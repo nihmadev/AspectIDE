@@ -1,0 +1,49 @@
+[package]
+name = "lux-desktop"
+version = "0.1.0"
+description = "Lux IDE desktop shell"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "lux_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "lux-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+lux-core = { path = "../../../crates/lux-core" }
+lux-dap = { path = "../../../crates/lux-dap" }
+lux-editor = { path = "../../../crates/lux-editor" }
+lux-extensions = { path = "../../../crates/lux-extensions" }
+lux-fs = { path = "../../../crates/lux-fs" }
+lux-git = { path = "../../../crates/lux-git" }
+lux-lsp = { path = "../../../crates/lux-lsp" }
+lux-search = { path = "../../../crates/lux-search" }
+lux-settings = { path = "../../../crates/lux-settings" }
+lux-terminal = { path = "../../../crates/lux-terminal" }
+lux-workspace = { path = "../../../crates/lux-workspace" }
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-log = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = "0.3"
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true

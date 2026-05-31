@@ -1,0 +1,29 @@
+{
+  "name": "lux-ide",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "description": "Rust-first desktop IDE for fast, typed, AI-native developer workflows.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/GofMan5/lux-ide.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GofMan5/lux-ide/issues"
+  },
+  "homepage": "https://github.com/GofMan5/lux-ide#readme",
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "dev": "pnpm --filter @lux/desktop tauri dev",
+    "dev:web": "pnpm --filter @lux/desktop dev",
+    "build": "pnpm --filter @lux/desktop build",
+    "typecheck": "pnpm --filter @lux/desktop typecheck",
+    "tauri:dev": "pnpm --filter @lux/desktop tauri dev",
+    "tauri:build": "pnpm --filter @lux/desktop tauri build",
+    "check:rust": "cargo check --workspace",
+    "test:rust": "cargo test --workspace"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  }
+}

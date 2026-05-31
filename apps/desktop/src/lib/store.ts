@@ -1,0 +1,613 @@
+import { create } from "zustand";
+import { defaultAiPreferences, mergeAiPreferences, type AiPreferences } from "./aiPreferences";
+import { defaultEditorPreferences, mergeEditorPreferences, type EditorPreferences } from "./editorPreferences";
+import { normalizePath, type FileTreeDirectories } from "./fileTree";
+import { DEFAULT_LOCALE, type Locale } from "./i18n";
+import { defaultKeybindingProfile } from "./keybindings";
+import type { DocumentEditResult, DocumentSnapshot, FsEntry, GitStatus, KeybindingProfile, LanguageServerInfo, SearchResponse, TerminalSessionInfo, TextEdit, WorkspaceDiagnostic, WorkspaceInfo } from "./types";
+
+export type Activity = "explorer" | "search" | "git" | "runDebug" | "extensions";
+export type BottomPanelTab = "problems" | "output" | "terminal";
+export type AiIndexStatus = "disabled" | "idle" | "indexing" | "ready";
+export type WorkspaceMode = "agent" | "workspace";
+
+export type AiIndexState = {
+  status: AiIndexStatus;
+  progress: number;
+  indexedFiles: number;
+  totalFiles: number;
+  updatedAt: string | null;
+};
+
+export type EditorGroup = {
+  id: string;
+  documentIds: string[];
+  activeDocumentId: string | null;
+};
+
+export type EditorRevealTarget = {
+  documentId: string;
+  line: number;
+  column: number;
+};
+
+const DEFAULT_EDITOR_GROUP_ID = "editor-group-1";
+const createEditorGroupId = () => `editor-group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+const createEmptyEditorGroup = (id = DEFAULT_EDITOR_GROUP_ID): EditorGroup => ({ id, documentIds: [], activeDocumentId: null });
+
+type LuxState = {
+  workspaceMode: WorkspaceMode;
+  activeActivity: Activity;
+  sidebarVisible: boolean;
+  aiChatOpen: boolean;
+  settingsOpen: boolean;
+  locale: Locale;
+  aiPreferences: AiPreferences;
+  aiIndex: AiIndexState;
+  editorPreferences: EditorPreferences;
+  keybindingProfile: KeybindingProfile;
+  workspace: WorkspaceInfo | null;
+  workspaceFolders: WorkspaceInfo[];
+  fileEntries: FsEntry[];
+  fileTreeDirectories: FileTreeDirectories;
+  fileTreeLoading: boolean;
+  fileTreeError: string | null;
+  explorerExpandedPaths: string[];
+  openDocuments: DocumentSnapshot[];
+  activeDocumentId: string | null;
+  pendingEditorReveal: EditorRevealTarget | null;
+  editorGroups: EditorGroup[];
+  activeEditorGroupId: string;
+  searchResponse: SearchResponse | null;
+  terminal: TerminalSessionInfo | null;
+  gitStatus: GitStatus | null;
+  languageServers: LanguageServerInfo[];
+  languageServersLoading: boolean;
+  diagnosticsByPath: Record<string, WorkspaceDiagnostic[]>;
+  commandPaletteOpen: boolean;
+  bottomPanelOpen: boolean;
+  bottomPanelTab: BottomPanelTab;
+  setWorkspaceMode: (mode: WorkspaceMode) => void;
+  setActiveActivity: (activity: Activity) => void;
+  setSidebarVisible: (visible: boolean) => void;
+  toggleSidebar: () => void;
+  setAiChatOpen: (open: boolean) => void;
+  toggleAiChat: () => void;
+  setSettingsOpen: (open: boolean) => void;
+  setLocale: (locale: Locale) => void;
+  updateAiPreferences: (preferences: Partial<AiPreferences>) => void;
+  setAiPreferences: (preferences: AiPreferences) => void;
+  setAiIndex: (index: Partial<AiIndexState>) => void;
+  updateEditorPreferences: (preferences: Partial<EditorPreferences>) => void;
+  setEditorPreferences: (preferences: EditorPreferences) => void;
+  setKeybindingProfile: (profile: KeybindingProfile) => void;
+  setWorkspace: (workspace: WorkspaceInfo | null) => void;
+  addWorkspaceFolder: (workspace: WorkspaceInfo) => void;
+  removeWorkspaceFolder: (root: string) => void;
+  setFileEntries: (entries: FsEntry[]) => void;
+  setFileTreeDirectories: (directories: FileTreeDirectories) => void;
+  setFileTreeLoading: (loading: boolean) => void;
+  setFileTreeError: (error: string | null) => void;
+  setExplorerExpandedPaths: (paths: Iterable<string>) => void;
+  ensureExplorerExpandedPath: (path: string) => void;
+  toggleExplorerExpandedPath: (path: string) => void;
+  upsertDocument: (document: DocumentSnapshot) => void;
+  updateOpenDocuments: (documents: DocumentSnapshot[]) => void;
+  replaceDocumentSnapshot: (document: DocumentSnapshot) => void;
+  applyDocumentEdits: (documentId: string, edits: TextEdit[], result: DocumentEditResult) => void;
+  setActiveDocument: (id: string) => void;
+  setActiveEditorGroup: (id: string) => void;
+  setActiveDocumentInGroup: (groupId: string, documentId: string) => void;
+  setPendingEditorReveal: (target: EditorRevealTarget | null) => void;
+  consumePendingEditorReveal: (documentId: string) => EditorRevealTarget | null;
+  splitActiveEditor: () => void;
+  splitDocumentInGroup: (groupId: string, documentId: string, side: "left" | "right") => void;
+  closeEditorGroup: (groupId: string) => void;
+  closeDocumentInGroup: (groupId: string, documentId: string) => void;
+  closeOtherDocumentsInGroup: (groupId: string, documentId: string) => void;
+  closeDocumentsToRightInGroup: (groupId: string, documentId: string) => void;
+  closeSavedDocumentsInGroup: (groupId: string) => void;
+  closeDocumentInActiveGroup: () => void;
+  closeDocument: (id: string) => void;
+  closeOtherDocuments: (id: string) => void;
+  closeAllDocuments: () => void;
+  selectNextDocument: () => void;
+  selectPreviousDocument: () => void;
+  setSearchResponse: (response: SearchResponse | null) => void;
+  setTerminal: (terminal: TerminalSessionInfo | null) => void;
+  setGitStatus: (status: GitStatus | null) => void;
+  setLanguageServers: (servers: LanguageServerInfo[]) => void;
+  setLanguageServersLoading: (loading: boolean) => void;
+  setDiagnosticsForPath: (path: string, diagnostics: WorkspaceDiagnostic[]) => void;
+  clearDiagnostics: () => void;
+  setCommandPaletteOpen: (open: boolean) => void;
+  openBottomPanel: (tab: BottomPanelTab) => void;
+  toggleBottomPanel: (tab: BottomPanelTab) => void;
+  setBottomPanelOpen: (open: boolean) => void;
+  setBottomPanelTab: (tab: BottomPanelTab) => void;
+};
+
+export const useLuxStore = create<LuxState>((set, get) => ({
+  workspaceMode: "workspace",
+  activeActivity: "explorer",
+  sidebarVisible: true,
+  aiChatOpen: false,
+  settingsOpen: false,
+  locale: DEFAULT_LOCALE,
+  aiPreferences: defaultAiPreferences,
+  aiIndex: { status: "idle", progress: 0, indexedFiles: 0, totalFiles: 0, updatedAt: null },
+  editorPreferences: defaultEditorPreferences,
+  keybindingProfile: defaultKeybindingProfile(),
+  workspace: null,
+  workspaceFolders: [],
+  fileEntries: [],
+  fileTreeDirectories: {},
+  fileTreeLoading: false,
+  fileTreeError: null,
+  explorerExpandedPaths: [],
+  openDocuments: [],
+  activeDocumentId: null,
+  pendingEditorReveal: null,
+  editorGroups: [createEmptyEditorGroup()],
+  activeEditorGroupId: DEFAULT_EDITOR_GROUP_ID,
+  searchResponse: null,
+  terminal: null,
+  gitStatus: null,
+  languageServers: [],
+  languageServersLoading: false,
+  diagnosticsByPath: {},
+  commandPaletteOpen: false,
+  bottomPanelOpen: false,
+  bottomPanelTab: "terminal",
+  setWorkspaceMode: (workspaceMode) => set({ workspaceMode }),
+  setActiveActivity: (activity) => set({ activeActivity: activity }),
+  setSidebarVisible: (sidebarVisible) => set({ sidebarVisible }),
+  toggleSidebar: () => set((state) => ({ sidebarVisible: !state.sidebarVisible })),
+  setAiChatOpen: (aiChatOpen) => set({ aiChatOpen }),
+  toggleAiChat: () => set((state) => ({ aiChatOpen: !state.aiChatOpen })),
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setLocale: (locale) => set({ locale }),
+  updateAiPreferences: (preferences) => set((state) => ({ aiPreferences: mergeAiPreferences(state.aiPreferences, preferences) })),
+  setAiPreferences: (aiPreferences) => set({ aiPreferences }),
+  setAiIndex: (index) => set((state) => ({ aiIndex: { ...state.aiIndex, ...index } })),
+  updateEditorPreferences: (preferences) => set((state) => ({ editorPreferences: mergeEditorPreferences(state.editorPreferences, preferences) })),
+  setEditorPreferences: (editorPreferences) => set({ editorPreferences }),
+  setKeybindingProfile: (keybindingProfile) => set({ keybindingProfile }),
+  setWorkspace: (workspace) =>
+    set((state) => ({
+      workspace,
+      aiChatOpen: workspace ? (state.workspace?.root === workspace.root ? state.aiChatOpen : true) : false,
+      workspaceFolders: workspace
+        ? state.workspaceFolders.some((folder) => folder.root === workspace.root)
+          ? state.workspaceFolders
+          : [workspace]
+        : [],
+      sidebarVisible: workspace ? true : false,
+      bottomPanelOpen: false,
+      fileEntries: workspace && state.workspace?.root === workspace.root ? state.fileEntries : [],
+      fileTreeDirectories: workspace && state.workspace?.root === workspace.root ? state.fileTreeDirectories : {},
+      fileTreeLoading: false,
+      fileTreeError: null,
+      openDocuments: workspace && state.workspace?.root === workspace.root ? state.openDocuments : [],
+      activeDocumentId: workspace && state.workspace?.root === workspace.root ? state.activeDocumentId : null,
+      pendingEditorReveal: null,
+      editorGroups: workspace && state.workspace?.root === workspace.root ? state.editorGroups : [createEmptyEditorGroup()],
+      activeEditorGroupId: workspace && state.workspace?.root === workspace.root ? state.activeEditorGroupId : DEFAULT_EDITOR_GROUP_ID,
+      terminal: null,
+      languageServers: workspace && state.workspace?.root === workspace.root ? state.languageServers : [],
+      languageServersLoading: false,
+      diagnosticsByPath: workspace && state.workspace?.root === workspace.root ? state.diagnosticsByPath : {},
+      explorerExpandedPaths: workspace
+        ? state.workspace?.root === workspace.root && state.explorerExpandedPaths.length > 0
+          ? state.explorerExpandedPaths
+          : [normalizePath(workspace.root)]
+        : [],
+    })),
+  addWorkspaceFolder: (workspace) =>
+    set((state) => ({
+      workspaceFolders: state.workspaceFolders.some((folder) => folder.root === workspace.root)
+        ? state.workspaceFolders
+        : [...state.workspaceFolders, workspace],
+    })),
+  removeWorkspaceFolder: (root) =>
+    set((state) => ({
+      workspaceFolders: state.workspaceFolders.filter((folder) => folder.root !== root),
+    })),
+  setFileEntries: (fileEntries) => set({ fileEntries }),
+  setFileTreeDirectories: (fileTreeDirectories) => set({ fileTreeDirectories }),
+  setFileTreeLoading: (fileTreeLoading) => set({ fileTreeLoading }),
+  setFileTreeError: (fileTreeError) => set({ fileTreeError }),
+  setExplorerExpandedPaths: (paths) => set({ explorerExpandedPaths: normalizePathList(paths) }),
+  ensureExplorerExpandedPath: (path) =>
+    set((state) => {
+      const normalizedPath = normalizePath(path);
+      if (state.explorerExpandedPaths.includes(normalizedPath)) return {};
+      return { explorerExpandedPaths: [...state.explorerExpandedPaths, normalizedPath] };
+    }),
+  toggleExplorerExpandedPath: (path) =>
+    set((state) => {
+      const normalizedPath = normalizePath(path);
+      return {
+        explorerExpandedPaths: state.explorerExpandedPaths.includes(normalizedPath)
+          ? state.explorerExpandedPaths.filter((candidate) => candidate !== normalizedPath)
+          : [...state.explorerExpandedPaths, normalizedPath],
+      };
+    }),
+  upsertDocument: (document) =>
+    set((state) => {
+      const exists = state.openDocuments.some((candidate) => candidate.id === document.id);
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const activeGroup = editorGroups.find((group) => group.id === state.activeEditorGroupId) ?? editorGroups[0];
+      return {
+        openDocuments: exists
+          ? state.openDocuments.map((candidate) => (candidate.id === document.id ? document : candidate))
+          : [...state.openDocuments, document],
+        editorGroups: editorGroups.map((group) =>
+          group.id === activeGroup.id
+            ? {
+                ...group,
+                documentIds: group.documentIds.includes(document.id) ? group.documentIds : [...group.documentIds, document.id],
+                activeDocumentId: document.id,
+              }
+            : group,
+        ),
+        activeEditorGroupId: activeGroup.id,
+        activeDocumentId: document.id,
+      };
+    }),
+  updateOpenDocuments: (documents) =>
+    set((state) => {
+      if (documents.length === 0) return {};
+      const byId = new Map(documents.map((document) => [document.id, document]));
+      return {
+        openDocuments: state.openDocuments.map((document) => byId.get(document.id) ?? document),
+      };
+    }),
+  replaceDocumentSnapshot: (document) =>
+    set((state) => {
+      if (!state.openDocuments.some((candidate) => candidate.id === document.id)) return {};
+      return {
+        openDocuments: state.openDocuments.map((candidate) => (candidate.id === document.id ? document : candidate)),
+      };
+    }),
+  applyDocumentEdits: (documentId, edits, result) =>
+    set((state) => ({
+      openDocuments: state.openDocuments.map((document) => {
+        if (document.id !== documentId) return document;
+        return {
+          ...document,
+          text: applyTextEdits(document.text, edits),
+          version: result.version,
+          is_dirty: result.is_dirty,
+        };
+      }),
+    })),
+  setActiveDocument: (activeDocumentId) =>
+    set((state) => {
+      if (!state.openDocuments.some((document) => document.id === activeDocumentId)) return {};
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const activeGroup = editorGroups.find((group) => group.id === state.activeEditorGroupId) ?? editorGroups[0];
+      return {
+        activeDocumentId,
+        activeEditorGroupId: activeGroup.id,
+        editorGroups: editorGroups.map((group) =>
+          group.id === activeGroup.id
+            ? {
+                ...group,
+                documentIds: group.documentIds.includes(activeDocumentId) ? group.documentIds : [...group.documentIds, activeDocumentId],
+                activeDocumentId,
+              }
+            : group,
+        ),
+      };
+    }),
+  setActiveEditorGroup: (activeEditorGroupId) =>
+    set((state) => {
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const activeGroup = editorGroups.find((group) => group.id === activeEditorGroupId);
+      if (!activeGroup) return {};
+      return { activeEditorGroupId, activeDocumentId: activeGroup.activeDocumentId ?? activeGroup.documentIds[0] ?? null };
+    }),
+  setActiveDocumentInGroup: (groupId, documentId) =>
+    set((state) => {
+      if (!state.openDocuments.some((document) => document.id === documentId)) return {};
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      if (!editorGroups.some((group) => group.id === groupId)) return {};
+      return {
+        activeDocumentId: documentId,
+        activeEditorGroupId: groupId,
+        editorGroups: editorGroups.map((group) =>
+          group.id === groupId
+            ? {
+                ...group,
+                documentIds: group.documentIds.includes(documentId) ? group.documentIds : [...group.documentIds, documentId],
+                activeDocumentId: documentId,
+              }
+            : group,
+        ),
+      };
+    }),
+  setPendingEditorReveal: (pendingEditorReveal) => set({ pendingEditorReveal }),
+  consumePendingEditorReveal: (documentId) => {
+    const target = get().pendingEditorReveal;
+    if (!target || target.documentId !== documentId) return null;
+    set({ pendingEditorReveal: null });
+    return target;
+  },
+  splitActiveEditor: () =>
+    set((state) => {
+      if (!state.activeDocumentId) return {};
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const activeIndex = Math.max(0, editorGroups.findIndex((group) => group.id === state.activeEditorGroupId));
+      const newGroup: EditorGroup = { id: createEditorGroupId(), documentIds: [state.activeDocumentId], activeDocumentId: state.activeDocumentId };
+      return {
+        editorGroups: [...editorGroups.slice(0, activeIndex + 1), newGroup, ...editorGroups.slice(activeIndex + 1)],
+        activeEditorGroupId: newGroup.id,
+      };
+    }),
+  splitDocumentInGroup: (groupId, documentId, side) =>
+    set((state) => {
+      if (!state.openDocuments.some((document) => document.id === documentId)) return {};
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const sourceIndex = editorGroups.findIndex((group) => group.id === groupId && group.documentIds.includes(documentId));
+      if (sourceIndex === -1) return {};
+      const newGroup: EditorGroup = { id: createEditorGroupId(), documentIds: [documentId], activeDocumentId: documentId };
+      const insertIndex = side === "left" ? sourceIndex : sourceIndex + 1;
+      return {
+        activeDocumentId: documentId,
+        activeEditorGroupId: newGroup.id,
+        editorGroups: [...editorGroups.slice(0, insertIndex), newGroup, ...editorGroups.slice(insertIndex)],
+      };
+    }),
+  closeEditorGroup: (groupId) =>
+    set((state) => {
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      if (editorGroups.length <= 1) return {};
+      const closingIndex = editorGroups.findIndex((group) => group.id === groupId);
+      if (closingIndex === -1) return {};
+      const remainingGroups = editorGroups.filter((group) => group.id !== groupId);
+      const referencedIds = new Set(remainingGroups.flatMap((group) => group.documentIds));
+      const openDocuments = state.openDocuments.filter((document) => referencedIds.has(document.id));
+      return normalizeEditorGroupState(
+        remainingGroups,
+        openDocuments,
+        state.activeEditorGroupId === groupId ? remainingGroups[Math.min(closingIndex, remainingGroups.length - 1)]?.id : state.activeEditorGroupId,
+      );
+    }),
+  closeDocumentInGroup: (groupId, documentId) =>
+    set((state) => closeDocumentInGroupState(state, groupId, documentId)),
+  closeOtherDocumentsInGroup: (groupId, documentId) =>
+    set((state) => {
+      const document = state.openDocuments.find((candidate) => candidate.id === documentId);
+      if (!document) return {};
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const targetGroup = editorGroups.find((group) => group.id === groupId);
+      if (!targetGroup?.documentIds.includes(documentId)) return {};
+      const nextGroups = editorGroups.map((group) => group.id === groupId ? { ...group, documentIds: [documentId], activeDocumentId: documentId } : group);
+      const referencedIds = new Set(nextGroups.flatMap((group) => group.documentIds));
+      const openDocuments = state.openDocuments.filter((candidate) => referencedIds.has(candidate.id));
+      return {
+        openDocuments,
+        editorGroups: nextGroups,
+        activeDocumentId: documentId,
+        activeEditorGroupId: groupId,
+      };
+    }),
+  closeDocumentsToRightInGroup: (groupId, documentId) =>
+    set((state) => {
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const targetGroup = editorGroups.find((group) => group.id === groupId);
+      if (!targetGroup) return {};
+      const documentIndex = targetGroup.documentIds.indexOf(documentId);
+      if (documentIndex === -1 || documentIndex === targetGroup.documentIds.length - 1) return {};
+      const nextDocumentIds = targetGroup.documentIds.slice(0, documentIndex + 1);
+      const nextGroups = editorGroups.map((group) => group.id === groupId ? { ...group, documentIds: nextDocumentIds, activeDocumentId: documentId } : group);
+      const referencedIds = new Set(nextGroups.flatMap((group) => group.documentIds));
+      const openDocuments = state.openDocuments.filter((document) => referencedIds.has(document.id));
+      return {
+        openDocuments,
+        editorGroups: nextGroups,
+        activeDocumentId: documentId,
+        activeEditorGroupId: groupId,
+      };
+    }),
+  closeSavedDocumentsInGroup: (groupId) =>
+    set((state) => {
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const targetGroup = editorGroups.find((group) => group.id === groupId);
+      if (!targetGroup) return {};
+      const dirtyIds = new Set(state.openDocuments.filter((document) => document.is_dirty).map((document) => document.id));
+      const nextDocumentIds = targetGroup.documentIds.filter((documentId) => dirtyIds.has(documentId));
+      const nextGroups = editorGroups
+        .map((group) => {
+          if (group.id !== groupId) return group;
+          const activeDocumentId = group.activeDocumentId && nextDocumentIds.includes(group.activeDocumentId)
+            ? group.activeDocumentId
+            : nextDocumentIds[0] ?? null;
+          return { ...group, documentIds: nextDocumentIds, activeDocumentId };
+        })
+        .filter((group) => group.documentIds.length > 0);
+      const referencedIds = new Set(nextGroups.flatMap((group) => group.documentIds));
+      const openDocuments = state.openDocuments.filter((document) => referencedIds.has(document.id));
+      return normalizeEditorGroupState(nextGroups, openDocuments, state.activeEditorGroupId);
+    }),
+  closeDocumentInActiveGroup: () =>
+    set((state) => {
+      if (!state.activeDocumentId) return {};
+      return closeDocumentInGroupState(state, state.activeEditorGroupId, state.activeDocumentId);
+    }),
+  closeDocument: (id) =>
+    set((state) => {
+      const openDocuments = state.openDocuments.filter((document) => document.id !== id);
+      if (openDocuments.length === state.openDocuments.length) return {};
+      const editorGroups = ensureEditorGroups(state.editorGroups)
+        .map((group) => {
+          const documentIds = group.documentIds.filter((documentId) => documentId !== id);
+          return {
+            ...group,
+            documentIds,
+            activeDocumentId: group.activeDocumentId === id ? documentIds[0] ?? null : group.activeDocumentId,
+          };
+        })
+        .filter((group) => group.documentIds.length > 0);
+      return normalizeEditorGroupState(editorGroups, openDocuments, state.activeEditorGroupId);
+    }),
+  closeOtherDocuments: (id) =>
+    set((state) => {
+      const document = state.openDocuments.find((candidate) => candidate.id === id);
+      if (!document) return {};
+      const groupId = state.activeEditorGroupId || DEFAULT_EDITOR_GROUP_ID;
+      return {
+        activeDocumentId: id,
+        activeEditorGroupId: groupId,
+        editorGroups: [{ id: groupId, documentIds: [id], activeDocumentId: id }],
+        openDocuments: [document],
+      };
+    }),
+  closeAllDocuments: () => set({ activeDocumentId: null, activeEditorGroupId: DEFAULT_EDITOR_GROUP_ID, editorGroups: [createEmptyEditorGroup()], openDocuments: [], pendingEditorReveal: null }),
+  selectNextDocument: () =>
+    set((state) => {
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const activeGroup = editorGroups.find((group) => group.id === state.activeEditorGroupId) ?? editorGroups[0];
+      if (activeGroup.documentIds.length < 2) return {};
+      const activeIndex = Math.max(0, activeGroup.documentIds.findIndex((documentId) => documentId === activeGroup.activeDocumentId));
+      const activeDocumentId = activeGroup.documentIds[(activeIndex + 1) % activeGroup.documentIds.length];
+      return {
+        activeDocumentId,
+        editorGroups: editorGroups.map((group) => group.id === activeGroup.id ? { ...group, activeDocumentId } : group),
+      };
+    }),
+  selectPreviousDocument: () =>
+    set((state) => {
+      const editorGroups = ensureEditorGroups(state.editorGroups);
+      const activeGroup = editorGroups.find((group) => group.id === state.activeEditorGroupId) ?? editorGroups[0];
+      if (activeGroup.documentIds.length < 2) return {};
+      const activeIndex = Math.max(0, activeGroup.documentIds.findIndex((documentId) => documentId === activeGroup.activeDocumentId));
+      const activeDocumentId = activeGroup.documentIds[(activeIndex - 1 + activeGroup.documentIds.length) % activeGroup.documentIds.length];
+      return {
+        activeDocumentId,
+        editorGroups: editorGroups.map((group) => group.id === activeGroup.id ? { ...group, activeDocumentId } : group),
+      };
+    }),
+  setSearchResponse: (searchResponse) => set({ searchResponse }),
+  setTerminal: (terminal) => set({ terminal }),
+  setGitStatus: (gitStatus) => set({ gitStatus }),
+  setLanguageServers: (languageServers) => set({ languageServers }),
+  setLanguageServersLoading: (languageServersLoading) => set({ languageServersLoading }),
+  setDiagnosticsForPath: (path, diagnostics) =>
+    set((state) => ({
+      diagnosticsByPath: {
+        ...state.diagnosticsByPath,
+        [normalizePath(path)]: diagnostics,
+      },
+    })),
+  clearDiagnostics: () => set({ diagnosticsByPath: {} }),
+  setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
+  openBottomPanel: (bottomPanelTab) => set({ bottomPanelOpen: true, bottomPanelTab }),
+  toggleBottomPanel: (bottomPanelTab) =>
+    set((state) => ({
+      bottomPanelOpen: state.bottomPanelOpen && state.bottomPanelTab === bottomPanelTab ? false : true,
+      bottomPanelTab,
+    })),
+  setBottomPanelOpen: (bottomPanelOpen) => set({ bottomPanelOpen }),
+  setBottomPanelTab: (bottomPanelTab) => set({ bottomPanelTab }),
+}));
+
+export const selectActiveDocument = (state: LuxState) =>
+  state.openDocuments.find((document) => document.id === state.activeDocumentId) ?? null;
+
+export const selectDiagnostics = (state: LuxState) => Object.values(state.diagnosticsByPath).flat();
+
+function ensureEditorGroups(editorGroups: EditorGroup[]) {
+  return editorGroups.length > 0 ? editorGroups : [createEmptyEditorGroup()];
+}
+
+function normalizeEditorGroupState(editorGroups: EditorGroup[], openDocuments: DocumentSnapshot[], preferredGroupId: string) {
+  const openDocumentIds = new Set(openDocuments.map((document) => document.id));
+  const groups = ensureEditorGroups(editorGroups)
+    .map((group) => {
+      const documentIds = group.documentIds.filter((documentId) => openDocumentIds.has(documentId));
+      const activeDocumentId = group.activeDocumentId && documentIds.includes(group.activeDocumentId)
+        ? group.activeDocumentId
+        : documentIds[0] ?? null;
+      return { ...group, documentIds, activeDocumentId };
+    })
+    .filter((group) => group.documentIds.length > 0);
+
+  if (groups.length === 0) {
+    return {
+      activeDocumentId: null,
+      activeEditorGroupId: DEFAULT_EDITOR_GROUP_ID,
+      editorGroups: [createEmptyEditorGroup()],
+      openDocuments,
+    };
+  }
+
+  const activeGroup = groups.find((group) => group.id === preferredGroupId) ?? groups[0];
+  return {
+    activeDocumentId: activeGroup.activeDocumentId,
+    activeEditorGroupId: activeGroup.id,
+    editorGroups: groups,
+    openDocuments,
+  };
+}
+
+function closeDocumentInGroupState(state: LuxState, groupId: string, documentId: string) {
+  const editorGroups = ensureEditorGroups(state.editorGroups);
+  const targetGroup = editorGroups.find((group) => group.id === groupId);
+  if (!targetGroup || !targetGroup.documentIds.includes(documentId)) return {};
+
+  const nextGroups = editorGroups.map((group) => {
+    if (group.id !== groupId) return group;
+    const documentIds = group.documentIds.filter((candidate) => candidate !== documentId);
+    return {
+      ...group,
+      documentIds,
+      activeDocumentId: group.activeDocumentId === documentId ? documentIds[0] ?? null : group.activeDocumentId,
+    };
+  }).filter((group) => group.documentIds.length > 0);
+
+  const referencedIds = new Set(nextGroups.flatMap((group) => group.documentIds));
+  const openDocuments = state.openDocuments.filter((document) => referencedIds.has(document.id));
+  return normalizeEditorGroupState(nextGroups, openDocuments, state.activeEditorGroupId === groupId ? groupId : state.activeEditorGroupId);
+}
+
+function normalizePathList(paths: Iterable<string>) {
+  return Array.from(new Set(Array.from(paths, normalizePath)));
+}
+
+function applyTextEdits(text: string, edits: TextEdit[]) {
+  let nextText = text;
+  for (const edit of edits) {
+    const start = positionToStringOffset(nextText, edit.start_line, edit.start_column);
+    const end = positionToStringOffset(nextText, edit.end_line, edit.end_column);
+    nextText = `${nextText.slice(0, start)}${edit.text}${nextText.slice(end)}`;
+  }
+  return nextText;
+}
+
+function positionToStringOffset(text: string, line: number, column: number) {
+  if (line < 1 || column < 1) throw new Error("Text edit positions are 1-based");
+
+  let currentLine = 1;
+  let currentColumn = 1;
+  for (let index = 0; index < text.length;) {
+    if (currentLine === line && currentColumn === column) return index;
+
+    const codePoint = text.codePointAt(index);
+    if (codePoint === undefined) break;
+    const width = codePoint > 0xffff ? 2 : 1;
+    const char = text.slice(index, index + width);
+    index += width;
+
+    if (char === "\n") {
+      currentLine += 1;
+      currentColumn = 1;
+    } else {
+      currentColumn += width;
+    }
+  }
+
+  if (currentLine === line && currentColumn === column) return text.length;
+  throw new Error(`Text edit position ${line}:${column} is outside the document`);
+}
