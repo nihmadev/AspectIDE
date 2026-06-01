@@ -1,15 +1,19 @@
-import { Bot, Brain, CornerDownLeft, Mic, PanelRightClose, Paperclip, SendHorizontal, ShieldCheck, Sparkles, Square, Wrench, X } from "lucide-react";
+import { ArrowDown, Brain, PanelRightClose, Plus, RotateCcw, Sparkles, Wifi, X } from "lucide-react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { CompactDropdown } from "./CompactDropdown";
-import { AiToolCallsGroup } from "./AiToolCall";
-import { AiToolsView } from "./AiToolsView";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { AiChatComposer } from "./ai-chat/AiChatComposer";
+import { AiChatMessages } from "./ai-chat/AiChatMessages";
+import { AiChatSessionBar, compareAiChatSessions } from "./ai-chat/AiChatSessionBar";
+import { buildAiChatContextUsageSummary, formatCompactTokens } from "../lib/aiChatContextUsage";
+import { loadAiChatHistory, saveAiChatHistory } from "../lib/aiChatHistory";
+import { aiChatSessionTitle, aiChatStatusLabel } from "../lib/aiChatPresentation";
 import { documentDisplayPath } from "../lib/documents";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
-import { AI_PREFERENCES_KEY, getAiModel, getAiProvider, mergeAiPreferences, type AiPreferences, type AiToolApprovalMode } from "../lib/aiPreferences";
-import { readChatAttachment, sendAiChatMessage, type AiChatAttachmentInput, type AiChatMessage, type AiToolApprovalDecision, type AiToolApprovalRequest } from "../lib/aiChatRuntime";
-import { useLuxStore } from "../lib/store";
-import { luxCommands } from "../lib/tauri";
+import { AI_PREFERENCES_KEY, getAiModel, getAiProvider, mergeAiPreferences, type AiPreferences } from "../lib/aiPreferences";
+import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
+import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision, AiToolApprovalRequest } from "../lib/aiChatTypes";
+import { selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
+import { luxCommands, type AiProviderDiagnosticResponse } from "../lib/tauri";
 import { useVoiceInput } from "../lib/useVoiceInput";
 
 type ChatAttachment = {
@@ -19,55 +23,68 @@ type ChatAttachment = {
   size: number;
 };
 
-type ContextUsageRow = {
-  color: string;
-  detail: string;
-  id: string;
-  label: string;
-  percent: number;
-  tokens: number;
+type AiChatPanelProps = {
+  embedded?: boolean;
+  presentation?: "panel" | "agent";
+  showCloseButton?: boolean;
 };
 
-type ContextUsageSummary = {
-  percent: number;
-  rows: ContextUsageRow[];
-  tokenBudget: number;
-  totalTokens: number;
-};
-
-const contextTokenBudget = 200_000;
-
-const contextRowColors = {
-  agent: "#9aa0a6",
-  model: "#8fb5d9",
-  index: "#57c178",
-  files: "#ffc46b",
-  conversation: "#6d8589",
-} as const;
-
-export function AiChatPanel() {
+export function AiChatPanel({ embedded = false, presentation = "panel", showCloseButton = true }: AiChatPanelProps) {
   const activeDocumentId = useLuxStore((state) => state.activeDocumentId);
   const aiIndex = useLuxStore((state) => state.aiIndex);
   const aiPreferences = useLuxStore((state) => state.aiPreferences);
+  const aiChatSessions = useLuxStore((state) => state.aiChatSessions);
+  const activeChatSession = useLuxStore(selectActiveAiChatSession);
+  const activeAiChatSessionId = useLuxStore((state) => state.activeAiChatSessionId);
+  const appendAiChatMessage = useLuxStore((state) => state.appendAiChatMessage);
+  const closeAiChatSession = useLuxStore((state) => state.closeAiChatSession);
+  const createAiChatSession = useLuxStore((state) => state.createAiChatSession);
+  const replaceAiChatMessages = useLuxStore((state) => state.replaceAiChatMessages);
+  const restoreAiChatSession = useLuxStore((state) => state.restoreAiChatSession);
+  const setActiveAiChatSession = useLuxStore((state) => state.setActiveAiChatSession);
+  const setAiChatSessions = useLuxStore((state) => state.setAiChatSessions);
   const setAiPreferences = useLuxStore((state) => state.setAiPreferences);
+  const setAiChatSessionStatus = useLuxStore((state) => state.setAiChatSessionStatus);
+  const updateAiChatMessage = useLuxStore((state) => state.updateAiChatMessage);
   const openDocuments = useLuxStore((state) => state.openDocuments);
   const setAiChatOpen = useLuxStore((state) => state.setAiChatOpen);
   const terminal = useLuxStore((state) => state.terminal);
+  const terminalSessions = useLuxStore((state) => state.terminalSessions);
+  const activeTerminalId = useLuxStore((state) => state.activeTerminalId);
+  const terminalOutputBuffers = useLuxStore((state) => state.terminalOutputBuffers);
   const workspace = useLuxStore((state) => state.workspace);
-  const { t } = useTranslation();
+  const { locale, t } = useTranslation();
   const [message, setMessage] = useState("");
-  const [messages, setMessages] = useState<AiChatMessage[]>([]);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [contextOpen, setContextOpen] = useState(false);
-  const [toolsViewOpen, setToolsViewOpen] = useState(false);
   const [draggingFiles, setDraggingFiles] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [sendingSessionId, setSendingSessionId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [lastUserDraft, setLastUserDraft] = useState<string | null>(null);
+  const [providerDiagnostic, setProviderDiagnostic] = useState<AiProviderDiagnosticResponse | null>(null);
+  const [providerDiagnosticRunning, setProviderDiagnosticRunning] = useState(false);
+  const [showScrollDown, setShowScrollDown] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const pinnedToBottomRef = useRef(true);
   const approvalResolversRef = useRef(new Map<string, (decision: AiToolApprovalDecision) => void>());
+  const persistedSessionsLoadedRef = useRef(false);
+  const skipNextSessionPersistRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const messages = activeChatSession?.messages ?? [];
+  const activeStatus = activeChatSession?.status ?? "idle";
+  const activeLastError = activeChatSession?.lastError ?? null;
+  const activeSessionClosed = Boolean(activeChatSession?.closedAt);
+  const sending = sendingSessionId !== null;
+  const activeSessionSending = sendingSessionId === activeAiChatSessionId;
+  // The last assistant message is "live" while this session is generating, so its
+  // reasoning block auto-expands and collapses once the turn settles.
+  const streamingMessageId = activeSessionSending
+    ? [...messages].reverse().find((entry) => entry.role === "assistant")?.id ?? null
+    : null;
+  const sortedChatSessions = useMemo(() => [...aiChatSessions].sort(compareAiChatSessions), [aiChatSessions]);
+  const isAgentHome = presentation === "agent" && messages.length === 0;
 
   const activeDocument = useMemo(
     () => openDocuments.find((document) => document.id === activeDocumentId) ?? null,
@@ -81,28 +98,99 @@ export function AiChatPanel() {
   const agentOptions = aiPreferences.agentProfiles.map((profile) => ({ label: profile.name, value: profile.id }));
   const modelOptions = selectedProvider?.models.map((model) => ({ label: model.name, value: model.id })) ?? [];
   const effortOptions = selectedModel?.effortLevels.map((effort) => ({ label: effort.label, value: effort.id })) ?? [];
-  const toolApprovalOptions: Array<{ label: string; value: AiToolApprovalMode }> = [
-    { label: t("aiChat.toolApproval.default"), value: "default" },
-    { label: t("aiChat.toolApproval.fullAccess"), value: "full-access" },
-  ];
-  const contextUsage = useMemo(() => buildContextUsageSummary({
+  const contextUsage = useMemo(() => buildAiChatContextUsageSummary({
     activeDocumentPath: activeDocument ? documentDisplayPath(activeDocument) : null,
     aiIndexStatus: aiIndex.status,
     agentInstruction: selectedAgent?.instructions ?? "",
     agentName: selectedAgent?.name ?? "",
     attachments,
+    conversation: messages,
     message,
     preferences: aiPreferences,
     selectedModelAlias: selectedModel?.alias ?? selectedModel?.id ?? "",
     t,
-  }), [activeDocument, aiIndex.status, aiPreferences, attachments, message, selectedAgent, selectedModel, t]);
+  }), [activeDocument, aiIndex.status, aiPreferences, attachments, message, messages, selectedAgent, selectedModel, t]);
   const contextLabel = t("aiChat.context.percentBadge", { percent: contextUsage.percent });
   const contextTitle = t("aiChat.context.tooltip", {
     percent: contextUsage.percent,
     totalTokens: formatCompactTokens(contextUsage.totalTokens),
     tokenBudget: formatCompactTokens(contextUsage.tokenBudget),
   });
-  const canSend = Boolean(selectedProvider && selectedModel && message.trim()) && !sending;
+  const canSend = Boolean(selectedProvider && selectedModel && message.trim()) && !sending && !activeSessionClosed;
+  const providerStatusLabel = providerDiagnosticRunning
+    ? t("aiChat.provider.checking")
+    : providerDiagnostic
+      ? providerDiagnostic.ok
+        ? t("aiChat.provider.ok", { latency: providerDiagnostic.latencyMs })
+        : t("aiChat.provider.failed")
+      : t("aiChat.provider.ready");
+  const providerStatusTitle = providerDiagnostic
+    ? providerDiagnostic.ok
+      ? t("aiChat.provider.okDetail", { status: providerDiagnostic.status ?? "-", latency: providerDiagnostic.latencyMs })
+      : providerDiagnostic.error ?? t("aiChat.provider.failed")
+    : selectedProvider
+      ? `${selectedProvider.name} / ${selectedModel?.name ?? aiPreferences.selectedModelId}`
+      : t("aiChat.send.disabledTooltip");
+  const renderComposerContent = () => (
+    <AiChatComposer
+      activeSessionSending={activeSessionSending}
+      disabled={activeSessionClosed}
+      agentOptions={agentOptions}
+      attachments={attachments}
+      attachFiles={attachFiles}
+      canSend={canSend}
+      contextLabel={contextLabel}
+      contextOpen={contextOpen}
+      contextTitle={contextTitle}
+      contextUsage={contextUsage}
+      draggingFiles={draggingFiles}
+      effortOptions={effortOptions}
+      fileInputRef={fileInputRef}
+      handleCancelSend={handleCancelSend}
+      handleComposerDragOver={handleComposerDragOver}
+      handleComposerDrop={handleComposerDrop}
+      handleComposerKeyDown={handleComposerKeyDown}
+      handleComposerPaste={handleComposerPaste}
+      handleMessageChange={handleMessageChange}
+      handleSend={() => void handleSend()}
+      isAgentHome={isAgentHome}
+      message={message}
+      modelOptions={modelOptions}
+      modelSupportsEffort={modelSupportsEffort}
+      preferences={aiPreferences}
+      removeAttachment={removeAttachment}
+      selectedModelId={selectedModel?.id ?? aiPreferences.selectedModelId}
+      selectedProviderReady={Boolean(selectedProvider && selectedModel)}
+      setContextOpen={setContextOpen}
+      setDraggingFiles={setDraggingFiles}
+      t={t}
+      textareaRef={textareaRef}
+      updateAiPreference={updateAiPreference}
+      updateModel={updateModel}
+      voiceInput={voiceInput}
+    />
+  );
+
+  useEffect(() => {
+    if (persistedSessionsLoadedRef.current) return;
+    persistedSessionsLoadedRef.current = true;
+    void loadAiChatHistory().then((history) => {
+      if (history && history.sessions.length > 0) setAiChatSessions(history);
+    }).finally(() => {
+      skipNextSessionPersistRef.current = false;
+    });
+  }, [setAiChatSessions]);
+
+  useEffect(() => {
+    if (!persistedSessionsLoadedRef.current) return;
+    if (skipNextSessionPersistRef.current) {
+      return;
+    }
+    void saveAiChatHistory({
+      activeSessionId: activeAiChatSessionId,
+      sessions: aiChatSessions,
+    }).catch(() => undefined);
+  }, [activeAiChatSessionId, aiChatSessions]);
 
   const updateAiPreference = useCallback((patch: Partial<AiPreferences>) => {
     const nextPreferences = mergeAiPreferences(aiPreferences, patch);
@@ -128,9 +216,42 @@ export function AiChatPanel() {
     resizeComposerTextarea();
   }, [message]);
 
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
+    const element = scrollRef.current;
+    if (!element) return;
+    pinnedToBottomRef.current = true;
+    setShowScrollDown(false);
+    element.scrollTo({ top: element.scrollHeight, behavior });
+  }, []);
+
+  const handleBodyScroll = useCallback(() => {
+    const element = scrollRef.current;
+    if (!element) return;
+    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
+    const pinned = distanceFromBottom <= 28;
+    pinnedToBottomRef.current = pinned;
+    setShowScrollDown(!pinned && element.scrollHeight - element.clientHeight > 48);
+  }, []);
+
+  // Keep the view pinned to the latest message while the user is already at the bottom.
+  // When they have scrolled up to read, new content streams in without yanking the viewport.
   useLayoutEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ block: "end" });
-  }, [messages, toolsViewOpen]);
+    if (!pinnedToBottomRef.current) return;
+    const element = scrollRef.current;
+    if (!element) return;
+    element.scrollTop = element.scrollHeight;
+  }, [messages]);
+
+  useEffect(() => {
+    pinnedToBottomRef.current = true;
+    setShowScrollDown(false);
+    const element = scrollRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [activeAiChatSessionId]);
+
+  useEffect(() => {
+    setSendError(null);
+  }, [activeAiChatSessionId]);
 
   const updateMessage = useCallback((nextMessage: string) => {
     setMessage(nextMessage);
@@ -182,13 +303,36 @@ export function AiChatPanel() {
     resolveAllToolApprovals("rejected");
   }, []);
 
-  const appendAssistantMessage = useCallback((assistantMessage: AiChatMessage) => {
-    setMessages((current) => current.some((candidate) => candidate.id === assistantMessage.id) ? current : [...current, assistantMessage]);
-  }, []);
-
-  const updateAssistantMessage = useCallback((messageId: string, patch: Partial<AiChatMessage>) => {
-    setMessages((current) => current.map((candidate) => candidate.id === messageId ? { ...candidate, ...patch } : candidate));
-  }, []);
+  const runProviderDiagnostic = useCallback(async () => {
+    if (!selectedProvider || !selectedModel || providerDiagnosticRunning) return;
+    setProviderDiagnosticRunning(true);
+    setProviderDiagnostic(null);
+    try {
+      const result = await luxCommands.aiProviderDiagnostic({
+        baseUrl: selectedProvider.baseUrl,
+        apiKey: selectedProvider.apiKey || null,
+        payload: {
+          model: selectedModel.alias || selectedModel.id,
+          messages: [{ role: "user", content: "Reply with OK." }],
+          max_tokens: 8,
+          stream: false,
+          temperature: 0,
+        },
+      });
+      setProviderDiagnostic(result);
+    } catch (error) {
+      setProviderDiagnostic({
+        ok: false,
+        status: null,
+        latencyMs: 0,
+        error: formatAiError(error, t),
+        model: selectedModel.alias || selectedModel.id,
+        baseUrl: selectedProvider.baseUrl,
+      });
+    } finally {
+      setProviderDiagnosticRunning(false);
+    }
+  }, [providerDiagnosticRunning, selectedModel, selectedProvider, t]);
 
   const requestToolApproval = useCallback((request: AiToolApprovalRequest) => {
     return new Promise<AiToolApprovalDecision>((resolve) => {
@@ -209,24 +353,31 @@ export function AiChatPanel() {
     for (const resolve of resolvers) resolve(decision);
   };
 
-  const handleSend = useCallback(async () => {
-    if (!selectedProvider || !selectedModel || !message.trim() || sending) return;
-    const currentMessage = message.trim();
-    const currentAttachments = attachments;
+  const handleSend = useCallback(async (overrideMessage?: string, overrideHistory?: AiChatMessage[]) => {
+    const nextMessage = (overrideMessage ?? message).trim();
+    if (!selectedProvider || !selectedModel || !nextMessage || sending || activeSessionClosed) return;
+    const sessionId = activeChatSession?.id ?? createAiChatSession(workspace?.root ?? null);
+    const currentMessage = nextMessage;
+    const currentAttachments = overrideMessage ? [] : attachments;
     const userMessage: AiChatMessage = {
       id: crypto.randomUUID(),
       role: "user",
       content: currentMessage,
       timestamp: Date.now(),
     };
-    const history = messages;
+    const history = overrideHistory ?? useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId)?.messages ?? [];
+    const startedAt = performance.now();
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
-    setMessages((current) => [...current, userMessage]);
+    appendAiChatMessage(sessionId, userMessage);
+    setLastUserDraft(currentMessage);
+    pinnedToBottomRef.current = true;
+    setShowScrollDown(false);
     setMessage("");
     setAttachments([]);
     setSendError(null);
-    setSending(true);
+    setSendingSessionId(sessionId);
+    setAiChatSessionStatus(sessionId, "thinking");
 
     try {
       const runtimeAttachments: AiChatAttachmentInput[] = await Promise.all(currentAttachments.map((attachment) => readChatAttachment(attachment.file)));
@@ -235,6 +386,7 @@ export function AiChatPanel() {
         activeDocument,
         attachments: runtimeAttachments,
         history,
+        locale,
         message: currentMessage,
         openDocuments,
         preferences: aiPreferences,
@@ -243,20 +395,34 @@ export function AiChatPanel() {
         selectedAgentName: selectedAgent?.name ?? "",
         selectedModel,
         terminal,
+        terminalContext: { activeTerminalId, outputBuffers: terminalOutputBuffers, sessions: terminalSessions },
         workspace,
-        onAssistantMessage: appendAssistantMessage,
-        onAssistantMessageUpdate: updateAssistantMessage,
+        onAssistantMessage: (assistantMessage) => {
+          const session = useLuxStore.getState().aiChatSessions.find((candidate) => candidate.id === sessionId);
+          if (session?.messages.some((candidate) => candidate.id === assistantMessage.id)) return;
+          appendAiChatMessage(sessionId, assistantMessage);
+        },
+        onAssistantMessageUpdate: (messageId, patch) => updateAiChatMessage(sessionId, messageId, patch),
+        onStatusChange: (status) => setAiChatSessionStatus(sessionId, statusToSessionStatus(status)),
         onToolApproval: requestToolApproval,
       });
+      const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
+      if (aiPreferences.showResponseDuration) {
+        const sessionMessages = useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId)?.messages ?? [];
+        const finalAssistantMessage = [...sessionMessages].reverse().find((candidate) => candidate.role === "assistant");
+        if (finalAssistantMessage) updateAiChatMessage(sessionId, finalAssistantMessage.id, { responseDurationMs: durationMs });
+      }
+      setAiChatSessionStatus(sessionId, "idle");
     } catch (error) {
-      const errorMessage = isAbortError(error) ? "Request cancelled." : readErrorMessage(error);
+      const errorMessage = formatAiError(error, t);
       const assistantError: AiChatMessage = {
         id: crypto.randomUUID(),
         role: "assistant",
         content: errorMessage,
         timestamp: Date.now(),
       };
-      setMessages((current) => replaceEmptyAssistantTail(current, assistantError));
+      replaceAiChatMessages(sessionId, replaceEmptyAssistantTail(useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId)?.messages ?? [], assistantError));
+      setAiChatSessionStatus(sessionId, isAbortError(error) ? "idle" : "error", errorMessage);
       if (isAbortError(error)) {
         setSendError(errorMessage);
       } else {
@@ -265,10 +431,35 @@ export function AiChatPanel() {
     } finally {
       if (abortControllerRef.current === abortController) abortControllerRef.current = null;
       resolveAllToolApprovals("rejected");
-      setSending(false);
+      setSendingSessionId((currentSessionId) => currentSessionId === sessionId ? null : currentSessionId);
       requestAnimationFrame(() => resizeComposerTextarea());
     }
-  }, [activeDocument, aiPreferences, appendAssistantMessage, attachments, message, messages, openDocuments, requestToolApproval, resizeComposerTextarea, selectedAgent, selectedModel, selectedProvider, sending, terminal, updateAssistantMessage, workspace]);
+  }, [activeChatSession?.id, activeDocument, activeSessionClosed, activeTerminalId, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, replaceAiChatMessages, requestToolApproval, resizeComposerTextarea, selectedAgent, selectedModel, selectedProvider, sending, setAiChatSessionStatus, t, terminal, terminalOutputBuffers, terminalSessions, updateAiChatMessage, workspace]);
+
+  const retryLastRequest = useCallback(() => {
+    const draft = lastUserDraft ?? [...messages].reverse().find((entry) => entry.role === "user")?.content ?? "";
+    if (!draft.trim() || sending || activeSessionClosed) return;
+    if (activeChatSession) {
+      const lastUserIndex = findLastUserMessageIndex(activeChatSession.messages);
+      if (lastUserIndex >= 0) {
+        const nextHistory = activeChatSession.messages.slice(0, lastUserIndex);
+        replaceAiChatMessages(activeChatSession.id, nextHistory);
+        void handleSend(draft, nextHistory);
+        return;
+      }
+    }
+    void handleSend(draft);
+  }, [activeChatSession, activeSessionClosed, handleSend, lastUserDraft, messages, replaceAiChatMessages, sending]);
+
+  const regenerateLastResponse = useCallback(() => {
+    if (!activeChatSession || sending || activeSessionClosed) return;
+    const lastUserIndex = findLastUserMessageIndex(activeChatSession.messages);
+    if (lastUserIndex < 0) return;
+    const draft = activeChatSession.messages[lastUserIndex].content;
+    const nextHistory = activeChatSession.messages.slice(0, lastUserIndex);
+    replaceAiChatMessages(activeChatSession.id, nextHistory);
+    void handleSend(draft, nextHistory);
+  }, [activeChatSession, activeSessionClosed, handleSend, replaceAiChatMessages, sending]);
 
   const handleComposerKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey) return;
@@ -277,206 +468,145 @@ export function AiChatPanel() {
   }, [handleSend]);
 
   return (
-    <aside className="ai-chat-panel" aria-label={t("aiChat.panel.aria")}>
-      <header className="ai-chat-header">
-        <div className="ai-chat-title">
-          <Sparkles size={15} />
-          <span>{t("aiChat.title")}</span>
-        </div>
-        <div className="ai-chat-header-actions">
-          <button
-            className="icon-button compact"
-            type="button"
-            aria-label="Tools"
-            title="Available Tools"
-            data-active={toolsViewOpen}
-            onClick={() => setToolsViewOpen(!toolsViewOpen)}
-          >
-            <Wrench size={15} />
-          </button>
-          <button className="icon-button compact" type="button" aria-label={t("aiChat.closeChat")} title={t("aiChat.closeChat")} onClick={() => setAiChatOpen(false)}>
-            <PanelRightClose size={15} />
-          </button>
-        </div>
-      </header>
+    <aside className="ai-chat-panel" aria-label={t("aiChat.panel.aria")} data-empty-home={isAgentHome} data-embedded={embedded} data-presentation={presentation} data-status={activeStatus}>
+      {!isAgentHome && (
+        <>
+          <header className="ai-chat-header">
+            <div className="ai-chat-title">
+              <Sparkles size={15} />
+              <span>{activeChatSession ? aiChatSessionTitle(activeChatSession.title, t) : t("aiChat.title")}</span>
+              <span className="ai-chat-status-chip" data-status={activeStatus}>{aiChatStatusLabel(activeStatus, true, t)}</span>
+            </div>
+            <div className="ai-chat-header-actions">
+              <button
+                className="ai-provider-status"
+                type="button"
+                data-state={providerDiagnosticRunning ? "checking" : providerDiagnostic?.ok === false ? "error" : providerDiagnostic?.ok ? "ok" : "idle"}
+                aria-label={t("aiChat.provider.check")}
+                title={providerStatusTitle}
+                disabled={!selectedProvider || !selectedModel || providerDiagnosticRunning}
+                onClick={() => void runProviderDiagnostic()}
+              >
+                <Wifi size={13} />
+                <span>{providerStatusLabel}</span>
+              </button>
+              <button className="icon-button compact" type="button" aria-label={t("agent.newChat")} title={t("agent.newChat")} onClick={() => createAiChatSession(workspace?.root ?? null)}>
+                <Plus size={15} />
+              </button>
+              {showCloseButton && <button className="icon-button compact" type="button" aria-label={t("aiChat.closeChat")} title={t("aiChat.closeChat")} onClick={() => setAiChatOpen(false)}>
+                <PanelRightClose size={15} />
+              </button>}
+            </div>
+          </header>
+          <AiChatSessionBar
+            activeSessionId={activeAiChatSessionId}
+            closeSession={closeAiChatSession}
+            restoreSession={restoreAiChatSession}
+            sessions={sortedChatSessions}
+            setActiveSession={setActiveAiChatSession}
+            t={t}
+          />
+        </>
+      )}
 
       <div className="ai-chat-body">
-        {toolsViewOpen ? (
-          <AiToolsView />
-        ) : messages.length > 0 ? (
-          <section className="ai-chat-thread" aria-live="polite">
-            {messages.map((chatMessage) => (
-              <article className="ai-chat-message" data-role={chatMessage.role} key={chatMessage.id}>
-                <div className="ai-chat-message-meta">
-                  <span>{chatMessage.role === "user" ? "You" : "Lux AI"}</span>
-                  <time>{formatMessageTime(chatMessage.timestamp)}</time>
+        <div className="ai-chat-scroll" ref={scrollRef} onScroll={handleBodyScroll}>
+          {messages.length > 0 ? (
+            <section className="ai-chat-thread" aria-live="polite">
+              <AiChatMessages
+                messages={messages}
+                parentRef={scrollRef}
+                streamingMessageId={streamingMessageId}
+                showResponseDuration={aiPreferences.showResponseDuration}
+                onApprovalDecision={resolveToolApproval}
+                t={t}
+              />
+              {activeSessionSending && <AiThinkingIndicator status={activeStatus} t={t} />}
+              {activeSessionClosed && <AiChatClosedNotice onRestore={() => restoreAiChatSession(activeAiChatSessionId)} t={t} />}
+              {sendError && <AiChatError message={sendError} canRetry={Boolean(lastUserDraft)} onRetry={retryLastRequest} t={t} />}
+              {activeLastError && !sendError && <AiChatError message={activeLastError} canRetry={Boolean(lastUserDraft)} onRetry={retryLastRequest} t={t} />}
+              {!activeSessionSending && messages.some((entry) => entry.role === "assistant") && (
+                <div className="ai-chat-thread-actions">
+                  <button type="button" onClick={regenerateLastResponse} disabled={sending || activeSessionClosed}>
+                    <RotateCcw size={13} />
+                    <span>{t("aiChat.regenerate")}</span>
+                  </button>
                 </div>
-                {chatMessage.content && <div className="ai-chat-message-content">{renderChatContent(chatMessage.content)}</div>}
-                {chatMessage.toolCalls && chatMessage.toolCalls.length > 0 && <AiToolCallsGroup onApprovalDecision={resolveToolApproval} toolCalls={chatMessage.toolCalls} />}
-              </article>
-            ))}
-            {sendError && <div className="ai-chat-error" role="status">{sendError}</div>}
-            <div ref={messagesEndRef} />
-          </section>
-        ) : (
-          <section className="ai-chat-empty">
-            <div className="ai-chat-mark"><Sparkles size={22} /></div>
-            <h2>{t("aiChat.empty.title")}</h2>
-            <div className="ai-chat-suggestions" aria-label={t("aiChat.suggestions.aria")}>
-              <button type="button" onClick={() => updateMessage(t("aiChat.suggestion.explainSelectedCode.prompt"))}>{t("aiChat.suggestion.explainSelectedCode.button")}</button>
-              <button type="button" onClick={() => updateMessage(t("aiChat.suggestion.fixCompileErrors.prompt"))}>{t("aiChat.suggestion.fixCompileErrors.button")}</button>
-              <button type="button" onClick={() => updateMessage(t("aiChat.suggestion.generateTests.prompt"))}>{t("aiChat.suggestion.generateTests.button")}</button>
-            </div>
-          </section>
+              )}
+            </section>
+          ) : (
+            <section className="ai-chat-empty">
+              <div className="ai-chat-mark"><Sparkles size={22} /></div>
+              <h2>{presentation === "agent" ? (workspace ? t("agent.welcome.titleWithWorkspace", { workspaceName: workspace.name }) : t("agent.welcome.title")) : t("aiChat.empty.title")}</h2>
+              {presentation === "agent" && <div className="ai-chat-empty-composer">{renderComposerContent()}</div>}
+              <div className="ai-chat-suggestions" aria-label={t("aiChat.suggestions.aria")}>
+                <button type="button" onClick={() => updateMessage(t("aiChat.suggestion.explainSelectedCode.prompt"))}>{t("aiChat.suggestion.explainSelectedCode.button")}</button>
+                <button type="button" onClick={() => updateMessage(t("aiChat.suggestion.fixCompileErrors.prompt"))}>{t("aiChat.suggestion.fixCompileErrors.button")}</button>
+                <button type="button" onClick={() => updateMessage(t("aiChat.suggestion.generateTests.prompt"))}>{t("aiChat.suggestion.generateTests.button")}</button>
+              </div>
+            </section>
+          )}
+        </div>
+        {messages.length > 0 && (
+          <button
+            type="button"
+            className="ai-chat-scroll-down"
+            data-visible={showScrollDown}
+            aria-hidden={!showScrollDown}
+            tabIndex={showScrollDown ? 0 : -1}
+            aria-label={t("aiChat.scrollToLatest")}
+            title={t("aiChat.scrollToLatest")}
+            onClick={() => scrollToBottom("smooth")}
+          >
+            <ArrowDown size={15} />
+          </button>
         )}
       </div>
 
-      <footer className="ai-chat-composer-shell">
-        <div
-          className="ai-chat-composer"
-          data-dragging-files={draggingFiles}
-          onDragLeave={(event) => {
-            if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-            setDraggingFiles(false);
-          }}
-          onDragOver={handleComposerDragOver}
-          onDrop={handleComposerDrop}
-        >
-          {contextOpen && (
-            <div className="ai-context-popover">
-              <div className="ai-context-popover-head">
-                <div>
-                  <span>{t("aiChat.context.label")}</span>
-                  <strong>{t("aiChat.context.full", { percent: contextUsage.percent })}</strong>
-                </div>
-                <button type="button" aria-label={t("aiChat.context.closeAria")} title={t("common.close")} onClick={() => setContextOpen(false)}>
-                  <X size={13} />
-                </button>
-              </div>
-              <div className="ai-context-token-row">
-                <span>{t("aiChat.context.estimatedUsage")}</span>
-                <strong>{t("aiChat.context.tokenUsage", { totalTokens: formatCompactTokens(contextUsage.totalTokens), tokenBudget: formatCompactTokens(contextUsage.tokenBudget) })}</strong>
-              </div>
-              <div className="ai-context-meter" aria-hidden="true">
-                {contextUsage.rows.map((row) => (
-                  <span key={row.id} style={{ width: `${row.percent}%`, background: row.color }} />
-                ))}
-              </div>
-              <dl className="ai-context-breakdown">
-                {contextUsage.rows.map((row) => (
-                  <div key={row.id}>
-                    <dt><span style={{ background: row.color }} />{row.label}</dt>
-                    <dd>{formatContextValue(row)}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          )}
-          <textarea
-            ref={textareaRef}
-            value={message}
-            onChange={handleMessageChange}
-            onKeyDown={handleComposerKeyDown}
-            onPaste={handleComposerPaste}
-            placeholder={t("aiChat.composer.placeholder")}
-            rows={1}
-          />
-          {attachments.length > 0 && (
-            <div className="ai-attachment-list" aria-label={t("aiChat.attachments.aria")}>
-              {attachments.map((attachment) => (
-                <span className="ai-attachment-chip" key={attachment.id} title={t("aiChat.attachment.tooltip", { name: attachment.name, size: formatBytes(attachment.size, t) })}>
-                  <span>{attachment.name}</span>
-                  <small>{formatBytes(attachment.size, t)}</small>
-                  <button type="button" aria-label={t("aiChat.attachment.removeAria", { name: attachment.name })} title={t("common.remove")} onClick={() => removeAttachment(attachment.id)}>
-                    <X size={12} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-          <div className="ai-composer-actions">
-            <div className="ai-composer-left-actions">
-              <input
-                ref={fileInputRef}
-                className="sr-only"
-                type="file"
-                multiple
-                onChange={(event) => {
-                  attachFiles(event.currentTarget.files);
-                  event.currentTarget.value = "";
-                }}
-              />
-              <button className="icon-button compact" type="button" aria-label={t("aiChat.attachFiles")} title={t("aiChat.attachFiles")} onClick={() => fileInputRef.current?.click()}>
-                <Paperclip size={15} />
-              </button>
-              <CompactDropdown
-                className="ai-composer-select"
-                icon={<Bot size={13} />}
-                label={t("aiChat.mode.agent")}
-                value={aiPreferences.selectedAgentId}
-                options={agentOptions}
-                onChange={(selectedAgentId) => updateAiPreference({ selectedAgentId })}
-              />
-              <CompactDropdown
-                className="ai-composer-select"
-                icon={<Sparkles size={13} />}
-                label={t("aiChat.model.label")}
-                value={selectedModel?.id ?? aiPreferences.selectedModelId}
-                options={modelOptions}
-                onChange={updateModel}
-              />
-              {modelSupportsEffort && (
-                <CompactDropdown
-                  className="ai-composer-select"
-                  icon={<Brain size={13} />}
-                  label={t("aiChat.reasoningEffort.label")}
-                  value={aiPreferences.selectedEffortId}
-                  options={effortOptions}
-                  onChange={(selectedEffortId) => updateAiPreference({ selectedEffortId })}
-                />
-              )}
-              <CompactDropdown<AiToolApprovalMode>
-                className="ai-composer-select ai-composer-tool-approval"
-                icon={<ShieldCheck size={13} />}
-                label={t("aiChat.toolApproval.label")}
-                value={aiPreferences.toolApprovalMode}
-                options={toolApprovalOptions}
-                onChange={(toolApprovalMode) => updateAiPreference({ toolApprovalMode })}
-              />
-              {attachments.length > 0 && <span className="ai-attachment-count">{attachments.length}</span>}
-            </div>
-            <div className="ai-composer-right-actions">
-              <button className="ai-context-circle" type="button" aria-label={t("aiChat.context.label")} title={contextTitle} data-active={contextOpen} onClick={() => setContextOpen((open) => !open)}>
-                {contextLabel}
-              </button>
-              <button
-                className="ai-voice-button"
-                type="button"
-                aria-label={t("aiChat.voiceInput.aria")}
-                title={voiceInput.voiceTitle}
-                data-recording={voiceInput.voiceMode === "recording" || voiceInput.listening}
-                data-transcribing={voiceInput.voiceMode === "transcribing"}
-                disabled={!voiceInput.canUseVoice || voiceInput.voiceMode === "transcribing"}
-                onClick={voiceInput.toggleVoiceInput}
-              >
-                <Mic size={14} />
-              </button>
-              <button
-                className="ai-send-button"
-                type="button"
-                aria-label={t("aiChat.send.aria")}
-                title={sending ? "Stop generation" : selectedProvider && selectedModel ? t("aiChat.send.aria") : t("aiChat.send.disabledTooltip")}
-                disabled={!sending && !canSend}
-                onClick={sending ? handleCancelSend : () => void handleSend()}
-              >
-                {sending ? <Square size={13} /> : message.trim() ? <SendHorizontal size={15} /> : <CornerDownLeft size={15} />}
-              </button>
-            </div>
-          </div>
-        </div>
-      </footer>
+      {!isAgentHome && <footer className="ai-chat-composer-shell">{renderComposerContent()}</footer>}
     </aside>
   );
+}
+
+function AiChatClosedNotice({ onRestore, t }: { onRestore: () => void; t: TranslateFn }) {
+  return (
+    <div className="ai-chat-closed-notice" role="status">
+      <span>{t("aiChat.closedNotice")}</span>
+      <button type="button" onClick={onRestore}>
+        <RotateCcw size={13} />
+        <span>{t("aiChat.restoreChat")}</span>
+      </button>
+    </div>
+  );
+}
+
+function AiChatError({ canRetry, message, onRetry, t }: { canRetry: boolean; message: string; onRetry: () => void; t: TranslateFn }) {
+  return (
+    <div className="ai-chat-error" role="status">
+      <span>{message}</span>
+      {canRetry && (
+        <button type="button" onClick={onRetry}>
+          <RotateCcw size={13} />
+          <span>{t("aiChat.retry")}</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AiThinkingIndicator({ status, t }: { status: AiChatSessionStatus; t: TranslateFn }) {
+  return (
+    <div className="ai-thinking-indicator" data-status={status}>
+      <span />
+      <span />
+      <span />
+      <strong>{aiChatStatusLabel(status, true, t)}</strong>
+    </div>
+  );
+}
+
+function statusToSessionStatus(status: "thinking" | "streaming" | "running-tools" | "waiting-approval"): AiChatSessionStatus {
+  return status;
 }
 
 function replaceEmptyAssistantTail(messages: AiChatMessage[], assistantError: AiChatMessage) {
@@ -487,105 +617,15 @@ function replaceEmptyAssistantTail(messages: AiChatMessage[], assistantError: Ai
   return [...messages, assistantError];
 }
 
+function findLastUserMessageIndex(messages: AiChatMessage[]) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") return index;
+  }
+  return -1;
+}
+
 function attachmentId(file: File) {
   return `${file.name}-${file.lastModified}-${file.size}`;
-}
-
-function buildContextUsageSummary({
-  activeDocumentPath,
-  aiIndexStatus,
-  agentInstruction,
-  agentName,
-  attachments,
-  message,
-  preferences,
-  selectedModelAlias,
-  t,
-}: {
-  activeDocumentPath: string | null;
-  aiIndexStatus: string;
-  agentInstruction: string;
-  agentName: string;
-  attachments: ChatAttachment[];
-  message: string;
-  preferences: AiPreferences;
-  selectedModelAlias: string;
-  t: TranslateFn;
-}): ContextUsageSummary {
-  const agentTokens = estimateTokens([agentName, preferences.agentMode, agentInstruction].join(" "));
-  const modelTokens = estimateTokens(selectedModelAlias);
-  const indexTokens = preferences.projectIndexingEnabled && aiIndexStatus !== "disabled" ? estimateTokens(aiIndexStatus) : 0;
-  const filesTokens = activeDocumentPath ? estimateTokens(activeDocumentPath) : 0;
-  const conversationTokens = Math.max(estimateTokens(message), message.trim() ? 80 : 0)
-    + attachments.reduce((sum, attachment) => sum + estimateAttachmentTokens(attachment), 0);
-  const rawRows: Omit<ContextUsageRow, "percent">[] = [
-    { color: contextRowColors.agent, detail: agentName || preferences.agentMode, id: "agent", label: t("aiChat.context.agent"), tokens: agentTokens },
-    { color: contextRowColors.model, detail: selectedModelAlias, id: "model", label: t("aiChat.model.label"), tokens: modelTokens },
-    { color: contextRowColors.index, detail: preferences.projectIndexingEnabled ? aiIndexStatus : t("common.off"), id: "index", label: t("aiChat.context.index"), tokens: indexTokens },
-    { color: contextRowColors.files, detail: activeDocumentPath ?? "", id: "files", label: t("aiChat.context.file"), tokens: filesTokens },
-    { color: contextRowColors.conversation, detail: attachments.length > 0 ? t("aiChat.attachment.count", { count: attachments.length }) : "", id: "conversation", label: t("aiChat.context.message"), tokens: conversationTokens },
-  ].filter((row) => row.tokens > 0 || row.detail);
-  const totalTokens = rawRows.reduce((sum, row) => sum + row.tokens, 0);
-  const rows = rawRows.map((row) => ({
-    ...row,
-    percent: totalTokens > 0 ? Math.max(0.8, (row.tokens / totalTokens) * 100) : 0,
-  }));
-
-  return {
-    percent: Math.min(100, Math.round((totalTokens / contextTokenBudget) * 100)),
-    rows,
-    tokenBudget: contextTokenBudget,
-    totalTokens,
-  };
-}
-
-function estimateAttachmentTokens(attachment: ChatAttachment) {
-  return estimateTokens(attachment.name) + Math.max(1, Math.ceil(attachment.size / 1024));
-}
-
-function estimateTokens(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return 0;
-  return Math.ceil(trimmed.length / 4);
-}
-
-function formatCompactTokens(tokens: number) {
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(tokens >= 10_000_000 ? 0 : 1)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(tokens >= 10_000 ? 0 : 1)}K`;
-  return String(tokens);
-}
-
-function formatContextValue(row: ContextUsageRow) {
-  const tokens = formatCompactTokens(row.tokens);
-  return row.detail ? `${tokens} - ${row.detail}` : tokens;
-}
-
-function formatBytes(bytes: number, t: TranslateFn) {
-  if (bytes < 1024) return t("common.fileSize.bytes", { bytes });
-  const kilobytes = bytes / 1024;
-  if (kilobytes < 1024) return t("common.fileSize.kilobytes", { kilobytes: kilobytes.toFixed(kilobytes >= 10 ? 0 : 1) });
-  const megabytes = kilobytes / 1024;
-  return t("common.fileSize.megabytes", { megabytes: megabytes.toFixed(megabytes >= 10 ? 0 : 1) });
-}
-
-function renderChatContent(content: string) {
-  const parts = content.split(/```/g);
-  if (parts.length === 1) return content;
-  return parts.map((part, index) => {
-    if (index % 2 === 0) return <span key={index}>{part}</span>;
-    const firstLineBreak = part.indexOf("\n");
-    const language = firstLineBreak > 0 ? part.slice(0, firstLineBreak).trim() : "";
-    const code = firstLineBreak > 0 ? part.slice(firstLineBreak + 1) : part;
-    return (
-      <pre className="ai-chat-code-block" key={index} data-language={language || undefined}>
-        <code>{code.trim()}</code>
-      </pre>
-    );
-  });
-}
-
-function formatMessageTime(timestamp: number) {
-  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(timestamp);
 }
 
 function isAbortError(error: unknown) {
@@ -594,4 +634,17 @@ function isAbortError(error: unknown) {
 
 function readErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatAiError(error: unknown, t: TranslateFn) {
+  if (isAbortError(error)) return t("aiChat.error.cancelled");
+  const message = readErrorMessage(error);
+  if (/timed out|timeout/i.test(message)) return t("aiChat.error.timeout", { detail: message });
+  if (/failed to fetch|connection refused|connect|ECONNREFUSED|network/i.test(message)) return t("aiChat.error.providerUnavailable", { detail: message });
+  if (/non-JSON|json|expected value/i.test(message)) return t("aiChat.error.invalidJson", { detail: message });
+  if (/rejected by the user/i.test(message)) return t("aiChat.error.toolRejected", { detail: message });
+  if (/workspace|no workspace is open/i.test(message)) return t("aiChat.error.workspace", { detail: message });
+  if (/not found|file does not exist|cannot find/i.test(message)) return t("aiChat.error.fileNotFound", { detail: message });
+  if (/stream/i.test(message)) return t("aiChat.error.stream", { detail: message });
+  return t("aiChat.error.generic", { detail: message });
 }

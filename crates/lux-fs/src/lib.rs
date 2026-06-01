@@ -1,4 +1,17 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::{fs, path::Path, process::Command};
+
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::path::PathBuf;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use chrono::{DateTime, Utc};
 use ignore::WalkBuilder;
@@ -175,14 +188,18 @@ pub fn reveal_in_file_explorer(path: impl AsRef<Path>) -> AppResult<()> {
     #[cfg(target_os = "windows")]
     {
         let argument = format!("/select,{}", path.display());
-        Command::new("explorer.exe").arg(argument).spawn()?;
-        return Ok(());
+        let mut command = Command::new("explorer.exe");
+        command
+            .arg(argument)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()?;
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
     {
         Command::new("open").arg("-R").arg(path).spawn()?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -195,7 +212,7 @@ pub fn reveal_in_file_explorer(path: impl AsRef<Path>) -> AppResult<()> {
                 .unwrap_or_else(|| PathBuf::from("."))
         };
         Command::new("xdg-open").arg(target).spawn()?;
-        return Ok(());
+        Ok(())
     }
 }
 

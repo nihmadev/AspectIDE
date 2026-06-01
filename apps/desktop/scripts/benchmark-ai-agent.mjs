@@ -2,6 +2,7 @@ import { exec as execCallback } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, relative, sep } from "node:path";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { transform } from "esbuild";
 
@@ -15,7 +16,7 @@ const keepWorkspace = process.env.LUX_AI_AGENT_BENCH_KEEP === "1";
 
 const { buildLuxIdeSystemPrompt } = await loadPromptBuilder();
 
-const scenarios = [
+export const scenarios = [
   {
     id: "fix-cart-total",
     title: "Fix a failing implementation and verify tests",
@@ -45,37 +46,37 @@ const scenarios = [
   },
 ];
 
-const results = [];
-for (const scenario of scenarios) {
-  const workspaceRoot = await mkdtemp(resolve(tmpdir(), `lux-ai-agent-${scenario.id}-`));
-  try {
-    await scenario.setup(workspaceRoot);
-    const result = await runScenario(scenario, workspaceRoot);
-    const evaluated = await scenario.evaluate(workspaceRoot, result);
-    const combined = { ...result, ...evaluated, passed: result.passed && evaluated.passed, failures: [...result.failures, ...evaluated.failures] };
-    results.push(combined);
-    const mark = combined.passed ? "PASS" : "FAIL";
-    console.log(`${mark} ${scenario.id} (${combined.score}/${combined.maxScore}) ${scenario.title}`);
-    if (!combined.passed) {
-      for (const failure of combined.failures) console.log(`  - ${failure}`);
-      console.log(`  tools: ${combined.toolLog.map((entry) => entry.name).join(" -> ") || "none"}`);
-      console.log(`  workspace: ${workspaceRoot}`);
-      console.log(`  final: ${truncate(combined.finalContent.replace(/\s+/g, " "), 500)}`);
-    }
-  } finally {
-    if (!keepWorkspace) await rm(workspaceRoot, { force: true, recursive: true });
-  }
+if (isMain()) {
+  const summary = await runLuxAgentBenchmark({ print: true });
+  if (!summary.passedAll) process.exitCode = 1;
 }
 
-const passed = results.filter((result) => result.passed).length;
-const score = results.reduce((sum, result) => sum + result.score, 0);
-const maxScore = results.reduce((sum, result) => sum + result.maxScore, 0);
-const percent = Math.round((score / maxScore) * 100);
-console.log(`AI agent benchmark: ${passed}/${results.length} scenarios passed, score ${score}/${maxScore} (${percent}%).`);
+export async function runLuxAgentBenchmark({ print = true } = {}) {
+  const results = [];
+  for (const scenario of scenarios) {
+    const workspaceRoot = await mkdtemp(resolve(tmpdir(), `lux-ai-agent-${scenario.id}-`));
+    try {
+      await scenario.setup(workspaceRoot);
+      const result = await runLuxScenario(scenario, workspaceRoot);
+      const evaluated = await scenario.evaluate(workspaceRoot, result);
+      const combined = { ...result, ...evaluated, passed: result.passed && evaluated.passed, failures: [...result.failures, ...evaluated.failures] };
+      results.push(combined);
+      if (print) printScenarioResult(scenario, combined, workspaceRoot);
+    } finally {
+      if (!keepWorkspace) await rm(workspaceRoot, { force: true, recursive: true });
+    }
+  }
 
-if (passed !== results.length || percent < 90) process.exitCode = 1;
+  const passed = results.filter((result) => result.passed).length;
+  const score = results.reduce((sum, result) => sum + result.score, 0);
+  const maxScore = results.reduce((sum, result) => sum + result.maxScore, 0);
+  const percent = Math.round((score / maxScore) * 100);
+  const passedAll = passed === results.length && percent >= 90;
+  if (print) console.log(`AI agent benchmark: ${passed}/${results.length} scenarios passed, score ${score}/${maxScore} (${percent}%).`);
+  return { maxScore, passed, passedAll, percent, results, score };
+}
 
-async function runScenario(scenario, workspaceRoot) {
+export async function runLuxScenario(scenario, workspaceRoot) {
   const toolLog = [];
   const messages = [
     { role: "system", content: buildLuxIdeSystemPrompt(context(workspaceRoot, scenario)) },
@@ -114,6 +115,21 @@ async function runScenario(scenario, workspaceRoot) {
 
   failures.push(`model did not finish within ${maxRounds} tool rounds`);
   return { passed: false, score: 0, maxScore: 4, finalContent, toolLog, failures };
+}
+
+function printScenarioResult(scenario, combined, workspaceRoot) {
+  const mark = combined.passed ? "PASS" : "FAIL";
+  console.log(`${mark} ${scenario.id} (${combined.score}/${combined.maxScore}) ${scenario.title}`);
+  if (!combined.passed) {
+    for (const failure of combined.failures) console.log(`  - ${failure}`);
+    console.log(`  tools: ${combined.toolLog.map((entry) => entry.name).join(" -> ") || "none"}`);
+    console.log(`  workspace: ${workspaceRoot}`);
+    console.log(`  final: ${truncate(combined.finalContent.replace(/\s+/g, " "), 500)}`);
+  }
+}
+
+function isMain() {
+  return Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 }
 
 async function requestCompletion(messages, scenarioId) {
@@ -499,7 +515,7 @@ function context(workspaceRoot, scenario = {}) {
   const agentMode = scenario.agentMode ?? "agent";
   return {
     preferences: { agentMode, selectedEffortId: reasoningEffort, toolApprovalMode: agentMode === "agent" ? "full-access" : "default" },
-    provider: { name: "Local proxy", protocol: "local-proxy" },
+    provider: { name: "Local", protocol: "local-proxy" },
     runtimeToolsAvailable: true,
     selectedAgentInstructions: scenario.selectedAgentInstructions ?? "Work autonomously from evidence. Edit the temp workspace and verify with the provided test command before reporting done.",
     selectedAgentName: scenario.selectedAgentName ?? "Agent",

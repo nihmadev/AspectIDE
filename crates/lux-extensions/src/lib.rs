@@ -1,3 +1,7 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -78,14 +82,14 @@ fn read_extension_info(extension_root: PathBuf, manifest_path: PathBuf) -> Exten
             ),
         },
         Err(error) => ExtensionInfo {
-            id: extension_root
-                .file_name()
-                .map(|value| value.to_string_lossy().to_string())
-                .unwrap_or_else(|| "invalid-extension".to_string()),
-            name: extension_root
-                .file_name()
-                .map(|value| value.to_string_lossy().to_string())
-                .unwrap_or_else(|| "Invalid extension".to_string()),
+            id: extension_root.file_name().map_or_else(
+                || "invalid-extension".to_string(),
+                |value| value.to_string_lossy().to_string(),
+            ),
+            name: extension_root.file_name().map_or_else(
+                || "Invalid extension".to_string(),
+                |value| value.to_string_lossy().to_string(),
+            ),
             version: "0.0.0".to_string(),
             wasm_module: PathBuf::new(),
             contributes: Vec::new(),
@@ -125,6 +129,7 @@ fn manifest_to_info(
     }
 }
 
+#[must_use]
 pub fn contribution_points_for_manifest(
     manifest: &ExtensionManifest,
 ) -> Vec<ExtensionContributionPoint> {

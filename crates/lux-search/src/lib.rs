@@ -1,3 +1,7 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::{path::Path, time::Instant};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -12,7 +16,7 @@ const SEARCH_PREVIEW_CONTEXT_BEFORE_CHARS: usize = 80;
 pub fn query(
     root: impl AsRef<Path>,
     search: String,
-    options: SearchOptions,
+    options: &SearchOptions,
 ) -> AppResult<SearchResponse> {
     let started = Instant::now();
     if search.trim().is_empty() {
@@ -27,7 +31,7 @@ pub fn query(
     let root = root.as_ref().to_path_buf();
     let include_globs = compile_globs(&options.include_globs)?;
     let exclude_globs = compile_globs(&options.exclude_globs)?;
-    let matcher = SearchMatcher::new(&search, &options)?;
+    let matcher = SearchMatcher::new(&search, options)?;
 
     let mut builder = WalkBuilder::new(&root);
     builder.hidden(!options.include_hidden);
@@ -36,13 +40,8 @@ pub fn query(
     let files: Vec<_> = builder
         .build()
         .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
-        })
-        .map(|entry| entry.into_path())
+        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
+        .map(ignore::DirEntry::into_path)
         .filter(|path| {
             matches_glob_filters(&root, path, include_globs.as_ref(), exclude_globs.as_ref())
         })
@@ -50,9 +49,9 @@ pub fn query(
 
     let mut hits: Vec<SearchHit> = files
         .par_iter()
-        .flat_map_iter(|path| match std::fs::read_to_string(path) {
-            Ok(text) => collect_hits(path, &text, &matcher),
-            Err(_) => Vec::new(),
+        .flat_map_iter(|path| {
+            std::fs::read_to_string(path)
+                .map_or_else(|_| Vec::new(), |text| collect_hits(path, &text, &matcher))
         })
         .collect();
 
@@ -82,7 +81,7 @@ impl SearchMatcher {
     fn new(search: &str, options: &SearchOptions) -> AppResult<Self> {
         if options.use_regex {
             let pattern = if options.whole_word {
-                format!(r"\b(?:{})\b", search)
+                format!(r"\b(?:{search})\b")
             } else {
                 search.to_string()
             };
@@ -131,7 +130,7 @@ struct SearchLineMatch {
 }
 
 impl SearchLineMatch {
-    fn end(&self) -> usize {
+    const fn end(&self) -> usize {
         self.start + self.length
     }
 }
@@ -207,8 +206,7 @@ fn byte_index_after_n_chars(text: &str, count: usize) -> usize {
 
     text.char_indices()
         .nth(count)
-        .map(|(index, _)| index)
-        .unwrap_or(text.len())
+        .map_or(text.len(), |(index, _)| index)
 }
 
 fn literal_matches(line: &str, needle: &str) -> Vec<SearchLineMatch> {
@@ -265,7 +263,7 @@ fn matches_glob_filters(
     if exclude_globs.is_some_and(|globs| globs.is_match(relative)) {
         return false;
     }
-    include_globs.map_or(true, |globs| globs.is_match(relative))
+    include_globs.is_none_or(|globs| globs.is_match(relative))
 }
 
 #[cfg(test)]
@@ -297,7 +295,7 @@ mod tests {
         let whole_word = query(
             &root,
             "alpha".to_string(),
-            SearchOptions {
+            &SearchOptions {
                 whole_word: true,
                 include_globs: vec!["*.rs".to_string()],
                 exclude_globs: vec!["target/**".to_string()],
@@ -324,7 +322,7 @@ mod tests {
         let regex = query(
             &root,
             "b.ta".to_string(),
-            SearchOptions {
+            &SearchOptions {
                 use_regex: true,
                 case_sensitive: false,
                 max_results: 20,
@@ -338,7 +336,7 @@ mod tests {
         let case_sensitive = query(
             &root,
             "beta".to_string(),
-            SearchOptions {
+            &SearchOptions {
                 case_sensitive: true,
                 max_results: 20,
                 ..SearchOptions::default()
@@ -352,7 +350,7 @@ mod tests {
         let unicode = query(
             &root,
             "мир".to_string(),
-            SearchOptions {
+            &SearchOptions {
                 case_sensitive: true,
                 include_globs: vec!["unicode.rs".to_string()],
                 max_results: 20,

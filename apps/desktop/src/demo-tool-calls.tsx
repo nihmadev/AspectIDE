@@ -1,8 +1,19 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { AiToolCallsGroup, type AiMessage } from "./components/AiToolCall";
+import type { TranslateFn } from "./lib/i18n/useTranslation";
 import "./styles/tokens.css";
 import "./styles/ai-tool-calls.css";
+
+const demoTranslate: TranslateFn = (key, params) => {
+  if (key === "aiTools.duration.ms") return `${params?.duration ?? 0} ms`;
+  if (key === "aiTools.duration.s") return `${params?.duration ?? 0} s`;
+  if (key === "aiTools.summary.waitingApproval") return `Waiting for ${params?.count ?? 0} approval`;
+  if (key === "aiTools.summary.running") return `Running ${params?.count ?? 0} tool`;
+  if (key === "aiTools.summary.ran") return `Ran ${params?.count ?? 0} tool`;
+  if (key === "aiTools.summary.failed") return `${params?.count ?? 0} failed`;
+  return key;
+};
 
 // Demo messages with tool calls
 const demoMessages: AiMessage[] = [
@@ -215,7 +226,7 @@ function DemoApp() {
               {message.content}
             </div>
             {message.toolCalls && (
-              <AiToolCallsGroup toolCalls={message.toolCalls} />
+              <AiToolCallsGroup t={demoTranslate} toolCalls={message.toolCalls} />
             )}
           </div>
         ))}

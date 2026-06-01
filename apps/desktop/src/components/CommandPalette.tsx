@@ -69,7 +69,7 @@ export function CommandPalette() {
   const languageServers = useLuxStore((state) => state.languageServers);
   const setLanguageServers = useLuxStore((state) => state.setLanguageServers);
   const setLanguageServersLoading = useLuxStore((state) => state.setLanguageServersLoading);
-  const setTerminal = useLuxStore((state) => state.setTerminal);
+  const upsertTerminalSession = useLuxStore((state) => state.upsertTerminalSession);
   const keybindingProfile = useLuxStore((state) => state.keybindingProfile);
   const upsertDocument = useLuxStore((state) => state.upsertDocument);
   const setPendingEditorReveal = useLuxStore((state) => state.setPendingEditorReveal);
@@ -411,7 +411,7 @@ export function CommandPalette() {
         icon: TerminalSquare,
         run: () => {
           openBottomPanel("terminal");
-          void luxCommands.terminalCreate().then(setTerminal).catch(() => undefined);
+          void luxCommands.terminalCreate().then((terminal) => upsertTerminalSession(terminal, true)).catch(() => undefined);
         },
       },
       {
@@ -465,7 +465,7 @@ export function CommandPalette() {
       setGitStatus,
       setSidebarVisible,
       setSettingsOpen,
-      setTerminal,
+      upsertTerminalSession,
       setWorkspace,
       sidebarVisible,
       splitActiveEditor,

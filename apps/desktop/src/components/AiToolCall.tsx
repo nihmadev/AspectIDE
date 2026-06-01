@@ -1,9 +1,11 @@
-import { motion } from "motion/react";
+import { useState } from "react";
+import { AnimatePresence, motion } from "motion/react";
 import {
   Activity,
   AlertTriangle,
   BookOpen,
-  CheckCircle2,
+  Check,
+  ChevronRight,
   Code2,
   Eye,
   FileSearch,
@@ -12,6 +14,7 @@ import {
   GitBranch,
   Layers,
   Loader2,
+  Minus,
   Network,
   Pencil,
   Search,
@@ -22,7 +25,8 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { AiToolApprovalDecision, AiToolApprovalState } from "../lib/aiChatRuntime";
+import type { AiToolApprovalDecision, AiToolApprovalState } from "../lib/aiChatTypes";
+import type { TranslateFn } from "../lib/i18n/useTranslation";
 
 export type ToolCallStatus = "approval" | "running" | "success" | "skipped" | "error";
 
@@ -56,6 +60,8 @@ const toolIcons: Record<string, LucideIcon> = {
   Checkpoint: Shield,
   Delete: Trash2,
   Shell: Terminal,
+  TerminalContext: Terminal,
+  TerminalWrite: Terminal,
   ReadLints: AlertTriangle,
   TodoWrite: Layers,
   WebFetch: Network,
@@ -73,124 +79,76 @@ const toolIcons: Record<string, LucideIcon> = {
   FailureAnalyzer: Activity,
   GitContext: GitBranch,
   DiagnosticsContext: AlertTriangle,
-  TestHealth: CheckCircle2,
+  TestHealth: Check,
   MemoryContext: BookOpen,
   ContextBudgeter: BookOpen,
   default: Wrench,
 };
 
-const toolColors: Record<string, string> = {
-  SemanticSearch: "#3b9eff",
-  Grep: "#3b9eff",
-  Glob: "#3b9eff",
-  Read: "#3b9eff",
-  Write: "#3b9eff",
-  StrReplace: "#3b9eff",
-  PatchEngine: "#4ec98a",
-  Checkpoint: "#4ec98a",
-  Delete: "#f14c4c",
-  Shell: "#e2b341",
-  ReadLints: "#3b9eff",
-  TodoWrite: "#3b9eff",
-  WebFetch: "#3b9eff",
-  FastContext: "#4ec98a",
-  RepoMap: "#4ec98a",
-  WorkspaceIndex: "#4ec98a",
-  ActiveContext: "#4ec98a",
-  RulesContext: "#4ec98a",
-  DocsContext: "#4ec98a",
-  ImpactAnalysis: "#4ec98a",
-  ReviewDiff: "#4ec98a",
-  SecretGuard: "#4ec98a",
-  SymbolContext: "#4ec98a",
-  RelatedFiles: "#4ec98a",
-  FailureAnalyzer: "#4ec98a",
-  GitContext: "#4ec98a",
-  DiagnosticsContext: "#4ec98a",
-  TestHealth: "#4ec98a",
-  MemoryContext: "#4ec98a",
-  ContextBudgeter: "#4ec98a",
-  default: "#8a8a8a",
-};
-
 type AiToolCallProps = {
   onApprovalDecision?: (approvalId: string, decision: AiToolApprovalDecision) => void;
+  t: TranslateFn;
   toolCall: ToolCall;
 };
 
-export function AiToolCall({ onApprovalDecision, toolCall }: AiToolCallProps) {
-  const Icon = toolIcons[toolCall.tool] || toolIcons.default;
-  const color = toolColors[toolCall.tool] || toolColors.default;
-  const duration = toolCall.endTime ? toolCall.endTime - toolCall.startTime : Date.now() - toolCall.startTime;
-  const durationText = duration < 1000 ? `${duration}ms` : `${(duration / 1000).toFixed(1)}s`;
+function StatusGlyph({ status, Icon }: { status: ToolCallStatus; Icon: LucideIcon }) {
+  if (status === "running") return <Loader2 size={13} className="spin-icon" />;
+  if (status === "approval") return <Shield size={13} />;
+  if (status === "error") return <AlertTriangle size={13} />;
+  if (status === "skipped") return <Minus size={13} />;
+  return <Icon size={13} />;
+}
 
-  const hasStats = toolCall.stats && (
-    toolCall.stats.linesAdded ||
-    toolCall.stats.linesRemoved ||
-    toolCall.stats.filesChanged ||
-    toolCall.stats.filesCreated ||
-    toolCall.stats.filesDeleted
-  );
+export function AiToolCall({ onApprovalDecision, t, toolCall }: AiToolCallProps) {
+  const Icon = toolIcons[toolCall.tool] || toolIcons.default;
+  const duration = toolCall.endTime ? toolCall.endTime - toolCall.startTime : Date.now() - toolCall.startTime;
+  const durationText = duration < 1000 ? t("aiTools.duration.ms", { duration }) : t("aiTools.duration.s", { duration: (duration / 1000).toFixed(1) });
+  const isApproval = toolCall.status === "approval";
+  const detail = toolCall.status === "error" ? toolCall.error : toolCall.status === "skipped" ? toolCall.error : toolCall.output;
+  const hasDetail = Boolean(detail && detail.trim());
+  const collapsible = !isApproval && hasDetail;
+  const [expanded, setExpanded] = useState(false);
+
+  const stats = toolCall.stats;
+  const hasStats = Boolean(stats && (stats.linesAdded || stats.linesRemoved || stats.filesChanged || stats.filesCreated || stats.filesDeleted));
 
   return (
     <motion.div
       className="ai-tool-call"
       data-status={toolCall.status}
-      initial={{ opacity: 0, y: 4, scale: 0.98 }}
-      animate={{ opacity: 1, y: 0, scale: 1 }}
-      transition={{ duration: 0.2 }}
+      data-open={collapsible && expanded ? true : undefined}
+      initial={{ opacity: 0, y: 2 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.16 }}
     >
-      <div className="ai-tool-call-header">
-        <div className="ai-tool-call-icon" style={{ color }}>
-          {toolCall.status === "running" || toolCall.status === "approval" ? (
-            <Loader2 size={14} className="spin-icon" />
-          ) : (
-            <Icon size={14} />
-          )}
-        </div>
-        <div className="ai-tool-call-main">
-          <div className="ai-tool-call-title">
-            <span>{toolCall.tool}</span>
-            {toolCall.status !== "running" && toolCall.status !== "approval" && (
-              <span className="ai-tool-call-duration">{durationText}</span>
-            )}
-            {toolCall.status === "approval" && (
-              <span className="ai-tool-call-duration">approval</span>
-            )}
-          </div>
-          {toolCall.input && (
-            <div className="ai-tool-call-input">{toolCall.input}</div>
-          )}
-          {hasStats && toolCall.stats && (
-            <div className="ai-tool-call-stats">
-              {toolCall.stats.linesAdded !== undefined && toolCall.stats.linesAdded > 0 && (
-                <span className="ai-tool-stat" data-type="added">+{toolCall.stats.linesAdded}</span>
-              )}
-              {toolCall.stats.linesRemoved !== undefined && toolCall.stats.linesRemoved > 0 && (
-                <span className="ai-tool-stat" data-type="removed">-{toolCall.stats.linesRemoved}</span>
-              )}
-              {toolCall.stats.filesCreated !== undefined && toolCall.stats.filesCreated > 0 && (
-                <span className="ai-tool-stat" data-type="created">{toolCall.stats.filesCreated} created</span>
-              )}
-              {toolCall.stats.filesChanged !== undefined && toolCall.stats.filesChanged > 0 && (
-                <span className="ai-tool-stat" data-type="changed">{toolCall.stats.filesChanged} changed</span>
-              )}
-              {toolCall.stats.filesDeleted !== undefined && toolCall.stats.filesDeleted > 0 && (
-                <span className="ai-tool-stat" data-type="deleted">{toolCall.stats.filesDeleted} deleted</span>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
+      <button
+        type="button"
+        className="ai-tool-call-row"
+        data-interactive={collapsible || undefined}
+        onClick={collapsible ? () => setExpanded((value) => !value) : undefined}
+        aria-expanded={collapsible ? expanded : undefined}
+      >
+        <span className="ai-tool-call-glyph">
+          <StatusGlyph status={toolCall.status} Icon={Icon} />
+        </span>
+        <span className="ai-tool-call-name">{toolCall.tool}</span>
+        {toolCall.input && <span className="ai-tool-call-target">{toolCall.input}</span>}
+        <span className="ai-tool-call-flex" />
+        {hasStats && stats && (
+          <span className="ai-tool-call-stats">
+            {stats.linesAdded ? <span className="ai-tool-stat" data-type="added">+{stats.linesAdded}</span> : null}
+            {stats.linesRemoved ? <span className="ai-tool-stat" data-type="removed">−{stats.linesRemoved}</span> : null}
+            {stats.filesCreated ? <span className="ai-tool-stat" data-type="created">{stats.filesCreated}N</span> : null}
+            {stats.filesChanged ? <span className="ai-tool-stat" data-type="changed">{stats.filesChanged}M</span> : null}
+            {stats.filesDeleted ? <span className="ai-tool-stat" data-type="deleted">{stats.filesDeleted}D</span> : null}
+          </span>
+        )}
+        {!isApproval && toolCall.status !== "running" && <span className="ai-tool-call-duration">{durationText}</span>}
+        {collapsible && <ChevronRight className="ai-tool-call-caret" data-expanded={expanded} size={13} />}
+      </button>
 
-      {toolCall.status === "approval" && toolCall.approval && (
-        <motion.div
-          className="ai-tool-approval"
-          data-risk={toolCall.approval.risk}
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          transition={{ duration: 0.2 }}
-        >
+      {isApproval && toolCall.approval && (
+        <div className="ai-tool-approval" data-risk={toolCall.approval.risk}>
           <div className="ai-tool-approval-head">
             <div>
               <strong>{toolCall.approval.title}</strong>
@@ -198,80 +156,62 @@ export function AiToolCall({ onApprovalDecision, toolCall }: AiToolCallProps) {
             </div>
           </div>
           <p>{toolCall.approval.summary}</p>
-          <pre>{toolCall.approval.preview}</pre>
+          {toolCall.approval.preview && <pre>{toolCall.approval.preview}</pre>}
           <div className="ai-tool-approval-actions">
             <button type="button" className="ai-tool-approval-reject" onClick={() => onApprovalDecision?.(toolCall.approval!.id, "rejected")}>{toolCall.approval.rejectLabel}</button>
             <button type="button" className="ai-tool-approval-approve" data-risk={toolCall.approval.risk} onClick={() => onApprovalDecision?.(toolCall.approval!.id, "approved")}>{toolCall.approval.approveLabel}</button>
           </div>
-        </motion.div>
+        </div>
       )}
 
-      {toolCall.status === "success" && toolCall.output && (
-        <motion.div
-          className="ai-tool-call-output"
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          transition={{ duration: 0.2 }}
-        >
-          <pre>{toolCall.output}</pre>
-        </motion.div>
-      )}
-
-      {toolCall.status === "error" && toolCall.error && (
-        <motion.div
-          className="ai-tool-call-error"
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          transition={{ duration: 0.2 }}
-        >
-          {toolCall.error}
-        </motion.div>
-      )}
-
-      {toolCall.status === "skipped" && toolCall.error && (
-        <motion.div
-          className="ai-tool-call-skipped"
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: "auto", opacity: 1 }}
-          transition={{ duration: 0.2 }}
-        >
-          {toolCall.error}
-        </motion.div>
-      )}
+      <AnimatePresence initial={false}>
+        {collapsible && expanded && (
+          <motion.div
+            className="ai-tool-call-body"
+            data-kind={toolCall.status}
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+          >
+            <pre>{detail}</pre>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.div>
   );
 }
 
 type AiToolCallsGroupProps = {
   onApprovalDecision?: (approvalId: string, decision: AiToolApprovalDecision) => void;
+  t: TranslateFn;
   toolCalls: ToolCall[];
 };
 
-export function AiToolCallsGroup({ onApprovalDecision, toolCalls }: AiToolCallsGroupProps) {
+export function AiToolCallsGroup({ onApprovalDecision, t, toolCalls }: AiToolCallsGroupProps) {
   if (toolCalls.length === 0) return null;
 
-  const approvalCount = toolCalls.filter((t) => t.status === "approval").length;
-  const runningCount = toolCalls.filter((t) => t.status === "running").length;
-  const successCount = toolCalls.filter((t) => t.status === "success").length;
-  const skippedCount = toolCalls.filter((t) => t.status === "skipped").length;
-  const errorCount = toolCalls.filter((t) => t.status === "error").length;
+  const approvalCount = toolCalls.filter((call) => call.status === "approval").length;
+  const runningCount = toolCalls.filter((call) => call.status === "running").length;
+  const errorCount = toolCalls.filter((call) => call.status === "error").length;
+  const active = approvalCount > 0 || runningCount > 0;
+
+  const summary = approvalCount > 0
+    ? t("aiTools.summary.waitingApproval", { count: approvalCount })
+    : runningCount > 0
+      ? t("aiTools.summary.running", { count: runningCount })
+      : t("aiTools.summary.ran", { count: toolCalls.length });
 
   return (
-    <div className="ai-tool-calls-group">
+    <div className="ai-tool-calls-group" data-active={active || undefined}>
       <div className="ai-tool-calls-summary">
-        <Wrench size={13} />
-        <span>
-          {approvalCount > 0 && `Waiting for ${approvalCount} approval${approvalCount > 1 ? "s" : ""}...`}
-          {runningCount > 0 && `Running ${runningCount} tool${runningCount > 1 ? "s" : ""}...`}
-          {approvalCount === 0 && runningCount === 0 && `Used ${toolCalls.length} tool${toolCalls.length > 1 ? "s" : ""}`}
-        </span>
-        {successCount > 0 && <span className="ai-tool-calls-badge" data-status="success">{successCount}</span>}
-        {skippedCount > 0 && <span className="ai-tool-calls-badge" data-status="skipped">{skippedCount}</span>}
-        {errorCount > 0 && <span className="ai-tool-calls-badge" data-status="error">{errorCount}</span>}
+        <span className="ai-tool-calls-rail" aria-hidden="true" />
+        <span className="ai-tool-calls-summary-label">{summary}</span>
+        {errorCount > 0 && <span className="ai-tool-calls-badge" data-status="error">{t("aiTools.summary.failed", { count: errorCount })}</span>}
       </div>
       <div className="ai-tool-calls-list">
         {toolCalls.map((toolCall) => (
-          <AiToolCall key={toolCall.id} onApprovalDecision={onApprovalDecision} toolCall={toolCall} />
+          <AiToolCall key={toolCall.id} onApprovalDecision={onApprovalDecision} t={t} toolCall={toolCall} />
         ))}
       </div>
     </div>

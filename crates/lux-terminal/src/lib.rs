@@ -1,3 +1,7 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::{
     collections::HashMap,
     io::{Read, Write},
@@ -13,6 +17,7 @@ use uuid::Uuid;
 
 pub type TerminalOutputHandler = Arc<dyn Fn(Uuid, String) + Send + Sync + 'static>;
 
+#[must_use]
 pub fn default_shell() -> String {
     if cfg!(target_os = "windows") {
         std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string())
@@ -31,14 +36,14 @@ pub fn session_info(shell: Option<String>, cwd: PathBuf) -> TerminalSessionInfo 
 }
 
 pub struct TerminalService {
-    sessions: Mutex<HashMap<Uuid, TerminalSession>>,
+    sessions: Mutex<HashMap<Uuid, Arc<TerminalSession>>>,
     output_handler: TerminalOutputHandler,
 }
 
 struct TerminalSession {
-    writer: Box<dyn Write + Send>,
+    writer: Mutex<Box<dyn Write + Send>>,
     child: Box<dyn Child + Send + Sync>,
-    _master: Box<dyn MasterPty + Send>,
+    master: Mutex<Box<dyn MasterPty + Send>>,
 }
 
 impl TerminalService {
@@ -85,37 +90,35 @@ impl TerminalService {
 
         let session_id = info.id;
         let handler = Arc::clone(&self.output_handler);
-        thread::spawn(move || read_pty_loop(session_id, &mut reader, handler));
+        thread::spawn(move || read_pty_loop(session_id, &mut reader, &handler));
 
         self.sessions.lock().map_err(lock_error)?.insert(
             info.id,
-            TerminalSession {
-                writer,
+            Arc::new(TerminalSession {
+                writer: Mutex::new(writer),
                 child,
-                _master: pair.master,
-            },
+                master: Mutex::new(pair.master),
+            }),
         );
 
         Ok(info)
     }
 
     pub fn write(&self, session_id: Uuid, data: &str) -> AppResult<()> {
-        let mut sessions = self.sessions.lock().map_err(lock_error)?;
-        let session = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| AppError::NotFound(format!("terminal session {session_id}")))?;
-        session.writer.write_all(data.as_bytes())?;
-        session.writer.flush()?;
+        let session = self.session(session_id)?;
+        let mut writer = session.writer.lock().map_err(lock_error)?;
+        writer.write_all(data.as_bytes())?;
+        writer.flush()?;
+        drop(writer);
         Ok(())
     }
 
     pub fn resize(&self, session_id: Uuid, cols: u16, rows: u16) -> AppResult<()> {
-        let sessions = self.sessions.lock().map_err(lock_error)?;
-        let session = sessions
-            .get(&session_id)
-            .ok_or_else(|| AppError::NotFound(format!("terminal session {session_id}")))?;
+        let session = self.session(session_id)?;
         session
-            ._master
+            .master
+            .lock()
+            .map_err(lock_error)?
             .resize(PtySize {
                 rows: rows.max(1),
                 cols: cols.max(1),
@@ -127,14 +130,25 @@ impl TerminalService {
     }
 
     pub fn close(&self, session_id: Uuid) -> AppResult<()> {
-        let mut sessions = self.sessions.lock().map_err(lock_error)?;
-        sessions.remove(&session_id);
+        self.sessions
+            .lock()
+            .map_err(lock_error)?
+            .remove(&session_id);
         Ok(())
     }
 
     pub fn close_all(&self) -> AppResult<()> {
         self.sessions.lock().map_err(lock_error)?.clear();
         Ok(())
+    }
+
+    fn session(&self, session_id: Uuid) -> AppResult<Arc<TerminalSession>> {
+        self.sessions
+            .lock()
+            .map_err(lock_error)?
+            .get(&session_id)
+            .cloned()
+            .ok_or_else(|| AppError::NotFound(format!("terminal session {session_id}")))
     }
 }
 
@@ -144,16 +158,15 @@ impl Drop for TerminalSession {
     }
 }
 
-fn read_pty_loop(session_id: Uuid, reader: &mut dyn Read, handler: TerminalOutputHandler) {
+fn read_pty_loop(session_id: Uuid, reader: &mut dyn Read, handler: &TerminalOutputHandler) {
     let mut buffer = [0_u8; 8192];
     loop {
         match reader.read(&mut buffer) {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(read) => {
                 let data = String::from_utf8_lossy(&buffer[..read]).to_string();
                 handler(session_id, data);
             }
-            Err(_) => break,
         }
     }
 }

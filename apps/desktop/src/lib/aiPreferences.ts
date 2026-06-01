@@ -1,10 +1,16 @@
 export const AI_PREFERENCES_KEY = "ai.preferences";
 
+export const aiToolRoundLimitMin = 1;
+export const aiToolRoundLimitMax = 200;
+export const defaultAiToolRoundLimit = 100;
+
 export type AiPreferences = {
   projectIndexingEnabled: boolean;
   realtimeIndexing: boolean;
   includeImages: boolean;
   maxIndexedFiles: number;
+  toolRoundLimit: number;
+  showResponseDuration: boolean;
   agentMode: AiAgentMode;
   selectedAgentId: string;
   agentProfiles: AiAgentProfile[];
@@ -253,8 +259,8 @@ export const AI_PROVIDER_PRESETS = [
   },
   {
     id: "local-proxy",
-    name: "Local proxy",
-    description: "Custom local proxy by IP, port, and path.",
+    name: "Local",
+    description: "Custom local endpoint by IP, port, and path.",
     protocol: "local-proxy",
     baseUrl: "http://127.0.0.1:8799/v1",
     localHost: "127.0.0.1",
@@ -297,13 +303,15 @@ export const defaultAiPreferences: AiPreferences = {
   realtimeIndexing: true,
   includeImages: true,
   maxIndexedFiles: 5000,
+  toolRoundLimit: defaultAiToolRoundLimit,
+  showResponseDuration: true,
   agentMode: "agent",
   selectedAgentId: "agent",
   agentProfiles: defaultAiAgentProfiles,
   selectedProviderId: defaultAiProviderId,
   selectedModelId: defaultAiModelId,
   selectedEffortId: defaultAiEffortId,
-  toolApprovalMode: "default",
+  toolApprovalMode: "full-access",
   providers: defaultAiProviders,
   voiceInputEnabled: true,
   voiceInputProvider: "native-webview",
@@ -342,6 +350,8 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     realtimeIndexing: typeof source.realtimeIndexing === "boolean" ? source.realtimeIndexing : defaultAiPreferences.realtimeIndexing,
     includeImages: typeof source.includeImages === "boolean" ? source.includeImages : defaultAiPreferences.includeImages,
     maxIndexedFiles: clampInteger(source.maxIndexedFiles, 500, 20000, defaultAiPreferences.maxIndexedFiles),
+    toolRoundLimit: clampInteger(source.toolRoundLimit ?? source.maxToolRounds ?? source.toolRounds, aiToolRoundLimitMin, aiToolRoundLimitMax, defaultAiPreferences.toolRoundLimit),
+    showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
     agentMode: selectedAgent.mode,
     selectedAgentId,
     agentProfiles,
@@ -488,7 +498,7 @@ function normalizeProvider(value: unknown, preserveText: boolean): AiProviderCon
 
   return {
     id: normalizeIdentifier(value.id, preset.id),
-    name: normalizeEditableText(value.name, preset.name, preserveText),
+    name: normalizeProviderName(value.name, preset, preserveText),
     providerType: preset.id,
     protocol,
     baseUrl,
@@ -498,6 +508,12 @@ function normalizeProvider(value: unknown, preserveText: boolean): AiProviderCon
     localPath: localEndpoint.localPath,
     models: normalizeModels(value.models, preserveText, preset.models),
   };
+}
+
+function normalizeProviderName(value: unknown, preset: AiProviderPreset, preserveText: boolean) {
+  const name = normalizeEditableText(value, preset.name, preserveText);
+  if (!preserveText && preset.id === "local-proxy" && name === `${preset.name} proxy`) return preset.name;
+  return name;
 }
 
 function normalizeModels(value: unknown, preserveText: boolean, fallbackModels: readonly AiModelTemplate[] = []): AiModelConfig[] {

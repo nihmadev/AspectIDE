@@ -1,3 +1,7 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::{
     collections::BTreeSet,
     env,
@@ -160,6 +164,7 @@ pub fn parse_dap_message(frame: &DapFrame) -> AppResult<Option<DapMessage>> {
     Ok(parse_dap_message_value(&value))
 }
 
+#[must_use]
 pub fn initialize_request(seq: u64, adapter_id: &str) -> Value {
     json!({
         "seq": seq,
@@ -181,14 +186,17 @@ pub fn initialize_request(seq: u64, adapter_id: &str) -> Value {
     })
 }
 
+#[must_use]
 pub fn launch_request(seq: u64, configuration: &DebugConfiguration) -> Value {
     debug_configuration_request(seq, "launch", configuration)
 }
 
+#[must_use]
 pub fn attach_request(seq: u64, configuration: &DebugConfiguration) -> Value {
     debug_configuration_request(seq, "attach", configuration)
 }
 
+#[must_use]
 pub fn configuration_done_request(seq: u64) -> Value {
     json!({
         "seq": seq,
@@ -198,6 +206,7 @@ pub fn configuration_done_request(seq: u64) -> Value {
     })
 }
 
+#[must_use]
 pub fn disconnect_request(seq: u64, terminate_debuggee: bool) -> Value {
     json!({
         "seq": seq,
@@ -480,23 +489,24 @@ fn command_exists_in_dir(dir: &Path, command: &str) -> bool {
 
     #[cfg(windows)]
     {
-        let extensions = env::var_os("PATHEXT")
-            .map(|value| {
-                value
-                    .to_string_lossy()
-                    .split(';')
-                    .filter(|extension| !extension.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| {
+        let extensions = env::var_os("PATHEXT").map_or_else(
+            || {
                 vec![
                     ".COM".to_string(),
                     ".EXE".to_string(),
                     ".BAT".to_string(),
                     ".CMD".to_string(),
                 ]
-            });
+            },
+            |value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|extension| !extension.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            },
+        );
 
         for extension in extensions {
             if dir.join(format!("{command}{extension}")).is_file() {

@@ -1,4 +1,9 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::{
+    cmp::Reverse,
     collections::HashMap,
     path::{Path, PathBuf},
 };
@@ -29,14 +34,14 @@ pub struct DocumentPathAttachment {
 }
 
 impl DocumentStore {
-    pub fn open_file(&mut self, path: PathBuf) -> AppResult<DocumentSnapshot> {
+    pub fn open_file(&mut self, path: &Path) -> AppResult<DocumentSnapshot> {
         let canonical = path.canonicalize()?;
         if let Some(document) = self.snapshot_for_path(&canonical)? {
             return Ok(document);
         }
 
         let text = std::fs::read_to_string(&canonical)?;
-        self.open_loaded_file(canonical, text)
+        self.open_loaded_file(&canonical, text)
     }
 
     pub fn snapshot_for_path(&self, path: &Path) -> AppResult<Option<DocumentSnapshot>> {
@@ -67,7 +72,8 @@ impl DocumentStore {
         Ok(self.documents.remove(&id))
     }
 
-    pub fn open_loaded_file(&mut self, path: PathBuf, text: String) -> AppResult<DocumentSnapshot> {
+    pub fn open_loaded_file(&mut self, path: &Path, text: String) -> AppResult<DocumentSnapshot> {
+        let path = path.to_path_buf();
         let indexed_path = normalize_path_for_index(&path);
         if let Some(document) = self.snapshot_for_path(&indexed_path)? {
             return Ok(document);
@@ -259,6 +265,7 @@ impl DocumentStore {
         Ok((document.clone(), saved_current_version))
     }
 
+    #[must_use]
     pub fn snapshots(&self) -> Vec<DocumentSnapshot> {
         self.documents.values().cloned().collect()
     }
@@ -279,14 +286,14 @@ pub fn apply_text_edit(text: &mut String, edit: &TextEdit) -> AppResult<()> {
 
 pub fn apply_text_edits(text: &mut String, edits: &[TextEdit]) -> AppResult<()> {
     let mut ordered_edits = edits.iter().collect::<Vec<_>>();
-    ordered_edits.sort_by(|left, right| text_edit_order_key(right).cmp(&text_edit_order_key(left)));
+    ordered_edits.sort_by_key(|edit| Reverse(text_edit_order_key(edit)));
     for edit in ordered_edits {
         apply_text_edit(text, edit)?;
     }
     Ok(())
 }
 
-fn text_edit_order_key(edit: &TextEdit) -> (u32, u32, u32, u32) {
+const fn text_edit_order_key(edit: &TextEdit) -> (u32, u32, u32, u32) {
     (
         edit.start_line,
         edit.start_column,
@@ -346,10 +353,10 @@ fn normalize_path_for_index(path: &Path) -> PathBuf {
 fn file_title(path: &Path) -> String {
     path.file_name()
         .and_then(|value| value.to_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+        .map_or_else(|| path.to_string_lossy().into_owned(), ToOwned::to_owned)
 }
 
+#[must_use]
 pub fn language_id_for_path(path: &Path) -> String {
     match path
         .extension()
@@ -411,7 +418,7 @@ mod tests {
         let mut store = DocumentStore::default();
         let path = PathBuf::from("/tmp/lux-editor-rename.rs");
         let document = store
-            .open_loaded_file(path.clone(), "let before = 1;\n".to_string())
+            .open_loaded_file(&path, "let before = 1;\n".to_string())
             .expect("open should succeed");
         let edits = vec![TextEdit {
             start_line: 1,
@@ -436,7 +443,7 @@ mod tests {
         let mut store = DocumentStore::default();
         let path = PathBuf::from("/tmp/lux-editor-ai-write.rs");
         let document = store
-            .open_loaded_file(path.clone(), "old".to_string())
+            .open_loaded_file(&path, "old".to_string())
             .expect("open should succeed");
 
         let updated = store
@@ -455,7 +462,7 @@ mod tests {
         let mut store = DocumentStore::default();
         let path = PathBuf::from("/tmp/lux-editor-close-path.rs");
         let document = store
-            .open_loaded_file(path.clone(), "text".to_string())
+            .open_loaded_file(&path, "text".to_string())
             .expect("open should succeed");
 
         let closed = store
@@ -515,10 +522,10 @@ mod tests {
         let path = PathBuf::from("/tmp/lux-editor-reuse.rs");
 
         let first = store
-            .open_loaded_file(path.clone(), "fn main() {}".to_string())
+            .open_loaded_file(&path, "fn main() {}".to_string())
             .expect("first open should succeed");
         let second = store
-            .open_loaded_file(path.clone(), "changed on disk".to_string())
+            .open_loaded_file(&path, "changed on disk".to_string())
             .expect("second open should reuse existing document");
 
         assert_eq!(first.id, second.id);
@@ -581,7 +588,7 @@ mod tests {
         let old_path = std::env::temp_dir().join("lux-editor-save-as-old.rs");
         let new_path = std::env::temp_dir().join("lux-editor-save-as-new.ts");
         let document = store
-            .open_loaded_file(old_path.clone(), "fn main() {}".to_string())
+            .open_loaded_file(&old_path, "fn main() {}".to_string())
             .expect("open should succeed");
 
         let attachment = store
@@ -613,10 +620,10 @@ mod tests {
         let first_path = std::env::temp_dir().join("lux-editor-open-first.rs");
         let second_path = std::env::temp_dir().join("lux-editor-open-second.rs");
         let first = store
-            .open_loaded_file(first_path.clone(), "first".to_string())
+            .open_loaded_file(&first_path, "first".to_string())
             .expect("first open should succeed");
         store
-            .open_loaded_file(second_path.clone(), "second".to_string())
+            .open_loaded_file(&second_path, "second".to_string())
             .expect("second open should succeed");
 
         let error = store
@@ -634,7 +641,7 @@ mod tests {
     fn finish_save_clears_dirty_only_when_saved_version_is_current() {
         let mut store = DocumentStore::default();
         let document = store
-            .open_loaded_file(PathBuf::from("/tmp/lux-editor-save.rs"), "one".to_string())
+            .open_loaded_file(&PathBuf::from("/tmp/lux-editor-save.rs"), "one".to_string())
             .expect("open should succeed");
         let dirty = store
             .update_text(document.id, "two".to_string())

@@ -24,6 +24,8 @@ const runtimeTools = [
   tool("Write", "Create or fully rewrite a text file inside the workspace."),
   tool("Delete", "Delete a workspace file or directory."),
   tool("Shell", "Run a non-interactive shell command in the workspace."),
+  tool("TerminalContext", "Return active integrated terminals and recent output."),
+  tool("TerminalWrite", "Write input to an existing integrated terminal after approval."),
   tool("TodoWrite", "Update the current structured AI task list."),
   tool("GitContext", "Return git branch and changed files."),
   tool("ReviewDiff", "Review the current workspace diff as a quality gate."),
@@ -252,7 +254,7 @@ function mockToolResult(toolName) {
     case "RulesContext":
       return { rules: ["Do all work carefully, optimized, beautiful, convenient, no filler."] };
     case "MemoryContext":
-      return { signals: ["Prefer the configured local proxy model for AI chat tests."] };
+      return { signals: ["Prefer the configured local model for AI chat tests."] };
     case "SecretGuard":
       return { findings: [{ kind: "api-key", severity: "critical", preview: "[REDACTED_SECRET]" }] };
     default:
@@ -268,7 +270,7 @@ function context({ agentMode, runtimeToolsAvailable }) {
       toolApprovalMode: "default",
     },
     provider: {
-      name: "Local proxy",
+      name: "Local",
       protocol: "local-proxy",
     },
     runtimeToolsAvailable,

@@ -1,28 +1,60 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
-    env,
     path::{Path, PathBuf},
     process::Stdio,
 };
 
-use lsp_types::{Diagnostic, PublishDiagnosticsParams, Uri};
+mod discovery;
+mod protocol;
+mod results;
+mod transport;
+
+pub use discovery::{language_server_diagnostics, workspace_language_servers};
+pub use protocol::{
+    code_action_request, completion_request, definition_request, did_change_edits_notification,
+    did_change_notification, did_close_notification, did_open_notification, did_save_notification,
+    document_symbol_request, exit_notification, folding_range_request, formatting_request,
+    hover_request, initialize_request, initialized_notification, inlay_hint_request,
+    path_to_file_uri, range_formatting_request, references_request, rename_request,
+    semantic_tokens_full_request, shutdown_request, signature_help_request,
+    workspace_symbol_request,
+};
+use results::empty_completion_list;
+pub use results::{
+    diagnostics_update_from_publish, parse_code_action_result, parse_completion_result,
+    parse_definition_result, parse_document_symbol_result, parse_folding_range_result,
+    parse_hover_result, parse_inlay_hint_result, parse_semantic_token_legend_from_initialize,
+    parse_semantic_tokens_result, parse_signature_help_result, parse_text_edits_result,
+    parse_workspace_edit_result, parse_workspace_symbol_result, workspace_diagnostics_from_publish,
+};
+pub use transport::{
+    drain_lsp_frames, encode_lsp_message, parse_lsp_notification, parse_lsp_response, LspFrame,
+    LspNotification,
+};
+use transport::{drain_stderr, read_lsp_stdout, LspResponse};
+
 use lux_core::{
     AppError, AppResult, DiagnosticSeverity, DocumentSnapshot, LanguageServerInfo,
     LanguageServerStatus, LspCodeAction, LspCodeActionDiagnostic, LspCodeActionTrigger,
-    LspCompletionItem, LspCompletionItemKind, LspCompletionList, LspDocumentSymbol,
-    LspFoldingRange, LspFoldingRangeKind, LspFormattingOptions, LspHover, LspInlayHint,
-    LspInlayHintKind, LspInsertTextFormat, LspLocation, LspRange, LspSemanticTokens,
-    LspSignatureHelp, LspSignatureInformation, LspSignatureParameter, LspSymbolKind, LspTextEdit,
-    LspWorkspaceEdit, LspWorkspaceEditFile, LspWorkspaceSymbol, TextEdit, WorkspaceDiagnostic,
+    LspCompletionList, LspDocumentSymbol, LspFoldingRange, LspFormattingOptions, LspHover,
+    LspInlayHint, LspLocation, LspRange, LspSemanticTokens, LspSignatureHelp, LspTextEdit,
+    LspWorkspaceEdit, LspWorkspaceSymbol, TextEdit, WorkspaceDiagnostic,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::AsyncWriteExt,
     process::{Child, ChildStdin, Command},
     sync::mpsc,
     task::JoinHandle,
 };
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageServerDefinition {
@@ -36,17 +68,6 @@ pub struct LanguageServerDefinition {
 pub struct DiagnosticsUpdate {
     pub path: PathBuf,
     pub diagnostics: Vec<WorkspaceDiagnostic>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LspFrame {
-    pub content: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-pub enum LspNotification {
-    PublishDiagnostics(DiagnosticsUpdate),
-    Other { method: String },
 }
 
 pub struct LspManager {
@@ -64,13 +85,6 @@ pub struct LspSession {
     request_id: u64,
     opened_documents: BTreeMap<PathBuf, u64>,
     semantic_token_legend: Option<SemanticTokenLegend>,
-}
-
-#[derive(Debug, Clone)]
-struct LspResponse {
-    id: u64,
-    error: Option<String>,
-    result: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,41 +132,9 @@ pub const CLIENT_SEMANTIC_TOKEN_MODIFIERS: &[&str] = &[
     "defaultLibrary",
 ];
 
-#[derive(Debug, Clone, Copy)]
-struct BuiltinServer {
-    language_id: &'static str,
-    name: &'static str,
-    command: &'static str,
-    args: &'static [&'static str],
-    extensions: &'static [&'static str],
-}
-
-const BUILTIN_SERVERS: &[BuiltinServer] = &[
-    BuiltinServer {
-        language_id: "rust",
-        name: "rust-analyzer",
-        command: "rust-analyzer",
-        args: &[],
-        extensions: &["rs"],
-    },
-    BuiltinServer {
-        language_id: "typescript",
-        name: "TypeScript Language Server",
-        command: "typescript-language-server",
-        args: &["--stdio"],
-        extensions: &["ts", "tsx", "js", "jsx"],
-    },
-    BuiltinServer {
-        language_id: "json",
-        name: "JSON Language Server",
-        command: "vscode-json-language-server",
-        args: &["--stdio"],
-        extensions: &["json"],
-    },
-];
-
 impl LspManager {
-    pub fn new(diagnostics_tx: mpsc::UnboundedSender<DiagnosticsUpdate>) -> Self {
+    #[must_use]
+    pub const fn new(diagnostics_tx: mpsc::UnboundedSender<DiagnosticsUpdate>) -> Self {
         Self {
             diagnostics_tx,
             sessions: BTreeMap::new(),
@@ -207,7 +189,7 @@ impl LspManager {
                     self.sessions.insert(server.language_id.clone(), session);
                 }
                 Err(error) => diagnostics.push(WorkspaceDiagnostic {
-                    path: diagnostic_anchor_path(server),
+                    path: discovery::diagnostic_anchor_path(server),
                     line: 1,
                     column: 1,
                     severity: DiagnosticSeverity::Warning,
@@ -644,14 +626,16 @@ impl LspSession {
         definition: LanguageServerDefinition,
         diagnostics_tx: mpsc::UnboundedSender<DiagnosticsUpdate>,
     ) -> AppResult<Self> {
-        let mut child = Command::new(&definition.command)
+        let mut command = Command::new(&definition.command);
+        command
             .args(&definition.args)
             .current_dir(&definition.workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        hide_process_window(&mut command);
+        let mut child = command.spawn()?;
 
         let stdin = child.stdin.take().ok_or_else(|| {
             AppError::Service(format!("{} did not expose stdin", definition.command))
@@ -1000,8 +984,7 @@ impl LspSession {
         Ok(response
             .result
             .as_ref()
-            .map(parse_completion_result)
-            .unwrap_or_else(empty_completion_list))
+            .map_or_else(empty_completion_list, parse_completion_result))
     }
 
     pub async fn code_actions(
@@ -1203,9 +1186,16 @@ impl LspSession {
         Ok(())
     }
 
-    fn next_request_id(&mut self) -> u64 {
+    const fn next_request_id(&mut self) -> u64 {
         self.request_id += 1;
         self.request_id
+    }
+}
+
+fn hide_process_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
     }
 }
 
@@ -1228,1515 +1218,6 @@ impl From<&LanguageServerInfo> for LanguageServerDefinition {
             workspace_root: server.workspace_root.clone(),
         }
     }
-}
-
-pub fn encode_lsp_message(value: &Value) -> AppResult<Vec<u8>> {
-    let content = serde_json::to_vec(value)?;
-    let mut message = format!("Content-Length: {}\r\n\r\n", content.len()).into_bytes();
-    message.extend_from_slice(&content);
-    Ok(message)
-}
-
-pub fn initialize_request(id: u64, definition: &LanguageServerDefinition) -> Value {
-    let root_uri = path_to_file_uri(&definition.workspace_root);
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "initialize",
-        "params": {
-            "processId": null,
-            "rootUri": root_uri,
-            "capabilities": {
-                "textDocument": {
-                    "publishDiagnostics": {
-                        "relatedInformation": true,
-                        "versionSupport": true,
-                        "codeDescriptionSupport": true,
-                        "dataSupport": true
-                    },
-                    "synchronization": {
-                        "dynamicRegistration": false,
-                        "didSave": true
-                    },
-                    "hover": {
-                        "dynamicRegistration": false,
-                        "contentFormat": ["markdown", "plaintext"]
-                    },
-                    "definition": {
-                        "dynamicRegistration": false,
-                        "linkSupport": true
-                    },
-                    "references": {
-                        "dynamicRegistration": false
-                    },
-                    "documentSymbol": {
-                        "dynamicRegistration": false,
-                        "hierarchicalDocumentSymbolSupport": true,
-                        "symbolKind": {
-                            "valueSet": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
-                        }
-                    },
-                    "foldingRange": {
-                        "dynamicRegistration": false,
-                        "lineFoldingOnly": true
-                    },
-                    "inlayHint": {
-                        "dynamicRegistration": false,
-                        "resolveSupport": {
-                            "properties": ["tooltip", "textEdits", "label.tooltip", "label.location", "label.command"]
-                        }
-                    },
-                    "semanticTokens": {
-                        "dynamicRegistration": false,
-                        "requests": {
-                            "range": false,
-                            "full": true
-                        },
-                        "tokenTypes": CLIENT_SEMANTIC_TOKEN_TYPES,
-                        "tokenModifiers": CLIENT_SEMANTIC_TOKEN_MODIFIERS,
-                        "formats": ["relative"],
-                        "overlappingTokenSupport": false,
-                        "multilineTokenSupport": true,
-                        "serverCancelSupport": false,
-                        "augmentsSyntaxTokens": true
-                    },
-                    "rename": {
-                        "dynamicRegistration": false,
-                        "prepareSupport": false
-                    },
-                    "codeAction": {
-                        "dynamicRegistration": false,
-                        "isPreferredSupport": true,
-                        "disabledSupport": true,
-                        "dataSupport": false,
-                        "codeActionLiteralSupport": {
-                            "codeActionKind": {
-                                "valueSet": ["", "quickfix", "refactor", "refactor.extract", "refactor.inline", "refactor.rewrite", "source", "source.organizeImports", "source.fixAll"]
-                            }
-                        }
-                    },
-                    "formatting": {
-                        "dynamicRegistration": false
-                    },
-                    "rangeFormatting": {
-                        "dynamicRegistration": false
-                    },
-                    "completion": {
-                        "dynamicRegistration": false,
-                        "completionItem": {
-                            "snippetSupport": true,
-                            "commitCharactersSupport": true,
-                            "documentationFormat": ["markdown", "plaintext"],
-                            "deprecatedSupport": true,
-                            "preselectSupport": true,
-                            "tagSupport": {
-                                "valueSet": [1]
-                            }
-                        },
-                        "completionItemKind": {
-                            "valueSet": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
-                        },
-                        "contextSupport": true
-                    },
-                    "signatureHelp": {
-                        "dynamicRegistration": false,
-                        "signatureInformation": {
-                            "documentationFormat": ["markdown", "plaintext"],
-                            "parameterInformation": {
-                                "labelOffsetSupport": true
-                            },
-                            "activeParameterSupport": true
-                        },
-                        "contextSupport": true
-                    }
-                },
-                "workspace": {
-                    "symbol": {
-                        "dynamicRegistration": false,
-                        "symbolKind": {
-                            "valueSet": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26]
-                        }
-                    },
-                    "workspaceFolders": false,
-                    "configuration": false
-                }
-            },
-            "workspaceFolders": [{
-                "uri": root_uri,
-                "name": definition.workspace_root.file_name().and_then(|name| name.to_str()).unwrap_or("workspace")
-            }]
-        }
-    })
-}
-
-pub fn initialized_notification() -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "method": "initialized",
-        "params": {}
-    })
-}
-
-pub fn did_open_notification(document: &DocumentSnapshot) -> Value {
-    let path = document
-        .path
-        .as_ref()
-        .expect("LSP didOpen requires a file-backed document");
-    json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didOpen",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path),
-                "languageId": lsp_language_id(document),
-                "version": document_version(document),
-                "text": document.text
-            }
-        }
-    })
-}
-
-pub fn did_change_notification(document: &DocumentSnapshot) -> Value {
-    let path = document
-        .path
-        .as_ref()
-        .expect("LSP didChange requires a file-backed document");
-    json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didChange",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path),
-                "version": document_version(document)
-            },
-            "contentChanges": [{
-                "text": document.text
-            }]
-        }
-    })
-}
-
-pub fn did_change_edits_notification(document: &DocumentSnapshot, edits: &[TextEdit]) -> Value {
-    let path = document
-        .path
-        .as_ref()
-        .expect("LSP didChange requires a file-backed document");
-    json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didChange",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path),
-                "version": document_version(document)
-            },
-            "contentChanges": edits.iter().map(lsp_content_change_for_edit).collect::<Vec<_>>()
-        }
-    })
-}
-
-fn lsp_content_change_for_edit(edit: &TextEdit) -> Value {
-    json!({
-        "range": {
-            "start": {
-                "line": edit.start_line.saturating_sub(1),
-                "character": edit.start_column.saturating_sub(1)
-            },
-            "end": {
-                "line": edit.end_line.saturating_sub(1),
-                "character": edit.end_column.saturating_sub(1)
-            }
-        },
-        "text": edit.text
-    })
-}
-
-pub fn did_save_notification(document: &DocumentSnapshot) -> Value {
-    let path = document
-        .path
-        .as_ref()
-        .expect("LSP didSave requires a file-backed document");
-    json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didSave",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path)
-            },
-            "text": document.text
-        }
-    })
-}
-
-pub fn did_close_notification(path: &Path) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "method": "textDocument/didClose",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path)
-            }
-        }
-    })
-}
-
-pub fn hover_request(id: u64, path: &Path, line: u32, column: u32) -> Value {
-    text_document_position_request(id, "textDocument/hover", path, line, column)
-}
-
-pub fn definition_request(id: u64, path: &Path, line: u32, column: u32) -> Value {
-    text_document_position_request(id, "textDocument/definition", path, line, column)
-}
-
-pub fn references_request(id: u64, path: &Path, line: u32, column: u32) -> Value {
-    let mut request =
-        text_document_position_request(id, "textDocument/references", path, line, column);
-    request["params"]["context"] = json!({
-        "includeDeclaration": true
-    });
-    request
-}
-
-pub fn document_symbol_request(id: u64, path: &Path) -> Value {
-    text_document_request(id, "textDocument/documentSymbol", path)
-}
-
-pub fn workspace_symbol_request(id: u64, query: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "workspace/symbol",
-        "params": {
-            "query": query
-        }
-    })
-}
-
-pub fn folding_range_request(id: u64, path: &Path) -> Value {
-    text_document_request(id, "textDocument/foldingRange", path)
-}
-
-pub fn inlay_hint_request(id: u64, path: &Path, range: &LspRange) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "textDocument/inlayHint",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path)
-            },
-            "range": lsp_range_value(range)
-        }
-    })
-}
-
-pub fn semantic_tokens_full_request(id: u64, path: &Path) -> Value {
-    text_document_request(id, "textDocument/semanticTokens/full", path)
-}
-
-pub fn rename_request(id: u64, path: &Path, line: u32, column: u32, new_name: &str) -> Value {
-    let mut request = text_document_position_request(id, "textDocument/rename", path, line, column);
-    request["params"]["newName"] = json!(new_name);
-    request
-}
-
-pub fn completion_request(id: u64, path: &Path, line: u32, column: u32) -> Value {
-    let mut request =
-        text_document_position_request(id, "textDocument/completion", path, line, column);
-    request["params"]["context"] = json!({
-        "triggerKind": 1
-    });
-    request
-}
-
-pub fn signature_help_request(id: u64, path: &Path, line: u32, column: u32) -> Value {
-    let mut request =
-        text_document_position_request(id, "textDocument/signatureHelp", path, line, column);
-    request["params"]["context"] = json!({
-        "triggerKind": 1,
-        "isRetrigger": false
-    });
-    request
-}
-
-pub fn code_action_request(
-    id: u64,
-    path: &Path,
-    range: &LspRange,
-    diagnostics: &[LspCodeActionDiagnostic],
-    only: Option<&[String]>,
-    trigger: LspCodeActionTrigger,
-) -> Value {
-    let mut context = json!({
-        "diagnostics": diagnostics.iter().map(lsp_diagnostic_for_code_action).collect::<Vec<_>>(),
-        "triggerKind": lsp_code_action_trigger_value(trigger),
-    });
-    if let Some(only) = only.filter(|items| !items.is_empty()) {
-        context["only"] = json!(only);
-    }
-
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "textDocument/codeAction",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path)
-            },
-            "range": lsp_range_value(range),
-            "context": context,
-        }
-    })
-}
-
-pub fn formatting_request(id: u64, path: &Path, options: LspFormattingOptions) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "textDocument/formatting",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path)
-            },
-            "options": lsp_formatting_options_value(options),
-        }
-    })
-}
-
-pub fn range_formatting_request(
-    id: u64,
-    path: &Path,
-    range: &LspRange,
-    options: LspFormattingOptions,
-) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "textDocument/rangeFormatting",
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path)
-            },
-            "range": lsp_range_value(range),
-            "options": lsp_formatting_options_value(options),
-        }
-    })
-}
-
-fn lsp_range_value(range: &LspRange) -> Value {
-    json!({
-        "start": {
-            "line": range.start_line.saturating_sub(1),
-            "character": range.start_column.saturating_sub(1),
-        },
-        "end": {
-            "line": range.end_line.saturating_sub(1),
-            "character": range.end_column.saturating_sub(1),
-        }
-    })
-}
-
-fn lsp_formatting_options_value(options: LspFormattingOptions) -> Value {
-    json!({
-        "tabSize": options.tab_size,
-        "insertSpaces": options.insert_spaces,
-    })
-}
-
-fn lsp_code_action_trigger_value(trigger: LspCodeActionTrigger) -> u8 {
-    match trigger {
-        LspCodeActionTrigger::Invoke => 1,
-        LspCodeActionTrigger::Automatic => 2,
-    }
-}
-
-fn lsp_diagnostic_for_code_action(diagnostic: &LspCodeActionDiagnostic) -> Value {
-    let mut value = json!({
-        "range": lsp_range_value(&diagnostic.range),
-        "message": diagnostic.message.clone(),
-    });
-    if let Some(severity) = diagnostic.severity.and_then(lsp_diagnostic_severity_value) {
-        value["severity"] = json!(severity);
-    }
-    if let Some(source) = &diagnostic.source {
-        value["source"] = json!(source);
-    }
-    value
-}
-
-fn lsp_diagnostic_severity_value(severity: DiagnosticSeverity) -> Option<u8> {
-    Some(match severity {
-        DiagnosticSeverity::Error => 1,
-        DiagnosticSeverity::Warning => 2,
-        DiagnosticSeverity::Information => 3,
-        DiagnosticSeverity::Hint => 4,
-    })
-}
-
-fn text_document_position_request(
-    id: u64,
-    method: &str,
-    path: &Path,
-    line: u32,
-    column: u32,
-) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path)
-            },
-            "position": {
-                "line": line.saturating_sub(1),
-                "character": column.saturating_sub(1)
-            }
-        }
-    })
-}
-
-fn text_document_request(id: u64, method: &str, path: &Path) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": method,
-        "params": {
-            "textDocument": {
-                "uri": path_to_file_uri(path)
-            }
-        }
-    })
-}
-
-pub fn shutdown_request(id: u64) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "method": "shutdown",
-        "params": null
-    })
-}
-
-pub fn exit_notification() -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "method": "exit",
-        "params": null
-    })
-}
-
-pub fn path_to_file_uri(path: &Path) -> String {
-    let normalized = path.to_string_lossy().replace('\\', "/");
-    let absolute_path = if cfg!(windows) && normalized.as_bytes().get(1) == Some(&b':') {
-        format!("/{normalized}")
-    } else {
-        normalized
-    };
-    format!("file://{}", percent_encode_path(&absolute_path))
-}
-
-pub fn workspace_language_servers(root: impl AsRef<Path>) -> AppResult<Vec<LanguageServerInfo>> {
-    let root = root.as_ref().canonicalize()?;
-    let detected_extensions = detect_extensions(&root)?;
-    let mut servers = Vec::new();
-
-    for server in BUILTIN_SERVERS {
-        if !server
-            .extensions
-            .iter()
-            .any(|extension| detected_extensions.contains(*extension))
-        {
-            continue;
-        }
-
-        let available = command_available(server.command);
-        servers.push(LanguageServerInfo {
-            language_id: server.language_id.to_string(),
-            name: server.name.to_string(),
-            command: server.command.to_string(),
-            args: server.args.iter().map(|arg| (*arg).to_string()).collect(),
-            workspace_root: root.clone(),
-            status: if available {
-                LanguageServerStatus::Available
-            } else {
-                LanguageServerStatus::Missing
-            },
-            error: if available {
-                None
-            } else {
-                Some(format!("{} was not found in PATH", server.command))
-            },
-        });
-    }
-
-    Ok(servers)
-}
-
-pub fn language_server_diagnostics(servers: &[LanguageServerInfo]) -> Vec<WorkspaceDiagnostic> {
-    servers
-        .iter()
-        .filter(|server| server.status == LanguageServerStatus::Missing)
-        .map(|server| WorkspaceDiagnostic {
-            path: diagnostic_anchor_path(server),
-            line: 1,
-            column: 1,
-            severity: DiagnosticSeverity::Warning,
-            source: "lux-lsp".to_string(),
-            message: server
-                .error
-                .clone()
-                .unwrap_or_else(|| format!("{} is configured but unavailable", server.command)),
-        })
-        .collect()
-}
-
-pub fn drain_lsp_frames(buffer: &mut Vec<u8>) -> AppResult<Vec<LspFrame>> {
-    let mut frames = Vec::new();
-
-    while let Some(header_end) = find_header_end(buffer) {
-        let headers = std::str::from_utf8(&buffer[..header_end])
-            .map_err(|error| AppError::Service(format!("invalid LSP header encoding: {error}")))?;
-        let content_length = parse_content_length(headers)?;
-        let frame_start = header_end + 4;
-        let frame_end = frame_start + content_length;
-
-        if buffer.len() < frame_end {
-            break;
-        }
-
-        let content = buffer[frame_start..frame_end].to_vec();
-        buffer.drain(..frame_end);
-        frames.push(LspFrame { content });
-    }
-
-    Ok(frames)
-}
-
-pub fn parse_lsp_notification(frame: &LspFrame) -> AppResult<Option<LspNotification>> {
-    let value: Value = serde_json::from_slice(&frame.content)?;
-    let Some(method) = value.get("method").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-
-    if method != "textDocument/publishDiagnostics" {
-        return Ok(Some(LspNotification::Other {
-            method: method.to_string(),
-        }));
-    }
-
-    let params = value.get("params").cloned().ok_or_else(|| {
-        AppError::Service("publishDiagnostics notification is missing params".into())
-    })?;
-    let params: PublishDiagnosticsParams = serde_json::from_value(params)?;
-    Ok(Some(LspNotification::PublishDiagnostics(
-        diagnostics_update_from_publish(params),
-    )))
-}
-
-pub fn parse_lsp_response(frame: &LspFrame) -> AppResult<Option<u64>> {
-    let value: Value = serde_json::from_slice(&frame.content)?;
-    Ok(parse_lsp_response_value(&value).map(|response| response.id))
-}
-
-pub fn diagnostics_update_from_publish(params: PublishDiagnosticsParams) -> DiagnosticsUpdate {
-    let path = uri_to_path(&params.uri).unwrap_or_else(|| PathBuf::from(params.uri.as_str()));
-    let diagnostics = workspace_diagnostics_for_path(path.clone(), params.diagnostics);
-    DiagnosticsUpdate { path, diagnostics }
-}
-
-pub fn workspace_diagnostics_from_publish(
-    params: PublishDiagnosticsParams,
-) -> Vec<WorkspaceDiagnostic> {
-    let path = uri_to_path(&params.uri).unwrap_or_else(|| PathBuf::from(params.uri.as_str()));
-
-    workspace_diagnostics_for_path(path, params.diagnostics)
-}
-
-pub fn parse_hover_result(value: &Value) -> Option<LspHover> {
-    if value.is_null() {
-        return None;
-    }
-    let contents_value = value.get("contents").unwrap_or(value);
-    let contents = markdown_strings_from_markup(contents_value);
-    if contents.is_empty() {
-        return None;
-    }
-    Some(LspHover {
-        contents,
-        range: value.get("range").and_then(lsp_range_from_value),
-    })
-}
-
-pub fn parse_definition_result(value: &Value) -> Vec<LspLocation> {
-    if value.is_null() {
-        return Vec::new();
-    }
-
-    let values = match value {
-        Value::Array(items) => items.iter().collect::<Vec<_>>(),
-        _ => vec![value],
-    };
-
-    values
-        .into_iter()
-        .filter_map(lsp_location_from_value)
-        .collect()
-}
-
-pub fn parse_completion_result(value: &Value) -> LspCompletionList {
-    match value {
-        Value::Array(items) => LspCompletionList {
-            is_incomplete: false,
-            items: items.iter().filter_map(parse_completion_item).collect(),
-        },
-        Value::Object(object) => LspCompletionList {
-            is_incomplete: object
-                .get("isIncomplete")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            items: object
-                .get("items")
-                .and_then(Value::as_array)
-                .map(|items| items.iter().filter_map(parse_completion_item).collect())
-                .unwrap_or_default(),
-        },
-        _ => empty_completion_list(),
-    }
-}
-
-pub fn parse_document_symbol_result(value: &Value) -> Vec<LspDocumentSymbol> {
-    value
-        .as_array()
-        .map(|symbols| {
-            symbols
-                .iter()
-                .filter_map(parse_document_symbol_item)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub fn parse_workspace_symbol_result(value: &Value) -> Vec<LspWorkspaceSymbol> {
-    value
-        .as_array()
-        .map(|symbols| {
-            symbols
-                .iter()
-                .filter_map(parse_workspace_symbol_item)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-pub fn parse_folding_range_result(value: &Value) -> Vec<LspFoldingRange> {
-    value
-        .as_array()
-        .map(|ranges| ranges.iter().filter_map(parse_folding_range_item).collect())
-        .unwrap_or_default()
-}
-
-pub fn parse_semantic_token_legend_from_initialize(value: &Value) -> Option<SemanticTokenLegend> {
-    let legend = value
-        .get("capabilities")?
-        .get("semanticTokensProvider")?
-        .get("legend")?;
-    let token_types = legend
-        .get("tokenTypes")?
-        .as_array()?
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let token_modifiers = legend
-        .get("tokenModifiers")
-        .and_then(Value::as_array)
-        .map(|modifiers| {
-            modifiers
-                .iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
-    (!token_types.is_empty()).then_some(SemanticTokenLegend {
-        token_types,
-        token_modifiers,
-    })
-}
-
-pub fn parse_inlay_hint_result(value: &Value) -> Vec<LspInlayHint> {
-    value
-        .as_array()
-        .map(|hints| hints.iter().filter_map(parse_inlay_hint_item).collect())
-        .unwrap_or_default()
-}
-
-pub fn parse_semantic_tokens_result(
-    value: &Value,
-    legend: &SemanticTokenLegend,
-) -> Option<LspSemanticTokens> {
-    let data = value
-        .get("data")?
-        .as_array()?
-        .iter()
-        .filter_map(|value| value.as_u64().and_then(|value| u32::try_from(value).ok()))
-        .collect::<Vec<_>>();
-    if data.is_empty() || data.len() % 5 != 0 {
-        return None;
-    }
-
-    Some(LspSemanticTokens {
-        result_id: value
-            .get("resultId")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        data: remap_semantic_token_data(&data, legend),
-    })
-}
-
-pub fn parse_signature_help_result(value: &Value) -> Option<LspSignatureHelp> {
-    if value.is_null() {
-        return None;
-    }
-    let signatures = value
-        .get("signatures")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter_map(parse_signature_information)
-        .collect::<Vec<_>>();
-    if signatures.is_empty() {
-        return None;
-    }
-
-    Some(LspSignatureHelp {
-        signatures,
-        active_signature: value.get("activeSignature").and_then(value_to_u32),
-        active_parameter: value.get("activeParameter").and_then(value_to_u32),
-    })
-}
-
-pub fn parse_workspace_edit_result(value: &Value) -> Option<LspWorkspaceEdit> {
-    if value.is_null() {
-        return None;
-    }
-
-    let mut files = BTreeMap::<PathBuf, Vec<LspTextEdit>>::new();
-    if let Some(changes) = value.get("changes").and_then(Value::as_object) {
-        for (uri, edits) in changes {
-            let Ok(uri) = uri.parse::<Uri>() else {
-                continue;
-            };
-            let Some(path) = uri_to_path(&uri) else {
-                continue;
-            };
-            let Some(edits) = edits.as_array() else {
-                continue;
-            };
-            files
-                .entry(path)
-                .or_default()
-                .extend(edits.iter().filter_map(lsp_text_edit_from_value));
-        }
-    }
-
-    if let Some(document_changes) = value.get("documentChanges").and_then(Value::as_array) {
-        for change in document_changes {
-            let Some(text_document) = change.get("textDocument") else {
-                continue;
-            };
-            let Some(uri) = text_document
-                .get("uri")
-                .and_then(Value::as_str)
-                .and_then(|value| value.parse::<Uri>().ok())
-            else {
-                continue;
-            };
-            let Some(path) = uri_to_path(&uri) else {
-                continue;
-            };
-            let Some(edits) = change.get("edits").and_then(Value::as_array) else {
-                continue;
-            };
-            files
-                .entry(path)
-                .or_default()
-                .extend(edits.iter().filter_map(lsp_text_edit_from_value));
-        }
-    }
-
-    let files = files
-        .into_iter()
-        .filter_map(|(path, edits)| {
-            (!edits.is_empty()).then_some(LspWorkspaceEditFile { path, edits })
-        })
-        .collect::<Vec<_>>();
-
-    (!files.is_empty()).then_some(LspWorkspaceEdit { files })
-}
-
-pub fn parse_text_edits_result(value: &Value) -> Vec<LspTextEdit> {
-    value
-        .as_array()
-        .map(|edits| edits.iter().filter_map(lsp_text_edit_from_value).collect())
-        .unwrap_or_default()
-}
-
-pub fn parse_code_action_result(value: &Value) -> Vec<LspCodeAction> {
-    value
-        .as_array()
-        .map(|actions| actions.iter().filter_map(parse_code_action).collect())
-        .unwrap_or_default()
-}
-
-fn parse_code_action(value: &Value) -> Option<LspCodeAction> {
-    let title = value.get("title")?.as_str()?.to_string();
-    let disabled_reason = value
-        .get("disabled")
-        .and_then(|disabled| disabled.get("reason"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let edit = value.get("edit").and_then(parse_workspace_edit_result);
-    if edit.is_none() && disabled_reason.is_none() {
-        return None;
-    }
-
-    Some(LspCodeAction {
-        title,
-        kind: value
-            .get("kind")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        is_preferred: value
-            .get("isPreferred")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        disabled_reason,
-        edit,
-    })
-}
-
-fn parse_document_symbol_item(value: &Value) -> Option<LspDocumentSymbol> {
-    let name = value.get("name")?.as_str()?.to_string();
-    let kind = value
-        .get("kind")
-        .and_then(parse_symbol_kind)
-        .unwrap_or(LspSymbolKind::Variable);
-
-    if let Some(selection_range) = value.get("selectionRange").and_then(lsp_range_from_value) {
-        let range = value
-            .get("range")
-            .and_then(lsp_range_from_value)
-            .unwrap_or_else(|| selection_range.clone());
-        let children = value
-            .get("children")
-            .and_then(Value::as_array)
-            .map(|children| {
-                children
-                    .iter()
-                    .filter_map(parse_document_symbol_item)
-                    .collect()
-            })
-            .unwrap_or_default();
-        return Some(LspDocumentSymbol {
-            name,
-            detail: value
-                .get("detail")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            kind,
-            range,
-            selection_range,
-            children,
-        });
-    }
-
-    let location = value.get("location").and_then(lsp_location_from_value)?;
-    Some(LspDocumentSymbol {
-        name,
-        detail: value
-            .get("containerName")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        kind,
-        range: location.range.clone(),
-        selection_range: location.range,
-        children: Vec::new(),
-    })
-}
-
-fn parse_workspace_symbol_item(value: &Value) -> Option<LspWorkspaceSymbol> {
-    let name = value.get("name")?.as_str()?.to_string();
-    let kind = value
-        .get("kind")
-        .and_then(parse_symbol_kind)
-        .unwrap_or(LspSymbolKind::Variable);
-    let location = value
-        .get("location")
-        .and_then(lsp_location_from_value)
-        .or_else(|| {
-            let uri = value
-                .get("location")?
-                .get("uri")
-                .or_else(|| value.get("uri"))?
-                .as_str()?
-                .parse::<Uri>()
-                .ok()?;
-            let path = uri_to_path(&uri)?;
-            let range = value
-                .get("location")?
-                .get("range")
-                .or_else(|| value.get("range"))
-                .and_then(lsp_range_from_value)?;
-            Some(LspLocation { path, range })
-        })?;
-    Some(LspWorkspaceSymbol {
-        name,
-        kind,
-        location,
-        container_name: value
-            .get("containerName")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    })
-}
-
-fn parse_folding_range_item(value: &Value) -> Option<LspFoldingRange> {
-    Some(LspFoldingRange {
-        start_line: one_based_lsp_position_value(value, "startLine")?,
-        end_line: one_based_lsp_position_value(value, "endLine")?,
-        start_column: value
-            .get("startCharacter")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .map(|value| value.saturating_add(1)),
-        end_column: value
-            .get("endCharacter")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .map(|value| value.saturating_add(1)),
-        kind: value
-            .get("kind")
-            .and_then(Value::as_str)
-            .and_then(parse_folding_range_kind),
-    })
-}
-
-fn parse_inlay_hint_item(value: &Value) -> Option<LspInlayHint> {
-    let position = value.get("position")?;
-    Some(LspInlayHint {
-        label: inlay_hint_label(value.get("label")?)?,
-        tooltip: value.get("tooltip").and_then(markup_to_markdown),
-        line: one_based_lsp_position_value(position, "line")?,
-        column: one_based_lsp_position_value(position, "character")?,
-        kind: value.get("kind").and_then(parse_inlay_hint_kind),
-        padding_left: value
-            .get("paddingLeft")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        padding_right: value
-            .get("paddingRight")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
-}
-
-fn inlay_hint_label(value: &Value) -> Option<String> {
-    match value {
-        Value::String(label) => Some(label.clone()),
-        Value::Array(parts) => {
-            let label = parts
-                .iter()
-                .filter_map(|part| {
-                    part.get("value")
-                        .or_else(|| part.get("label"))
-                        .and_then(Value::as_str)
-                })
-                .collect::<String>();
-            (!label.is_empty()).then_some(label)
-        }
-        _ => None,
-    }
-}
-
-fn parse_inlay_hint_kind(value: &Value) -> Option<LspInlayHintKind> {
-    Some(match value.as_u64()? {
-        1 => LspInlayHintKind::Type,
-        2 => LspInlayHintKind::Parameter,
-        _ => return None,
-    })
-}
-
-fn remap_semantic_token_data(data: &[u32], legend: &SemanticTokenLegend) -> Vec<u32> {
-    let type_indexes = semantic_token_type_indexes(legend);
-    let modifier_masks = semantic_token_modifier_masks(legend);
-    let mut remapped = Vec::with_capacity(data.len());
-
-    for chunk in data.chunks_exact(5) {
-        remapped.extend_from_slice(&chunk[..3]);
-        let token_type = usize::try_from(chunk[3])
-            .ok()
-            .and_then(|index| type_indexes.get(index).copied())
-            .flatten()
-            .unwrap_or(0);
-        let token_modifiers = remap_semantic_token_modifier_mask(chunk[4], &modifier_masks);
-        remapped.push(token_type);
-        remapped.push(token_modifiers);
-    }
-
-    remapped
-}
-
-fn semantic_token_type_indexes(legend: &SemanticTokenLegend) -> Vec<Option<u32>> {
-    legend
-        .token_types
-        .iter()
-        .map(|token_type| {
-            CLIENT_SEMANTIC_TOKEN_TYPES
-                .iter()
-                .position(|candidate| candidate == token_type)
-                .and_then(|index| u32::try_from(index).ok())
-        })
-        .collect()
-}
-
-fn semantic_token_modifier_masks(legend: &SemanticTokenLegend) -> Vec<u32> {
-    legend
-        .token_modifiers
-        .iter()
-        .map(|modifier| {
-            CLIENT_SEMANTIC_TOKEN_MODIFIERS
-                .iter()
-                .position(|candidate| candidate == modifier)
-                .and_then(|index| u32::try_from(index).ok())
-                .map(|index| 1_u32.checked_shl(index).unwrap_or(0))
-                .unwrap_or(0)
-        })
-        .collect()
-}
-
-fn remap_semantic_token_modifier_mask(source_mask: u32, modifier_masks: &[u32]) -> u32 {
-    modifier_masks
-        .iter()
-        .enumerate()
-        .fold(0_u32, |acc, (index, target_mask)| {
-            let Ok(index) = u32::try_from(index) else {
-                return acc;
-            };
-            let Some(source_bit) = 1_u32.checked_shl(index) else {
-                return acc;
-            };
-            if source_mask & source_bit != 0 {
-                acc | target_mask
-            } else {
-                acc
-            }
-        })
-}
-
-fn parse_symbol_kind(value: &Value) -> Option<LspSymbolKind> {
-    Some(match value.as_u64()? {
-        1 => LspSymbolKind::File,
-        2 => LspSymbolKind::Module,
-        3 => LspSymbolKind::Namespace,
-        4 => LspSymbolKind::Package,
-        5 => LspSymbolKind::Class,
-        6 => LspSymbolKind::Method,
-        7 => LspSymbolKind::Property,
-        8 => LspSymbolKind::Field,
-        9 => LspSymbolKind::Constructor,
-        10 => LspSymbolKind::Enum,
-        11 => LspSymbolKind::Interface,
-        12 => LspSymbolKind::Function,
-        13 => LspSymbolKind::Variable,
-        14 => LspSymbolKind::Constant,
-        15 => LspSymbolKind::String,
-        16 => LspSymbolKind::Number,
-        17 => LspSymbolKind::Boolean,
-        18 => LspSymbolKind::Array,
-        19 => LspSymbolKind::Object,
-        20 => LspSymbolKind::Key,
-        21 => LspSymbolKind::Null,
-        22 => LspSymbolKind::EnumMember,
-        23 => LspSymbolKind::Struct,
-        24 => LspSymbolKind::Event,
-        25 => LspSymbolKind::Operator,
-        26 => LspSymbolKind::TypeParameter,
-        _ => return None,
-    })
-}
-
-fn parse_folding_range_kind(value: &str) -> Option<LspFoldingRangeKind> {
-    Some(match value {
-        "comment" => LspFoldingRangeKind::Comment,
-        "imports" => LspFoldingRangeKind::Imports,
-        "region" => LspFoldingRangeKind::Region,
-        _ => return None,
-    })
-}
-
-fn empty_completion_list() -> LspCompletionList {
-    LspCompletionList {
-        is_incomplete: false,
-        items: Vec::new(),
-    }
-}
-
-fn workspace_diagnostics_for_path(
-    path: PathBuf,
-    diagnostics: Vec<Diagnostic>,
-) -> Vec<WorkspaceDiagnostic> {
-    diagnostics
-        .into_iter()
-        .map(|diagnostic| WorkspaceDiagnostic {
-            path: path.clone(),
-            line: diagnostic.range.start.line.saturating_add(1),
-            column: diagnostic.range.start.character.saturating_add(1),
-            severity: diagnostic
-                .severity
-                .map(map_lsp_severity)
-                .unwrap_or(DiagnosticSeverity::Information),
-            source: diagnostic.source.unwrap_or_else(|| "lsp".to_string()),
-            message: diagnostic.message,
-        })
-        .collect()
-}
-
-fn lsp_location_from_value(value: &Value) -> Option<LspLocation> {
-    let candidate = value
-        .get("targetUri")
-        .is_some()
-        .then(|| {
-            (
-                value.get("targetUri"),
-                value
-                    .get("targetSelectionRange")
-                    .or_else(|| value.get("targetRange")),
-            )
-        })
-        .unwrap_or_else(|| (value.get("uri"), value.get("range")));
-    let uri = candidate.0?.as_str()?.parse::<Uri>().ok()?;
-    let path = uri_to_path(&uri)?;
-    let range = lsp_range_from_value(candidate.1?)?;
-    Some(LspLocation { path, range })
-}
-
-fn lsp_text_edit_from_value(value: &Value) -> Option<LspTextEdit> {
-    Some(LspTextEdit {
-        range: lsp_range_from_value(value.get("range")?)?,
-        text: value.get("newText")?.as_str()?.to_string(),
-    })
-}
-
-fn parse_completion_item(value: &Value) -> Option<LspCompletionItem> {
-    let label = value.get("label")?.as_str()?.to_string();
-    let text_edit = value.get("textEdit").and_then(parse_completion_text_edit);
-    let insert_text = text_edit
-        .as_ref()
-        .map(|(_, text)| text.clone())
-        .or_else(|| {
-            value
-                .get("insertText")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| label.clone());
-
-    Some(LspCompletionItem {
-        label,
-        kind: value.get("kind").and_then(parse_completion_item_kind),
-        detail: value
-            .get("detail")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        documentation: value
-            .get("documentation")
-            .and_then(parse_completion_documentation),
-        insert_text,
-        insert_text_format: value
-            .get("insertTextFormat")
-            .and_then(Value::as_u64)
-            .map(parse_insert_text_format)
-            .unwrap_or(LspInsertTextFormat::PlainText),
-        filter_text: value
-            .get("filterText")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        sort_text: value
-            .get("sortText")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        range: text_edit.map(|(range, _)| range),
-        commit_characters: value
-            .get("commitCharacters")
-            .and_then(Value::as_array)
-            .map(|characters| {
-                characters
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        preselect: value
-            .get("preselect")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-    })
-}
-
-fn parse_signature_information(value: &Value) -> Option<LspSignatureInformation> {
-    let label = value.get("label")?.as_str()?.to_string();
-    let parameters = value
-        .get("parameters")
-        .and_then(Value::as_array)
-        .map(|parameters| {
-            parameters
-                .iter()
-                .filter_map(|parameter| parse_signature_parameter(parameter, &label))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Some(LspSignatureInformation {
-        label,
-        documentation: value.get("documentation").and_then(markup_to_markdown),
-        parameters,
-        active_parameter: value.get("activeParameter").and_then(value_to_u32),
-    })
-}
-
-fn parse_signature_parameter(
-    value: &Value,
-    signature_label: &str,
-) -> Option<LspSignatureParameter> {
-    let label = value
-        .get("label")
-        .and_then(|label| signature_parameter_label(label, signature_label))?;
-    Some(LspSignatureParameter {
-        label,
-        documentation: value.get("documentation").and_then(markup_to_markdown),
-    })
-}
-
-fn signature_parameter_label(value: &Value, signature_label: &str) -> Option<String> {
-    if let Some(label) = value.as_str() {
-        return Some(label.to_string());
-    }
-    let range = value.as_array()?;
-    if range.len() != 2 {
-        return None;
-    }
-    let start = usize::try_from(range[0].as_u64()?).ok()?;
-    let end = usize::try_from(range[1].as_u64()?).ok()?;
-    if start > end
-        || end > signature_label.len()
-        || !signature_label.is_char_boundary(start)
-        || !signature_label.is_char_boundary(end)
-    {
-        return None;
-    }
-    Some(signature_label[start..end].to_string())
-}
-
-fn parse_completion_text_edit(value: &Value) -> Option<(LspRange, String)> {
-    let range = value
-        .get("range")
-        .or_else(|| value.get("replace"))
-        .and_then(lsp_range_from_value)?;
-    let text = value
-        .get("newText")
-        .or_else(|| value.get("insertText"))
-        .and_then(Value::as_str)?
-        .to_string();
-    Some((range, text))
-}
-
-fn parse_completion_documentation(value: &Value) -> Option<String> {
-    markup_to_markdown(value)
-}
-
-fn markup_to_markdown(value: &Value) -> Option<String> {
-    match value {
-        Value::String(text) => non_empty_markdown(text),
-        Value::Object(object) => object
-            .get("value")
-            .and_then(Value::as_str)
-            .and_then(non_empty_markdown),
-        _ => None,
-    }
-}
-
-fn parse_insert_text_format(value: u64) -> LspInsertTextFormat {
-    if value == 2 {
-        LspInsertTextFormat::Snippet
-    } else {
-        LspInsertTextFormat::PlainText
-    }
-}
-
-fn parse_completion_item_kind(value: &Value) -> Option<LspCompletionItemKind> {
-    let kind = value.as_u64()?;
-    Some(match kind {
-        1 => LspCompletionItemKind::Text,
-        2 => LspCompletionItemKind::Method,
-        3 => LspCompletionItemKind::Function,
-        4 => LspCompletionItemKind::Constructor,
-        5 => LspCompletionItemKind::Field,
-        6 => LspCompletionItemKind::Variable,
-        7 => LspCompletionItemKind::Class,
-        8 => LspCompletionItemKind::Interface,
-        9 => LspCompletionItemKind::Module,
-        10 => LspCompletionItemKind::Property,
-        11 => LspCompletionItemKind::Unit,
-        12 => LspCompletionItemKind::Value,
-        13 => LspCompletionItemKind::Enum,
-        14 => LspCompletionItemKind::Keyword,
-        15 => LspCompletionItemKind::Snippet,
-        16 => LspCompletionItemKind::Color,
-        17 => LspCompletionItemKind::File,
-        18 => LspCompletionItemKind::Reference,
-        19 => LspCompletionItemKind::Folder,
-        20 => LspCompletionItemKind::EnumMember,
-        21 => LspCompletionItemKind::Constant,
-        22 => LspCompletionItemKind::Struct,
-        23 => LspCompletionItemKind::Event,
-        24 => LspCompletionItemKind::Operator,
-        25 => LspCompletionItemKind::TypeParameter,
-        _ => return None,
-    })
-}
-
-fn lsp_range_from_value(value: &Value) -> Option<LspRange> {
-    let start = value.get("start")?;
-    let end = value.get("end")?;
-    Some(LspRange {
-        start_line: one_based_lsp_position_value(start, "line")?,
-        start_column: one_based_lsp_position_value(start, "character")?,
-        end_line: one_based_lsp_position_value(end, "line")?,
-        end_column: one_based_lsp_position_value(end, "character")?,
-    })
-}
-
-fn one_based_lsp_position_value(value: &Value, key: &str) -> Option<u32> {
-    let raw = value.get(key)?.as_u64()?;
-    Some(
-        u32::try_from(raw)
-            .unwrap_or(u32::MAX.saturating_sub(1))
-            .saturating_add(1),
-    )
-}
-
-fn value_to_u32(value: &Value) -> Option<u32> {
-    u32::try_from(value.as_u64()?).ok()
-}
-
-fn markdown_strings_from_markup(value: &Value) -> Vec<String> {
-    match value {
-        Value::String(text) => non_empty_markdown(text).into_iter().collect(),
-        Value::Array(items) => items
-            .iter()
-            .flat_map(markdown_strings_from_markup)
-            .collect(),
-        Value::Object(object) => {
-            if let Some((language, text)) = object
-                .get("language")
-                .and_then(Value::as_str)
-                .zip(object.get("value").and_then(Value::as_str))
-            {
-                non_empty_markdown(&format!("```{language}\n{text}\n```"))
-                    .into_iter()
-                    .collect()
-            } else if let Some(value) = object.get("value").and_then(Value::as_str) {
-                non_empty_markdown(value).into_iter().collect()
-            } else {
-                Vec::new()
-            }
-        }
-        _ => Vec::new(),
-    }
-}
-
-fn non_empty_markdown(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-async fn read_lsp_stdout<R>(
-    mut stdout: R,
-    diagnostics_tx: mpsc::UnboundedSender<DiagnosticsUpdate>,
-    response_tx: mpsc::UnboundedSender<LspResponse>,
-) where
-    R: AsyncRead + Unpin,
-{
-    let mut buffer = Vec::new();
-    let mut chunk = [0_u8; 8192];
-
-    loop {
-        let read = match stdout.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(_) => break,
-        };
-        buffer.extend_from_slice(&chunk[..read]);
-
-        let frames = match drain_lsp_frames(&mut buffer) {
-            Ok(frames) => frames,
-            Err(_) => {
-                buffer.clear();
-                continue;
-            }
-        };
-
-        for frame in frames {
-            if let Ok(Some(notification)) = parse_lsp_notification(&frame) {
-                if let LspNotification::PublishDiagnostics(update) = notification {
-                    let _ = diagnostics_tx.send(update);
-                }
-                continue;
-            }
-
-            if let Ok(value) = serde_json::from_slice::<Value>(&frame.content) {
-                if let Some(response) = parse_lsp_response_value(&value) {
-                    let _ = response_tx.send(response);
-                }
-            }
-        }
-    }
-}
-
-async fn drain_stderr<R>(mut stderr: R)
-where
-    R: AsyncRead + Unpin,
-{
-    let mut buffer = [0_u8; 4096];
-    loop {
-        match stderr.read(&mut buffer).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-    }
-}
-
-fn parse_lsp_response_value(value: &Value) -> Option<LspResponse> {
-    if value.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return None;
-    }
-    if value.get("method").is_some() {
-        return None;
-    }
-
-    let id = value.get("id")?.as_u64()?;
-    let error = value.get("error").map(lsp_error_to_string);
-    let result = value.get("result").cloned();
-    Some(LspResponse { id, error, result })
-}
-
-fn lsp_error_to_string(value: &Value) -> String {
-    value
-        .get("message")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| value.to_string())
 }
 
 fn session_language_id(language_id: &str) -> &str {
@@ -2766,258 +1247,15 @@ fn language_id_for_path(path: &Path) -> String {
     .to_string()
 }
 
-fn lsp_language_id(document: &DocumentSnapshot) -> &str {
-    match document.language_id.as_str() {
-        "javascript" => "javascript",
-        "typescript" => "typescript",
-        other => other,
-    }
-}
-
-fn document_version(document: &DocumentSnapshot) -> i32 {
-    i32::try_from(document.version).unwrap_or(i32::MAX)
-}
-
-fn percent_encode_path(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
-                encoded.push(char::from(byte));
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-
-    encoded
-}
-
-fn find_header_end(buffer: &[u8]) -> Option<usize> {
-    buffer.windows(4).position(|window| window == b"\r\n\r\n")
-}
-
-fn parse_content_length(headers: &str) -> AppResult<usize> {
-    for line in headers.lines() {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("content-length") {
-            return value.trim().parse::<usize>().map_err(|error| {
-                AppError::Service(format!("invalid LSP Content-Length: {error}"))
-            });
-        }
-    }
-
-    Err(AppError::Service(
-        "LSP frame is missing Content-Length header".into(),
-    ))
-}
-
-fn map_lsp_severity(severity: lsp_types::DiagnosticSeverity) -> DiagnosticSeverity {
-    if severity == lsp_types::DiagnosticSeverity::ERROR {
-        DiagnosticSeverity::Error
-    } else if severity == lsp_types::DiagnosticSeverity::WARNING {
-        DiagnosticSeverity::Warning
-    } else if severity == lsp_types::DiagnosticSeverity::HINT {
-        DiagnosticSeverity::Hint
-    } else {
-        DiagnosticSeverity::Information
-    }
-}
-
-fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
-    let value = uri.as_str();
-    let path = value.strip_prefix("file://")?;
-    let decoded = percent_decode(path);
-
-    #[cfg(windows)]
-    {
-        let without_leading_slash = decoded
-            .strip_prefix('/')
-            .filter(|candidate| candidate.as_bytes().get(1) == Some(&b':'))
-            .unwrap_or(&decoded);
-        Some(PathBuf::from(without_leading_slash.replace('/', "\\")))
-    }
-
-    #[cfg(not(windows))]
-    {
-        Some(PathBuf::from(decoded))
-    }
-}
-
-fn percent_decode(value: &str) -> String {
-    let bytes = value.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-
-    while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            let high = hex_value(bytes[index + 1]);
-            let low = hex_value(bytes[index + 2]);
-            if let (Some(high), Some(low)) = (high, low) {
-                decoded.push((high << 4) | low);
-                index += 3;
-                continue;
-            }
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn hex_value(value: u8) -> Option<u8> {
-    match value {
-        b'0'..=b'9' => Some(value - b'0'),
-        b'a'..=b'f' => Some(value - b'a' + 10),
-        b'A'..=b'F' => Some(value - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn diagnostic_anchor_path(server: &LanguageServerInfo) -> PathBuf {
-    let candidates: &[&str] = match server.language_id.as_str() {
-        "rust" => &["rust-toolchain.toml", "Cargo.toml"],
-        "typescript" | "javascript" => &["tsconfig.json", "jsconfig.json", "package.json"],
-        "json" => &["package.json"],
-        _ => &[],
-    };
-
-    for candidate in candidates {
-        let path = server.workspace_root.join(candidate);
-        if path.is_file() {
-            return path;
-        }
-    }
-
-    server.workspace_root.clone()
-}
-
-fn detect_extensions(root: &Path) -> AppResult<BTreeSet<String>> {
-    let mut extensions = BTreeSet::new();
-    let mut stack = vec![root.to_path_buf()];
-
-    while let Some(path) = stack.pop() {
-        let Ok(children) = std::fs::read_dir(&path) else {
-            continue;
-        };
-
-        for child in children {
-            let child = child?;
-            let file_name = child.file_name();
-            let file_name = file_name.to_string_lossy();
-            if file_name == "node_modules" || file_name == "target" || file_name == ".git" {
-                continue;
-            }
-
-            let file_type = child.file_type()?;
-            if file_type.is_dir() {
-                stack.push(child.path());
-            } else if file_type.is_file() {
-                if let Some(extension) = child.path().extension().and_then(|value| value.to_str()) {
-                    extensions.insert(extension.to_ascii_lowercase());
-                }
-            }
-        }
-    }
-
-    Ok(extensions)
-}
-
-fn command_available(command: &str) -> bool {
-    let command_path = Path::new(command);
-    if command_path.components().count() > 1 {
-        return command_path.is_file();
-    }
-
-    let Some(paths) = env::var_os("PATH") else {
-        return false;
-    };
-
-    env::split_paths(&paths).any(|path| command_exists_in_dir(&path, command))
-}
-
-fn command_exists_in_dir(dir: &Path, command: &str) -> bool {
-    let direct = dir.join(command);
-    if direct.is_file() {
-        return true;
-    }
-
-    #[cfg(windows)]
-    {
-        let extensions = env::var_os("PATHEXT")
-            .map(|value| {
-                value
-                    .to_string_lossy()
-                    .split(';')
-                    .filter(|extension| !extension.is_empty())
-                    .map(str::to_string)
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| {
-                vec![
-                    ".COM".to_string(),
-                    ".EXE".to_string(),
-                    ".BAT".to_string(),
-                    ".CMD".to_string(),
-                ]
-            });
-
-        for extension in extensions {
-            if dir.join(format!("{command}{extension}")).is_file() {
-                return true;
-            }
-        }
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lsp_types::{Diagnostic, Position, Range};
-
-    #[test]
-    fn language_server_diagnostics_reports_missing_servers() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let servers = vec![LanguageServerInfo {
-            language_id: "typescript".to_string(),
-            name: "TypeScript Language Server".to_string(),
-            command: "typescript-language-server".to_string(),
-            args: vec!["--stdio".to_string()],
-            workspace_root: root.clone(),
-            status: LanguageServerStatus::Missing,
-            error: Some("typescript-language-server was not found in PATH".to_string()),
-        }];
-
-        let diagnostics = language_server_diagnostics(&servers);
-
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, DiagnosticSeverity::Warning);
-        assert_eq!(diagnostics[0].source, "lux-lsp");
-        assert_eq!(diagnostics[0].line, 1);
-        assert!(diagnostics[0]
-            .message
-            .contains("typescript-language-server"));
-        assert_eq!(diagnostics[0].path, root);
-    }
-
-    #[test]
-    fn language_server_diagnostics_ignores_available_servers() {
-        let servers = vec![LanguageServerInfo {
-            language_id: "rust".to_string(),
-            name: "rust-analyzer".to_string(),
-            command: "rust-analyzer".to_string(),
-            args: Vec::new(),
-            workspace_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
-            status: LanguageServerStatus::Available,
-            error: None,
-        }];
-
-        assert!(language_server_diagnostics(&servers).is_empty());
-    }
+    use lsp_types::{Diagnostic, Position, PublishDiagnosticsParams, Range, Uri};
+    use lux_core::{
+        LspCompletionItemKind, LspFoldingRangeKind, LspInlayHintKind, LspInsertTextFormat,
+        LspSymbolKind,
+    };
+    use serde_json::json;
 
     #[test]
     fn drain_lsp_frames_extracts_complete_frames_and_keeps_partial_tail() {
@@ -3246,57 +1484,23 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn navigation_and_assistance_requests_use_zero_based_lsp_positions() {
-        let path = PathBuf::from("/tmp/src/main.rs");
-
-        let hover = hover_request(41, &path, 5, 3);
-        let definition = definition_request(42, &path, 1, 1);
-        let completion = completion_request(43, &path, 2, 4);
-        let signature = signature_help_request(44, &path, 9, 12);
-        let references = references_request(45, &path, 7, 2);
-        let rename = rename_request(46, &path, 11, 6, "renamed_value");
-        let document_symbol = document_symbol_request(50, &path);
-        let workspace_symbol = workspace_symbol_request(51, "LuxStore");
-        let folding_range = folding_range_request(52, &path);
-        let semantic_tokens = semantic_tokens_full_request(54, &path);
-        let code_action_range = LspRange {
+    fn sample_request_range() -> LspRange {
+        LspRange {
             start_line: 3,
             start_column: 5,
             end_line: 3,
             end_column: 9,
-        };
-        let inlay_hint = inlay_hint_request(53, &path, &code_action_range);
-        let code_action = code_action_request(
-            47,
-            &path,
-            &code_action_range,
-            &[LspCodeActionDiagnostic {
-                range: code_action_range.clone(),
-                severity: Some(DiagnosticSeverity::Warning),
-                source: Some("rust-analyzer".to_string()),
-                message: "unused import".to_string(),
-            }],
-            Some(&["quickfix".to_string()]),
-            LspCodeActionTrigger::Invoke,
-        );
-        let formatting = formatting_request(
-            48,
-            &path,
-            LspFormattingOptions {
-                tab_size: 4,
-                insert_spaces: true,
-            },
-        );
-        let range_formatting = range_formatting_request(
-            49,
-            &path,
-            &code_action_range,
-            LspFormattingOptions {
-                tab_size: 2,
-                insert_spaces: false,
-            },
-        );
+        }
+    }
+
+    #[test]
+    fn navigation_requests_use_zero_based_lsp_positions() {
+        let path = PathBuf::from("/tmp/src/main.rs");
+
+        let hover = hover_request(41, &path, 5, 3);
+        let definition = definition_request(42, &path, 1, 1);
+        let references = references_request(45, &path, 7, 2);
+        let rename = rename_request(46, &path, 11, 6, "renamed_value");
 
         assert_eq!(hover["id"], 41);
         assert_eq!(hover["method"], "textDocument/hover");
@@ -3316,6 +1520,28 @@ mod tests {
         assert_eq!(rename["params"]["position"]["line"], 10);
         assert_eq!(rename["params"]["position"]["character"], 5);
         assert_eq!(rename["params"]["newName"], "renamed_value");
+    }
+
+    #[test]
+    fn assistance_requests_include_expected_context() {
+        let path = PathBuf::from("/tmp/src/main.rs");
+        let completion = completion_request(43, &path, 2, 4);
+        let signature = signature_help_request(44, &path, 9, 12);
+        let code_action_range = sample_request_range();
+        let code_action = code_action_request(
+            47,
+            &path,
+            &code_action_range,
+            &[LspCodeActionDiagnostic {
+                range: code_action_range.clone(),
+                severity: Some(DiagnosticSeverity::Warning),
+                source: Some("rust-analyzer".to_string()),
+                message: "unused import".to_string(),
+            }],
+            Some(&["quickfix".to_string()]),
+            LspCodeActionTrigger::Invoke,
+        );
+
         assert_eq!(completion["id"], 43);
         assert_eq!(completion["method"], "textDocument/completion");
         assert_eq!(completion["params"]["position"]["line"], 1);
@@ -3341,6 +1567,30 @@ mod tests {
         );
         assert_eq!(code_action["params"]["context"]["only"][0], "quickfix");
         assert_eq!(code_action["params"]["context"]["triggerKind"], 1);
+    }
+
+    #[test]
+    fn formatting_requests_keep_options_and_ranges() {
+        let path = PathBuf::from("/tmp/src/main.rs");
+        let code_action_range = sample_request_range();
+        let formatting = formatting_request(
+            48,
+            &path,
+            LspFormattingOptions {
+                tab_size: 4,
+                insert_spaces: true,
+            },
+        );
+        let range_formatting = range_formatting_request(
+            49,
+            &path,
+            &code_action_range,
+            LspFormattingOptions {
+                tab_size: 2,
+                insert_spaces: false,
+            },
+        );
+
         assert_eq!(formatting["id"], 48);
         assert_eq!(formatting["method"], "textDocument/formatting");
         assert_eq!(formatting["params"]["options"]["tabSize"], 4);
@@ -3349,6 +1599,18 @@ mod tests {
         assert_eq!(range_formatting["method"], "textDocument/rangeFormatting");
         assert_eq!(range_formatting["params"]["range"]["end"]["line"], 2);
         assert_eq!(range_formatting["params"]["options"]["insertSpaces"], false);
+    }
+
+    #[test]
+    fn symbol_and_token_requests_use_file_uris() {
+        let path = PathBuf::from("/tmp/src/main.rs");
+        let document_symbol = document_symbol_request(50, &path);
+        let workspace_symbol = workspace_symbol_request(51, "LuxStore");
+        let folding_range = folding_range_request(52, &path);
+        let inlay_hint_range = sample_request_range();
+        let inlay_hint = inlay_hint_request(53, &path, &inlay_hint_range);
+        let semantic_tokens = semantic_tokens_full_request(54, &path);
+
         assert_eq!(document_symbol["id"], 50);
         assert_eq!(document_symbol["method"], "textDocument/documentSymbol");
         assert!(document_symbol["params"]["textDocument"]["uri"]

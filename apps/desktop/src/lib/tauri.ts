@@ -72,6 +72,26 @@ export type AiChatCompletionResponse = {
   body: unknown;
 };
 
+export type AiChatHistorySaveRequest = {
+  activeSessionId: string;
+  sessions: unknown[];
+};
+
+export type AiChatHistoryResponse = AiChatHistorySaveRequest & {
+  schemaVersion: number;
+  path: string;
+  recovered: boolean;
+};
+
+export type AiProviderDiagnosticResponse = {
+  ok: boolean;
+  status: number | null;
+  latencyMs: number;
+  error: string | null;
+  model: string;
+  baseUrl: string;
+};
+
 export type AiChatCompletionStreamRequest = AiChatCompletionRequest & {
   streamId?: string;
 };
@@ -215,6 +235,13 @@ async function invokeOptional<T>(command: string, args: Record<string, unknown> 
 }
 
 const browserSettings = new Map<string, SettingValue>();
+let browserAiChatHistory: AiChatHistoryResponse = {
+  schemaVersion: 1,
+  activeSessionId: "",
+  sessions: [],
+  path: "browser-memory://ai-chat-history",
+  recovered: false,
+};
 
 export const luxCommands = {
   workspaceOpen: (path: string) => invokeRequired<WorkspaceInfo>("workspace_open", { path }),
@@ -240,6 +267,13 @@ export const luxCommands = {
   editorSaveFileAs: (bufferId: BufferId) => invokeOptional<DocumentSnapshot>("editor_save_file_as", { bufferId }, () => saveBrowserDocumentAs(bufferId)),
   searchQuery: (query: string, options: SearchOptions) => invokeRequired<SearchResponse>("search_query", { query, options }),
   aiChatCompletion: (request: AiChatCompletionRequest) => invokeRequired<AiChatCompletionResponse>("ai_chat_completion", { request }),
+  aiChatHistoryLoad: () => invokeOptional<AiChatHistoryResponse>("ai_chat_history_load", undefined, () => browserAiChatHistory),
+  aiChatHistorySave: (request: AiChatHistorySaveRequest) =>
+    invokeOptional<AiChatHistoryResponse>("ai_chat_history_save", { request }, () => {
+      browserAiChatHistory = { ...browserAiChatHistory, ...request, schemaVersion: 1 };
+      return browserAiChatHistory;
+    }),
+  aiProviderDiagnostic: (request: AiChatCompletionRequest) => invokeRequired<AiProviderDiagnosticResponse>("ai_provider_diagnostic", { request }),
   aiChatCompletionStream: (request: AiChatCompletionStreamRequest) =>
     invokeRequired<AiChatCompletionStreamResponse>("ai_chat_completion_stream", { request }),
   aiChatCompletionStreamCancel: (streamId: string) => invokeRequired<void>("ai_chat_completion_stream_cancel", { streamId }),

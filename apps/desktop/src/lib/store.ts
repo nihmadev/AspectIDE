@@ -1,15 +1,18 @@
 import { create } from "zustand";
 import { defaultAiPreferences, mergeAiPreferences, type AiPreferences } from "./aiPreferences";
+import type { AiChatMessage } from "./aiChatTypes";
 import { defaultEditorPreferences, mergeEditorPreferences, type EditorPreferences } from "./editorPreferences";
 import { normalizePath, type FileTreeDirectories } from "./fileTree";
 import { DEFAULT_LOCALE, type Locale } from "./i18n";
 import { defaultKeybindingProfile } from "./keybindings";
+import type { TerminalOutputBuffer } from "./terminalTypes";
 import type { DocumentEditResult, DocumentSnapshot, FsEntry, GitStatus, KeybindingProfile, LanguageServerInfo, SearchResponse, TerminalSessionInfo, TextEdit, WorkspaceDiagnostic, WorkspaceInfo } from "./types";
 
 export type Activity = "explorer" | "search" | "git" | "runDebug" | "extensions";
 export type BottomPanelTab = "problems" | "output" | "terminal";
 export type AiIndexStatus = "disabled" | "idle" | "indexing" | "ready";
 export type WorkspaceMode = "agent" | "workspace";
+export type AiChatSessionStatus = "idle" | "thinking" | "streaming" | "running-tools" | "waiting-approval" | "error";
 
 export type AiIndexState = {
   status: AiIndexStatus;
@@ -31,9 +34,28 @@ export type EditorRevealTarget = {
   column: number;
 };
 
+export type AiChatSession = {
+  id: string;
+  title: string;
+  workspaceRoot: string | null;
+  messages: AiChatMessage[];
+  status: AiChatSessionStatus;
+  lastError: string | null;
+  closedAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type AiChatSessionState = {
+  activeSessionId: string;
+  sessions: AiChatSession[];
+};
+
 const DEFAULT_EDITOR_GROUP_ID = "editor-group-1";
+const MAX_TERMINAL_BUFFER_CHARS = 120_000;
 const createEditorGroupId = () => `editor-group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 const createEmptyEditorGroup = (id = DEFAULT_EDITOR_GROUP_ID): EditorGroup => ({ id, documentIds: [], activeDocumentId: null });
+const createAiChatSessionId = () => `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
 type LuxState = {
   workspaceMode: WorkspaceMode;
@@ -44,6 +66,8 @@ type LuxState = {
   locale: Locale;
   aiPreferences: AiPreferences;
   aiIndex: AiIndexState;
+  aiChatSessions: AiChatSession[];
+  activeAiChatSessionId: string;
   editorPreferences: EditorPreferences;
   keybindingProfile: KeybindingProfile;
   workspace: WorkspaceInfo | null;
@@ -60,6 +84,9 @@ type LuxState = {
   activeEditorGroupId: string;
   searchResponse: SearchResponse | null;
   terminal: TerminalSessionInfo | null;
+  terminalSessions: TerminalSessionInfo[];
+  activeTerminalId: string | null;
+  terminalOutputBuffers: Record<string, TerminalOutputBuffer>;
   gitStatus: GitStatus | null;
   languageServers: LanguageServerInfo[];
   languageServersLoading: boolean;
@@ -78,6 +105,16 @@ type LuxState = {
   updateAiPreferences: (preferences: Partial<AiPreferences>) => void;
   setAiPreferences: (preferences: AiPreferences) => void;
   setAiIndex: (index: Partial<AiIndexState>) => void;
+  setAiChatSessions: (state: AiChatSessionState) => void;
+  createAiChatSession: (workspaceRoot?: string | null) => string;
+  setActiveAiChatSession: (sessionId: string) => void;
+  closeAiChatSession: (sessionId: string) => void;
+  restoreAiChatSession: (sessionId: string) => void;
+  renameAiChatSession: (sessionId: string, title: string) => void;
+  appendAiChatMessage: (sessionId: string, message: AiChatMessage) => void;
+  updateAiChatMessage: (sessionId: string, messageId: string, patch: Partial<AiChatMessage>) => void;
+  replaceAiChatMessages: (sessionId: string, messages: AiChatMessage[]) => void;
+  setAiChatSessionStatus: (sessionId: string, status: AiChatSessionStatus, lastError?: string | null) => void;
   updateEditorPreferences: (preferences: Partial<EditorPreferences>) => void;
   setEditorPreferences: (preferences: EditorPreferences) => void;
   setKeybindingProfile: (profile: KeybindingProfile) => void;
@@ -115,6 +152,13 @@ type LuxState = {
   selectPreviousDocument: () => void;
   setSearchResponse: (response: SearchResponse | null) => void;
   setTerminal: (terminal: TerminalSessionInfo | null) => void;
+  upsertTerminalSession: (terminal: TerminalSessionInfo, makeActive?: boolean) => void;
+  setActiveTerminal: (terminalId: string) => void;
+  closeTerminalSession: (terminalId: string) => void;
+  closeAllTerminalSessions: () => void;
+  appendTerminalOutput: (terminalId: string, data: string) => void;
+  clearTerminalOutput: (terminalId: string) => void;
+  clearAllTerminalOutput: () => void;
   setGitStatus: (status: GitStatus | null) => void;
   setLanguageServers: (servers: LanguageServerInfo[]) => void;
   setLanguageServersLoading: (loading: boolean) => void;
@@ -136,6 +180,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   locale: DEFAULT_LOCALE,
   aiPreferences: defaultAiPreferences,
   aiIndex: { status: "idle", progress: 0, indexedFiles: 0, totalFiles: 0, updatedAt: null },
+  ...createInitialAiChatState(),
   editorPreferences: defaultEditorPreferences,
   keybindingProfile: defaultKeybindingProfile(),
   workspace: null,
@@ -152,6 +197,9 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   activeEditorGroupId: DEFAULT_EDITOR_GROUP_ID,
   searchResponse: null,
   terminal: null,
+  terminalSessions: [],
+  activeTerminalId: null,
+  terminalOutputBuffers: {},
   gitStatus: null,
   languageServers: [],
   languageServersLoading: false,
@@ -170,13 +218,110 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   updateAiPreferences: (preferences) => set((state) => ({ aiPreferences: mergeAiPreferences(state.aiPreferences, preferences) })),
   setAiPreferences: (aiPreferences) => set({ aiPreferences }),
   setAiIndex: (index) => set((state) => ({ aiIndex: { ...state.aiIndex, ...index } })),
+  setAiChatSessions: (chatState) => set(() => normalizeAiChatSessionState(chatState)),
+  createAiChatSession: (workspaceRoot = get().workspace?.root ?? null) => {
+    const session = createAiChatSession(workspaceRoot);
+    set((state) => ({
+      aiChatSessions: [session, ...state.aiChatSessions],
+      activeAiChatSessionId: session.id,
+      aiChatOpen: true,
+    }));
+    return session.id;
+  },
+  setActiveAiChatSession: (sessionId) => set((state) => {
+    const target = state.aiChatSessions.find((session) => session.id === sessionId);
+    if (!target) return {};
+    return {
+      activeAiChatSessionId: sessionId,
+      aiChatOpen: true,
+    };
+  }),
+  closeAiChatSession: (sessionId) =>
+    set((state) => {
+      const target = state.aiChatSessions.find((session) => session.id === sessionId);
+      if (!target || target.closedAt) return {};
+      const now = Date.now();
+      const sessions = state.aiChatSessions.map((session) => session.id === sessionId
+        ? { ...session, closedAt: now, updatedAt: now }
+        : session);
+      if (state.activeAiChatSessionId !== sessionId) return { aiChatSessions: sessions };
+      const nextActiveSession = sessions.find((session) => !session.closedAt && session.id !== sessionId);
+      if (!nextActiveSession) {
+        const fallback = createAiChatSession(state.workspace?.root ?? null);
+        return { aiChatSessions: [fallback, ...sessions], activeAiChatSessionId: fallback.id, aiChatOpen: true };
+      }
+      return { aiChatSessions: sessions, activeAiChatSessionId: nextActiveSession.id };
+    }),
+  restoreAiChatSession: (sessionId) =>
+    set((state) => {
+      const target = state.aiChatSessions.find((session) => session.id === sessionId);
+      if (!target) return {};
+      const now = Date.now();
+      return {
+        activeAiChatSessionId: sessionId,
+        aiChatOpen: true,
+        aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
+          ? { ...session, closedAt: null, updatedAt: now }
+          : session),
+      };
+    }),
+  renameAiChatSession: (sessionId, title) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId ? { ...session, title: normalizeChatTitle(title), updatedAt: Date.now() } : session),
+    })),
+  appendAiChatMessage: (sessionId, message) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) => {
+        if (session.id !== sessionId) return session;
+        const messages = [...session.messages, message];
+        return { ...session, messages, title: nextChatSessionTitle(session, message), lastError: null, updatedAt: Date.now() };
+      }),
+    })),
+  updateAiChatMessage: (sessionId, messageId, patch) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
+        ? {
+            ...session,
+            messages: session.messages.map((message) => message.id === messageId ? { ...message, ...patch } : message),
+            updatedAt: Date.now(),
+          }
+        : session),
+    })),
+  replaceAiChatMessages: (sessionId, messages) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
+        ? { ...session, messages, title: titleFromMessages(messages) ?? session.title, updatedAt: Date.now() }
+        : session),
+    })),
+  setAiChatSessionStatus: (sessionId, status, lastError = null) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
+        ? { ...session, status, lastError, updatedAt: status === "idle" ? session.updatedAt : Date.now() }
+        : session),
+    })),
   updateEditorPreferences: (preferences) => set((state) => ({ editorPreferences: mergeEditorPreferences(state.editorPreferences, preferences) })),
   setEditorPreferences: (editorPreferences) => set({ editorPreferences }),
   setKeybindingProfile: (keybindingProfile) => set({ keybindingProfile }),
   setWorkspace: (workspace) =>
-    set((state) => ({
+    set((state) => {
+      const sameWorkspace = Boolean(workspace && state.workspace?.root === workspace.root);
+      const workspaceChatSession = workspace
+        ? state.aiChatSessions.find((session) => !session.closedAt && session.workspaceRoot === workspace.root)
+        : state.aiChatSessions.find((session) => !session.closedAt && session.workspaceRoot === null) ?? null;
+      const fallbackChatSession = workspace ? createAiChatSession(workspace.root) : createAiChatSession(null);
+      const aiChatSessions = sameWorkspace || !fallbackChatSession
+        ? state.aiChatSessions
+        : workspaceChatSession
+          ? state.aiChatSessions
+          : [fallbackChatSession, ...state.aiChatSessions];
+      const activeAiChatSessionId = sameWorkspace
+        ? state.activeAiChatSessionId
+        : workspaceChatSession?.id ?? fallbackChatSession?.id ?? state.activeAiChatSessionId;
+      return {
       workspace,
-      aiChatOpen: workspace ? (state.workspace?.root === workspace.root ? state.aiChatOpen : true) : false,
+      aiChatOpen: workspace ? (sameWorkspace ? state.aiChatOpen : true) : false,
+      aiChatSessions,
+      activeAiChatSessionId,
       workspaceFolders: workspace
         ? state.workspaceFolders.some((folder) => folder.root === workspace.root)
           ? state.workspaceFolders
@@ -184,25 +329,29 @@ export const useLuxStore = create<LuxState>((set, get) => ({
         : [],
       sidebarVisible: workspace ? true : false,
       bottomPanelOpen: false,
-      fileEntries: workspace && state.workspace?.root === workspace.root ? state.fileEntries : [],
-      fileTreeDirectories: workspace && state.workspace?.root === workspace.root ? state.fileTreeDirectories : {},
+      fileEntries: workspace && sameWorkspace ? state.fileEntries : [],
+      fileTreeDirectories: workspace && sameWorkspace ? state.fileTreeDirectories : {},
       fileTreeLoading: false,
       fileTreeError: null,
-      openDocuments: workspace && state.workspace?.root === workspace.root ? state.openDocuments : [],
-      activeDocumentId: workspace && state.workspace?.root === workspace.root ? state.activeDocumentId : null,
+      openDocuments: workspace && sameWorkspace ? state.openDocuments : [],
+      activeDocumentId: workspace && sameWorkspace ? state.activeDocumentId : null,
       pendingEditorReveal: null,
-      editorGroups: workspace && state.workspace?.root === workspace.root ? state.editorGroups : [createEmptyEditorGroup()],
-      activeEditorGroupId: workspace && state.workspace?.root === workspace.root ? state.activeEditorGroupId : DEFAULT_EDITOR_GROUP_ID,
+      editorGroups: workspace && sameWorkspace ? state.editorGroups : [createEmptyEditorGroup()],
+      activeEditorGroupId: workspace && sameWorkspace ? state.activeEditorGroupId : DEFAULT_EDITOR_GROUP_ID,
       terminal: null,
-      languageServers: workspace && state.workspace?.root === workspace.root ? state.languageServers : [],
+      terminalSessions: [],
+      activeTerminalId: null,
+      terminalOutputBuffers: {},
+      languageServers: workspace && sameWorkspace ? state.languageServers : [],
       languageServersLoading: false,
-      diagnosticsByPath: workspace && state.workspace?.root === workspace.root ? state.diagnosticsByPath : {},
+      diagnosticsByPath: workspace && sameWorkspace ? state.diagnosticsByPath : {},
       explorerExpandedPaths: workspace
-        ? state.workspace?.root === workspace.root && state.explorerExpandedPaths.length > 0
+        ? sameWorkspace && state.explorerExpandedPaths.length > 0
           ? state.explorerExpandedPaths
           : [normalizePath(workspace.root)]
         : [],
-    })),
+      };
+    }),
   addWorkspaceFolder: (workspace) =>
     set((state) => ({
       workspaceFolders: state.workspaceFolders.some((folder) => folder.root === workspace.root)
@@ -490,7 +639,46 @@ export const useLuxStore = create<LuxState>((set, get) => ({
       };
     }),
   setSearchResponse: (searchResponse) => set({ searchResponse }),
-  setTerminal: (terminal) => set({ terminal }),
+  setTerminal: (terminal) => set((state) => terminal ? upsertTerminalState(state, terminal, true) : { terminal: null, terminalSessions: [], activeTerminalId: null, terminalOutputBuffers: {} }),
+  upsertTerminalSession: (terminal, makeActive = true) => set((state) => upsertTerminalState(state, terminal, makeActive)),
+  setActiveTerminal: (terminalId) =>
+    set((state) => {
+      const terminal = state.terminalSessions.find((session) => session.id === terminalId);
+      if (!terminal) return {};
+      return { activeTerminalId: terminal.id, terminal };
+    }),
+  closeTerminalSession: (terminalId) =>
+    set((state) => {
+      const terminalSessions = state.terminalSessions.filter((session) => session.id !== terminalId);
+      if (terminalSessions.length === state.terminalSessions.length) return {};
+      const terminalOutputBuffers = { ...state.terminalOutputBuffers };
+      delete terminalOutputBuffers[terminalId];
+      const activeStillExists = terminalSessions.find((session) => session.id === state.activeTerminalId) ?? null;
+      const terminal = activeStillExists ?? terminalSessions[0] ?? null;
+      return {
+        terminal,
+        terminalSessions,
+        activeTerminalId: terminal?.id ?? null,
+        terminalOutputBuffers,
+      };
+    }),
+  closeAllTerminalSessions: () => set({ terminal: null, terminalSessions: [], activeTerminalId: null, terminalOutputBuffers: {} }),
+  appendTerminalOutput: (terminalId, data) =>
+    set((state) => {
+      if (!terminalId || !data) return {};
+      return {
+        terminalOutputBuffers: {
+          ...state.terminalOutputBuffers,
+          [terminalId]: appendTerminalBuffer(state.terminalOutputBuffers[terminalId], data),
+        },
+      };
+    }),
+  clearTerminalOutput: (terminalId) =>
+    set((state) => {
+      if (!terminalId || !state.terminalOutputBuffers[terminalId]) return {};
+      return { terminalOutputBuffers: { ...state.terminalOutputBuffers, [terminalId]: emptyTerminalBuffer() } };
+    }),
+  clearAllTerminalOutput: () => set({ terminalOutputBuffers: {} }),
   setGitStatus: (gitStatus) => set({ gitStatus }),
   setLanguageServers: (languageServers) => set({ languageServers }),
   setLanguageServersLoading: (languageServersLoading) => set({ languageServersLoading }),
@@ -516,7 +704,76 @@ export const useLuxStore = create<LuxState>((set, get) => ({
 export const selectActiveDocument = (state: LuxState) =>
   state.openDocuments.find((document) => document.id === state.activeDocumentId) ?? null;
 
+export const selectActiveAiChatSession = (state: LuxState) =>
+  state.aiChatSessions.find((session) => session.id === state.activeAiChatSessionId) ?? state.aiChatSessions[0] ?? null;
+
 export const selectDiagnostics = (state: LuxState) => Object.values(state.diagnosticsByPath).flat();
+
+function createInitialAiChatState(workspaceRoot: string | null = null): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
+  const session = createAiChatSession(workspaceRoot);
+  return { aiChatSessions: [session], activeAiChatSessionId: session.id };
+}
+
+function createAiChatSession(workspaceRoot: string | null): AiChatSession {
+  const now = Date.now();
+  return {
+    id: createAiChatSessionId(),
+    title: "New chat",
+    workspaceRoot,
+    messages: [],
+    status: "idle",
+    lastError: null,
+    closedAt: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function normalizeAiChatSessionState(chatState: AiChatSessionState): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
+  let sessions = chatState.sessions.length > 0 ? chatState.sessions.map(normalizeAiChatSession) : [createAiChatSession(null)];
+  let activeAiChatSessionId = sessions.some((session) => session.id === chatState.activeSessionId) ? chatState.activeSessionId : sessions[0].id;
+  const activeSession = sessions.find((session) => session.id === activeAiChatSessionId);
+  if (!activeSession || activeSession.closedAt) {
+    const openSession = sessions.find((session) => !session.closedAt);
+    if (openSession) {
+      activeAiChatSessionId = openSession.id;
+    } else {
+      const fallback = createAiChatSession(null);
+      sessions = [fallback, ...sessions];
+      activeAiChatSessionId = fallback.id;
+    }
+  }
+  return { aiChatSessions: sessions, activeAiChatSessionId };
+}
+
+function normalizeAiChatSession(session: AiChatSession): AiChatSession {
+  return {
+    ...session,
+    title: normalizeChatTitle(session.title || titleFromMessages(session.messages) || "New chat"),
+    status: session.status === "error" ? "error" : "idle",
+    lastError: session.lastError ?? null,
+    closedAt: Number.isFinite(session.closedAt) ? session.closedAt : null,
+    messages: Array.isArray(session.messages) ? session.messages : [],
+    createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(),
+    updatedAt: Number.isFinite(session.updatedAt) ? session.updatedAt : Date.now(),
+  };
+}
+
+function nextChatSessionTitle(session: AiChatSession, message: AiChatMessage) {
+  if (session.title !== "New chat" || message.role !== "user") return session.title;
+  return normalizeChatTitle(message.content);
+}
+
+function titleFromMessages(messages: AiChatMessage[]) {
+  const firstUserMessage = messages.find((message) => message.role === "user" && message.content.trim());
+  return firstUserMessage ? normalizeChatTitle(firstUserMessage.content) : null;
+}
+
+function normalizeChatTitle(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "New chat";
+  return normalized.length > 42 ? `${normalized.slice(0, 42).trimEnd()}...` : normalized;
+}
 
 function ensureEditorGroups(editorGroups: EditorGroup[]) {
   return editorGroups.length > 0 ? editorGroups : [createEmptyEditorGroup()];
@@ -574,6 +831,37 @@ function closeDocumentInGroupState(state: LuxState, groupId: string, documentId:
 
 function normalizePathList(paths: Iterable<string>) {
   return Array.from(new Set(Array.from(paths, normalizePath)));
+}
+
+function upsertTerminalState(state: LuxState, terminal: TerminalSessionInfo, makeActive: boolean) {
+  const exists = state.terminalSessions.some((session) => session.id === terminal.id);
+  const terminalSessions = exists
+    ? state.terminalSessions.map((session) => session.id === terminal.id ? terminal : session)
+    : [...state.terminalSessions, terminal];
+  const activeTerminalId = makeActive || !state.activeTerminalId ? terminal.id : state.activeTerminalId;
+  const activeTerminal = terminalSessions.find((session) => session.id === activeTerminalId) ?? terminalSessions[0] ?? null;
+  return {
+    terminal: activeTerminal,
+    terminalSessions,
+    activeTerminalId: activeTerminal?.id ?? null,
+  };
+}
+
+function emptyTerminalBuffer(): TerminalOutputBuffer {
+  return { text: "", updatedAt: null, bytes: 0, chunks: 0, truncated: false };
+}
+
+function appendTerminalBuffer(current: TerminalOutputBuffer | undefined, data: string): TerminalOutputBuffer {
+  const previous = current ?? emptyTerminalBuffer();
+  const combined = `${previous.text}${data}`;
+  const overflow = combined.length > MAX_TERMINAL_BUFFER_CHARS;
+  return {
+    text: overflow ? combined.slice(combined.length - MAX_TERMINAL_BUFFER_CHARS) : combined,
+    updatedAt: new Date().toISOString(),
+    bytes: previous.bytes + data.length,
+    chunks: previous.chunks + 1,
+    truncated: previous.truncated || overflow,
+  };
 }
 
 function applyTextEdits(text: string, edits: TextEdit[]) {

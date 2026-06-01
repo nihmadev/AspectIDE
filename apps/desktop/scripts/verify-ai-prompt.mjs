@@ -12,10 +12,11 @@ const baseContext = {
   preferences: {
     agentMode: "agent",
     selectedEffortId: "xhigh",
-    toolApprovalMode: "default",
+    toolRoundLimit: 100,
+    toolApprovalMode: "full-access",
   },
   provider: {
-    name: "Local proxy",
+    name: "Local",
     protocol: "local-proxy",
   },
   runtimeToolsAvailable: true,
@@ -52,15 +53,22 @@ const requiredPhrases = [
   "ReviewDiff",
   "TestHealth",
   "FailureAnalyzer",
+  "TerminalContext",
+  "TerminalWrite",
   "SecretGuard",
   "Default tool approval mode",
+  "Tool round limit",
   "Full Access mode",
   "Agent mode",
   "Plan mode",
   "Ask mode",
   "Review behavior",
+  "Review requests are read-only by default",
+  "do not change files or run shell/test commands unless explicitly requested",
   "Verification protocol",
   "Failure recovery",
+  "GitHub-flavored Markdown",
+  "fenced code blocks with language names",
   "Preserve user work",
   "Do not use TodoWrite as a substitute for evidence gathering",
   "one compact read-only context round",
@@ -77,8 +85,8 @@ if (!webPrompt.includes("Runtime tools are not attached")) {
   throw new Error("AI system prompt must clearly explain web/dev chat requests without runtime tools.");
 }
 
-if (prompt.length < 6_000 || prompt.length > 12_000) {
-  throw new Error(`AI system prompt length ${prompt.length} is outside the expected 6000-12000 character range.`);
+if (prompt.length < 6_000 || prompt.length > 12_500) {
+  throw new Error(`AI system prompt length ${prompt.length} is outside the expected 6000-12500 character range.`);
 }
 
 console.log(`AI prompt verification passed (${prompt.length} chars).`);

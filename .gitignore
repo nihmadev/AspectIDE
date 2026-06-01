@@ -17,6 +17,7 @@ apps/desktop/src-tauri/gen/schemas/
 apps/desktop/src/bindings/generated/
 
 # Test, coverage, and local tooling output
+.codex-publish.git/
 coverage/
 **/coverage/
 .nyc_output/

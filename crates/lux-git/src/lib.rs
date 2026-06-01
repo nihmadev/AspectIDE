@@ -1,11 +1,20 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::{path::Path, process::Command};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use lux_core::{AppError, AppResult, GitDiff, GitDiffFile, GitFileStatus, GitStatus};
 
 const MAX_DIFF_PATCH_CHARS: usize = 120_000;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn status(root: impl AsRef<Path>) -> AppResult<GitStatus> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(root.as_ref())
         .args(["status", "--porcelain=v1", "--branch"])
@@ -22,7 +31,7 @@ pub fn status(root: impl AsRef<Path>) -> AppResult<GitStatus> {
 
 pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     let root = root.as_ref();
-    let stat_output = Command::new("git")
+    let stat_output = git_command()
         .arg("-C")
         .arg(root)
         .args(["diff", "--numstat", "--find-renames", "HEAD", "--"])
@@ -36,7 +45,7 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
         ));
     }
 
-    let name_status_output = Command::new("git")
+    let name_status_output = git_command()
         .arg("-C")
         .arg(root)
         .args(["diff", "--name-status", "--find-renames", "HEAD", "--"])
@@ -50,7 +59,7 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
         ));
     }
 
-    let patch_output = Command::new("git")
+    let patch_output = git_command()
         .arg("-C")
         .arg(root)
         .args([
@@ -98,6 +107,19 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
         patch,
         truncated,
     })
+}
+
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    hide_process_window(&mut command);
+    command
+}
+
+fn hide_process_window(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
 }
 
 fn parse_status(raw: &str) -> GitStatus {

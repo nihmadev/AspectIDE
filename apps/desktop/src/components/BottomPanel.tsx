@@ -31,7 +31,13 @@ type BottomPanelProps = {
 export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPanelProps) {
   const { t } = useTranslation();
   const terminal = useLuxStore((state) => state.terminal);
-  const setTerminal = useLuxStore((state) => state.setTerminal);
+  const terminalSessions = useLuxStore((state) => state.terminalSessions);
+  const activeTerminalId = useLuxStore((state) => state.activeTerminalId);
+  const terminalOutputBuffers = useLuxStore((state) => state.terminalOutputBuffers);
+  const upsertTerminalSession = useLuxStore((state) => state.upsertTerminalSession);
+  const setActiveTerminal = useLuxStore((state) => state.setActiveTerminal);
+  const closeTerminalSession = useLuxStore((state) => state.closeTerminalSession);
+  const clearTerminalOutput = useLuxStore((state) => state.clearTerminalOutput);
   const activeTab = useLuxStore((state) => state.bottomPanelTab);
   const setActiveTab = useLuxStore((state) => state.setBottomPanelTab);
   const setBottomPanelOpen = useLuxStore((state) => state.setBottomPanelOpen);
@@ -56,16 +62,29 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
     mutationFn: async () => {
       if (!isTauriRuntime()) return null;
       const created = await luxCommands.terminalCreate();
-      if (terminal) await luxCommands.terminalClose(terminal.id).catch(() => undefined);
       return created;
     },
     onSuccess: (session) => {
-      setTerminalClearToken((value) => value + 1);
       setTerminalError(null);
-      setTerminal(session);
+      if (session) upsertTerminalSession(session, true);
     },
     onError: (error) => setTerminalError(readErrorMessage(error)),
   });
+
+  const clearActiveTerminal = () => {
+    if (activeTerminalId) clearTerminalOutput(activeTerminalId);
+    setTerminalClearToken((value) => value + 1);
+  };
+
+  const closeActiveTerminal = () => {
+    if (!terminal) return;
+    const terminalId = terminal.id;
+    if (isTauriRuntime()) {
+      void luxCommands.terminalClose(terminalId).catch(() => undefined).finally(() => closeTerminalSession(terminalId));
+    } else {
+      closeTerminalSession(terminalId);
+    }
+  };
 
   const openProblemMutation = useMutation({
     mutationFn: async (problem: WorkspaceDiagnostic) => ({ problem, document: await luxCommands.editorOpenFile(problem.path) }),
@@ -120,8 +139,21 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
         {activeTab === "terminal" && (
           <>
             <div className="terminal-profile"><TerminalSquare size={15} /> {terminalShellLabel(terminal, t)}</div>
+            <select
+              className="panel-select terminal-session-select"
+              aria-label={t("panel.terminal.activeSession")}
+              disabled={terminalSessions.length === 0}
+              value={activeTerminalId ?? ""}
+              onChange={(event) => setActiveTerminal(event.target.value)}
+            >
+              {terminalSessions.length === 0 ? <option value="">{t("panel.terminal.noSessions")}</option> : null}
+              {terminalSessions.map((session, index) => (
+                <option key={session.id} value={session.id}>{terminalSessionLabel(session, index)}</option>
+              ))}
+            </select>
             <PanelIconButton label={t("panel.terminal.new")} onClick={() => terminalMutation.mutate()} icon={<Plus size={15} />} disabled={terminalMutation.isPending} />
-            <PanelIconButton label={t("panel.terminal.clear")} onClick={() => setTerminalClearToken((value) => value + 1)} icon={<Trash2 size={14} />} />
+            <PanelIconButton label={t("panel.terminal.clear")} onClick={clearActiveTerminal} icon={<Trash2 size={14} />} />
+            <PanelIconButton label={t("panel.terminal.closeActive")} onClick={closeActiveTerminal} icon={<X size={15} />} disabled={!terminal} />
           </>
         )}
         <PanelIconButton
@@ -138,8 +170,8 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
         openProblem={(problem) => openProblemMutation.mutate(problem)}
         problemOpenError={problemOpenError}
         outputEntries={outputEntries}
-        setTerminal={setTerminal}
         terminal={terminal}
+        terminalBufferText={activeTerminalId ? terminalOutputBuffers[activeTerminalId]?.text ?? "" : ""}
         terminalClearToken={terminalClearToken}
         terminalError={terminalError}
         terminalMounted={terminalMounted}
@@ -206,8 +238,8 @@ function PanelContent({
   openProblem,
   problemOpenError,
   outputEntries,
-  setTerminal,
   terminal,
+  terminalBufferText,
   terminalClearToken,
   terminalError,
   terminalMounted,
@@ -218,8 +250,8 @@ function PanelContent({
   openProblem: (problem: WorkspaceDiagnostic) => void;
   problemOpenError: string | null;
   outputEntries: OutputEntry[];
-  setTerminal: (session: TerminalSessionInfo | null) => void;
   terminal: TerminalSessionInfo | null;
+  terminalBufferText: string;
   terminalClearToken: number;
   terminalError: string | null;
   terminalMounted: boolean;
@@ -238,7 +270,7 @@ function PanelContent({
       )}
       {(activeTab === "terminal" || terminal || terminalMounted) && (
         <div className="bottom-panel-page" aria-hidden={activeTab !== "terminal"} data-active={activeTab === "terminal"}>
-          <TerminalPanel clearToken={terminalClearToken} error={terminalError} session={terminal} setSession={setTerminal} />
+          <TerminalPanel bufferText={terminalBufferText} clearToken={terminalClearToken} error={terminalError} session={terminal} />
         </div>
       )}
     </div>
@@ -292,11 +324,11 @@ function OutputPanel({ entries, hasAnyEntries }: { entries: OutputEntry[]; hasAn
   );
 }
 
-function TerminalPanel({ clearToken, error, session, setSession }: { clearToken: number; error: string | null; session: TerminalSessionInfo | null; setSession: (session: TerminalSessionInfo | null) => void }) {
+function TerminalPanel({ bufferText, clearToken, error, session }: { bufferText: string; clearToken: number; error: string | null; session: TerminalSessionInfo | null }) {
   return (
     <div className="terminal-surface">
       {error ? <div className="terminal-error">{error}</div> : null}
-      <XtermTerminal clearToken={clearToken} session={session} setSession={setSession} />
+      <XtermTerminal bufferText={bufferText} clearToken={clearToken} session={session} />
     </div>
   );
 }
@@ -305,6 +337,12 @@ function terminalShellLabel(session: TerminalSessionInfo | null, t: TranslateFn)
   if (!session) return t("panel.terminal.shellFallback");
   const normalized = session.shell.replace(/\\/g, "/");
   return normalized.split("/").pop()?.replace(/\.exe$/i, "") || session.shell;
+}
+
+function terminalSessionLabel(session: TerminalSessionInfo, index: number) {
+  const normalized = session.shell.replace(/\\/g, "/");
+  const shell = normalized.split("/").pop()?.replace(/\.exe$/i, "") || session.shell;
+  return `${index + 1}: ${shell}`;
 }
 
 function readErrorMessage(error: unknown) {

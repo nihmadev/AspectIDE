@@ -9,22 +9,45 @@ import "@xterm/xterm/css/xterm.css";
 const webPrompt = "$ ";
 
 type XtermTerminalProps = {
+  bufferText?: string;
   clearToken: number;
   session: TerminalSessionInfo | null;
-  setSession: (session: TerminalSessionInfo | null) => void;
+  onSessionCreated?: (session: TerminalSessionInfo) => void;
 };
 
-export function XtermTerminal({ clearToken, session, setSession }: XtermTerminalProps) {
+export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, session }: XtermTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const fitFrameRef = useRef<number | null>(null);
   const sessionRef = useRef<TerminalSessionInfo | null>(session);
-  const setTerminal = useLuxStore((state) => state.setTerminal);
+  const bufferTextRef = useRef(bufferText);
+  const renderedSessionIdRef = useRef<string | null>(null);
+  const webPromptWrittenRef = useRef(false);
+  const upsertTerminalSession = useLuxStore((state) => state.upsertTerminalSession);
+  const appendTerminalOutput = useLuxStore((state) => state.appendTerminalOutput);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    bufferTextRef.current = bufferText;
+  }, [bufferText]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const sessionId = session?.id ?? null;
+    if (!terminal || renderedSessionIdRef.current === sessionId) return;
+    renderedSessionIdRef.current = sessionId;
+    webPromptWrittenRef.current = false;
+    terminal.clear();
+    if (bufferText) terminal.write(bufferText);
+    else if (!sessionId && !isTauriRuntime()) {
+      terminal.write(webPrompt);
+      webPromptWrittenRef.current = true;
+    }
+  }, [bufferText, session?.id]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -68,6 +91,12 @@ export function XtermTerminal({ clearToken, session, setSession }: XtermTerminal
 
     terminalRef.current = terminal;
     fitRef.current = fitAddon;
+    renderedSessionIdRef.current = sessionRef.current?.id ?? null;
+    if (bufferTextRef.current) terminal.write(bufferTextRef.current);
+    else if (!sessionRef.current && !isTauriRuntime()) {
+      terminal.write(webPrompt);
+      webPromptWrittenRef.current = true;
+    }
 
     const scheduleFit = () => {
       if (fitFrameRef.current !== null) return;
@@ -96,6 +125,7 @@ export function XtermTerminal({ clearToken, session, setSession }: XtermTerminal
         void luxCommands.terminalWrite(activeSession.id, data);
         return;
       }
+      if (activeSession) appendTerminalOutput(activeSession.id, data);
       terminal.write(data === "\r" ? `\r\n${webPrompt}` : data);
     });
 
@@ -124,13 +154,16 @@ export function XtermTerminal({ clearToken, session, setSession }: XtermTerminal
       if (!terminal) return;
       if (session) return;
       if (!isTauriRuntime()) {
-        terminal.write(webPrompt);
+        if (!webPromptWrittenRef.current) {
+          terminal.write(webPrompt);
+          webPromptWrittenRef.current = true;
+        }
         return;
       }
       const created = await luxCommands.terminalCreate(undefined, undefined, terminal.cols, terminal.rows);
       if (!disposed) {
-        setSession(created);
-        setTerminal(created);
+        upsertTerminalSession(created, true);
+        onSessionCreated?.(created);
       } else {
         void luxCommands.terminalClose(created.id).catch(() => undefined);
       }
@@ -139,7 +172,7 @@ export function XtermTerminal({ clearToken, session, setSession }: XtermTerminal
     return () => {
       disposed = true;
     };
-  }, [session, setSession, setTerminal]);
+  }, [onSessionCreated, session, upsertTerminalSession]);
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
@@ -159,6 +192,7 @@ export function XtermTerminal({ clearToken, session, setSession }: XtermTerminal
       terminalRef.current?.clear();
       if (!sessionRef.current && !isTauriRuntime()) {
         terminalRef.current?.write(webPrompt);
+        webPromptWrittenRef.current = true;
       }
     }
   }, [clearToken]);

@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import { AgentWorkspace } from "./components/AgentWorkspace";
-import { AiChatPanel } from "./components/AiChatPanel";
 import { BottomPanel } from "./components/BottomPanel";
 import { CommandPalette } from "./components/CommandPalette";
 import { useEditorCloseGuard } from "./components/EditorCloseGuard";
 import { EditorArea } from "./components/EditorArea";
+import { LazyAiChatPanel } from "./components/LazyAiChatPanel";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { Sidebar } from "./components/Sidebar";
 import { StatusBar } from "./components/StatusBar";
@@ -39,6 +39,7 @@ export function App() {
   const setLanguageServers = useLuxStore((state) => state.setLanguageServers);
   const setLanguageServersLoading = useLuxStore((state) => state.setLanguageServersLoading);
   const setDiagnosticsForPath = useLuxStore((state) => state.setDiagnosticsForPath);
+  const appendTerminalOutput = useLuxStore((state) => state.appendTerminalOutput);
   const clearDiagnostics = useLuxStore((state) => state.clearDiagnostics);
   const setEditorPreferences = useLuxStore((state) => state.setEditorPreferences);
   const setLocale = useLuxStore((state) => state.setLocale);
@@ -289,6 +290,7 @@ export function App() {
       if (event.type === "editorDocumentEdited") applyDocumentEdits(event.document.id, [], event.document);
       if (event.type === "editorDiagnosticsChanged") setDiagnosticsForPath(event.path, event.diagnostics);
       if (event.type === "gitStatusChanged") setGitStatus(event.status);
+      if (event.type === "terminalOutput") appendTerminalOutput(event.session_id, event.data);
       if (event.type === "settingsChanged" && event.key === KEYBINDINGS_SETTINGS_KEY) {
         void luxCommands.keybindingsGet().then(setKeybindingProfile).catch(() => undefined);
       }
@@ -299,7 +301,7 @@ export function App() {
       if (fsRefreshTimer !== undefined) window.clearTimeout(fsRefreshTimer);
       dispose?.();
     };
-  }, [applyDocumentEdits, closeDocument, setDiagnosticsForPath, setGitStatus, setKeybindingProfile, setWorkspace, updateOpenDocuments, upsertDocument]);
+  }, [appendTerminalOutput, applyDocumentEdits, closeDocument, setDiagnosticsForPath, setGitStatus, setKeybindingProfile, setWorkspace, updateOpenDocuments, upsertDocument]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -373,7 +375,7 @@ export function App() {
                 <>
                   <Separator className="resize-handle editor-group-separator" />
                   <Panel defaultSize="32%" minSize="300px" maxSize="48%">
-                    <AiChatPanel />
+                    <LazyAiChatPanel presentation="panel" />
                   </Panel>
                 </>
               )}
@@ -426,7 +428,7 @@ export function App() {
             <>
               <Separator className="resize-handle editor-group-separator" />
               <Panel defaultSize="32%" minSize="300px" maxSize="48%">
-                <AiChatPanel />
+                <LazyAiChatPanel presentation="panel" />
               </Panel>
             </>
           )}

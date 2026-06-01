@@ -1,3 +1,7 @@
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -54,6 +58,7 @@ pub struct RecentWorkspace {
 pub struct WorkspaceId(pub Uuid);
 
 impl WorkspaceId {
+    #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -92,6 +97,7 @@ pub enum FsEntryKind {
 pub struct BufferId(pub Uuid);
 
 impl BufferId {
+    #[must_use]
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -155,6 +161,7 @@ impl From<&DocumentSnapshot> for DocumentEditResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SearchOptions {
     pub case_sensitive: bool,
     pub whole_word: bool,
@@ -495,7 +502,7 @@ pub struct LspDocumentSymbol {
     pub kind: LspSymbolKind,
     pub range: LspRange,
     pub selection_range: LspRange,
-    pub children: Vec<LspDocumentSymbol>,
+    pub children: Vec<Self>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]

@@ -6,6 +6,7 @@ import { App } from "./App";
 import { EditorCloseGuardProvider } from "./components/EditorCloseGuard";
 import "./styles/tokens.css";
 import "./styles/app.css";
+import "./styles/ai-chat.css";
 import "./styles/ai-tool-calls.css";
 
 const queryClient = new QueryClient({

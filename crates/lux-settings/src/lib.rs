@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::PathBuf};
+#![deny(clippy::pedantic)]
+#![deny(clippy::nursery)]
+#![allow(clippy::missing_errors_doc)]
+
+use std::{cmp::Reverse, collections::BTreeMap, fs, path::PathBuf};
 
 use chrono::Utc;
 use lux_core::{
@@ -27,6 +31,7 @@ impl SettingsStore {
         Ok(Self { path, values })
     }
 
+    #[must_use]
     pub fn get(&self, _scope: SettingsScope, key: &str) -> Option<SettingValue> {
         self.values.get(key).cloned()
     }
@@ -54,8 +59,7 @@ impl SettingsStore {
         self.values
             .get(KEYBINDINGS_KEY)
             .and_then(|setting| serde_json::from_value(setting.value.clone()).ok())
-            .map(normalize_keybinding_profile)
-            .unwrap_or_else(default_keybinding_profile)
+            .map_or_else(default_keybinding_profile, normalize_keybinding_profile)
     }
 
     pub fn set_keybinding_profile(
@@ -79,7 +83,7 @@ impl SettingsStore {
 
         let mut workspaces: Vec<RecentWorkspace> =
             serde_json::from_str(&fs::read_to_string(path)?)?;
-        workspaces.sort_by(|left, right| right.last_opened_at.cmp(&left.last_opened_at));
+        workspaces.sort_by_key(|workspace| Reverse(workspace.last_opened_at));
         Ok(workspaces)
     }
 
@@ -131,6 +135,7 @@ impl SettingsStore {
     }
 }
 
+#[must_use]
 pub fn default_keybinding_profile() -> KeybindingProfile {
     KeybindingProfile {
         id: "default".to_string(),
@@ -256,7 +261,7 @@ fn normalize_keybinding_profile(profile: KeybindingProfile) -> KeybindingProfile
 fn normalize_key_sequence(value: &str) -> String {
     value
         .split_whitespace()
-        .filter_map(|chord| normalize_key_chord(chord))
+        .filter_map(normalize_key_chord)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -313,10 +318,9 @@ fn normalize_key_name(value: &str) -> String {
         key if key.len() == 1 => key.to_ascii_uppercase(),
         _ => {
             let mut chars = value.chars();
-            match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => String::new(),
-            }
+            chars.next().map_or_else(String::new, |first| {
+                first.to_uppercase().collect::<String>() + chars.as_str()
+            })
         }
     }
 }
@@ -349,7 +353,7 @@ mod tests {
             .record_recent_workspace(&workspace("first", first_root.clone()))
             .expect("first workspace should record");
         store
-            .record_recent_workspace(&workspace("second", second_root.clone()))
+            .record_recent_workspace(&workspace("second", second_root))
             .expect("second workspace should record");
         let workspaces = store
             .record_recent_workspace(&workspace("first", first_root.clone()))
@@ -379,7 +383,7 @@ mod tests {
             .record_recent_workspace(&workspace("first", first_root.clone()))
             .expect("first workspace should record");
         store
-            .record_recent_workspace(&workspace("second", second_root.clone()))
+            .record_recent_workspace(&workspace("second", second_root))
             .expect("second workspace should record");
 
         let workspaces = store
@@ -485,7 +489,7 @@ mod tests {
                     Keybinding {
                         command: "workbench.action.files.saveAll".to_string(),
                         key: "ctrl+k ctrl+s".to_string(),
-                        when: Some("".to_string()),
+                        when: Some(String::new()),
                     },
                 ],
             })
