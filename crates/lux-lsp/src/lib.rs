@@ -1192,12 +1192,13 @@ impl LspSession {
     }
 }
 
+#[cfg(windows)]
 fn hide_process_window(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    command.creation_flags(CREATE_NO_WINDOW);
 }
+
+#[cfg(not(windows))]
+fn hide_process_window(_command: &mut Command) {}
 
 impl Drop for LspSession {
     fn drop(&mut self) {

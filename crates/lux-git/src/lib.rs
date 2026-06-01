@@ -115,12 +115,13 @@ fn git_command() -> Command {
     command
 }
 
+#[cfg(windows)]
 fn hide_process_window(command: &mut Command) {
-    #[cfg(windows)]
-    {
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
+    command.creation_flags(CREATE_NO_WINDOW);
 }
+
+#[cfg(not(windows))]
+fn hide_process_window(_command: &mut Command) {}
 
 fn parse_status(raw: &str) -> GitStatus {
     let mut branch = None;

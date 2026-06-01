@@ -115,11 +115,25 @@ fn is_publishable_watch_path(root: &Path, path: &Path) -> bool {
 }
 
 fn normalize_watch_event_path(root: &Path, path: PathBuf) -> PathBuf {
-    if path.is_absolute() {
+    if path.is_absolute() || looks_like_windows_absolute_path(&path) {
         path
     } else {
         root.join(path)
     }
+}
+
+fn looks_like_windows_absolute_path(path: &Path) -> bool {
+    let raw = path.to_string_lossy();
+    let Some((drive, rest)) = raw.split_once(':') else {
+        return false;
+    };
+
+    drive.len() == 1
+        && drive
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && (rest.starts_with('/') || rest.starts_with('\\'))
 }
 
 fn path_is_within_root(root: &Path, path: &Path) -> bool {
