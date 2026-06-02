@@ -1,4 +1,4 @@
-﻿import type { MessageKey } from "./i18n";
+import type { MessageKey } from "./i18n";
 import type { AiIndexStatus, ProjectLoadStage, ProjectLoadState } from "./store";
 
 export type ProjectLoadChecklistItem = {
@@ -47,8 +47,8 @@ function deriveProjectLoadStage({ aiIndexStatus, fileTreeLoading, languageServer
   if (languageServersLoading) return "services";
   // AI indexing is a background operation; do not block UI
   // if (projectIndexingEnabled && aiIndexStatus === "indexing") return "indexing";
-  if (projectLoad.active && projectLoad.stage !== "indexing") return projectLoad.stage;
-  return projectLoad.stage === "ready" ? "ready" : "idle";
+  // AI indexing never blocks; UI always shows ready after filetree+LSP
+  return "ready";
 }
 
 function deriveProjectLoadProgress({ aiIndexStatus, fileTreeLoading, languageServersLoading, projectIndexingEnabled, projectLoad, stage }: ProjectLoadSignals & { stage: ProjectLoadStage }): number {
