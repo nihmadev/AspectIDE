@@ -12,12 +12,13 @@
   "type": "module",
   "scripts": {
     "dev": "node ./scripts/kill-dev-port.mjs 5173 && vite --host 127.0.0.1 --port 5173 --strictPort",
-    "build": "pnpm run verify:ai-prompt && pnpm run verify:ai-tools && tsc --noEmit && vite build",
+    "build": "pnpm run verify:ai-index && pnpm run verify:ai-prompt && pnpm run verify:ai-tools && tsc --noEmit && vite build",
     "compare:ai-agents": "node ./scripts/compare-ai-agents.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "benchmark:ai-agent": "node ./scripts/benchmark-ai-agent.mjs",
     "benchmark:ai-prompt": "node ./scripts/benchmark-ai-prompt.mjs",
     "verify:ai-tools": "node ./scripts/verify-ai-tools.mjs",
+    "verify:ai-index": "node ./scripts/verify-ai-index.mjs",
     "verify:ai-prompt": "node ./scripts/verify-ai-prompt.mjs",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"

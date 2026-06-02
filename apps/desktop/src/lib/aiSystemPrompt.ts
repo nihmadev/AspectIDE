@@ -131,6 +131,7 @@ export function buildLuxIdeSystemPrompt(context: LuxIdeSystemPromptContext) {
 
 function buildRuntimeSection(context: LuxIdeSystemPromptContext, selectedModel: string, agentName: string) {
   const workspaceLine = context.workspace ? `Workspace root: ${context.workspace.root}` : "Workspace root: none open";
+  const toolRoundLimit = context.preferences.toolRoundLimit === null ? "unlimited" : String(context.preferences.toolRoundLimit);
   const approvalLine = context.preferences.toolApprovalMode === "full-access"
     ? "Tool approval mode: Full Access. Dangerous tools auto-run only through Lux workspace guards."
     : "Tool approval mode: Default. Dangerous tools require explicit user approval.";
@@ -143,7 +144,7 @@ function buildRuntimeSection(context: LuxIdeSystemPromptContext, selectedModel: 
     `Provider: ${context.provider.name} (${context.provider.protocol})`,
     `Model: ${selectedModel}`,
     `Reasoning effort: ${context.preferences.selectedEffortId}`,
-    `Tool round limit: ${context.preferences.toolRoundLimit}`,
+    `Tool round limit: ${toolRoundLimit}`,
     approvalLine,
   ].join("\n");
 }

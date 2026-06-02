@@ -34,6 +34,31 @@ export function NumberSetting({ detail, label, max, min, onChange, step = 1, val
   );
 }
 
+export function ToolRoundLimitSetting({ detail, fallbackLimitedValue, label, limitedLabel, max, min, onChange, step = 1, unlimitedLabel, value }: { detail?: string; fallbackLimitedValue: number; label: string; limitedLabel: string; max: number; min: number; onChange: (value: number | null) => void; step?: number; unlimitedLabel: string; value: number | null }) {
+  const limitedValue = value ?? fallbackLimitedValue;
+  const boundedLimitedValue = Math.min(max, Math.max(min, limitedValue));
+  return (
+    <SettingField detail={detail} label={label}>
+      <div className="settings-compound-control">
+        <div className="settings-segmented" role="radiogroup" aria-label={label}>
+          <button type="button" role="radio" aria-checked={value === null} data-active={value === null} onClick={() => onChange(null)}>{unlimitedLabel}</button>
+          <button type="button" role="radio" aria-checked={value !== null} data-active={value !== null} onClick={() => onChange(boundedLimitedValue)}>{limitedLabel}</button>
+        </div>
+        {value !== null && (
+          <div className="settings-stepper">
+            <button type="button" aria-label={`Decrease ${label}`} disabled={boundedLimitedValue <= min} onClick={() => onChange(boundedLimitedValue - step)}><Minus size={13} /></button>
+            <input aria-label={label} type="number" min={min} max={max} value={boundedLimitedValue} onChange={(event) => {
+              if (event.currentTarget.value.trim() === "") return;
+              onChange(Number(event.currentTarget.value));
+            }} />
+            <button type="button" aria-label={`Increase ${label}`} disabled={boundedLimitedValue >= max} onClick={() => onChange(boundedLimitedValue + step)}><Plus size={13} /></button>
+          </div>
+        )}
+      </div>
+    </SettingField>
+  );
+}
+
 export function SelectSetting<T extends string>({ detail, label, onChange, options, value }: { detail?: string; label: string; onChange: (value: T) => void; options: Array<{ label: string; value: T }>; value: T }) {
   return (
     <SettingField detail={detail} label={label}>
@@ -51,6 +76,14 @@ export function TextSetting({ detail, label, onChange, password = false, placeho
   return (
     <SettingField detail={detail} label={label} wide={wide}>
       <input className="settings-input-control" aria-label={label} type={password ? "password" : "text"} value={value} placeholder={placeholder} readOnly={readOnly} spellCheck={false} onChange={(event) => onChange(event.currentTarget.value)} />
+    </SettingField>
+  );
+}
+
+export function TextareaSetting({ detail, label, onChange, placeholder, rows = 8, value, wide = false }: { detail?: string; label: string; onChange: (value: string) => void; placeholder?: string; rows?: number; value: string; wide?: boolean }) {
+  return (
+    <SettingField detail={detail} label={label} wide={wide}>
+      <textarea className="settings-textarea-control" aria-label={label} value={value} placeholder={placeholder} rows={rows} spellCheck={false} onChange={(event) => onChange(event.currentTarget.value)} />
     </SettingField>
   );
 }
@@ -82,13 +115,13 @@ export function ToggleSetting({ checked, detail, label, onChange }: { checked: b
 
 function SettingField({ children, detail, label, wide = false }: { children: ReactNode; detail?: string; label: string; wide?: boolean }) {
   return (
-    <label className="settings-field" data-wide={wide}>
+    <div className="settings-field" data-wide={wide}>
       <span className="settings-field-copy">
         <strong>{label}</strong>
         {detail && <small>{detail}</small>}
       </span>
       {children}
-    </label>
+    </div>
   );
 }
 

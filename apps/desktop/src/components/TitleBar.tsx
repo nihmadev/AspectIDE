@@ -34,7 +34,7 @@ async function handleWindowAction(action: "minimize" | "maximize" | "close" | "d
 }
 
 function isTitleBarInteractiveTarget(target: EventTarget | null) {
-  if (!(target instanceof HTMLElement)) return false;
+  if (!(target instanceof Element)) return false;
   return Boolean(target.closest("button, a, input, textarea, select, [role='menu'], .top-menu, .mode-switcher, .title-actions, .window-controls"));
 }
 

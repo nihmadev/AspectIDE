@@ -2,6 +2,7 @@ import {
   deriveSegmentContent,
   type AiChatAttachmentInput,
   type AiChatMessage,
+  type AiChatResponseTiming,
   type AiChatSendInput,
   type AiChatToolCall,
   type AiToolApprovalDecision,
@@ -9,7 +10,8 @@ import {
   type AiToolApprovalState,
 } from "./aiChatTypes";
 import { createTurnTimeline, type TurnTimeline } from "./aiChatTimeline";
-import { firstChoice, readReasoningDelta, requestChatCompletion, type ChatCompletionMessage, type OpenAiToolCall } from "./aiChatTransport";
+import { firstChoice, readReasoningDelta, requestChatCompletion, type ChatCompletionMessage, type ChatCompletionResult, type OpenAiToolCall } from "./aiChatTransport";
+import { buildAiProjectIndexSnapshot } from "./aiProjectIndex";
 import { createDeleteApproval, createPatchApproval, createShellApproval, createStrReplaceApproval, createTerminalWriteApproval, createWriteApproval } from "./aiRuntimeApprovals";
 import { checkpointTool } from "./aiRuntimeCheckpoints";
 import { addDirectContextBudgetItems, addToolContextBudgetItems, buildContextBudgeterNextActions, contextBudgeterUnavailable, parseToolContent, rankContextBudgetItems, selectContextBudgetItems, type ContextBudgetItem } from "./aiRuntimeContextBudget";
@@ -65,6 +67,10 @@ type RuntimeToolSession = {
   todos: SessionTodo[];
 };
 
+type ResponseTimingAccumulator = Omit<AiChatResponseTiming, "overheadMs" | "totalMs"> & {
+  startedAtMs: number;
+};
+
 type ToolExecutionUi = {
   setApproval: (approval: AiToolApprovalState) => void;
   setRunning: (approval?: AiToolApprovalState) => void;
@@ -81,6 +87,7 @@ export async function readChatAttachment(file: File): Promise<AiChatAttachmentIn
 }
 
 export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatMessage> {
+  const timing = createResponseTimingAccumulator();
   const assistantMessage: AiChatMessage = {
     id: crypto.randomUUID(),
     role: "assistant",
@@ -96,14 +103,16 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
   const timeline = createTurnTimeline((patch) => input.onAssistantMessageUpdate(assistantMessage.id, patch));
   const toolRoundLimit = input.preferences.toolRoundLimit;
 
-  for (let round = 0; round < toolRoundLimit; round += 1) {
+  for (let round = 0; toolRoundLimit === null || round < toolRoundLimit; round += 1) {
     throwIfAborted(input.abortSignal);
     input.onStatusChange?.(round === 0 ? "thinking" : "running-tools");
     timeline.beginRound();
+    const modelCallStartedAtMs = performance.now();
     const response = await requestRuntimeChatCompletion(input, messages, (progress) => {
       input.onStatusChange?.(progress.content ? "streaming" : "thinking");
       timeline.setStreaming(progress);
     });
+    recordModelTiming(timing, response, modelCallStartedAtMs);
     const choice = firstChoice(response.body);
     const assistant = normalizeAssistantMessage(choice?.message);
     timeline.commitRound(assistant.content ?? "", assistant.reasoning ?? "");
@@ -113,7 +122,7 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
       if (deriveSegmentContent(timeline.snapshot().segments ?? []).trim().length === 0) {
         timeline.appendText("Done.");
       }
-      const finalMessage = { ...assistantMessage, ...timeline.snapshot() };
+      const finalMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing);
       input.onAssistantMessageUpdate(assistantMessage.id, finalMessage);
       return finalMessage;
     }
@@ -128,6 +137,7 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
     timeline.addToolCalls(roundToolCalls);
     input.onStatusChange?.("running-tools");
 
+    const toolsStartedAtMs = performance.now();
     const toolResults = await Promise.all(roundToolCalls.map(async (uiCall, index) => {
       const requestedCall = requestedToolCalls[index];
       try {
@@ -158,17 +168,18 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
         };
       }
     }));
+    recordToolTiming(timing, toolsStartedAtMs, roundToolCalls.length);
 
     messages.push(...toolResults);
   }
 
-  await requestToolLimitFinalAnswer(input, messages, timeline, toolRoundLimit);
-  const limitedMessage = { ...assistantMessage, ...timeline.snapshot() };
+  if (toolRoundLimit !== null) await requestToolLimitFinalAnswer(input, messages, timeline, toolRoundLimit, timing);
+  const limitedMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing);
   input.onAssistantMessageUpdate(assistantMessage.id, limitedMessage);
   return limitedMessage;
 }
 
-async function requestToolLimitFinalAnswer(input: AiChatSendInput, messages: ChatCompletionMessage[], timeline: TurnTimeline, toolRoundLimit: number) {
+async function requestToolLimitFinalAnswer(input: AiChatSendInput, messages: ChatCompletionMessage[], timeline: TurnTimeline, toolRoundLimit: number, timing: ResponseTimingAccumulator) {
   throwIfAborted(input.abortSignal);
   const toolCalls = timeline.toolCalls();
   const successfulTools = toolCalls.filter((toolCall) => toolCall.status === "success").length;
@@ -190,11 +201,13 @@ async function requestToolLimitFinalAnswer(input: AiChatSendInput, messages: Cha
   let streamedAnswer = "";
   try {
     input.onStatusChange?.("thinking");
+    const modelCallStartedAtMs = performance.now();
     const response = await requestRuntimeChatCompletion(input, messages, (progress) => {
       streamedAnswer = progress.content || streamedAnswer;
       input.onStatusChange?.(progress.content ? "streaming" : "thinking");
       timeline.setStreaming(progress);
     }, { toolsEnabled: false });
+    recordModelTiming(timing, response, modelCallStartedAtMs);
     const assistant = normalizeAssistantMessage(firstChoice(response.body)?.message);
     timeline.commitRound(assistant.content ?? "", assistant.reasoning ?? "");
     if ((assistant.content?.trim() || streamedAnswer.trim())) return;
@@ -210,6 +223,66 @@ async function requestToolLimitFinalAnswer(input: AiChatSendInput, messages: Cha
       "Increase Settings -> AI -> Tool rounds for longer autonomous tasks, then send a follow-up if more work is needed.",
     ].join("\n\n"));
   }
+}
+
+function createResponseTimingAccumulator(): ResponseTimingAccumulator {
+  return {
+    startedAtMs: performance.now(),
+    modelMs: 0,
+    toolMs: 0,
+    firstTokenMs: null,
+    streamMs: null,
+    modelCalls: 0,
+    toolCalls: 0,
+    rounds: 0,
+    streamed: false,
+  };
+}
+
+function recordModelTiming(timing: ResponseTimingAccumulator, response: ChatCompletionResult, modelCallStartedAtMs: number) {
+  timing.modelCalls += 1;
+  timing.rounds += 1;
+  timing.modelMs += response.timing.durationMs;
+  timing.streamed ||= response.streamed;
+
+  if (response.timing.firstTokenMs !== null && timing.firstTokenMs === null) {
+    timing.firstTokenMs = Math.max(0, Math.round(modelCallStartedAtMs + response.timing.firstTokenMs - timing.startedAtMs));
+  }
+
+  if (response.timing.streamMs !== null) {
+    timing.streamMs = (timing.streamMs ?? 0) + response.timing.streamMs;
+  }
+}
+
+function recordToolTiming(timing: ResponseTimingAccumulator, startedAtMs: number, toolCalls: number) {
+  timing.toolMs += Math.max(0, Math.round(performance.now() - startedAtMs));
+  timing.toolCalls += toolCalls;
+}
+
+function assistantMessageWithTiming(assistantMessage: AiChatMessage, patch: Partial<AiChatMessage>, timing: ResponseTimingAccumulator): AiChatMessage {
+  const responseTiming = finalizeResponseTiming(timing);
+  return {
+    ...assistantMessage,
+    ...patch,
+    responseDurationMs: responseTiming.totalMs,
+    responseTiming,
+  };
+}
+
+function finalizeResponseTiming(timing: ResponseTimingAccumulator): AiChatResponseTiming {
+  const totalMs = Math.max(0, Math.round(performance.now() - timing.startedAtMs));
+  return {
+    totalMs,
+    modelMs: timing.modelMs,
+    toolMs: timing.toolMs,
+    overheadMs: Math.max(0, totalMs - timing.modelMs - timing.toolMs),
+    firstTokenMs: timing.firstTokenMs,
+    streamMs: timing.streamMs,
+    modelCalls: timing.modelCalls,
+    toolCalls: timing.toolCalls,
+    rounds: timing.rounds,
+    streamed: timing.streamed,
+  };
 }
 
 function requestRuntimeChatCompletion(
@@ -350,11 +423,23 @@ async function repoMap(maxFiles: number): Promise<ToolResult> {
 }
 
 async function workspaceIndex(args: UnknownRecord, input: AiChatSendInput): Promise<ToolResult> {
+  const startedAtMs = performance.now();
   const maxFiles = clamp(numberArg(args, "maxFiles", 60), 1, 180);
   const maxScan = clamp(numberArg(args, "maxScan", input.preferences.maxIndexedFiles), 500, 20_000);
   const entries = await luxCommands.fsListFiles(maxScan);
   const files = entries.filter((entry) => entry.kind === "file" && !isLowSignalRelatedPath(entry.path));
   const descriptors = files.map((entry) => createRelatedFileDescriptor(entry, input.workspace?.root ?? ""));
+  const projectSnapshot = input.workspace
+    ? buildAiProjectIndexSnapshot(entries, {
+        finishedAtMs: performance.now(),
+        includeImages: input.preferences.includeImages,
+        maxIndexedFiles: input.preferences.maxIndexedFiles,
+        scanLimit: maxScan,
+        source: "workspace-scan",
+        startedAtMs,
+        workspaceRoot: input.workspace.root,
+      })
+    : null;
   const byLanguage = topCounts(descriptors.map((file) => languageForPath(file.basenameLower)), 20);
   const byDirectory = topCounts(descriptors.map((file) => topDirectory(file.relativePath)), 24);
   const important = descriptors
@@ -377,8 +462,24 @@ async function workspaceIndex(args: UnknownRecord, input: AiChatSendInput): Prom
       enabled: input.preferences.projectIndexingEnabled,
       realtime: input.preferences.realtimeIndexing,
       maxIndexedFiles: input.preferences.maxIndexedFiles,
+      scanLimit: maxScan,
       includeImages: input.preferences.includeImages,
     },
+    indexHealth: projectSnapshot ? {
+      quality: projectSnapshot.quality,
+      source: projectSnapshot.source,
+      scanLimit: projectSnapshot.scanLimit,
+      scanTruncated: projectSnapshot.scanTruncated,
+      ignoredFiles: projectSnapshot.ignoredFiles,
+      truncatedFiles: projectSnapshot.truncatedFiles,
+      sourceFiles: projectSnapshot.sourceFiles,
+      testFiles: projectSnapshot.testFiles,
+      rulesFiles: projectSnapshot.rulesFiles,
+      docsFiles: projectSnapshot.docsFiles,
+      memoryFiles: projectSnapshot.memoryFiles,
+      durationMs: projectSnapshot.durationMs,
+      contextAnchors: projectSnapshot.importantFiles,
+    } : null,
     languageMix: byLanguage,
     topDirectories: byDirectory,
     importantFiles: important.map(compactIndexedFile),

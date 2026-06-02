@@ -45,6 +45,19 @@ export type AiChatToolCall = {
   };
 };
 
+export type AiChatResponseTiming = {
+  totalMs: number;
+  modelMs: number;
+  toolMs: number;
+  overheadMs: number;
+  firstTokenMs: number | null;
+  streamMs: number | null;
+  modelCalls: number;
+  toolCalls: number;
+  rounds: number;
+  streamed: boolean;
+};
+
 // Assistant turns are rendered as an ordered timeline, so reasoning, text and
 // tool calls keep their exact model order instead of being flattened.
 export type AiMessageSegment =
@@ -60,6 +73,7 @@ export type AiChatMessage = {
   toolCalls?: AiChatToolCall[];
   segments?: AiMessageSegment[];
   responseDurationMs?: number;
+  responseTiming?: AiChatResponseTiming;
   timestamp: number;
 };
 

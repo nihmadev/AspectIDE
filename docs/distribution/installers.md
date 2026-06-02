@@ -38,3 +38,15 @@ Before enabling updater artifacts for a release, verify all of the following:
 - `plugins.updater.pubkey` contains the public key matching the signing private key.
 - `plugins.updater.endpoints` points at the production update manifest host, not a local or placeholder domain.
 - `updater:default` or narrower updater permissions are added only when the frontend exposes a real update workflow.
+
+## GitHub Releases
+
+Release installers are built by `.github/workflows/release.yml` from a clean git tag. The tag must match the app version in both `package.json` and `apps/desktop/src-tauri/tauri.conf.json`.
+
+Release flow:
+
+1. Update both version fields to the same semantic version.
+2. Push a tag such as `v1.0.0`, or run the `Release Installers` workflow manually with the same tag.
+3. The workflow runs quality gates, builds native Tauri bundles on Windows, macOS, and Linux runners, and publishes installer assets to the GitHub Release.
+
+Published assets include Windows NSIS installer, macOS app/dmg bundles, Linux AppImage/deb/rpm packages, `SHA256SUMS.txt`, and `release-manifest.json`. Public macOS releases still require Apple Developer ID signing and notarization secrets before they should be treated as fully trusted distribution builds.

@@ -13,13 +13,14 @@ import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { AI_PREFERENCES_KEY, normalizeAiPreferences } from "./lib/aiPreferences";
+import { buildAiProjectIndexSnapshot } from "./lib/aiProjectIndex";
 import { closedDocumentIdsForAllDocuments, closedDocumentIdsForDocumentInGroup } from "./lib/editorCloseTargets";
 import { normalizeLocale, UI_LOCALE_KEY } from "./lib/i18n";
 import { resetEditorFontZoom, toggleEditorMinimap, toggleEditorWordWrap, zoomEditorFontIn, zoomEditorFontOut } from "./lib/editorPreferenceCommands";
 import { EDITOR_PREFERENCES_KEY, normalizeEditorPreferences } from "./lib/editorPreferences";
 import { buildFileTreeDirectories, normalizePath } from "./lib/fileTree";
 import { createKeybindingDispatcher, KEYBINDINGS_SETTINGS_KEY } from "./lib/keybindings";
-import { useLuxStore, type Activity } from "./lib/store";
+import { createEmptyAiIndexState, useLuxStore, type Activity } from "./lib/store";
 import { luxCommands, subscribeLuxEvents } from "./lib/tauri";
 import { pickAndOpenWorkspace } from "./lib/workspaceActions";
 import type { RecentWorkspace, WorkspaceInfo } from "./lib/types";
@@ -27,7 +28,6 @@ import type { RecentWorkspace, WorkspaceInfo } from "./lib/types";
 export function App() {
   const setWorkspace = useLuxStore((state) => state.setWorkspace);
   const setFileEntries = useLuxStore((state) => state.setFileEntries);
-  const fileTreeDirectories = useLuxStore((state) => state.fileTreeDirectories);
   const setFileTreeDirectories = useLuxStore((state) => state.setFileTreeDirectories);
   const setFileTreeLoading = useLuxStore((state) => state.setFileTreeLoading);
   const setFileTreeError = useLuxStore((state) => state.setFileTreeError);
@@ -73,6 +73,7 @@ export function App() {
   const { requestCloseDocuments } = useEditorCloseGuard();
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
   const [bottomPanelMaximized, setBottomPanelMaximized] = useState(false);
+  const [aiIndexRefreshToken, setAiIndexRefreshToken] = useState(0);
   const keybindingDispatcherRef = useRef(createKeybindingDispatcher(keybindingProfile));
   const bottomPanelRef = useRef<PanelImperativeHandle | null>(null);
 
@@ -139,45 +140,55 @@ export function App() {
   }, [locale]);
 
   useEffect(() => {
-    if (!workspace || !aiPreferences.projectIndexingEnabled) {
-      setAiIndex({ status: aiPreferences.projectIndexingEnabled ? "idle" : "disabled", progress: 0, indexedFiles: 0, totalFiles: 0, updatedAt: null });
+    const scanLimit = aiIndexScanLimit(aiPreferences.maxIndexedFiles);
+    if (!workspace) {
+      setAiIndex(createEmptyAiIndexState(aiPreferences.projectIndexingEnabled ? "idle" : "disabled"));
       return;
     }
-
-    const files = Object.values(fileTreeDirectories)
-      .flat()
-      .filter((entry) => entry.kind === "file")
-      .filter((entry) => aiPreferences.includeImages || !isImagePath(entry.path))
-      .slice(0, aiPreferences.maxIndexedFiles);
-
-    if (files.length === 0) {
-      setAiIndex({ status: "idle", progress: 0, indexedFiles: 0, totalFiles: 0, updatedAt: null });
+    if (!aiPreferences.projectIndexingEnabled) {
+      setAiIndex({ ...createEmptyAiIndexState("disabled"), scanLimit, source: "workspace-scan", workspaceRoot: workspace.root });
       return;
     }
 
     let cancelled = false;
-    let indexedFiles = 0;
-    setAiIndex({ status: "indexing", progress: 0, indexedFiles: 0, totalFiles: files.length, updatedAt: null });
+    const startedAtMs = performance.now();
+    setAiIndex({
+      ...createEmptyAiIndexState("indexing"),
+      progress: 8,
+      scanLimit,
+      source: "workspace-scan",
+      workspaceRoot: workspace.root,
+    });
 
-    const tick = () => {
+    const indexTimer = window.setTimeout(() => {
       if (cancelled) return;
-      indexedFiles = Math.min(files.length, indexedFiles + Math.max(1, Math.ceil(files.length / 18)));
-      setAiIndex({
-        status: indexedFiles >= files.length ? "ready" : "indexing",
-        progress: Math.round((indexedFiles / files.length) * 100),
-        indexedFiles,
-        totalFiles: files.length,
-        updatedAt: indexedFiles >= files.length ? new Date().toISOString() : null,
-      });
-      if (indexedFiles < files.length) window.setTimeout(tick, 90);
-    };
+      void buildWorkspaceAiIndex(workspace, aiPreferences.includeImages, aiPreferences.maxIndexedFiles, scanLimit, startedAtMs)
+        .then((snapshot) => {
+          if (cancelled) return;
+          setAiIndex({
+            ...snapshot,
+            status: "ready",
+            progress: 100,
+            updatedAt: new Date().toISOString(),
+          });
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setAiIndex({
+            ...createEmptyAiIndexState("idle"),
+            lastError: readErrorMessage(error),
+            scanLimit,
+            source: "workspace-scan",
+            workspaceRoot: workspace.root,
+          });
+        });
+    }, 60);
 
-    const timer = window.setTimeout(tick, 120);
     return () => {
       cancelled = true;
-      window.clearTimeout(timer);
+      window.clearTimeout(indexTimer);
     };
-  }, [aiPreferences.includeImages, aiPreferences.maxIndexedFiles, aiPreferences.projectIndexingEnabled, fileTreeDirectories, setAiIndex, workspace]);
+  }, [aiIndexRefreshToken, aiPreferences.includeImages, aiPreferences.maxIndexedFiles, aiPreferences.projectIndexingEnabled, setAiIndex, workspace]);
 
   useEffect(() => {
     void luxCommands.keybindingsGet()
@@ -238,6 +249,7 @@ export function App() {
   useEffect(() => {
     let dispose: (() => void) | undefined;
     let fsRefreshTimer: number | undefined;
+    let aiIndexRefreshTimer: number | undefined;
     let fsRefreshInFlight = false;
     let fsRefreshQueued = false;
     const pendingFsRefreshRoots = new Map<string, WorkspaceInfo>();
@@ -277,12 +289,25 @@ export function App() {
       }, 180);
     };
 
+    const scheduleAiIndexRefresh = () => {
+      const preferences = useLuxStore.getState().aiPreferences;
+      if (!preferences.projectIndexingEnabled || !preferences.realtimeIndexing) return;
+      if (aiIndexRefreshTimer !== undefined) window.clearTimeout(aiIndexRefreshTimer);
+      aiIndexRefreshTimer = window.setTimeout(() => {
+        aiIndexRefreshTimer = undefined;
+        setAiIndexRefreshToken((token) => token + 1);
+      }, 650);
+    };
+
     void subscribeLuxEvents((event) => {
       if (event.type === "workspaceChanged") setWorkspace(event.workspace);
       if (event.type === "fsChanged") {
         const touchedRoots = workspaceRootsForChangedPath(event.path);
         for (const root of touchedRoots) pendingFsRefreshRoots.set(normalizePath(root.root), root);
-        if (touchedRoots.length > 0) scheduleFsRefresh();
+        if (touchedRoots.length > 0) {
+          scheduleFsRefresh();
+          scheduleAiIndexRefresh();
+        }
       }
       if (event.type === "editorDocumentClosed") closeDocument(event.document.id);
       if (event.type === "editorDocumentChanged") upsertDocument(event.document);
@@ -299,6 +324,7 @@ export function App() {
     });
     return () => {
       if (fsRefreshTimer !== undefined) window.clearTimeout(fsRefreshTimer);
+      if (aiIndexRefreshTimer !== undefined) window.clearTimeout(aiIndexRefreshTimer);
       dispose?.();
     };
   }, [appendTerminalOutput, applyDocumentEdits, closeDocument, setDiagnosticsForPath, setGitStatus, setKeybindingProfile, setWorkspace, updateOpenDocuments, upsertDocument]);
@@ -557,6 +583,23 @@ function showActivity(activity: Activity, setActiveActivity: (activity: Activity
   setSidebarVisible(true);
 }
 
+function aiIndexScanLimit(maxIndexedFiles: number) {
+  return Math.min(50_000, Math.max(maxIndexedFiles * 2, maxIndexedFiles + 1_000, 2_500));
+}
+
+async function buildWorkspaceAiIndex(workspace: WorkspaceInfo, includeImages: boolean, maxIndexedFiles: number, scanLimit: number, startedAtMs: number) {
+  const entries = await luxCommands.fsListFiles(scanLimit);
+  return buildAiProjectIndexSnapshot(entries, {
+    finishedAtMs: performance.now(),
+    includeImages,
+    maxIndexedFiles,
+    scanLimit,
+    source: "workspace-scan",
+    startedAtMs,
+    workspaceRoot: workspace.root,
+  });
+}
+
 async function refreshWorkspaceFileTree(workspace: WorkspaceInfo, clearTreeOnError: boolean, rootsToRefresh?: WorkspaceInfo[]) {
   const roots = workspaceRootsForRefresh(workspace, rootsToRefresh);
   try {
@@ -625,10 +668,6 @@ function pathIsInsideRoot(root: string, path: string) {
   const normalizedRoot = normalizePath(root);
   const normalizedPath = normalizePath(path);
   return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}/`);
-}
-
-function isImagePath(path: string) {
-  return /\.(avif|gif|ico|jpeg|jpg|png|svg|webp)$/i.test(path);
 }
 
 function readErrorMessage(error: unknown) {

@@ -21,7 +21,14 @@ export type OpenAiToolCall = {
 
 export type ChatCompletionResult = {
   body: unknown;
+  timing: ChatCompletionTiming;
   streamed: boolean;
+};
+
+export type ChatCompletionTiming = {
+  durationMs: number;
+  firstTokenMs: number | null;
+  streamMs: number | null;
 };
 
 export type StreamProgress = {
@@ -78,6 +85,7 @@ export async function requestChatCompletion(
     }
   }
 
+  const startedAtMs = performance.now();
   const response = desktopRuntime
     ? await luxCommands.aiChatCompletion({
       baseUrl: input.provider.baseUrl,
@@ -86,7 +94,7 @@ export async function requestChatCompletion(
     })
     : await requestBrowserChatCompletion(input, payload);
   throwIfAborted(input.abortSignal);
-  return { body: response.body, streamed: false };
+  return { body: response.body, streamed: false, timing: elapsedTiming(startedAtMs) };
 }
 
 export function firstChoice(value: unknown) {
@@ -164,6 +172,8 @@ function aiResponseError(status: number, body: unknown) {
 
 async function requestStreamingChatCompletion(input: ChatCompletionTransportInput, payload: UnknownRecord, onStreamProgress: (progress: StreamProgress) => void): Promise<ChatCompletionResult> {
   const streamId = crypto.randomUUID();
+  const startedAtMs = performance.now();
+  let firstTokenAtMs: number | null = null;
   let started = false;
   let cleanup: (() => void) | undefined;
   let abortListener: (() => void) | undefined;
@@ -207,6 +217,7 @@ async function requestStreamingChatCompletion(input: ChatCompletionTransportInpu
         if (event.streamId !== streamId || settled) return;
         if (event.kind === "chunk") {
           started = true;
+          firstTokenAtMs ??= performance.now();
           try {
             const progress = applyStreamChunk(accumulator, event.data);
             if (progress.content || progress.reasoning) onStreamProgress(progress);
@@ -218,7 +229,8 @@ async function requestStreamingChatCompletion(input: ChatCompletionTransportInpu
         }
         if (event.kind === "done") {
           started = true;
-          settle(() => resolve({ body: streamAccumulatorToCompletion(accumulator), streamed: true }));
+          const timing = streamTiming(startedAtMs, firstTokenAtMs, performance.now());
+          settle(() => resolve({ body: streamAccumulatorToCompletion(accumulator), streamed: true, timing }));
           return;
         }
         if (event.kind === "cancelled") {
@@ -246,6 +258,23 @@ async function requestStreamingChatCompletion(input: ChatCompletionTransportInpu
     cleanup?.();
     if (abortListener) input.abortSignal.removeEventListener("abort", abortListener);
   }
+}
+
+function elapsedTiming(startedAtMs: number): ChatCompletionTiming {
+  return {
+    durationMs: Math.max(0, Math.round(performance.now() - startedAtMs)),
+    firstTokenMs: null,
+    streamMs: null,
+  };
+}
+
+function streamTiming(startedAtMs: number, firstTokenAtMs: number | null, finishedAtMs: number): ChatCompletionTiming {
+  const firstTokenMs = firstTokenAtMs === null ? null : Math.max(0, Math.round(firstTokenAtMs - startedAtMs));
+  return {
+    durationMs: Math.max(0, Math.round(finishedAtMs - startedAtMs)),
+    firstTokenMs,
+    streamMs: firstTokenAtMs === null ? null : Math.max(0, Math.round(finishedAtMs - firstTokenAtMs)),
+  };
 }
 
 function createStreamAccumulator(): StreamAccumulator {

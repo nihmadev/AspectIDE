@@ -1,9 +1,8 @@
-import { ArrowDown, Brain, PanelRightClose, Plus, RotateCcw, Sparkles, Wifi, X } from "lucide-react";
+import { ArrowDown, Brain, MessageSquarePlus, PanelRightClose, Plus, RotateCcw, Sparkles, Wifi, X } from "lucide-react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AiChatComposer } from "./ai-chat/AiChatComposer";
 import { AiChatMessages } from "./ai-chat/AiChatMessages";
-import { AiChatSessionBar, compareAiChatSessions } from "./ai-chat/AiChatSessionBar";
 import { buildAiChatContextUsageSummary, formatCompactTokens } from "../lib/aiChatContextUsage";
 import { loadAiChatHistory, saveAiChatHistory } from "../lib/aiChatHistory";
 import { aiChatSessionTitle, aiChatStatusLabel } from "../lib/aiChatPresentation";
@@ -37,11 +36,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const activeChatSession = useLuxStore(selectActiveAiChatSession);
   const activeAiChatSessionId = useLuxStore((state) => state.activeAiChatSessionId);
   const appendAiChatMessage = useLuxStore((state) => state.appendAiChatMessage);
-  const closeAiChatSession = useLuxStore((state) => state.closeAiChatSession);
   const createAiChatSession = useLuxStore((state) => state.createAiChatSession);
   const replaceAiChatMessages = useLuxStore((state) => state.replaceAiChatMessages);
   const restoreAiChatSession = useLuxStore((state) => state.restoreAiChatSession);
-  const setActiveAiChatSession = useLuxStore((state) => state.setActiveAiChatSession);
   const setAiChatSessions = useLuxStore((state) => state.setAiChatSessions);
   const setAiPreferences = useLuxStore((state) => state.setAiPreferences);
   const setAiChatSessionStatus = useLuxStore((state) => state.setAiChatSessionStatus);
@@ -83,7 +80,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const streamingMessageId = activeSessionSending
     ? [...messages].reverse().find((entry) => entry.role === "assistant")?.id ?? null
     : null;
-  const sortedChatSessions = useMemo(() => [...aiChatSessions].sort(compareAiChatSessions), [aiChatSessions]);
   const isAgentHome = presentation === "agent" && messages.length === 0;
 
   const activeDocument = useMemo(
@@ -366,7 +362,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       timestamp: Date.now(),
     };
     const history = overrideHistory ?? useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId)?.messages ?? [];
-    const startedAt = performance.now();
     const abortController = new AbortController();
     abortControllerRef.current = abortController;
     appendAiChatMessage(sessionId, userMessage);
@@ -406,12 +401,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         onStatusChange: (status) => setAiChatSessionStatus(sessionId, statusToSessionStatus(status)),
         onToolApproval: requestToolApproval,
       });
-      const durationMs = Math.max(0, Math.round(performance.now() - startedAt));
-      if (aiPreferences.showResponseDuration) {
-        const sessionMessages = useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId)?.messages ?? [];
-        const finalAssistantMessage = [...sessionMessages].reverse().find((candidate) => candidate.role === "assistant");
-        if (finalAssistantMessage) updateAiChatMessage(sessionId, finalAssistantMessage.id, { responseDurationMs: durationMs });
-      }
       setAiChatSessionStatus(sessionId, "idle");
     } catch (error) {
       const errorMessage = formatAiError(error, t);
@@ -490,22 +479,16 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                 <Wifi size={13} />
                 <span>{providerStatusLabel}</span>
               </button>
-              <button className="icon-button compact" type="button" aria-label={t("agent.newChat")} title={t("agent.newChat")} onClick={() => createAiChatSession(workspace?.root ?? null)}>
-                <Plus size={15} />
-              </button>
+              {presentation !== "agent" && (
+                <button className="icon-button compact" type="button" aria-label={t("agent.newChat")} title={t("agent.newChat")} onClick={() => createAiChatSession(workspace?.root ?? null)}>
+                  <Plus size={15} />
+                </button>
+              )}
               {showCloseButton && <button className="icon-button compact" type="button" aria-label={t("aiChat.closeChat")} title={t("aiChat.closeChat")} onClick={() => setAiChatOpen(false)}>
                 <PanelRightClose size={15} />
               </button>}
             </div>
           </header>
-          <AiChatSessionBar
-            activeSessionId={activeAiChatSessionId}
-            closeSession={closeAiChatSession}
-            restoreSession={restoreAiChatSession}
-            sessions={sortedChatSessions}
-            setActiveSession={setActiveAiChatSession}
-            t={t}
-          />
         </>
       )}
 
@@ -573,7 +556,7 @@ function AiChatClosedNotice({ onRestore, t }: { onRestore: () => void; t: Transl
     <div className="ai-chat-closed-notice" role="status">
       <span>{t("aiChat.closedNotice")}</span>
       <button type="button" onClick={onRestore}>
-        <RotateCcw size={13} />
+        <MessageSquarePlus size={13} />
         <span>{t("aiChat.restoreChat")}</span>
       </button>
     </div>

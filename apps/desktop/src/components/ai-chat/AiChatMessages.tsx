@@ -5,7 +5,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { lexer, type Token, type Tokens } from "marked";
 import { AiToolCallsGroup } from "../AiToolCall";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import type { AiChatMessage, AiMessageSegment, AiToolApprovalDecision } from "../../lib/aiChatTypes";
+import type { AiChatMessage, AiChatResponseTiming, AiMessageSegment, AiToolApprovalDecision } from "../../lib/aiChatTypes";
 
 type AiChatMessagesProps = {
   messages: AiChatMessage[];
@@ -84,7 +84,7 @@ const AiChatMessageView = memo(function AiChatMessageView({ message, onApprovalD
         t={t}
       />
       {message.role === "assistant" && showResponseDuration && typeof message.responseDurationMs === "number" && (
-        <div className="ai-chat-response-duration">{formatResponseDuration(message.responseDurationMs, t)}</div>
+        <div className="ai-chat-response-duration" title={formatResponseTimingTitle(message, t)}>{formatResponseDuration(message.responseDurationMs, t)}</div>
       )}
     </article>
   );
@@ -95,6 +95,33 @@ function formatResponseDuration(durationMs: number, t: TranslateFn) {
     milliseconds: durationMs,
     seconds: (durationMs / 1000).toFixed(durationMs >= 10_000 ? 1 : 2),
   });
+}
+
+function formatResponseTimingTitle(message: AiChatMessage, t: TranslateFn) {
+  const timing = message.responseTiming;
+  if (!timing) return formatResponseDuration(message.responseDurationMs ?? 0, t);
+  return t("aiChat.responseTiming.detail", {
+    total: formatTimingMs(timing.totalMs, t),
+    model: formatTimingMs(timing.modelMs, t),
+    firstToken: formatNullableTimingMs(timing.firstTokenMs, t),
+    stream: formatNullableTimingMs(timing.streamMs, t),
+    tools: formatTimingMs(timing.toolMs, t),
+    overhead: formatTimingMs(timing.overheadMs, t),
+    modelCalls: timing.modelCalls,
+    toolCalls: timing.toolCalls,
+    rounds: timing.rounds,
+    mode: timing.streamed ? t("aiChat.responseTiming.streamed") : t("aiChat.responseTiming.request"),
+  });
+}
+
+function formatNullableTimingMs(value: number | null, t: TranslateFn) {
+  return value === null ? "-" : formatTimingMs(value, t);
+}
+
+function formatTimingMs(value: number, t: TranslateFn) {
+  if (value < 1_000) return t("aiChat.responseTiming.milliseconds", { milliseconds: value });
+  const seconds = (value / 1_000).toFixed(value >= 10_000 ? 1 : 2);
+  return t("aiChat.responseDuration", { milliseconds: value, seconds });
 }
 
 function AiMessageBody({ message, streaming, onApprovalDecision, t }: {

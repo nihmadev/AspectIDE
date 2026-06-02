@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { defaultAiPreferences, mergeAiPreferences, type AiPreferences } from "./aiPreferences";
 import type { AiChatMessage } from "./aiChatTypes";
+import type { AiProjectIndexBucket, AiProjectIndexFile, AiProjectIndexQuality, AiProjectIndexSource } from "./aiProjectIndex";
 import { defaultEditorPreferences, mergeEditorPreferences, type EditorPreferences } from "./editorPreferences";
 import { normalizePath, type FileTreeDirectories } from "./fileTree";
 import { DEFAULT_LOCALE, type Locale } from "./i18n";
@@ -19,6 +20,25 @@ export type AiIndexState = {
   progress: number;
   indexedFiles: number;
   totalFiles: number;
+  ignoredFiles: number;
+  truncatedFiles: number;
+  totalBytes: number;
+  sourceFiles: number;
+  testFiles: number;
+  configFiles: number;
+  rulesFiles: number;
+  docsFiles: number;
+  memoryFiles: number;
+  durationMs: number | null;
+  scanLimit: number | null;
+  scanTruncated: boolean;
+  source: AiProjectIndexSource;
+  lastError: string | null;
+  quality: AiProjectIndexQuality;
+  languageCounts: AiProjectIndexBucket[];
+  topDirectories: AiProjectIndexBucket[];
+  importantFiles: AiProjectIndexFile[];
+  workspaceRoot: string | null;
   updatedAt: string | null;
 };
 
@@ -56,6 +76,35 @@ const MAX_TERMINAL_BUFFER_CHARS = 120_000;
 const createEditorGroupId = () => `editor-group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 const createEmptyEditorGroup = (id = DEFAULT_EDITOR_GROUP_ID): EditorGroup => ({ id, documentIds: [], activeDocumentId: null });
 const createAiChatSessionId = () => `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+
+export function createEmptyAiIndexState(status: AiIndexStatus = "idle"): AiIndexState {
+  return {
+    status,
+    progress: 0,
+    indexedFiles: 0,
+    totalFiles: 0,
+    ignoredFiles: 0,
+    truncatedFiles: 0,
+    totalBytes: 0,
+    sourceFiles: 0,
+    testFiles: 0,
+    configFiles: 0,
+    rulesFiles: 0,
+    docsFiles: 0,
+    memoryFiles: 0,
+    durationMs: null,
+    scanLimit: null,
+    scanTruncated: false,
+    source: "file-tree",
+    lastError: null,
+    quality: "empty",
+    languageCounts: [],
+    topDirectories: [],
+    importantFiles: [],
+    workspaceRoot: null,
+    updatedAt: null,
+  };
+}
 
 type LuxState = {
   workspaceMode: WorkspaceMode;
@@ -111,6 +160,7 @@ type LuxState = {
   closeAiChatSession: (sessionId: string) => void;
   restoreAiChatSession: (sessionId: string) => void;
   renameAiChatSession: (sessionId: string, title: string) => void;
+  deleteAiChatSession: (sessionId: string) => void;
   appendAiChatMessage: (sessionId: string, message: AiChatMessage) => void;
   updateAiChatMessage: (sessionId: string, messageId: string, patch: Partial<AiChatMessage>) => void;
   replaceAiChatMessages: (sessionId: string, messages: AiChatMessage[]) => void;
@@ -179,7 +229,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   settingsOpen: false,
   locale: DEFAULT_LOCALE,
   aiPreferences: defaultAiPreferences,
-  aiIndex: { status: "idle", progress: 0, indexedFiles: 0, totalFiles: 0, updatedAt: null },
+  aiIndex: createEmptyAiIndexState(),
   ...createInitialAiChatState(),
   editorPreferences: defaultEditorPreferences,
   keybindingProfile: defaultKeybindingProfile(),
@@ -269,6 +319,20 @@ export const useLuxStore = create<LuxState>((set, get) => ({
     set((state) => ({
       aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId ? { ...session, title: normalizeChatTitle(title), updatedAt: Date.now() } : session),
     })),
+  deleteAiChatSession: (sessionId) =>
+    set((state) => {
+      if (!state.aiChatSessions.some((session) => session.id === sessionId)) return {};
+      const aiChatSessions = state.aiChatSessions.filter((session) => session.id !== sessionId);
+      if (aiChatSessions.length === 0) {
+        const fallback = createAiChatSession(state.workspace?.root ?? null);
+        return { aiChatSessions: [fallback], activeAiChatSessionId: fallback.id, aiChatOpen: true };
+      }
+      if (state.activeAiChatSessionId !== sessionId) return { aiChatSessions };
+      const nextOpenSession = aiChatSessions.find((session) => !session.closedAt);
+      if (nextOpenSession) return { aiChatSessions, activeAiChatSessionId: nextOpenSession.id };
+      const fallback = createAiChatSession(state.workspace?.root ?? null);
+      return { aiChatSessions: [fallback, ...aiChatSessions], activeAiChatSessionId: fallback.id, aiChatOpen: true };
+    }),
   appendAiChatMessage: (sessionId, message) =>
     set((state) => ({
       aiChatSessions: state.aiChatSessions.map((session) => {

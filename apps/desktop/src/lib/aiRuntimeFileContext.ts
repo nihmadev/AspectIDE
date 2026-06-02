@@ -326,7 +326,8 @@ export function topDirectory(path: string) {
   const parts = normalizePathSlashes(path).split("/").filter(Boolean);
   if (parts.length === 0) return ".";
   if (parts[0].startsWith(".")) return parts[0];
-  return parts.length > 1 && ["apps", "crates", "packages", "src"].includes(parts[0]) ? `${parts[0]}/${parts[1]}` : parts[0];
+  if (parts[0] === "src") return "src";
+  return parts.length > 1 && ["apps", "crates", "packages"].includes(parts[0]) ? `${parts[0]}/${parts[1]}` : parts[0];
 }
 
 export function languageForPath(path: string) {

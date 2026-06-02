@@ -1,8 +1,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Cpu, Database, Eye, Globe, Plus, RotateCcw, Search, Settings, Sparkles, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Cpu, Database, Eye, FileText, Globe, Plus, RotateCcw, Search, Settings, Sparkles, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextSetting, ToggleSetting, type SaveState } from "./settings/SettingsControls";
+import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
 import {
   AI_PREFERENCES_KEY,
   AI_PROVIDER_PRESETS,
@@ -12,6 +12,8 @@ import {
   createAiEffortConfig,
   createAiModelConfig,
   createAiProviderConfig,
+  defaultAiAgentProfiles,
+  defaultLimitedAiToolRoundLimit,
   defaultAiPreferences,
   getAiAgentProfile,
   getAiModel,
@@ -44,8 +46,9 @@ import { luxCommands } from "../lib/tauri";
 
 const scope = "user" as const;
 
-// Settings are organized into three flat tabs. Each tab renders one or more stacked panels.
-type SettingsSectionId = "general" | "editor" | "ai";
+// AI configuration is split into focused sections so runtime, instructions,
+// providers, and indexing do not compete in one mixed settings list.
+type SettingsSectionId = "general" | "editor" | "ai-runtime" | "ai-instructions" | "ai-providers" | "ai-indexing";
 
 type SettingsSection = {
   id: SettingsSectionId;
@@ -90,11 +93,32 @@ const settingsSections: SettingsSection[] = [
     keywords: ["font", "line", "tab", "whitespace", "unicode", "minimap", "word wrap", "mouse", "zoom", "smooth", "ligatures", "appearance", "behavior", "редактор", "шрифт"],
   },
   {
-    id: "ai",
-    titleKey: "settings.group.ai",
-    descriptionKey: "settings.ai.description",
+    id: "ai-runtime",
+    titleKey: "settings.aiRuntime.title",
+    descriptionKey: "settings.aiRuntime.description",
     icon: <Sparkles size={16} />,
-    keywords: ["agent", "mode", "model", "effort", "reasoning", "openai", "anthropic", "openrouter", "gemini", "proxy", "api key", "base url", "models", "index", "files", "images", "metadata", "context", "провайдер", "модель", "индекс"],
+    keywords: ["ai", "agent", "mode", "model", "effort", "reasoning", "tools", "tool rounds", "runtime"],
+  },
+  {
+    id: "ai-instructions",
+    titleKey: "settings.instructions.title",
+    descriptionKey: "settings.instructions.description",
+    icon: <FileText size={16} />,
+    keywords: ["ai", "instructions", "system", "prompt", "profile", "behavior", "agent", "plan", "ask"],
+  },
+  {
+    id: "ai-providers",
+    titleKey: "settings.providers.title",
+    descriptionKey: "settings.providers.description",
+    icon: <Cpu size={16} />,
+    keywords: ["ai", "provider", "providers", "model", "models", "openai", "anthropic", "openrouter", "gemini", "local", "proxy", "api key", "base url"],
+  },
+  {
+    id: "ai-indexing",
+    titleKey: "settings.indexing.title",
+    descriptionKey: "settings.indexing.description",
+    icon: <Database size={16} />,
+    keywords: ["ai", "index", "indexing", "files", "images", "metadata", "context", "workspace"],
   },
 ];
 
@@ -229,7 +253,7 @@ export function SettingsDialog() {
                   <p>{t(activeSection.descriptionKey)}</p>
                 </div>
                 {activeSectionId !== "general" && (
-                  <button className="settings-reset-button" type="button" onClick={() => resetSection(activeSectionId, persistEditorPreferences, persistAiPreferences)}>
+                  <button className="settings-reset-button" type="button" onClick={() => resetSection(activeSectionId, persistEditorPreferences, persistAiPreferences, aiPreferences)}>
                     <RotateCcw size={14} /> {t("settings.reset", { group: t(activeSection.titleKey) })}
                   </button>
                 )}
@@ -243,13 +267,10 @@ export function SettingsDialog() {
                     <EditorBehaviorSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
                   </div>
                 )}
-                {activeSectionId === "ai" && (
-                  <div className="settings-section-stack">
-                    <AiActiveCard preferences={aiPreferences} onChange={updateAiPreference} t={t} />
-                    <AiProvidersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />
-                    <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />
-                  </div>
-                )}
+                {activeSectionId === "ai-runtime" && <AiActiveCard preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+                {activeSectionId === "ai-instructions" && <AiInstructionsSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+                {activeSectionId === "ai-providers" && <AiProvidersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+                {activeSectionId === "ai-indexing" && <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
               </div>
             </main>
           </div>
@@ -354,10 +375,6 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
       ?? preferences.agentProfiles.find((candidate) => candidate.mode === mode);
     if (profile) onChange({ selectedAgentId: profile.id });
   };
-  const updateInstructions = (instructions: string) => {
-    onChange({ agentProfiles: preferences.agentProfiles.map((profile) => profile.id === selectedAgent.id ? { ...profile, instructions } : profile) });
-  };
-
   return (
     <section className="ai-active-card">
       <div className="ai-active-hero">
@@ -376,15 +393,49 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
         )}
         <SegmentedSetting<AiAgentMode> label={t("settings.aiRuntime.mode.label")} value={selectedAgent.mode} options={AI_AGENT_MODES.map((mode) => ({ label: t(`settings.aiRuntime.mode.${mode}` as MessageKey), value: mode }))} onChange={selectMode} />
         <SegmentedSetting<AiToolApprovalMode> label={t("settings.aiRuntime.toolApproval.label")} detail={t("settings.aiRuntime.toolApproval.detail")} value={preferences.toolApprovalMode} options={AI_TOOL_APPROVAL_MODES.map((mode) => ({ label: t(`settings.aiRuntime.toolApproval.${mode}` as MessageKey), value: mode }))} onChange={(toolApprovalMode) => onChange({ toolApprovalMode })} />
-        <NumberSetting label={t("settings.aiRuntime.toolRoundLimit.label")} detail={t("settings.aiRuntime.toolRoundLimit.detail")} value={preferences.toolRoundLimit} min={aiToolRoundLimitMin} max={aiToolRoundLimitMax} step={1} onChange={(toolRoundLimit) => onChange({ toolRoundLimit })} />
+        <ToolRoundLimitSetting label={t("settings.aiRuntime.toolRoundLimit.label")} detail={t("settings.aiRuntime.toolRoundLimit.detail")} value={preferences.toolRoundLimit} min={aiToolRoundLimitMin} max={aiToolRoundLimitMax} step={1} fallbackLimitedValue={defaultLimitedAiToolRoundLimit} unlimitedLabel={t("settings.aiRuntime.toolRoundLimit.unlimited")} limitedLabel={t("settings.aiRuntime.toolRoundLimit.limited")} onChange={(toolRoundLimit) => onChange({ toolRoundLimit })} />
         <ToggleSetting label={t("settings.aiRuntime.responseDuration.label")} detail={t("settings.aiRuntime.responseDuration.detail")} checked={preferences.showResponseDuration} onChange={(showResponseDuration) => onChange({ showResponseDuration })} />
-        <TextSetting label={t("settings.aiRuntime.instructions.label")} detail={t("settings.aiRuntime.instructions.detail")} value={selectedAgent.instructions} onChange={updateInstructions} wide />
       </SettingsGrid>
     </section>
   );
 }
 
-// Provider management uses a master→detail flow: a list of provider tiles, and a focused
+function AiInstructionsSection({ onChange, preferences, t }: { onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
+  const selectedAgent = getAiAgentProfile(preferences.agentProfiles, preferences.selectedAgentId) ?? preferences.agentProfiles[0];
+  const defaultProfile = defaultAiAgentProfiles.find((profile) => profile.id === selectedAgent.id);
+
+  const updateSelectedAgent = (selectedAgentId: string) => {
+    const profile = getAiAgentProfile(preferences.agentProfiles, selectedAgentId);
+    if (profile) onChange({ selectedAgentId: profile.id });
+  };
+  const updateSelectedMode = (mode: AiAgentMode) => {
+    onChange({ agentProfiles: preferences.agentProfiles.map((profile) => profile.id === selectedAgent.id ? { ...profile, mode } : profile) });
+  };
+  const updateSelectedInstructions = (instructions: string) => {
+    onChange({ agentProfiles: preferences.agentProfiles.map((profile) => profile.id === selectedAgent.id ? { ...profile, instructions } : profile) });
+  };
+  const resetSelectedInstructions = () => {
+    if (!defaultProfile) return;
+    onChange({ agentProfiles: preferences.agentProfiles.map((profile) => profile.id === selectedAgent.id ? { ...profile, instructions: defaultProfile.instructions, name: defaultProfile.name, mode: defaultProfile.mode } : profile) });
+  };
+
+  return (
+    <SettingsPanel title={t("settings.instructions.profile.title")} description={t("settings.instructions.profile.description")}>
+      <div className="settings-toolbar instructions-toolbar">
+        <button type="button" onClick={resetSelectedInstructions} disabled={!defaultProfile}>
+          <RotateCcw size={14} /> {t("settings.instructions.resetProfile")}
+        </button>
+      </div>
+      <SettingsGrid>
+        <SelectSetting label={t("settings.instructions.profile.label")} detail={t("settings.instructions.profile.detail")} value={selectedAgent.id} options={preferences.agentProfiles.map((profile) => ({ label: profile.name, value: profile.id }))} onChange={updateSelectedAgent} />
+        <SegmentedSetting<AiAgentMode> label={t("settings.aiRuntime.mode.label")} detail={t("settings.aiRuntime.mode.detail")} value={selectedAgent.mode} options={AI_AGENT_MODES.map((mode) => ({ label: t(`settings.aiRuntime.mode.${mode}` as MessageKey), value: mode }))} onChange={updateSelectedMode} />
+        <TextareaSetting label={t("settings.instructions.body.label")} detail={t("settings.instructions.body.detail")} value={selectedAgent.instructions} rows={12} onChange={updateSelectedInstructions} wide />
+      </SettingsGrid>
+    </SettingsPanel>
+  );
+}
+
+// Provider management uses a master-to-detail flow: a list of provider tiles, and a focused
 // editor screen reached by opening one. `openProviderId === null` means the list is shown.
 function AiProvidersSection({ onChange, preferences, t }: { onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
   const [openProviderId, setOpenProviderId] = useState<string | null>(null);
@@ -455,6 +506,9 @@ function AiProvidersSection({ onChange, preferences, t }: { onChange: (patch: Pa
       <div className="provider-grid">
         {preferences.providers.map((provider) => {
           const isActive = provider.id === preferences.selectedProviderId;
+          const activeModel = isActive
+            ? getAiModel(provider, preferences.selectedModelId) ?? provider.models[0]
+            : provider.models[0];
           return (
             <button
               type="button"
@@ -467,7 +521,8 @@ function AiProvidersSection({ onChange, preferences, t }: { onChange: (patch: Pa
               <span className="provider-tile-avatar"><Cpu size={16} /></span>
               <span className="provider-tile-body">
                 <span className="provider-tile-title">{provider.name}</span>
-                <span className="provider-tile-meta">{t("settings.providers.modelsCount", { count: provider.models.length })}</span>
+                <span className="provider-tile-meta">{t("settings.providers.protocolWithModels", { protocol: provider.protocol, count: provider.models.length })}</span>
+                <span className="provider-tile-url">{provider.protocol === "local-proxy" ? provider.baseUrl : activeModel.name}</span>
               </span>
               <span className="provider-tile-side">
                 <span className="provider-status-pill" data-active={isActive}>{isActive ? t("settings.providers.active") : t("settings.providers.ready")}</span>
@@ -644,17 +699,40 @@ function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: Ret
       : aiIndex.status === "disabled"
         ? t("settings.indexing.status.disabled")
         : t("settings.indexing.status.waiting");
+  const qualityLabel = t(`settings.indexing.quality.${aiIndex.quality}` as MessageKey);
+  const updatedLabel = aiIndex.updatedAt ? formatIndexUpdatedAt(aiIndex.updatedAt) : t("settings.indexing.neverUpdated");
+  const scanSourceLabel = t(`settings.indexing.source.${aiIndex.source}` as MessageKey);
+  const scanLimitLabel = aiIndex.scanLimit === null ? t("settings.indexing.noLimit") : formatInteger(aiIndex.scanLimit);
+  const scanTruncatedLabel = aiIndex.scanTruncated ? t("settings.indexing.yes") : t("settings.indexing.no");
   return (
     <div className="settings-section-stack">
-      <section className="index-status-card">
-        <div>
-          <Database size={18} />
+      <section className="index-status-card" data-status={aiIndex.status} data-quality={aiIndex.quality}>
+        <div className="index-status-head">
+          <span className="index-status-icon"><Database size={18} /></span>
           <div>
             <strong>{statusLabel}</strong>
             <span>{t("settings.indexing.filesIndexed", { indexed: aiIndex.indexedFiles, total: aiIndex.totalFiles })}</span>
           </div>
+          <em>{qualityLabel}</em>
         </div>
         <div className="index-progress"><span style={{ width: `${aiIndex.progress}%` }} /></div>
+        <p className="index-summary-line">{t("settings.indexing.summary", { docs: aiIndex.docsFiles, memory: aiIndex.memoryFiles, rules: aiIndex.rulesFiles, source: aiIndex.sourceFiles, tests: aiIndex.testFiles })}</p>
+        <div className="index-metrics">
+          <IndexMetric label={t("settings.indexing.metric.source")} value={scanSourceLabel} />
+          <IndexMetric label={t("settings.indexing.metric.scanLimit")} value={scanLimitLabel} />
+          <IndexMetric label={t("settings.indexing.metric.scanTruncated")} value={scanTruncatedLabel} />
+          <IndexMetric label={t("settings.indexing.metric.ignored")} value={formatInteger(aiIndex.ignoredFiles)} />
+          <IndexMetric label={t("settings.indexing.metric.truncated")} value={formatInteger(aiIndex.truncatedFiles)} />
+          <IndexMetric label={t("settings.indexing.metric.duration")} value={formatIndexDuration(aiIndex.durationMs)} />
+          <IndexMetric label={t("settings.indexing.metric.bytes")} value={formatIndexBytes(aiIndex.totalBytes)} />
+          <IndexMetric label={t("settings.indexing.metric.updated")} value={updatedLabel} />
+        </div>
+        {aiIndex.lastError && <p className="index-error-line">{t("settings.indexing.metric.error")}: {aiIndex.lastError}</p>}
+        <div className="index-insights">
+          <IndexBucketList buckets={aiIndex.languageCounts} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.languages")} />
+          <IndexBucketList buckets={aiIndex.topDirectories} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.directories")} />
+          <IndexImportantFiles files={aiIndex.importantFiles} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.importantFiles")} />
+        </div>
       </section>
       <SettingsPanel title={t("settings.indexing.title")} description={t("settings.indexing.description")}>
         <SettingsGrid>
@@ -668,6 +746,65 @@ function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: Ret
   );
 }
 
+function IndexMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="index-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function IndexBucketList({ buckets, emptyLabel, title }: { buckets: Array<{ count: number; label: string }>; emptyLabel: string; title: string }) {
+  return (
+    <div className="index-insight-list">
+      <h4>{title}</h4>
+      {buckets.length === 0 ? <p>{emptyLabel}</p> : buckets.map((bucket) => (
+        <div className="index-bucket-row" key={bucket.label}>
+          <span>{bucket.label}</span>
+          <strong>{formatInteger(bucket.count)}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function IndexImportantFiles({ emptyLabel, files, title }: { emptyLabel: string; files: Array<{ language: string; relativePath: string }>; title: string }) {
+  return (
+    <div className="index-insight-list index-important-files">
+      <h4>{title}</h4>
+      {files.length === 0 ? <p>{emptyLabel}</p> : files.slice(0, 6).map((file) => (
+        <div className="index-file-row" key={file.relativePath} title={file.relativePath}>
+          <span>{file.relativePath}</span>
+          <strong>{file.language}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function formatInteger(value: number) {
+  return new Intl.NumberFormat().format(value);
+}
+
+function formatIndexDuration(value: number | null) {
+  if (value === null) return "-";
+  if (value < 1_000) return `${value} ms`;
+  return `${(value / 1_000).toFixed(2)} s`;
+}
+
+function formatIndexBytes(bytes: number) {
+  if (bytes < 1_000) return `${bytes} B`;
+  if (bytes < 1_000_000) return `${(bytes / 1_000).toFixed(1)} KB`;
+  return `${(bytes / 1_000_000).toFixed(1)} MB`;
+}
+
+function formatIndexUpdatedAt(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(date);
+}
+
 function providerPresetDescription(providerType: string, t: TranslateFn) {
   const descriptionKey = PROVIDER_PRESET_DESCRIPTION_KEYS[providerType];
   return descriptionKey ? t(descriptionKey) : t("settings.providers.customProvider");
@@ -677,7 +814,36 @@ function sectionMatchesQuery(section: SettingsSection, query: string, t: Transla
   return [t(section.titleKey), t(section.descriptionKey), ...section.keywords].some((value) => value.toLowerCase().includes(query));
 }
 
-function resetSection(sectionId: SettingsSectionId, resetEditor: (preferences: EditorPreferences) => void, resetAi: (preferences: AiPreferences) => void) {
+function resetSection(sectionId: SettingsSectionId, resetEditor: (preferences: EditorPreferences) => void, resetAi: (preferences: AiPreferences) => void, currentAiPreferences: AiPreferences) {
   if (sectionId === "editor") resetEditor(defaultEditorPreferences);
-  else if (sectionId === "ai") resetAi(defaultAiPreferences);
+  else if (sectionId === "ai-runtime") {
+    resetAi(mergeAiPreferences(currentAiPreferences, {
+      selectedAgentId: defaultAiPreferences.selectedAgentId,
+      selectedProviderId: defaultAiPreferences.selectedProviderId,
+      selectedModelId: defaultAiPreferences.selectedModelId,
+      selectedEffortId: defaultAiPreferences.selectedEffortId,
+      toolApprovalMode: defaultAiPreferences.toolApprovalMode,
+      toolRoundLimit: defaultAiPreferences.toolRoundLimit,
+      showResponseDuration: defaultAiPreferences.showResponseDuration,
+    }));
+  } else if (sectionId === "ai-instructions") {
+    resetAi(mergeAiPreferences(currentAiPreferences, {
+      selectedAgentId: defaultAiPreferences.selectedAgentId,
+      agentProfiles: defaultAiPreferences.agentProfiles,
+    }));
+  } else if (sectionId === "ai-providers") {
+    resetAi(mergeAiPreferences(currentAiPreferences, {
+      providers: defaultAiPreferences.providers,
+      selectedProviderId: defaultAiPreferences.selectedProviderId,
+      selectedModelId: defaultAiPreferences.selectedModelId,
+      selectedEffortId: defaultAiPreferences.selectedEffortId,
+    }));
+  } else if (sectionId === "ai-indexing") {
+    resetAi(mergeAiPreferences(currentAiPreferences, {
+      projectIndexingEnabled: defaultAiPreferences.projectIndexingEnabled,
+      realtimeIndexing: defaultAiPreferences.realtimeIndexing,
+      includeImages: defaultAiPreferences.includeImages,
+      maxIndexedFiles: defaultAiPreferences.maxIndexedFiles,
+    }));
+  }
 }

@@ -2,14 +2,17 @@ export const AI_PREFERENCES_KEY = "ai.preferences";
 
 export const aiToolRoundLimitMin = 1;
 export const aiToolRoundLimitMax = 200;
-export const defaultAiToolRoundLimit = 100;
+export const defaultLimitedAiToolRoundLimit = 100;
+export const defaultAiToolRoundLimit: AiToolRoundLimit = null;
+
+export type AiToolRoundLimit = number | null;
 
 export type AiPreferences = {
   projectIndexingEnabled: boolean;
   realtimeIndexing: boolean;
   includeImages: boolean;
   maxIndexedFiles: number;
-  toolRoundLimit: number;
+  toolRoundLimit: AiToolRoundLimit;
   showResponseDuration: boolean;
   agentMode: AiAgentMode;
   selectedAgentId: string;
@@ -291,9 +294,25 @@ export const defaultAiModelId = "gpt-5.5";
 export const defaultAiEffortId = "xhigh";
 
 export const defaultAiAgentProfiles: AiAgentProfile[] = [
-  { id: "agent", name: "Agent", mode: "agent", instructions: "Work autonomously from evidence. Inspect the workspace before claims, make scoped code changes when needed, preserve unrelated user work, and verify with focused tests or diagnostics before reporting done." },
-  { id: "plan", name: "Plan", mode: "plan", instructions: "Investigate with read-only context first, then propose a concrete implementation and verification plan. Do not modify files or run risky commands until the user confirms." },
-  { id: "ask", name: "Ask", mode: "ask", instructions: "Answer questions and explain code clearly. Use read-only context when useful, but do not edit files or run mutating commands unless the user explicitly asks for action." },
+  { id: "agent", name: "Agent", mode: "agent", instructions: [
+    "Drive the task end to end inside the current workspace: inspect evidence first, make the needed scoped edits, then verify with the narrowest meaningful checks before reporting completion.",
+    "Preserve unrelated user work, dirty files, and existing architecture. Prefer existing project patterns, typed APIs, focused modules, and small reversible changes over broad rewrites.",
+    "Use tools whenever the answer depends on files, diagnostics, commands, browser state, docs, or current workspace facts. Batch independent read-only context, then act sequentially where results matter.",
+    "When changing code, keep behavior production-ready: handle errors explicitly, avoid silent fallbacks, avoid placeholder implementations, and surface real residual risk if verification cannot cover it.",
+    "Final reports should be concise: what changed, what was verified, and what remains only if something genuinely remains.",
+  ].join("\n") },
+  { id: "plan", name: "Plan", mode: "plan", instructions: [
+    "Stay read-only unless the user explicitly approves implementation. Gather only enough context to understand the task, constraints, affected files, and verification surface.",
+    "Return a concrete execution plan with assumptions, edit targets, ordering, risk points, and validation commands. Do not bury uncertainty; name the decision that needs confirmation.",
+    "Prefer architecture-preserving plans: separate domain, runtime, infrastructure, and UI concerns; avoid hidden coupling, silent fallback behavior, and cosmetic extraction.",
+    "Keep the plan compact and actionable so it can be executed without another discovery pass unless the user changes scope.",
+  ].join("\n") },
+  { id: "ask", name: "Ask", mode: "ask", instructions: [
+    "Answer directly from the available evidence. Use read-only workspace context when it materially improves correctness, but do not edit files or run mutating commands unless asked.",
+    "Explain code and tradeoffs with exact file, symbol, or command references when available. Separate confirmed facts from assumptions.",
+    "For debugging questions, identify the most likely cause, the evidence behind it, and the next verification step instead of presenting speculation as certainty.",
+    "Keep answers concise and useful; include examples only when they reduce ambiguity.",
+  ].join("\n") },
 ];
 
 export const defaultAiProviders: AiProviderConfig[] = [createProviderFromPreset(getAiProviderPreset("local-proxy")!, [])];
@@ -350,7 +369,7 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     realtimeIndexing: typeof source.realtimeIndexing === "boolean" ? source.realtimeIndexing : defaultAiPreferences.realtimeIndexing,
     includeImages: typeof source.includeImages === "boolean" ? source.includeImages : defaultAiPreferences.includeImages,
     maxIndexedFiles: clampInteger(source.maxIndexedFiles, 500, 20000, defaultAiPreferences.maxIndexedFiles),
-    toolRoundLimit: clampInteger(source.toolRoundLimit ?? source.maxToolRounds ?? source.toolRounds, aiToolRoundLimitMin, aiToolRoundLimitMax, defaultAiPreferences.toolRoundLimit),
+    toolRoundLimit: normalizeToolRoundLimit(resolveToolRoundLimitSource(source)),
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
     agentMode: selectedAgent.mode,
     selectedAgentId,
@@ -678,6 +697,18 @@ function normalizeVoiceInputProvider(value: unknown): AiVoiceInputProvider {
 
 function normalizeVoiceInputLanguage(value: unknown): AiVoiceInputLanguage {
   return value === "ru-RU" || value === "en-US" || value === "auto" ? value : defaultAiPreferences.voiceInputLanguage;
+}
+
+function resolveToolRoundLimitSource(source: Record<string, unknown>) {
+  if (Object.hasOwn(source, "toolRoundLimit")) return source.toolRoundLimit;
+  if (Object.hasOwn(source, "maxToolRounds")) return source.maxToolRounds;
+  if (Object.hasOwn(source, "toolRounds")) return source.toolRounds;
+  return undefined;
+}
+
+function normalizeToolRoundLimit(value: unknown): AiToolRoundLimit {
+  if (value === undefined || value === null || value === "" || value === "unlimited" || value === "none" || value === 0) return defaultAiToolRoundLimit;
+  return clampInteger(value, aiToolRoundLimitMin, aiToolRoundLimitMax, defaultLimitedAiToolRoundLimit);
 }
 
 function clampInteger(value: unknown, min: number, max: number, fallback: number) {
