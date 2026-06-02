@@ -54,6 +54,7 @@ const toolIcons: Record<string, LucideIcon> = {
   Grep: FileSearch,
   Glob: FolderTree,
   Read: Eye,
+  InspectFile: FileSearch,
   Write: FileText,
   StrReplace: Pencil,
   PatchEngine: Wrench,

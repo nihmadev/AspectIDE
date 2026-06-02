@@ -47,7 +47,7 @@ import {
 } from "./aiRuntimeFileContext";
 import { runtimeTools, type RuntimeToolName } from "./aiRuntimeTools";
 import { isTauriRuntime, luxCommands } from "./tauri";
-import type { LspDocumentSymbol, LspLocation, WorkspaceInfo } from "./types";
+import type { FileInspection, LspDocumentSymbol, LspLocation, WorkspaceInfo } from "./types";
 
 type FileToolResult = Awaited<ReturnType<typeof luxCommands.aiFileWrite>>;
 
@@ -329,6 +329,8 @@ async function runRuntimeTool(call: OpenAiToolCall, input: AiChatSendInput, sess
       return globFiles(stringArg(args, "pattern"), numberArg(args, "maxResults", 80));
     case "Read":
       return readFileTool(stringArg(args, "path"), numberArg(args, "maxBytes", 120_000));
+    case "InspectFile":
+      return inspectFileTool(args);
     case "Write":
       return writeFileTool(args, input, ui);
     case "StrReplace":
@@ -636,6 +638,112 @@ async function readFileTool(path: string, maxBytes: number): Promise<ToolResult>
     truncated: response.truncated,
     text: truncateText(response.text, maxToolOutputChars),
   });
+}
+
+async function inspectFileTool(args: UnknownRecord): Promise<ToolResult> {
+  const path = stringArg(args, "path").trim();
+  if (!path) throw new Error("InspectFile requires a path.");
+  const maxRows = clamp(numberArg(args, "maxRows", 80), 1, 500);
+  const maxColumns = clamp(numberArg(args, "maxColumns", 24), 1, 200);
+  const maxBytes = clamp(numberArg(args, "maxBytes", 120_000), 1_000, 1_000_000);
+  const inspection = await luxCommands.fileInspect(path, {
+    maxTextBytes: BigInt(maxBytes),
+    maxRows,
+    maxColumns,
+    maxArchiveEntries: maxRows,
+  });
+  return toolJson("InspectFile", compactFileInspection(inspection, { maxBytes, maxColumns, maxRows }));
+}
+
+type InspectFileLimits = {
+  maxBytes: number;
+  maxColumns: number;
+  maxRows: number;
+};
+
+function compactFileInspection(inspection: FileInspection, limits: InspectFileLimits) {
+  const maxStringChars = clamp(Math.min(limits.maxBytes, 12_000), 1_000, 12_000);
+  const maxAiContextChars = clamp(Math.min(Math.max(limits.maxBytes, 4_000), 10_000), 4_000, 10_000);
+  return {
+    path: inspection.path,
+    title: inspection.title,
+    descriptor: {
+      ...inspection.descriptor,
+      maxInlineBytes: jsonNumber(inspection.descriptor.maxInlineBytes),
+    },
+    metadata: inspection.metadata,
+    truncated: inspection.truncated,
+    warnings: inspection.warnings,
+    preview: compactFilePreview(inspection.preview, limits, maxStringChars),
+    aiContext: truncateText(inspection.aiContext, maxAiContextChars),
+  };
+}
+
+function compactFilePreview(preview: FileInspection["preview"], limits: InspectFileLimits, maxStringChars: number): unknown {
+  const maxCellChars = 800;
+  switch (preview.kind) {
+    case "text":
+      return { ...preview, text: truncateText(preview.text, maxStringChars) };
+    case "table":
+      return {
+        ...preview,
+        headers: compactStringRow(preview.headers, limits.maxColumns, maxCellChars),
+        rows: compactStringRows(preview.rows, limits, maxCellChars),
+      };
+    case "spreadsheet":
+      return {
+        ...preview,
+        sheets: preview.sheets.map((sheet) => ({
+          ...sheet,
+          headers: compactStringRow(sheet.headers, limits.maxColumns, maxCellChars),
+          rows: compactStringRows(sheet.rows, limits, maxCellChars),
+        })),
+      };
+    case "database":
+      return {
+        ...preview,
+        tables: preview.tables.map((table) => ({
+          ...table,
+          columns: table.columns.slice(0, limits.maxColumns),
+          rows: compactStringRows(table.rows, limits, maxCellChars),
+        })),
+      };
+    case "pdf":
+    case "office":
+      return { ...preview, text: truncateText(preview.text, maxStringChars) };
+    case "notebook":
+      return {
+        ...preview,
+        cells: preview.cells.slice(0, limits.maxRows).map((cell) => ({
+          ...cell,
+          text: truncateText(cell.text, maxStringChars),
+          outputText: truncateText(cell.outputText, maxStringChars),
+        })),
+      };
+    case "binary":
+      return {
+        ...preview,
+        hex: truncateText(preview.hex, maxStringChars),
+        ascii: truncateText(preview.ascii, maxStringChars),
+      };
+    default:
+      return preview;
+  }
+}
+
+function compactStringRows(rows: string[][], limits: InspectFileLimits, maxStringChars: number) {
+  return rows.slice(0, limits.maxRows).map((row) => compactStringRow(row, limits.maxColumns, maxStringChars));
+}
+
+function compactStringRow(row: string[], maxColumns: number, maxStringChars: number) {
+  return row.slice(0, maxColumns).map((cell) => truncateText(cell, maxStringChars));
+}
+
+function jsonNumber(value: bigint | number | null) {
+  if (value === null) return null;
+  if (typeof value === "number") return value;
+  const numeric = Number(value);
+  return Number.isSafeInteger(numeric) ? numeric : value.toString();
 }
 
 async function semanticSearch(args: UnknownRecord, input: AiChatSendInput): Promise<ToolResult> {

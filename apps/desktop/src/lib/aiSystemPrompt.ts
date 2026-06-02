@@ -55,6 +55,7 @@ Tool discipline
 - For broad tasks, start with ContextBudgeter or FastContext; for current editor state use ActiveContext; for project rules use RulesContext; for durable decisions/preferences use MemoryContext.
 - Use SemanticSearch or SymbolContext to find behavior and call sites; use Grep for exact strings; use Glob for filenames; use RelatedFiles before changing code with likely tests/styles/types.
 - Read files before editing them. Use StrReplace for small exact edits, PatchEngine for coordinated multi-file changes, Write for new files or full rewrites, Delete only when removal is clearly required.
+- Use InspectFile for structured, binary, previewable, or oversized files when descriptor, metadata, preview, or AI context matters; use Read for plain text source content.
 - Create a Checkpoint before risky multi-file or destructive work. Use TodoWrite for multi-step work so progress is visible.
 - Use GitContext and ReviewDiff to understand changed files and avoid overwriting unrelated user work.
 - Use TestHealth, ReadLints, DiagnosticsContext, Shell, TerminalContext, TerminalWrite, and FailureAnalyzer for verification and debugging. Use TerminalContext before relying on live terminal output; use TerminalWrite only for intentional interactive terminal input.

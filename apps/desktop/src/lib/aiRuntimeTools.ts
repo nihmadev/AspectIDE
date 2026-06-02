@@ -4,6 +4,7 @@ export type RuntimeToolName =
   | "SemanticSearch"
   | "Glob"
   | "Read"
+  | "InspectFile"
   | "Write"
   | "StrReplace"
   | "PatchEngine"
@@ -165,6 +166,19 @@ export const runtimeTools: RuntimeToolDefinition[] = [
       parameters: objectSchema({
         path: stringSchema("Absolute path to the file."),
         maxBytes: numberSchema("Maximum bytes to read, default 120000."),
+      }, ["path"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "InspectFile",
+      description: "Inspect a file with Lux's structured preview engine without opening it in the editor. Prefer this over Read for tables, spreadsheets, PDFs, Office files, archives, notebooks, media, binary files, or when descriptor/metadata/AI context is needed.",
+      parameters: objectSchema({
+        path: stringSchema("Workspace-relative or absolute path to the file."),
+        maxRows: numberSchema("Maximum data rows or structured entries to inspect, default 80."),
+        maxColumns: numberSchema("Maximum table/spreadsheet/database columns to inspect, default 24."),
+        maxBytes: numberSchema("Maximum inline text bytes to inspect, default 120000, capped at 1000000."),
       }, ["path"]),
     },
   },

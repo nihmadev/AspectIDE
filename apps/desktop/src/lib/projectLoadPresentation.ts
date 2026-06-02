@@ -45,9 +45,6 @@ function deriveProjectLoadStage({ aiIndexStatus, fileTreeLoading, languageServer
   if (projectLoad.stage === "opening" && projectLoad.active) return "opening";
   if (fileTreeLoading) return "files";
   if (languageServersLoading) return "services";
-  // AI indexing is a background operation; do not block UI
-  // if (projectIndexingEnabled && aiIndexStatus === "indexing") return "indexing";
-  // AI indexing never blocks; UI always shows ready after filetree+LSP
   return "ready";
 }
 
@@ -56,8 +53,6 @@ function deriveProjectLoadProgress({ aiIndexStatus, fileTreeLoading, languageSer
   if (stage === "opening") return Math.max(projectLoad.progress, 8);
   if (fileTreeLoading) return Math.max(projectLoad.progress, 34);
   if (languageServersLoading) return Math.max(projectLoad.progress, 58);
-  // Background indexing does not block progress
-  // if (projectIndexingEnabled && aiIndexStatus === "indexing") return Math.max(projectLoad.progress, 76);
   if (stage === "ready") return 100;
   return projectLoad.progress;
 }

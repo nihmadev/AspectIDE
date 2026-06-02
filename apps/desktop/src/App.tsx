@@ -306,7 +306,7 @@ export function App() {
       .finally(() => {
         if (!cancelled) {
           setLanguageServersLoading(false);
-          if (useLuxStore.getState().projectLoad.stage !== "error") setProjectLoad({ progress: aiPreferences.projectIndexingEnabled ? 68 : 100, root: workspace.root, stage: aiPreferences.projectIndexingEnabled ? "indexing" : "ready", workspaceName: workspace.name, active: aiPreferences.projectIndexingEnabled });
+          if (useLuxStore.getState().projectLoad.stage !== "error") setProjectLoad({ active: false, progress: 100, root: workspace.root, stage: "ready", workspaceName: workspace.name });
         }
       });
     luxCommands.diagnosticsSnapshot()
