@@ -1,4 +1,4 @@
-import type { MessageKey } from "./i18n";
+﻿import type { MessageKey } from "./i18n";
 import type { AiIndexStatus, ProjectLoadStage, ProjectLoadState } from "./store";
 
 export type ProjectLoadChecklistItem = {
@@ -35,7 +35,7 @@ export function buildProjectLoadSummary(signals: ProjectLoadSignals): ProjectLoa
       { key: "projectLoading.step.opening", active: stage === "opening", done: progress >= 28 },
       { key: "projectLoading.step.files", active: stage === "files", done: !signals.fileTreeLoading && progress >= 56 },
       { key: "projectLoading.step.services", active: stage === "services", done: !signals.languageServersLoading && progress >= 68 },
-      { key: "projectLoading.step.index", active: stage === "indexing", done: !signals.projectIndexingEnabled || signals.aiIndexStatus === "ready" },
+      { key: "projectLoading.step.index", active: false, done: true },
     ],
   };
 }
@@ -45,7 +45,8 @@ function deriveProjectLoadStage({ aiIndexStatus, fileTreeLoading, languageServer
   if (projectLoad.stage === "opening" && projectLoad.active) return "opening";
   if (fileTreeLoading) return "files";
   if (languageServersLoading) return "services";
-  if (projectIndexingEnabled && aiIndexStatus === "indexing") return "indexing";
+  // AI indexing is a background operation; do not block UI
+  // if (projectIndexingEnabled && aiIndexStatus === "indexing") return "indexing";
   if (projectLoad.active && projectLoad.stage !== "indexing") return projectLoad.stage;
   return projectLoad.stage === "ready" ? "ready" : "idle";
 }
@@ -55,7 +56,8 @@ function deriveProjectLoadProgress({ aiIndexStatus, fileTreeLoading, languageSer
   if (stage === "opening") return Math.max(projectLoad.progress, 8);
   if (fileTreeLoading) return Math.max(projectLoad.progress, 34);
   if (languageServersLoading) return Math.max(projectLoad.progress, 58);
-  if (projectIndexingEnabled && aiIndexStatus === "indexing") return Math.max(projectLoad.progress, 76);
+  // Background indexing does not block progress
+  // if (projectIndexingEnabled && aiIndexStatus === "indexing") return Math.max(projectLoad.progress, 76);
   if (stage === "ready") return 100;
   return projectLoad.progress;
 }

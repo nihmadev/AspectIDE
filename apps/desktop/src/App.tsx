@@ -231,8 +231,6 @@ export function App() {
       source: "workspace-scan",
       workspaceRoot: workspace.root,
     });
-    setProjectLoad({ active: true, error: null, progress: Math.max(useLuxStore.getState().projectLoad.progress, 72), root: workspace.root, stage: "indexing", workspaceName: workspace.name });
-
     const indexTimer = window.setTimeout(() => {
       if (cancelled) return;
       void buildWorkspaceAiIndex(workspace, aiPreferences.includeImages, aiPreferences.maxIndexedFiles, scanLimit, startedAtMs)
@@ -244,7 +242,6 @@ export function App() {
             progress: 100,
             updatedAt: new Date().toISOString(),
           });
-          setProjectLoad({ active: false, error: null, progress: 100, root: workspace.root, stage: "ready", workspaceName: workspace.name });
         })
         .catch((error) => {
           if (cancelled) return;
@@ -255,7 +252,7 @@ export function App() {
             source: "workspace-scan",
             workspaceRoot: workspace.root,
           });
-          setProjectLoad({ active: false, error: readErrorMessage(error), progress: 100, root: workspace.root, stage: "error", workspaceName: workspace.name });
+          // Indexing error is handled by setAiIndex above
         });
     }, 60);
 
