@@ -133,13 +133,14 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
       tool_calls: requestedToolCalls,
     });
 
-    const roundToolCalls = requestedToolCalls.map((call) => createRunningToolCall(call));
-    timeline.addToolCalls(roundToolCalls);
     input.onStatusChange?.("running-tools");
 
     const toolsStartedAtMs = performance.now();
-    const toolResults = await Promise.all(roundToolCalls.map(async (uiCall, index) => {
-      const requestedCall = requestedToolCalls[index];
+    const toolResults: ChatCompletionMessage[] = [];
+    for (const requestedCall of requestedToolCalls) {
+      throwIfAborted(input.abortSignal);
+      const uiCall = createRunningToolCall(requestedCall);
+      timeline.addToolCalls([uiCall]);
       try {
         const result = await runRuntimeTool(requestedCall, input, toolSession, {
           setApproval: (approval) => {
@@ -152,23 +153,23 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
           },
         });
         timeline.updateToolCall(uiCall.id, { status: "success", output: formatToolOutput(result), endTime: Date.now(), stats: result.stats });
-        return {
+        toolResults.push({
           role: "tool" as const,
           tool_call_id: requestedCall.id ?? uiCall.id,
           content: result.content,
-        };
+        });
       } catch (error) {
         const message = readErrorMessage(error);
         const skipped = error instanceof ToolApprovalRejectedError;
         timeline.updateToolCall(uiCall.id, { status: skipped ? "skipped" : "error", error: message, endTime: Date.now() });
-        return {
+        toolResults.push({
           role: "tool" as const,
           tool_call_id: requestedCall.id ?? uiCall.id,
           content: JSON.stringify({ error: message }),
-        };
+        });
       }
-    }));
-    recordToolTiming(timing, toolsStartedAtMs, roundToolCalls.length);
+    }
+    recordToolTiming(timing, toolsStartedAtMs, requestedToolCalls.length);
 
     messages.push(...toolResults);
   }

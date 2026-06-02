@@ -1,4 +1,5 @@
 import type { AiModelConfig, AiProviderConfig } from "./aiPreferences";
+import { readVisibleReasoningFromProviderField } from "./aiChatReasoning";
 import { createDesktopRuntimeError, isBrowserPreviewRuntime, isTauriRuntime, luxCommands, subscribeAiChatStream } from "./tauri";
 
 export type ChatCompletionMessage = {
@@ -95,14 +96,7 @@ export function firstChoice(value: unknown) {
 }
 
 export function readReasoningDelta(delta: UnknownRecord): string {
-  if (typeof delta.reasoning_content === "string") return delta.reasoning_content;
-  const reasoning = delta.reasoning;
-  if (typeof reasoning === "string") return reasoning;
-  if (isRecord(reasoning)) {
-    if (typeof reasoning.content === "string") return reasoning.content;
-    if (typeof reasoning.text === "string") return reasoning.text;
-  }
-  return "";
+  return readVisibleReasoningFromProviderField(delta);
 }
 
 async function requestBrowserChatCompletion(input: ChatCompletionTransportInput, payload: UnknownRecord) {

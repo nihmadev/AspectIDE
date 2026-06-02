@@ -137,10 +137,10 @@ export function AiToolCall({ onApprovalDecision, t, toolCall }: AiToolCallProps)
         {hasStats && stats && (
           <span className="ai-tool-call-stats">
             {stats.linesAdded ? <span className="ai-tool-stat" data-type="added">+{stats.linesAdded}</span> : null}
-            {stats.linesRemoved ? <span className="ai-tool-stat" data-type="removed">−{stats.linesRemoved}</span> : null}
-            {stats.filesCreated ? <span className="ai-tool-stat" data-type="created">{stats.filesCreated}N</span> : null}
-            {stats.filesChanged ? <span className="ai-tool-stat" data-type="changed">{stats.filesChanged}M</span> : null}
-            {stats.filesDeleted ? <span className="ai-tool-stat" data-type="deleted">{stats.filesDeleted}D</span> : null}
+            {stats.linesRemoved ? <span className="ai-tool-stat" data-type="removed">-{stats.linesRemoved}</span> : null}
+            {stats.filesCreated ? <span className="ai-tool-stat" data-type="created">{stats.filesCreated} new</span> : null}
+            {stats.filesChanged ? <span className="ai-tool-stat" data-type="changed">{stats.filesChanged} changed</span> : null}
+            {stats.filesDeleted ? <span className="ai-tool-stat" data-type="deleted">{stats.filesDeleted} deleted</span> : null}
           </span>
         )}
         {!isApproval && toolCall.status !== "running" && <span className="ai-tool-call-duration">{durationText}</span>}

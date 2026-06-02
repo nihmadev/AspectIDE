@@ -1,17 +1,17 @@
 import { ArrowDown, Brain, MessageSquarePlus, PanelRightClose, RotateCcw, Sparkles, X } from "lucide-react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { AiChatComposer } from "./ai-chat/AiChatComposer";
 import { AiChatMessages } from "./ai-chat/AiChatMessages";
 import { buildAiChatContextUsageSummary, formatCompactTokens } from "../lib/aiChatContextUsage";
-import { loadAiChatHistory, saveAiChatHistory } from "../lib/aiChatHistory";
 import { aiChatSessionTitle, aiChatStatusLabel } from "../lib/aiChatPresentation";
 import { documentDisplayPath } from "../lib/documents";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { AI_PREFERENCES_KEY, getAiModel, getAiProjectInstructions, getAiProvider, mergeAiPreferences, type AiPreferences } from "../lib/aiPreferences";
 import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
+import { abortAiChatTurn, finishAiChatTurn, getAiChatTurnRuntimeSnapshot, requestAiToolApproval, resolveAiToolApproval, startAiChatTurn, subscribeAiChatTurnRuntime } from "../lib/aiChatTurnRuntime";
 import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision, AiToolApprovalRequest } from "../lib/aiChatTypes";
-import { selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
+import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
 import { luxCommands } from "../lib/tauri";
 import { useVoiceInput } from "../lib/useVoiceInput";
 
@@ -21,6 +21,9 @@ type ChatAttachment = {
   name: string;
   size: number;
 };
+
+const draftBySessionId = new Map<string, string>();
+const attachmentsBySessionId = new Map<string, ChatAttachment[]>();
 
 type AiChatPanelProps = {
   embedded?: boolean;
@@ -39,7 +42,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const createAiChatSession = useLuxStore((state) => state.createAiChatSession);
   const replaceAiChatMessages = useLuxStore((state) => state.replaceAiChatMessages);
   const restoreAiChatSession = useLuxStore((state) => state.restoreAiChatSession);
-  const setAiChatSessions = useLuxStore((state) => state.setAiChatSessions);
   const setAiPreferences = useLuxStore((state) => state.setAiPreferences);
   const setAiChatSessionStatus = useLuxStore((state) => state.setAiChatSessionStatus);
   const updateAiChatMessage = useLuxStore((state) => state.updateAiChatMessage);
@@ -55,25 +57,22 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [contextOpen, setContextOpen] = useState(false);
   const [draggingFiles, setDraggingFiles] = useState(false);
-  const [sendingSessionId, setSendingSessionId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [lastUserDraft, setLastUserDraft] = useState<string | null>(null);
   const [showScrollDown, setShowScrollDown] = useState(false);
-  const abortControllerRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pinnedToBottomRef = useRef(true);
-  const approvalResolversRef = useRef(new Map<string, (decision: AiToolApprovalDecision) => void>());
-  const persistedSessionsLoadedRef = useRef(false);
-  const skipNextSessionPersistRef = useRef(true);
-  const historyPersistTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const runtimeSnapshot = useSyncExternalStore(subscribeAiChatTurnRuntime, getAiChatTurnRuntimeSnapshot, getAiChatTurnRuntimeSnapshot);
   const messages = activeChatSession?.messages ?? [];
   const activeStatus = activeChatSession?.status ?? "idle";
   const activeLastError = activeChatSession?.lastError ?? null;
   const activeSessionClosed = Boolean(activeChatSession?.closedAt);
-  const sending = sendingSessionId !== null;
-  const activeSessionSending = sendingSessionId === activeAiChatSessionId;
+  const busySessionId = aiChatSessions.find((session) => isAiChatSessionBusyStatus(session.status))?.id ?? null;
+  const sendingSessionId = runtimeSnapshot.sendingSessionId ?? busySessionId;
+  const sending = Boolean(sendingSessionId);
+  const activeSessionSending = sendingSessionId === activeAiChatSessionId || isAiChatSessionBusyStatus(activeStatus);
   // The last assistant message is "live" while this session is generating, so its
   // reasoning block auto-expands and collapses once the turn settles.
   const streamingMessageId = activeSessionSending
@@ -152,45 +151,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     />
   );
 
-  useEffect(() => {
-    if (persistedSessionsLoadedRef.current) return;
-    persistedSessionsLoadedRef.current = true;
-    void loadAiChatHistory().then((history) => {
-      if (history && history.sessions.length > 0) setAiChatSessions(history);
-    }).catch((error) => {
-      setSendError(readErrorMessage(error));
-    }).finally(() => {
-      skipNextSessionPersistRef.current = false;
-    });
-  }, [setAiChatSessions]);
-
-  useEffect(() => {
-    if (!persistedSessionsLoadedRef.current) return;
-    if (skipNextSessionPersistRef.current) {
-      return;
-    }
-    if (historyPersistTimerRef.current !== null) {
-      window.clearTimeout(historyPersistTimerRef.current);
-      historyPersistTimerRef.current = null;
-    }
-    if (sendingSessionId !== null) return;
-
-    historyPersistTimerRef.current = window.setTimeout(() => {
-      historyPersistTimerRef.current = null;
-      void saveAiChatHistory({
-        activeSessionId: activeAiChatSessionId,
-        sessions: aiChatSessions,
-      }).catch((error) => setSendError(readErrorMessage(error)));
-    }, 450);
-
-    return () => {
-      if (historyPersistTimerRef.current !== null) {
-        window.clearTimeout(historyPersistTimerRef.current);
-        historyPersistTimerRef.current = null;
-      }
-    };
-  }, [activeAiChatSessionId, aiChatSessions, sendingSessionId]);
-
   const updateAiPreference = useCallback((patch: Partial<AiPreferences>) => {
     const nextPreferences = mergeAiPreferences(aiPreferences, patch);
     setAiPreferences(nextPreferences);
@@ -214,6 +174,16 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   useLayoutEffect(() => {
     resizeComposerTextarea();
   }, [message]);
+
+  useEffect(() => {
+    const nextMessage = draftBySessionId.get(activeAiChatSessionId) ?? "";
+    const nextAttachments = attachmentsBySessionId.get(activeAiChatSessionId) ?? [];
+    setMessage(nextMessage);
+    setAttachments(nextAttachments);
+    setContextOpen(false);
+    setDraggingFiles(false);
+    requestAnimationFrame(() => resizeComposerTextarea());
+  }, [activeAiChatSessionId, resizeComposerTextarea]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const element = scrollRef.current;
@@ -253,9 +223,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   }, [activeAiChatSessionId]);
 
   const updateMessage = useCallback((nextMessage: string) => {
+    draftBySessionId.set(activeAiChatSessionId, nextMessage);
     setMessage(nextMessage);
     requestAnimationFrame(() => resizeComposerTextarea());
-  }, [resizeComposerTextarea]);
+  }, [activeAiChatSessionId, resizeComposerTextarea]);
 
   const handleMessageChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>) => {
     resizeComposerTextarea(event.currentTarget);
@@ -268,12 +239,18 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     setAttachments((current) => {
       const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
       for (const file of Array.from(files)) byId.set(attachmentId(file), { file, id: attachmentId(file), name: file.name, size: file.size });
-      return [...byId.values()];
+      const nextAttachments = [...byId.values()];
+      attachmentsBySessionId.set(activeAiChatSessionId, nextAttachments);
+      return nextAttachments;
     });
   };
 
   const removeAttachment = (id: string) => {
-    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+    setAttachments((current) => {
+      const nextAttachments = current.filter((attachment) => attachment.id !== id);
+      attachmentsBySessionId.set(activeAiChatSessionId, nextAttachments);
+      return nextAttachments;
+    });
   };
 
   const handleComposerDragOver = (event: DragEvent<HTMLDivElement>) => {
@@ -298,28 +275,16 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   };
 
   const handleCancelSend = useCallback(() => {
-    abortControllerRef.current?.abort();
-    resolveAllToolApprovals("rejected");
-  }, []);
+    abortAiChatTurn(activeSessionSending ? activeAiChatSessionId : sendingSessionId);
+  }, [activeAiChatSessionId, activeSessionSending, sendingSessionId]);
 
   const requestToolApproval = useCallback((request: AiToolApprovalRequest) => {
-    return new Promise<AiToolApprovalDecision>((resolve) => {
-      approvalResolversRef.current.set(request.id, resolve);
-    });
+    return requestAiToolApproval(request.id);
   }, []);
 
   const resolveToolApproval = useCallback((approvalId: string, decision: AiToolApprovalDecision) => {
-    const resolver = approvalResolversRef.current.get(approvalId);
-    if (!resolver) return;
-    approvalResolversRef.current.delete(approvalId);
-    resolver(decision);
+    resolveAiToolApproval(approvalId, decision);
   }, []);
-
-  const resolveAllToolApprovals = (decision: AiToolApprovalDecision) => {
-    const resolvers = [...approvalResolversRef.current.values()];
-    approvalResolversRef.current.clear();
-    for (const resolve of resolvers) resolve(decision);
-  };
 
   const handleSend = useCallback(async (overrideMessage?: string, overrideHistory?: AiChatMessage[]) => {
     const nextMessage = (overrideMessage ?? message).trim();
@@ -335,15 +300,16 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     };
     const history = overrideHistory ?? useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId)?.messages ?? [];
     const abortController = new AbortController();
-    abortControllerRef.current = abortController;
+    startAiChatTurn(sessionId, abortController);
     appendAiChatMessage(sessionId, userMessage);
     setLastUserDraft(currentMessage);
     pinnedToBottomRef.current = true;
     setShowScrollDown(false);
+    draftBySessionId.set(sessionId, "");
+    attachmentsBySessionId.set(sessionId, []);
     setMessage("");
     setAttachments([]);
     setSendError(null);
-    setSendingSessionId(sessionId);
     setAiChatSessionStatus(sessionId, "thinking");
 
     try {
@@ -392,9 +358,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         setSendError(errorMessage);
       }
     } finally {
-      if (abortControllerRef.current === abortController) abortControllerRef.current = null;
-      resolveAllToolApprovals("rejected");
-      setSendingSessionId((currentSessionId) => currentSessionId === sessionId ? null : currentSessionId);
+      finishAiChatTurn(sessionId, abortController);
       requestAnimationFrame(() => resizeComposerTextarea());
     }
   }, [activeChatSession?.id, activeDocument, activeSessionClosed, activeTerminalId, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, projectInstructions, replaceAiChatMessages, requestToolApproval, resizeComposerTextarea, selectedAgent, selectedModel, selectedProvider, sending, setAiChatSessionStatus, t, terminal, terminalOutputBuffers, terminalSessions, updateAiChatMessage, workspace]);

@@ -8,6 +8,7 @@ import { ProjectLoadingStatus } from "./components/ProjectLoadingStatus";
 import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { loadAiChatHistory, saveAiChatHistory } from "./lib/aiChatHistory";
 import { AI_PREFERENCES_KEY, normalizeAiPreferences } from "./lib/aiPreferences";
 import { buildAiProjectIndexSnapshot } from "./lib/aiProjectIndex";
 import { closedDocumentIdsForAllDocuments, closedDocumentIdsForDocumentInGroup } from "./lib/editorCloseTargets";
@@ -17,7 +18,7 @@ import { EDITOR_PREFERENCES_KEY, normalizeEditorPreferences } from "./lib/editor
 import { buildFileTreeDirectories, normalizePath } from "./lib/fileTree";
 import { createKeybindingDispatcher, KEYBINDINGS_SETTINGS_KEY } from "./lib/keybindings";
 import { buildProjectLoadSummary } from "./lib/projectLoadPresentation";
-import { createEmptyAiIndexState, createIdleProjectLoadState, useLuxStore, type Activity } from "./lib/store";
+import { createEmptyAiIndexState, createIdleProjectLoadState, isAiChatSessionBusyStatus, useLuxStore, type Activity } from "./lib/store";
 import { luxCommands, subscribeLuxEvents } from "./lib/tauri";
 import { pickAndOpenWorkspace } from "./lib/workspaceActions";
 import type { RecentWorkspace, WorkspaceInfo } from "./lib/types";
@@ -50,8 +51,11 @@ export function App() {
   const locale = useLuxStore((state) => state.locale);
   const aiPreferences = useLuxStore((state) => state.aiPreferences);
   const aiIndex = useLuxStore((state) => state.aiIndex);
+  const aiChatSessions = useLuxStore((state) => state.aiChatSessions);
+  const activeAiChatSessionId = useLuxStore((state) => state.activeAiChatSessionId);
   const setAiPreferences = useLuxStore((state) => state.setAiPreferences);
   const setAiIndex = useLuxStore((state) => state.setAiIndex);
+  const setAiChatSessions = useLuxStore((state) => state.setAiChatSessions);
   const setKeybindingProfile = useLuxStore((state) => state.setKeybindingProfile);
   const keybindingProfile = useLuxStore((state) => state.keybindingProfile);
   const workspace = useLuxStore((state) => state.workspace);
@@ -86,6 +90,9 @@ export function App() {
   const [aiIndexRefreshToken, setAiIndexRefreshToken] = useState(0);
   const keybindingDispatcherRef = useRef(createKeybindingDispatcher(keybindingProfile));
   const bottomPanelRef = useRef<PanelImperativeHandle | null>(null);
+  const aiChatHistoryLoadedRef = useRef(false);
+  const skipNextAiChatPersistRef = useRef(true);
+  const aiChatPersistTimerRef = useRef<number | null>(null);
   const projectLoadSummary = useMemo(() => buildProjectLoadSummary({ aiIndexStatus: aiIndex.status, fileTreeLoading, languageServersLoading, projectIndexingEnabled: aiPreferences.projectIndexingEnabled, projectLoad }), [aiIndex.status, aiPreferences.projectIndexingEnabled, fileTreeLoading, languageServersLoading, projectLoad]);
   const dismissProjectLoadError = () => setProjectLoad(createIdleProjectLoadState());
 
@@ -137,6 +144,48 @@ export function App() {
   useEffect(() => {
     refreshRecentWorkspaces(setRecentWorkspaces);
   }, []);
+
+  useEffect(() => {
+    if (aiChatHistoryLoadedRef.current) return;
+    aiChatHistoryLoadedRef.current = true;
+    let cancelled = false;
+    void loadAiChatHistory().then((history) => {
+      if (!cancelled && history && history.sessions.length > 0) setAiChatSessions(history);
+    }).catch((error) => {
+      if (cancelled) return;
+      const store = useLuxStore.getState();
+      store.setAiChatSessionStatus(store.activeAiChatSessionId, "error", readErrorMessage(error));
+    }).finally(() => {
+      if (!cancelled) skipNextAiChatPersistRef.current = false;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [setAiChatSessions]);
+
+  useEffect(() => {
+    if (!aiChatHistoryLoadedRef.current || skipNextAiChatPersistRef.current) return;
+    if (aiChatPersistTimerRef.current !== null) {
+      window.clearTimeout(aiChatPersistTimerRef.current);
+      aiChatPersistTimerRef.current = null;
+    }
+    if (aiChatSessions.some((session) => isAiChatSessionBusyStatus(session.status))) return;
+
+    aiChatPersistTimerRef.current = window.setTimeout(() => {
+      aiChatPersistTimerRef.current = null;
+      void saveAiChatHistory({
+        activeSessionId: activeAiChatSessionId,
+        sessions: aiChatSessions,
+      }).catch(reportAiChatHistoryError);
+    }, 450);
+
+    return () => {
+      if (aiChatPersistTimerRef.current !== null) {
+        window.clearTimeout(aiChatPersistTimerRef.current);
+        aiChatPersistTimerRef.current = null;
+      }
+    };
+  }, [activeAiChatSessionId, aiChatSessions]);
 
   useEffect(() => {
     void luxCommands.settingsGet("user", AI_PREFERENCES_KEY)
@@ -716,6 +765,10 @@ function readErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
   return "Failed to load project file tree.";
+}
+
+function reportAiChatHistoryError(error: unknown) {
+  console.error("AI chat history sync failed", error);
 }
 
 function DeferredEditorArea() {

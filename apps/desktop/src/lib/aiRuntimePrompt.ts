@@ -1,5 +1,6 @@
 import type { AiChatMessage, AiChatSendInput } from "./aiChatTypes";
 import type { ChatCompletionMessage } from "./aiChatTransport";
+import { normalizeVisibleReasoning } from "./aiChatReasoning";
 import { truncateText } from "./aiRuntimeShared";
 import { compactTerminalContext } from "./aiRuntimeTerminal";
 import { buildLuxIdeSystemPrompt } from "./aiSystemPrompt";
@@ -79,7 +80,8 @@ function compactHistoryMessages(history: AiChatMessage[], budgetChars: number): 
 
 function compactHistoryMessageContent(message: AiChatMessage) {
   const parts: string[] = [];
-  if (message.reasoning?.trim()) parts.push(`[reasoning summary]\n${truncateText(message.reasoning, 1_200)}`);
+  const reasoning = normalizeVisibleReasoning(message.reasoning);
+  if (reasoning) parts.push(`[reasoning summary]\n${truncateText(reasoning, 1_200)}`);
   if (message.content.trim()) parts.push(truncateText(message.content, maxHistoryMessageChars));
   const toolCalls = message.toolCalls?.filter((call) => call.output || call.error).slice(-8) ?? [];
   if (toolCalls.length > 0) {

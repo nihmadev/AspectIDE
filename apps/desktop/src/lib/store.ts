@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { defaultAiPreferences, mergeAiPreferences, type AiPreferences } from "./aiPreferences";
-import type { AiChatMessage } from "./aiChatTypes";
+import { normalizeAiMessageReasoning } from "./aiChatReasoning";
+import type { AiChatMessage, AiMessageSegment } from "./aiChatTypes";
 import type { AiProjectIndexBucket, AiProjectIndexFile, AiProjectIndexQuality, AiProjectIndexSource } from "./aiProjectIndex";
 import { defaultEditorPreferences, mergeEditorPreferences, type EditorPreferences } from "./editorPreferences";
 import { normalizePath, type FileTreeDirectories } from "./fileTree";
@@ -85,6 +86,10 @@ export type CreateAiChatSessionResult = {
   id: string;
   reused: boolean;
 };
+
+export function isAiChatSessionBusyStatus(status: AiChatSessionStatus) {
+  return status === "thinking" || status === "streaming" || status === "running-tools" || status === "waiting-approval";
+}
 
 const DEFAULT_EDITOR_GROUP_ID = "editor-group-1";
 const MAX_TERMINAL_BUFFER_CHARS = 120_000;
@@ -305,7 +310,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   updateAiPreferences: (preferences) => set((state) => ({ aiPreferences: mergeAiPreferences(state.aiPreferences, preferences) })),
   setAiPreferences: (aiPreferences) => set({ aiPreferences }),
   setAiIndex: (index) => set((state) => ({ aiIndex: { ...state.aiIndex, ...index } })),
-  setAiChatSessions: (chatState) => set(() => normalizeAiChatSessionState(chatState)),
+  setAiChatSessions: (chatState) => set((state) => mergeAiChatSessionState(state, chatState)),
   createAiChatSession: (workspaceRoot = get().workspace?.root ?? null) => {
     const session = createAiChatSession(workspaceRoot);
     set((state) => ({
@@ -896,17 +901,93 @@ function normalizeAiChatSessionState(chatState: AiChatSessionState): Pick<LuxSta
   return { aiChatSessions: sessions, activeAiChatSessionId };
 }
 
-function normalizeAiChatSession(session: AiChatSession): AiChatSession {
+function mergeAiChatSessionState(state: LuxState, chatState: AiChatSessionState): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
+  const incoming = normalizeAiChatSessionState(chatState);
+  const byId = new Map<string, AiChatSession>();
+
+  for (const session of incoming.aiChatSessions) {
+    byId.set(session.id, session);
+  }
+
+  for (const current of state.aiChatSessions.map((session) => normalizeAiChatSession(session, { preserveRuntimeStatus: true }))) {
+    const persisted = byId.get(current.id);
+    byId.set(current.id, persisted ? chooseHydratedAiChatSession(current, persisted) : current);
+  }
+
+  const aiChatSessions = sortAiChatSessionsForStore([...byId.values()]);
+  const activeAiChatSessionId = resolveHydratedActiveSessionId(state.activeAiChatSessionId, incoming.activeAiChatSessionId, aiChatSessions);
+  return { aiChatSessions, activeAiChatSessionId };
+}
+
+function chooseHydratedAiChatSession(current: AiChatSession, persisted: AiChatSession): AiChatSession {
+  if (isAiChatSessionBusyStatus(current.status)) return current;
+  if (current.updatedAt > persisted.updatedAt) return current;
+  if (current.messages.length > persisted.messages.length) return current;
+  if (current.updatedAt === persisted.updatedAt && sessionSegmentScore(current) >= sessionSegmentScore(persisted)) return current;
+  return persisted;
+}
+
+function normalizeAiChatSession(session: AiChatSession, options: { preserveRuntimeStatus?: boolean } = {}): AiChatSession {
+  const status = options.preserveRuntimeStatus && isAiChatSessionBusyStatus(session.status)
+    ? session.status
+    : session.status === "error"
+      ? "error"
+      : "idle";
   return {
     ...session,
     title: normalizeChatTitle(session.title || titleFromMessages(session.messages) || "New chat"),
-    status: session.status === "error" ? "error" : "idle",
+    status,
     lastError: session.lastError ?? null,
     closedAt: Number.isFinite(session.closedAt) ? session.closedAt : null,
-    messages: Array.isArray(session.messages) ? session.messages : [],
+    messages: Array.isArray(session.messages) ? session.messages.map(normalizeAiChatMessage) : [],
     createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(),
     updatedAt: Number.isFinite(session.updatedAt) ? session.updatedAt : Date.now(),
   };
+}
+
+function normalizeAiChatMessage(message: AiChatMessage): AiChatMessage {
+  const normalized = normalizeAiMessageReasoning(message);
+  return {
+    ...normalized,
+    segments: normalizeAiMessageSegments(normalized),
+  };
+}
+
+function normalizeAiMessageSegments(message: AiChatMessage): AiMessageSegment[] | undefined {
+  if (Array.isArray(message.segments) && message.segments.length > 0) {
+    return message.segments.map((segment, index) => {
+      if (segment.kind === "tool") return { ...segment, id: segment.id || segment.toolCall.id || `tool-${index}` };
+      return { ...segment, id: segment.id || `${segment.kind}-${index}` };
+    });
+  }
+
+  if (message.role !== "assistant") return message.segments;
+  const segments: AiMessageSegment[] = [];
+  if (message.reasoning?.trim()) segments.push({ kind: "reasoning", id: `${message.id}-reasoning`, text: message.reasoning });
+  if (message.toolCalls?.length) {
+    for (const [index, toolCall] of message.toolCalls.entries()) {
+      const id = toolCall.id || `${message.id}-tool-${index}`;
+      segments.push({ kind: "tool", id, toolCall: { ...toolCall, id } });
+    }
+  }
+  if (message.content.trim()) segments.push({ kind: "text", id: `${message.id}-text`, text: message.content });
+  return segments.length > 0 ? segments : message.segments;
+}
+
+function sessionSegmentScore(session: AiChatSession) {
+  return session.messages.reduce((score, message) => score + (message.segments?.length ?? 0), 0);
+}
+
+function sortAiChatSessionsForStore(sessions: AiChatSession[]) {
+  return sessions.sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt);
+}
+
+function resolveHydratedActiveSessionId(currentActiveId: string, persistedActiveId: string, sessions: AiChatSession[]) {
+  const current = sessions.find((session) => session.id === currentActiveId);
+  if (current && !current.closedAt) return current.id;
+  const persisted = sessions.find((session) => session.id === persistedActiveId);
+  if (persisted && !persisted.closedAt) return persisted.id;
+  return sessions.find((session) => !session.closedAt)?.id ?? sessions[0]?.id ?? "";
 }
 
 function isEmptyAiChatSession(session: AiChatSession) {

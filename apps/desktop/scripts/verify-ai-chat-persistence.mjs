@@ -1,31 +1,34 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { resolve, dirname } from "node:path";
 
-const panelPath = resolve("src/components/AiChatPanel.tsx");
-const source = await readFile(panelPath, "utf8");
+const scriptDir = dirname(fileURLToPath(import.meta.url));
+const appPath = resolve(scriptDir, "../src/App.tsx");
+const panelPath = resolve(scriptDir, "../src/components/AiChatPanel.tsx");
+const [appSource, panelSource] = await Promise.all([
+  readFile(appPath, "utf8"),
+  readFile(panelPath, "utf8"),
+]);
 const errors = [];
 
-if (!source.includes("historyPersistTimerRef")) {
-  errors.push("AI chat history persistence must be debounced; historyPersistTimerRef was not found.");
+if (!appSource.includes("aiChatHistoryLoadedRef")) {
+  errors.push("AI chat history must be loaded from the stable app-level component (App), not from AiChatPanel.");
 }
 
-if (!source.includes("if (sendingSessionId !== null) return;")) {
-  errors.push("AI chat history must not persist during active streaming/generation.");
+if (!appSource.includes("aiChatPersistTimerRef")) {
+  errors.push("AI chat history persistence must be debounced from the app-level; aiChatPersistTimerRef was not found in App.");
 }
 
-if (!source.includes("window.setTimeout")) {
-  errors.push("AI chat history persistence must debounce rapid streaming updates.");
+if (!appSource.includes("isAiChatSessionBusyStatus(session.status)")) {
+  errors.push("AI chat history must not persist while any session is busy (thinking/streaming/running-tools/waiting-approval).");
 }
 
-const persistEffect = source.match(/useEffect\(\(\) => \{\n\s*if \(!persistedSessionsLoadedRef\.current\)[\s\S]*?saveAiChatHistory\([\s\S]*?\n\s*}\, \[activeAiChatSessionId, aiChatSessions, sendingSessionId\]\);/);
-if (!persistEffect) {
-  errors.push("AI chat history persist effect must depend on sendingSessionId and save only from the debounced path.");
-} else if (persistEffect[0].includes("saveAiChatHistory") && !persistEffect[0].includes("historyPersistTimerRef.current = window.setTimeout")) {
-  errors.push("saveAiChatHistory must stay inside the debounced timer callback.");
+if (panelSource.includes("historyPersistTimerRef") || panelSource.includes("loadAiChatHistory")) {
+  errors.push("AI chat history load/save must be removed from AiChatPanel to prevent stale-overwrite on remount.");
 }
 
 if (errors.length > 0) {
   throw new Error(`AI chat persistence verification failed:\n- ${errors.join("\n- ")}`);
 }
 
-console.log("AI chat persistence verification passed (streaming updates are not persisted per chunk).");
+console.log("AI chat persistence verification passed (sync is stable at the app level, guarded by busy status).");

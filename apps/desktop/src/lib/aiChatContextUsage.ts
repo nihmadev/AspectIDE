@@ -1,5 +1,6 @@
 import type { AiPreferences } from "./aiPreferences";
 import type { AiChatAttachmentInput, AiChatMessage } from "./aiChatTypes";
+import { normalizeVisibleReasoning } from "./aiChatReasoning";
 import type { TranslateFn } from "./i18n/useTranslation";
 
 export type AiChatContextUsageRow = {
@@ -64,7 +65,7 @@ export function buildAiChatContextUsageSummary({
   const activeFileTokens = activeDocumentPath ? estimateTokens(activeDocumentPath) : 0;
   const attachmentTokens = attachments.reduce((sum, attachment) => sum + estimateAttachmentTokens(attachment), 0);
   const historyTokens = conversation.reduce((sum, entry) => {
-    return sum + estimateTokens(entry.content) + estimateTokens(entry.reasoning ?? "");
+    return sum + estimateTokens(entry.content) + estimateTokens(normalizeVisibleReasoning(entry.reasoning) ?? "");
   }, 0);
   const toolTokens = conversation.reduce((sum, entry) => sum + (entry.toolCalls?.reduce((toolSum, call) => toolSum
       + estimateTokens(call.tool) + estimateTokens(call.input ?? "") + estimateTokens(call.output ?? "") + estimateTokens(call.error ?? ""), 0) ?? 0), 0);
