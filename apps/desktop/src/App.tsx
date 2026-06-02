@@ -1,14 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import { AgentWorkspace } from "./components/AgentWorkspace";
-import { BottomPanel } from "./components/BottomPanel";
-import { CommandPalette } from "./components/CommandPalette";
 import { useEditorCloseGuard } from "./components/EditorCloseGuard";
-import { EditorArea } from "./components/EditorArea";
 import { LazyAiChatPanel } from "./components/LazyAiChatPanel";
-import { SettingsDialog } from "./components/SettingsDialog";
-import { Sidebar } from "./components/Sidebar";
+import { ProjectLoadingStatus } from "./components/ProjectLoadingStatus";
 import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
@@ -20,10 +16,17 @@ import { resetEditorFontZoom, toggleEditorMinimap, toggleEditorWordWrap, zoomEdi
 import { EDITOR_PREFERENCES_KEY, normalizeEditorPreferences } from "./lib/editorPreferences";
 import { buildFileTreeDirectories, normalizePath } from "./lib/fileTree";
 import { createKeybindingDispatcher, KEYBINDINGS_SETTINGS_KEY } from "./lib/keybindings";
-import { createEmptyAiIndexState, useLuxStore, type Activity } from "./lib/store";
+import { buildProjectLoadSummary } from "./lib/projectLoadPresentation";
+import { createEmptyAiIndexState, createIdleProjectLoadState, useLuxStore, type Activity } from "./lib/store";
 import { luxCommands, subscribeLuxEvents } from "./lib/tauri";
 import { pickAndOpenWorkspace } from "./lib/workspaceActions";
 import type { RecentWorkspace, WorkspaceInfo } from "./lib/types";
+
+const BottomPanel = lazy(() => import("./components/BottomPanel").then((module) => ({ default: module.BottomPanel })));
+const CommandPalette = lazy(() => import("./components/CommandPalette").then((module) => ({ default: module.CommandPalette })));
+const EditorArea = lazy(() => import("./components/EditorArea").then((module) => ({ default: module.EditorArea })));
+const SettingsDialog = lazy(() => import("./components/SettingsDialog").then((module) => ({ default: module.SettingsDialog })));
+const Sidebar = lazy(() => import("./components/Sidebar").then((module) => ({ default: module.Sidebar })));
 
 export function App() {
   const setWorkspace = useLuxStore((state) => state.setWorkspace);
@@ -38,6 +41,7 @@ export function App() {
   const setGitStatus = useLuxStore((state) => state.setGitStatus);
   const setLanguageServers = useLuxStore((state) => state.setLanguageServers);
   const setLanguageServersLoading = useLuxStore((state) => state.setLanguageServersLoading);
+  const setProjectLoad = useLuxStore((state) => state.setProjectLoad);
   const setDiagnosticsForPath = useLuxStore((state) => state.setDiagnosticsForPath);
   const appendTerminalOutput = useLuxStore((state) => state.appendTerminalOutput);
   const clearDiagnostics = useLuxStore((state) => state.clearDiagnostics);
@@ -45,15 +49,21 @@ export function App() {
   const setLocale = useLuxStore((state) => state.setLocale);
   const locale = useLuxStore((state) => state.locale);
   const aiPreferences = useLuxStore((state) => state.aiPreferences);
+  const aiIndex = useLuxStore((state) => state.aiIndex);
   const setAiPreferences = useLuxStore((state) => state.setAiPreferences);
   const setAiIndex = useLuxStore((state) => state.setAiIndex);
   const setKeybindingProfile = useLuxStore((state) => state.setKeybindingProfile);
   const keybindingProfile = useLuxStore((state) => state.keybindingProfile);
   const workspace = useLuxStore((state) => state.workspace);
   const workspaceMode = useLuxStore((state) => state.workspaceMode);
+  const projectLoad = useLuxStore((state) => state.projectLoad);
+  const fileTreeLoading = useLuxStore((state) => state.fileTreeLoading);
+  const languageServersLoading = useLuxStore((state) => state.languageServersLoading);
   const bottomPanelOpen = useLuxStore((state) => state.bottomPanelOpen);
   const sidebarVisible = useLuxStore((state) => state.sidebarVisible);
   const aiChatOpen = useLuxStore((state) => state.aiChatOpen);
+  const commandPaletteOpen = useLuxStore((state) => state.commandPaletteOpen);
+  const settingsOpen = useLuxStore((state) => state.settingsOpen);
   const setCommandPaletteOpen = useLuxStore((state) => state.setCommandPaletteOpen);
   const setSettingsOpen = useLuxStore((state) => state.setSettingsOpen);
   const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
@@ -76,14 +86,22 @@ export function App() {
   const [aiIndexRefreshToken, setAiIndexRefreshToken] = useState(0);
   const keybindingDispatcherRef = useRef(createKeybindingDispatcher(keybindingProfile));
   const bottomPanelRef = useRef<PanelImperativeHandle | null>(null);
+  const projectLoadSummary = useMemo(() => buildProjectLoadSummary({ aiIndexStatus: aiIndex.status, fileTreeLoading, languageServersLoading, projectIndexingEnabled: aiPreferences.projectIndexingEnabled, projectLoad }), [aiIndex.status, aiPreferences.projectIndexingEnabled, fileTreeLoading, languageServersLoading, projectLoad]);
+  const dismissProjectLoadError = () => setProjectLoad(createIdleProjectLoadState());
 
   const openProject = () => {
-    requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => void pickAndOpenWorkspace().then((workspace) => {
-      if (workspace) {
-        setWorkspace(workspace);
-        refreshRecentWorkspaces(setRecentWorkspaces);
-      }
-    }).catch(() => undefined), { title: "Save changes before opening another folder?" });
+    requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
+      setProjectLoad({ active: true, error: null, progress: 4, root: null, stage: "opening", workspaceName: null });
+      void pickAndOpenWorkspace().then((workspace) => {
+        if (workspace) {
+          setProjectLoad({ active: true, error: null, progress: 12, root: workspace.root, stage: "opening", workspaceName: workspace.name });
+          setWorkspace(workspace);
+          refreshRecentWorkspaces(setRecentWorkspaces);
+          return;
+        }
+        setProjectLoad(createIdleProjectLoadState());
+      }).catch((error) => setProjectLoad({ active: false, error: readErrorMessage(error), progress: 0, root: null, stage: "error", workspaceName: null }));
+    }, { title: "Save changes before opening another folder?" });
   };
 
   const newUntitledFile = () => {
@@ -99,12 +117,17 @@ export function App() {
   };
 
   const openRecentWorkspace = (root: string) => {
-    requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => void luxCommands.workspaceOpen(root).then((workspace) => {
-      setWorkspace(workspace);
-      refreshRecentWorkspaces(setRecentWorkspaces);
-    }).catch(() => {
-      void luxCommands.recentWorkspaceForget(root).then(setRecentWorkspaces).catch(() => undefined);
-    }), { title: "Save changes before switching folders?" });
+    requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
+      setProjectLoad({ active: true, error: null, progress: 8, root, stage: "opening", workspaceName: null });
+      void luxCommands.workspaceOpen(root).then((workspace) => {
+        setProjectLoad({ active: true, error: null, progress: 12, root: workspace.root, stage: "opening", workspaceName: workspace.name });
+        setWorkspace(workspace);
+        refreshRecentWorkspaces(setRecentWorkspaces);
+      }).catch(() => {
+        setProjectLoad({ active: false, error: "Failed to open recent project.", progress: 0, root, stage: "error", workspaceName: null });
+        void luxCommands.recentWorkspaceForget(root).then(setRecentWorkspaces).catch(() => undefined);
+      });
+    }, { title: "Save changes before switching folders?" });
   };
 
   const forgetRecentWorkspace = (root: string) => {
@@ -159,6 +182,7 @@ export function App() {
       source: "workspace-scan",
       workspaceRoot: workspace.root,
     });
+    setProjectLoad({ active: true, error: null, progress: Math.max(useLuxStore.getState().projectLoad.progress, 72), root: workspace.root, stage: "indexing", workspaceName: workspace.name });
 
     const indexTimer = window.setTimeout(() => {
       if (cancelled) return;
@@ -171,6 +195,7 @@ export function App() {
             progress: 100,
             updatedAt: new Date().toISOString(),
           });
+          setProjectLoad({ active: false, error: null, progress: 100, root: workspace.root, stage: "ready", workspaceName: workspace.name });
         })
         .catch((error) => {
           if (cancelled) return;
@@ -181,6 +206,7 @@ export function App() {
             source: "workspace-scan",
             workspaceRoot: workspace.root,
           });
+          setProjectLoad({ active: false, error: readErrorMessage(error), progress: 100, root: workspace.root, stage: "error", workspaceName: workspace.name });
         });
     }, 60);
 
@@ -188,7 +214,7 @@ export function App() {
       cancelled = true;
       window.clearTimeout(indexTimer);
     };
-  }, [aiIndexRefreshToken, aiPreferences.includeImages, aiPreferences.maxIndexedFiles, aiPreferences.projectIndexingEnabled, setAiIndex, workspace]);
+  }, [aiIndexRefreshToken, aiPreferences.includeImages, aiPreferences.maxIndexedFiles, aiPreferences.projectIndexingEnabled, setAiIndex, setProjectLoad, workspace]);
 
   useEffect(() => {
     void luxCommands.keybindingsGet()
@@ -205,6 +231,7 @@ export function App() {
 
   useEffect(() => {
     if (!workspace) return;
+    setProjectLoad({ active: true, error: null, progress: 28, root: workspace.root, stage: "files", workspaceName: workspace.name });
     setBottomPanelMaximized(false);
     let cancelled = false;
     clearDiagnostics();
@@ -212,9 +239,14 @@ export function App() {
     setFileTreeError(null);
 
     void refreshWorkspaceFileTree(workspace, true)
-      .catch(() => undefined)
+      .catch((error) => {
+        if (!cancelled) setProjectLoad({ active: false, error: readErrorMessage(error), progress: 100, root: workspace.root, stage: "error", workspaceName: workspace.name });
+      })
       .finally(() => {
-        if (!cancelled) setFileTreeLoading(false);
+        if (!cancelled) {
+          setFileTreeLoading(false);
+          if (useLuxStore.getState().projectLoad.stage !== "error") setProjectLoad({ progress: 56, root: workspace.root, stage: "services", workspaceName: workspace.name });
+        }
       });
     luxCommands.gitStatus().then(setGitStatus).catch(() => setGitStatus(null));
     setLanguageServersLoading(true);
@@ -226,7 +258,10 @@ export function App() {
         if (!cancelled) setLanguageServers([]);
       })
       .finally(() => {
-        if (!cancelled) setLanguageServersLoading(false);
+        if (!cancelled) {
+          setLanguageServersLoading(false);
+          if (useLuxStore.getState().projectLoad.stage !== "error") setProjectLoad({ progress: aiPreferences.projectIndexingEnabled ? 68 : 100, root: workspace.root, stage: aiPreferences.projectIndexingEnabled ? "indexing" : "ready", workspaceName: workspace.name, active: aiPreferences.projectIndexingEnabled });
+        }
       });
     luxCommands.diagnosticsSnapshot()
       .then((diagnostics) => {
@@ -244,7 +279,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [clearDiagnostics, setDiagnosticsForPath, setFileEntries, setFileTreeDirectories, setFileTreeError, setFileTreeLoading, setGitStatus, setLanguageServers, setLanguageServersLoading, workspace]);
+  }, [aiPreferences.projectIndexingEnabled, clearDiagnostics, setDiagnosticsForPath, setFileEntries, setFileTreeDirectories, setFileTreeError, setFileTreeLoading, setGitStatus, setLanguageServers, setLanguageServersLoading, setProjectLoad, workspace]);
 
   useEffect(() => {
     let dispose: (() => void) | undefined;
@@ -371,10 +406,12 @@ export function App() {
         <div className="app-shell no-project-shell agent-shell">
           <TitleBar />
           <AgentWorkspace
+            projectLoad={projectLoadSummary}
             onOpenProject={openProject}
           />
-          <CommandPalette />
-          <SettingsDialog />
+          <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
+          <DeferredCommandPalette open={commandPaletteOpen} />
+          <DeferredSettingsDialog open={settingsOpen} />
         </div>
       );
     }
@@ -387,9 +424,10 @@ export function App() {
             <Group orientation="horizontal" className="main-panels">
               <Panel minSize="360px">
                 {hasOpenDocuments ? (
-                  <EditorArea />
+                  <DeferredEditorArea />
                 ) : (
                   <WelcomeScreen
+                    loading={projectLoadSummary.active}
                     onForgetRecentWorkspace={forgetRecentWorkspace}
                     onOpenProject={openProject}
                     onOpenRecentWorkspace={openRecentWorkspace}
@@ -407,11 +445,12 @@ export function App() {
               )}
             </Group>
           </div>
-          {bottomPanelOpen && <BottomPanel isMaximized={bottomPanelMaximized} onToggleMaximized={toggleBottomPanelMaximized} />}
+          {bottomPanelOpen && <DeferredBottomPanel isMaximized={bottomPanelMaximized} onToggleMaximized={toggleBottomPanelMaximized} />}
         </div>
+        <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
         <StatusBar />
-        <CommandPalette />
-        <SettingsDialog />
+        <DeferredCommandPalette open={commandPaletteOpen} />
+        <DeferredSettingsDialog open={settingsOpen} />
       </div>
     );
   }
@@ -421,10 +460,12 @@ export function App() {
       <div className="app-shell agent-shell">
         <TitleBar />
         <AgentWorkspace
+          projectLoad={projectLoadSummary}
           onOpenProject={openProject}
         />
-        <CommandPalette />
-        <SettingsDialog />
+        <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
+        <DeferredCommandPalette open={commandPaletteOpen} />
+        <DeferredSettingsDialog open={settingsOpen} />
       </div>
     );
   }
@@ -438,13 +479,13 @@ export function App() {
           <Panel minSize="360px">
             <Group orientation="vertical">
               <Panel minSize="360px">
-                <EditorArea />
+                <DeferredEditorArea />
               </Panel>
               {bottomPanelOpen && (
                 <>
                   <Separator className="resize-handle horizontal" />
                   <Panel defaultSize="210px" minSize="150px" maxSize="70%" panelRef={bottomPanelRef}>
-                    <BottomPanel isMaximized={bottomPanelMaximized} onToggleMaximized={toggleBottomPanelMaximized} />
+                    <DeferredBottomPanel isMaximized={bottomPanelMaximized} onToggleMaximized={toggleBottomPanelMaximized} />
                   </Panel>
                 </>
               )}
@@ -460,9 +501,10 @@ export function App() {
           )}
         </Group>
       </div>
+      <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
       <StatusBar />
-      <CommandPalette />
-      <SettingsDialog />
+      <DeferredCommandPalette open={commandPaletteOpen} />
+      <DeferredSettingsDialog open={settingsOpen} />
     </div>
   );
 }
@@ -676,11 +718,47 @@ function readErrorMessage(error: unknown) {
   return "Failed to load project file tree.";
 }
 
+function DeferredEditorArea() {
+  return (
+    <Suspense fallback={<section className="editor-empty" aria-busy="true" />}>
+      <EditorArea />
+    </Suspense>
+  );
+}
+
+function DeferredBottomPanel({ isMaximized, onToggleMaximized }: { isMaximized: boolean; onToggleMaximized: () => void }) {
+  return (
+    <Suspense fallback={<section className="bottom-panel" data-maximized={isMaximized} aria-busy="true" />}>
+      <BottomPanel isMaximized={isMaximized} onToggleMaximized={onToggleMaximized} />
+    </Suspense>
+  );
+}
+
+function DeferredCommandPalette({ open }: { open: boolean }) {
+  if (!open) return null;
+  return (
+    <Suspense fallback={null}>
+      <CommandPalette />
+    </Suspense>
+  );
+}
+
+function DeferredSettingsDialog({ open }: { open: boolean }) {
+  if (!open) return null;
+  return (
+    <Suspense fallback={null}>
+      <SettingsDialog />
+    </Suspense>
+  );
+}
+
 function ExplorerPanelSlot() {
   return (
     <>
       <Panel defaultSize="288px" minSize="220px" maxSize="430px">
-        <Sidebar side="left" />
+        <Suspense fallback={<aside className="sidebar" data-side="left" aria-busy="true" />}>
+          <Sidebar side="left" />
+        </Suspense>
       </Panel>
       <Separator className="resize-handle" />
     </>

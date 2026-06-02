@@ -19,6 +19,8 @@ const baseContext = {
     name: "Local",
     protocol: "local-proxy",
   },
+  globalInstructions: "",
+  projectInstructions: "",
   runtimeToolsAvailable: true,
   selectedAgentInstructions: "Work autonomously from evidence.",
   selectedAgentName: "Agent",

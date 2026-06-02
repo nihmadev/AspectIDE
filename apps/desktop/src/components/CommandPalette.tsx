@@ -18,6 +18,7 @@ import {
   SquareSplitHorizontal,
   TerminalSquare,
   WrapText,
+  PlugZap,
 } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -36,7 +37,7 @@ import { displayPath as formatPath, normalizePath } from "../lib/fileTree";
 import { useLuxStore, type Activity } from "../lib/store";
 import { luxCommands } from "../lib/tauri";
 import { pickAndOpenWorkspace, reloadWorkspace } from "../lib/workspaceActions";
-import type { FsEntry, LspWorkspaceSymbol } from "../lib/types";
+import type { ExtensionCommandExecution, ExtensionCommandRoute, FsEntry, LspWorkspaceSymbol } from "../lib/types";
 
 const MAX_QUICK_OPEN_FILES = 2_500;
 
@@ -47,6 +48,7 @@ type PaletteCommand = {
   shortcut?: string;
   icon: typeof FolderOpen;
   run: () => void;
+  closeOnRun?: boolean;
 };
 
 export function CommandPalette() {
@@ -86,8 +88,11 @@ export function CommandPalette() {
   const [search, setSearch] = useState("");
   const [files, setFiles] = useState<FsEntry[]>([]);
   const [workspaceSymbols, setWorkspaceSymbols] = useState<LspWorkspaceSymbol[]>([]);
+  const [extensionCommandRoutes, setExtensionCommandRoutes] = useState<ExtensionCommandRoute[]>([]);
+  const [extensionCommandRoutesLoaded, setExtensionCommandRoutesLoaded] = useState(false);
   const [indexError, setIndexError] = useState<string | null>(null);
   const [symbolsError, setSymbolsError] = useState<string | null>(null);
+  const [extensionCommandError, setExtensionCommandError] = useState<string | null>(null);
   const { requestCloseDocuments } = useEditorCloseGuard();
 
   const fileIndexMutation = useMutation({
@@ -106,6 +111,33 @@ export function CommandPalette() {
       setSymbolsError(null);
     },
     onError: (error) => setSymbolsError(readErrorMessage(error, t)),
+  });
+
+  const extensionCommandsMutation = useMutation({
+    mutationFn: luxCommands.extensionsCommandRoutes,
+    onSuccess: (routes) => {
+      setExtensionCommandRoutes(routes);
+      setExtensionCommandRoutesLoaded(true);
+      setExtensionCommandError(null);
+    },
+    onError: (error) => {
+      setExtensionCommandRoutesLoaded(true);
+      setExtensionCommandError(readErrorMessage(error, t));
+    },
+  });
+
+  const executeExtensionCommandMutation = useMutation({
+    mutationFn: luxCommands.extensionsExecuteCommand,
+    onSuccess: (report) => {
+      if (report.status === "failed") {
+        setExtensionCommandError(formatExtensionCommandExecutionError(report, t));
+        return;
+      }
+      setExtensionCommandError(null);
+      setOpen(false);
+      setSearch("");
+    },
+    onError: (error) => setExtensionCommandError(readErrorMessage(error, t)),
   });
 
   const openFileMutation = useMutation({
@@ -161,6 +193,11 @@ export function CommandPalette() {
   const commandMode = search.trimStart().startsWith(">");
   const symbolMode = search.trimStart().startsWith("@");
   const query = commandMode || symbolMode ? search.trimStart().slice(1).trim() : search.trim();
+
+  useEffect(() => {
+    if (!open || !commandMode || extensionCommandRoutesLoaded || extensionCommandsMutation.isPending) return;
+    extensionCommandsMutation.mutate();
+  }, [commandMode, extensionCommandRoutesLoaded, extensionCommandsMutation, open]);
 
   useEffect(() => {
     if (!open || !workspace || !symbolMode) return;
@@ -436,6 +473,17 @@ export function CommandPalette() {
         icon: LayoutPanelLeft,
         run: () => setSidebarVisible(!sidebarVisible),
       },
+      ...extensionCommandRoutes.map((route) => ({
+        id: `extension.${route.id}`,
+        label: route.title,
+        detail: route.category ? `${route.category} - ${route.extension_name}` : route.extension_name,
+        icon: PlugZap,
+        closeOnRun: false,
+        run: () => {
+          setExtensionCommandError(null);
+          void executeExtensionCommandMutation.mutate(route.id);
+        },
+      })),
     ],
     [
       bottomPanelOpen,
@@ -471,6 +519,8 @@ export function CommandPalette() {
       splitActiveEditor,
       t,
       toggleAiChat,
+      extensionCommandRoutes,
+      executeExtensionCommandMutation,
       workspace,
     ],
   );
@@ -500,8 +550,9 @@ export function CommandPalette() {
       .map((candidate) => candidate.symbol);
   }, [query, symbolMode, workspaceSymbols]);
 
-  const runAndClose = (run: () => void) => {
-    run();
+  const runPaletteCommand = (command: PaletteCommand) => {
+    command.run();
+    if (command.closeOnRun === false) return;
     setOpen(false);
     setSearch("");
   };
@@ -554,13 +605,17 @@ export function CommandPalette() {
                 </Command.Group>
               )}
               <Command.Group heading={t("command.heading.commands")}>
-                {visibleCommands.map(({ detail, icon: Icon, id, label, run, shortcut }) => (
-                  <Command.Item key={id} value={`${label} ${detail}`} onSelect={() => runAndClose(run)}>
-                    <Icon size={16} />
-                    <span>{label}</span>
-                    {shortcut ? <kbd>{shortcut}</kbd> : <small>{detail}</small>}
-                  </Command.Item>
-                ))}
+                {visibleCommands.map((command) => {
+                  const { detail, icon: Icon, id, label, shortcut } = command;
+                  return (
+                    <Command.Item key={id} value={`${label} ${detail}`} onSelect={() => runPaletteCommand(command)}>
+                      <Icon size={16} />
+                      <span>{label}</span>
+                      {shortcut ? <kbd>{shortcut}</kbd> : <small>{detail}</small>}
+                    </Command.Item>
+                  );
+                })}
+                {extensionCommandError && <div className="command-inline-error">{extensionCommandError}</div>}
               </Command.Group>
             </Command.List>
             <div className="command-footer">
@@ -627,6 +682,11 @@ function formatLanguageServerSummary(servers: Array<{ status: string }>, t: Tran
   if (servers.length === 0) return t("command.languageServers.none");
   const available = servers.filter((server) => server.status === "available").length;
   return t("command.languageServers.available", { available, total: servers.length });
+}
+
+function formatExtensionCommandExecutionError(report: ExtensionCommandExecution, t: TranslateFn) {
+  const reason = report.reason ?? t("command.error.failed");
+  return `${t("command.error.failed")} [${report.phase}]: ${reason}`;
 }
 
 function readErrorMessage(error: unknown, t: TranslateFn) {

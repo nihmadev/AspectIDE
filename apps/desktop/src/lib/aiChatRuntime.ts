@@ -1184,12 +1184,26 @@ function summarizeToolInput(value: string | undefined) {
   try {
     const parsed = JSON.parse(value) as unknown;
     if (isRecord(parsed)) {
-      return Object.entries(parsed).map(([key, entry]) => `${key}: ${String(entry)}`).join(", ");
+      const primaryKey = ["path", "query", "command", "pattern", "url", "cwd"].find((key) => typeof parsed[key] === "string" && String(parsed[key]).trim());
+      if (primaryKey) return sanitizeToolSummary(String(parsed[primaryKey]));
+      return truncateText(Object.entries(parsed).map(([key, entry]) => `${key}: ${formatToolInputValue(entry)}`).join(", "), 180);
     }
   } catch {
-    return truncateText(value, 180);
+    return sanitizeToolSummary(truncateText(value, 180));
   }
-  return truncateText(value, 180);
+  return sanitizeToolSummary(truncateText(value, 180));
+}
+
+function formatToolInputValue(value: unknown) {
+  if (typeof value === "string") return sanitizeToolSummary(value);
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return `${value.length} item${value.length === 1 ? "" : "s"}`;
+  if (isRecord(value)) return "object";
+  return String(value ?? "");
+}
+
+function sanitizeToolSummary(value: string) {
+  return truncateText(normalizePathSlashes(value.trim()).replace(/^\/\/\?\//, "").replace(/^\/\?\//, ""), 180);
 }
 
 function parseToolArguments(value: string | undefined): UnknownRecord {

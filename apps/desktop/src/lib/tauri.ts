@@ -2,10 +2,28 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   BufferId,
+  DebugBreakpointsUpdate,
+  DebugConfiguration,
+  DebugEvaluateContext,
+  DebugEvaluateResult,
+  DebugExecutionAction,
+  DebugFrameScopes,
+  DebugSourceBreakpoint,
+  DebugStackTrace,
+  DebugSessionInfo,
+  DebugVariables,
   DebugWorkspaceInfo,
   DocumentEditResult,
   DocumentSnapshot,
+  ExtensionActivationReport,
+  ExtensionActivationPlan,
+  ExtensionCommandExecution,
+  ExtensionCommandRoute,
+  ExtensionContributionRegistry,
   ExtensionInfo,
+  FileFormatSupport,
+  FileInspection,
+  FileInspectionOptions,
   FsEntry,
   GitDiff,
   GitStatus,
@@ -126,6 +144,13 @@ export type FsReadTextResponse = {
   size: number;
 };
 
+export type FileAssetResponse = {
+  path: string;
+  mimeType: string;
+  dataUrl: string;
+  size: number;
+};
+
 export type TestHealthResponse = {
   workspaceRoot: string;
   status: "passed" | "failed" | "timeout" | "error" | string;
@@ -222,15 +247,28 @@ export type AiSymbolContextResponse = {
 
 export const isTauriRuntime = () => Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
 
+export const isBrowserPreviewRuntime = () => !isTauriRuntime() && import.meta.env.VITE_LUX_BROWSER_PREVIEW === "1";
+
+export function desktopRuntimeRequiredMessage(feature: string) {
+  return `${feature} requires the Lux desktop runtime. Browser fallbacks are available only in explicit preview mode.`;
+}
+
+export function createDesktopRuntimeError(feature: string) {
+  return new Error(desktopRuntimeRequiredMessage(feature));
+}
+
 async function invokeRequired<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   if (!isTauriRuntime()) {
-    throw new Error(`Command ${command} requires the Lux desktop runtime`);
+    throw createDesktopRuntimeError(`Command ${command}`);
   }
   return invoke<T>(command, args);
 }
 
 async function invokeOptional<T>(command: string, args: Record<string, unknown> | undefined, fallback: () => T): Promise<T> {
-  if (!isTauriRuntime()) return fallback();
+  if (!isTauriRuntime()) {
+    if (isBrowserPreviewRuntime()) return fallback();
+    throw createDesktopRuntimeError(`Command ${command}`);
+  }
   return invoke<T>(command, args);
 }
 
@@ -257,6 +295,10 @@ export const luxCommands = {
   fsCopy: (from: string, to: string) => invokeRequired<void>("fs_copy", { from, to }),
   fsDelete: (path: string) => invokeRequired<void>("fs_delete", { path }),
   fsRevealInFileExplorer: (path: string) => invokeRequired<void>("fs_reveal_in_file_explorer", { path }),
+  fileSupportedFormats: () => invokeRequired<FileFormatSupport[]>("file_supported_formats"),
+  fileInspect: (path: string, options?: Partial<FileInspectionOptions>) => invokeRequired<FileInspection>("file_inspect", { path, options: options ?? null }),
+  fileAssetData: (path: string) => invokeRequired<FileAssetResponse>("file_asset_data", { path }),
+  fileOpenExternal: (path: string) => invokeRequired<void>("file_open_external", { path }),
   clipboardWriteText: (text: string) => navigator.clipboard.writeText(text),
   editorNewFile: () => invokeOptional<DocumentSnapshot>("editor_new_file", undefined, createBrowserUntitledDocument),
   editorOpenFile: (path: string) => invokeRequired<DocumentSnapshot>("editor_open_file", { path }),
@@ -310,7 +352,22 @@ export const luxCommands = {
   gitStatus: () => invokeRequired<GitStatus>("git_status"),
   gitDiff: () => invokeRequired<GitDiff>("git_diff"),
   extensionsList: () => invokeRequired<ExtensionInfo[]>("extensions_list"),
+  extensionsActivationPlan: () => invokeRequired<ExtensionActivationPlan>("extensions_activation_plan"),
+  extensionsActivate: () => invokeRequired<ExtensionActivationReport>("extensions_activate"),
+  extensionsContributionRegistry: () => invokeRequired<ExtensionContributionRegistry>("extensions_contribution_registry"),
+  extensionsCommandRoutes: () => invokeRequired<ExtensionCommandRoute[]>("extensions_command_routes"),
+  extensionsExecuteCommand: (commandId: string) => invokeRequired<ExtensionCommandExecution>("extensions_execute_command", { commandId }),
   debugWorkspaceInfo: () => invokeRequired<DebugWorkspaceInfo>("debug_workspace_info"),
+  debugStart: (configuration: DebugConfiguration, breakpoints: DebugSourceBreakpoint[] = []) => invokeRequired<DebugSessionInfo>("debug_start", { configuration, breakpoints }),
+  debugStop: (sessionId: string) => invokeRequired<DebugSessionInfo>("debug_stop", { sessionId }),
+  debugSessions: () => invokeRequired<DebugSessionInfo[]>("debug_sessions"),
+  debugStackTrace: (sessionId: string) => invokeRequired<DebugStackTrace>("debug_stack_trace", { sessionId }),
+  debugScopes: (sessionId: string, frameId: number) => invokeRequired<DebugFrameScopes>("debug_scopes", { sessionId, frameId }),
+  debugVariables: (sessionId: string, variablesReference: number) => invokeRequired<DebugVariables>("debug_variables", { sessionId, variablesReference }),
+  debugEvaluate: (sessionId: string, expression: string, frameId: number | null, context: DebugEvaluateContext = "repl") =>
+    invokeRequired<DebugEvaluateResult>("debug_evaluate", { sessionId, expression, frameId, context }),
+  debugExecute: (sessionId: string, action: DebugExecutionAction) => invokeRequired<DebugSessionInfo>("debug_execute", { sessionId, action }),
+  debugSetBreakpoints: (sessionId: string, path: string, breakpoints: DebugSourceBreakpoint[]) => invokeRequired<DebugBreakpointsUpdate>("debug_set_breakpoints", { sessionId, path, breakpoints }),
   lspServers: () => invokeRequired<LanguageServerInfo[]>("lsp_servers"),
   diagnosticsSnapshot: () => invokeRequired<WorkspaceDiagnostic[]>("diagnostics_snapshot"),
   lspHover: (bufferId: BufferId, line: number, column: number) => invokeOptional<LspHover | null>("lsp_hover", { bufferId, line, column }, () => null),
@@ -364,6 +421,7 @@ function createBrowserUntitledDocument(): DocumentSnapshot {
     title,
     language_id: "plaintext",
     text: "",
+    view: defaultTextView(),
     version: 1,
     is_dirty: true,
     is_untitled: true,
@@ -371,6 +429,23 @@ function createBrowserUntitledDocument(): DocumentSnapshot {
   };
   browserDocuments.set(document.id, document);
   return document;
+}
+
+function defaultTextView() {
+  return {
+    category: "text" as const,
+    strategy: "monacoText" as const,
+    mode: "editableText" as const,
+    displayName: "Text",
+    mimeType: "text/plain",
+    extensions: [],
+    editable: true,
+    previewable: true,
+    aiReadable: true,
+    binary: false,
+    maxInlineBytes: 1_000_000n,
+    notes: [],
+  };
 }
 
 function saveBrowserDocument(bufferId: BufferId): DocumentSnapshot {
@@ -432,6 +507,7 @@ function defaultKeybindingProfile(): KeybindingProfile {
 
 export async function subscribeLuxEvents(handler: (event: LuxEvent) => void) {
   if (!isTauriRuntime()) {
+    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://event");
     return () => undefined;
   }
   return listen<LuxEvent>("lux://event", (event) => handler(event.payload));
@@ -439,6 +515,7 @@ export async function subscribeLuxEvents(handler: (event: LuxEvent) => void) {
 
 export async function subscribeAiChatStream(handler: (event: AiChatStreamEvent) => void) {
   if (!isTauriRuntime()) {
+    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://ai-chat-stream");
     return () => undefined;
   }
   return listen<AiChatStreamEvent>("lux://ai-chat-stream", (event) => handler(event.payload));

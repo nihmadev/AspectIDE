@@ -8,3 +8,5 @@ authors.workspace = true
 [dependencies]
 lux-core = { path = "../lux-core" }
 serde_json.workspace = true
+wasmparser.workspace = true
+wasmtime.workspace = true

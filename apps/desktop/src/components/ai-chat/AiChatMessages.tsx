@@ -1,6 +1,6 @@
 import { Brain, ChevronRight, Copy } from "lucide-react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
-import { Fragment, memo, useMemo, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { lexer, type Token, type Tokens } from "marked";
 import { AiToolCallsGroup } from "../AiToolCall";
@@ -185,6 +185,9 @@ function AiReasoningBlock({ text, streaming, hasAnswer, t }: {
   const autoOpen = streaming || !hasAnswer;
   const open = userToggled ?? autoOpen;
   const label = streaming ? t("aiChat.reasoning.thinking") : t("aiChat.reasoning.thought");
+  useEffect(() => {
+    if (streaming) setUserToggled(null);
+  }, [streaming]);
   return (
     <div className="ai-reasoning" data-open={open} data-streaming={streaming}>
       <button type="button" className="ai-reasoning-header" onClick={() => setUserToggled(!open)} aria-expanded={open}>

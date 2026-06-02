@@ -5,8 +5,8 @@ use std::{
 
 use chrono::Utc;
 use lux_core::{
-    BufferId, DocumentSnapshot, LspDocumentSymbol, LspHover, LspLocation, LspSignatureHelp,
-    LspWorkspaceSymbol, LuxEvent, WorkspaceDiagnostic,
+    file_view_descriptor_for_path, BufferId, DocumentSnapshot, LspDocumentSymbol, LspHover,
+    LspLocation, LspSignatureHelp, LspWorkspaceSymbol, LuxEvent, WorkspaceDiagnostic,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -909,6 +909,7 @@ async fn symbol_context_document_for_path(
             .map_or_else(|| path.to_string_lossy().into_owned(), ToOwned::to_owned),
         language_id: lux_editor::language_id_for_path(path),
         text,
+        view: file_view_descriptor_for_path(path),
         version: 1,
         is_dirty: false,
         is_untitled: false,

@@ -36,11 +36,14 @@ type BuildContextUsageInput = {
 const contextTokenBudget = 200_000;
 
 const contextRowColors = {
-  agent: "#9aa0a6",
-  model: "#8fb5d9",
+  attachments: "#d7a85d",
+  history: "#6d8589",
   index: "#57c178",
-  files: "#ffc46b",
-  conversation: "#6d8589",
+  input: "#8fb5d9",
+  model: "#9aa0a6",
+  openFile: "#c990d8",
+  system: "#b8b8b8",
+  tools: "#7aa6a1",
 } as const;
 
 export function buildAiChatContextUsageSummary({
@@ -55,28 +58,28 @@ export function buildAiChatContextUsageSummary({
   selectedModelAlias,
   t,
 }: BuildContextUsageInput): AiChatContextUsageSummary {
-  const agentTokens = estimateTokens([agentName, preferences.agentMode, agentInstruction].join(" "));
+  const systemTokens = estimateTokens([agentName, preferences.agentMode, agentInstruction, preferences.toolApprovalMode].join(" "));
   const modelTokens = estimateTokens(selectedModelAlias);
-  const indexTokens = preferences.projectIndexingEnabled && aiIndexStatus !== "disabled" ? estimateTokens(aiIndexStatus) : 0;
-  const filesTokens = activeDocumentPath ? estimateTokens(activeDocumentPath) : 0;
+  const indexTokens = preferences.projectIndexingEnabled && aiIndexStatus !== "disabled" ? estimateTokens([aiIndexStatus, String(preferences.maxIndexedFiles)].join(" ")) : 0;
+  const activeFileTokens = activeDocumentPath ? estimateTokens(activeDocumentPath) : 0;
+  const attachmentTokens = attachments.reduce((sum, attachment) => sum + estimateAttachmentTokens(attachment), 0);
   const historyTokens = conversation.reduce((sum, entry) => {
-    const toolTokens = entry.toolCalls?.reduce((toolSum, call) => toolSum
-      + estimateTokens(call.input ?? "") + estimateTokens(call.output ?? "") + estimateTokens(call.error ?? ""), 0) ?? 0;
-    return sum + estimateTokens(entry.content) + toolTokens;
+    return sum + estimateTokens(entry.content) + estimateTokens(entry.reasoning ?? "");
   }, 0);
-  const conversationTokens = historyTokens
-    + Math.max(estimateTokens(message), message.trim() ? 80 : 0)
-    + attachments.reduce((sum, attachment) => sum + estimateAttachmentTokens(attachment), 0);
+  const toolTokens = conversation.reduce((sum, entry) => sum + (entry.toolCalls?.reduce((toolSum, call) => toolSum
+      + estimateTokens(call.tool) + estimateTokens(call.input ?? "") + estimateTokens(call.output ?? "") + estimateTokens(call.error ?? ""), 0) ?? 0), 0);
+  const inputTokens = Math.max(estimateTokens(message), message.trim() ? 80 : 0);
   const messageCount = conversation.length;
-  const conversationDetail = messageCount > 0
-    ? t("aiChat.context.messageCount", { count: messageCount })
-    : attachments.length > 0 ? t("aiChat.attachment.count", { count: attachments.length }) : "";
+  const toolCount = conversation.reduce((sum, entry) => sum + (entry.toolCalls?.length ?? 0), 0);
   const rawRows: Omit<AiChatContextUsageRow, "percent">[] = [
-    { color: contextRowColors.agent, detail: agentName || preferences.agentMode, id: "agent", label: t("aiChat.context.agent"), tokens: agentTokens },
+    { color: contextRowColors.system, detail: agentName || preferences.agentMode, id: "system", label: t("aiChat.context.system"), tokens: systemTokens },
     { color: contextRowColors.model, detail: selectedModelAlias, id: "model", label: t("aiChat.model.label"), tokens: modelTokens },
     { color: contextRowColors.index, detail: preferences.projectIndexingEnabled ? aiIndexStatus : t("common.off"), id: "index", label: t("aiChat.context.index"), tokens: indexTokens },
-    { color: contextRowColors.files, detail: activeDocumentPath ?? "", id: "files", label: t("aiChat.context.file"), tokens: filesTokens },
-    { color: contextRowColors.conversation, detail: conversationDetail, id: "conversation", label: t("aiChat.context.message"), tokens: conversationTokens },
+    { color: contextRowColors.openFile, detail: activeDocumentPath ?? "", id: "open-file", label: t("aiChat.context.openFile"), tokens: activeFileTokens },
+    { color: contextRowColors.attachments, detail: attachments.length > 0 ? t("aiChat.attachment.count", { count: attachments.length }) : "", id: "attachments", label: t("aiChat.context.attachments"), tokens: attachmentTokens },
+    { color: contextRowColors.history, detail: messageCount > 0 ? t("aiChat.context.messageCount", { count: messageCount }) : "", id: "history", label: t("aiChat.context.history"), tokens: historyTokens },
+    { color: contextRowColors.tools, detail: toolCount > 0 ? t("aiTools.summary.ran", { count: toolCount }) : "", id: "tools", label: t("aiChat.context.tools"), tokens: toolTokens },
+    { color: contextRowColors.input, detail: message.trim() ? t("aiChat.context.currentRequest") : "", id: "input", label: t("aiChat.context.input"), tokens: inputTokens },
   ].filter((row) => row.tokens > 0 || row.detail);
   const totalTokens = rawRows.reduce((sum, row) => sum + row.tokens, 0);
   const rows = rawRows.map((row) => ({

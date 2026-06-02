@@ -2,7 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import { useLuxStore } from "../lib/store";
-import { isTauriRuntime, luxCommands, subscribeLuxEvents } from "../lib/tauri";
+import { isBrowserPreviewRuntime, isTauriRuntime, luxCommands, subscribeLuxEvents } from "../lib/tauri";
 import type { TerminalSessionInfo } from "../lib/types";
 import "@xterm/xterm/css/xterm.css";
 
@@ -43,7 +43,7 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
     webPromptWrittenRef.current = false;
     terminal.clear();
     if (bufferText) terminal.write(bufferText);
-    else if (!sessionId && !isTauriRuntime()) {
+    else if (!sessionId && isBrowserPreviewRuntime()) {
       terminal.write(webPrompt);
       webPromptWrittenRef.current = true;
     }
@@ -93,7 +93,7 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
     fitRef.current = fitAddon;
     renderedSessionIdRef.current = sessionRef.current?.id ?? null;
     if (bufferTextRef.current) terminal.write(bufferTextRef.current);
-    else if (!sessionRef.current && !isTauriRuntime()) {
+    else if (!sessionRef.current && isBrowserPreviewRuntime()) {
       terminal.write(webPrompt);
       webPromptWrittenRef.current = true;
     }
@@ -125,6 +125,7 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
         void luxCommands.terminalWrite(activeSession.id, data);
         return;
       }
+      if (!isBrowserPreviewRuntime()) return;
       if (activeSession) appendTerminalOutput(activeSession.id, data);
       terminal.write(data === "\r" ? `\r\n${webPrompt}` : data);
     });
@@ -153,7 +154,7 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
       const terminal = terminalRef.current;
       if (!terminal) return;
       if (session) return;
-      if (!isTauriRuntime()) {
+      if (isBrowserPreviewRuntime()) {
         if (!webPromptWrittenRef.current) {
           terminal.write(webPrompt);
           webPromptWrittenRef.current = true;
@@ -182,6 +183,8 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
       terminalRef.current?.write(event.data);
     }).then((unlisten) => {
       dispose = unlisten;
+    }).catch((error: unknown) => {
+      terminalRef.current?.write(`\r\n${readErrorMessage(error)}\r\n`);
     });
 
     return () => dispose?.();
@@ -190,7 +193,7 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
   useEffect(() => {
     if (clearToken > 0) {
       terminalRef.current?.clear();
-      if (!sessionRef.current && !isTauriRuntime()) {
+      if (!sessionRef.current && isBrowserPreviewRuntime()) {
         terminalRef.current?.write(webPrompt);
         webPromptWrittenRef.current = true;
       }
@@ -198,4 +201,8 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
   }, [clearToken]);
 
   return <div className="xterm-host" ref={containerRef} />;
+}
+
+function readErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }

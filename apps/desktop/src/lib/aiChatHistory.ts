@@ -1,6 +1,6 @@
 import type { AiChatMessage } from "./aiChatTypes";
 import type { AiChatSession, AiChatSessionState } from "./store";
-import { isTauriRuntime, luxCommands } from "./tauri";
+import { isBrowserPreviewRuntime, isTauriRuntime, luxCommands } from "./tauri";
 
 export const legacyAiChatSessionsStorageKey = "ai.chat.sessions.v1";
 
@@ -16,31 +16,28 @@ type PersistedChatState = {
 };
 
 export async function loadAiChatHistory(): Promise<AiChatSessionState | null> {
-  if (!isTauriRuntime()) return loadLegacyAiChatHistory();
-  try {
-    const response = await luxCommands.aiChatHistoryLoad();
-    if (response.schemaVersion !== historySchemaVersion || !Array.isArray(response.sessions) || response.sessions.length === 0) {
-      const legacy = loadLegacyAiChatHistory();
-      if (legacy && legacy.sessions.length > 0) await migrateLegacyAiChatHistory(legacy);
-      return legacy;
-    }
-    return {
-      activeSessionId: response.activeSessionId,
-      sessions: response.sessions.filter(isAiChatSession),
-    };
-  } catch {
-    return loadLegacyAiChatHistory();
+  if (isBrowserPreviewRuntime()) return loadLegacyAiChatHistory();
+
+  const response = await luxCommands.aiChatHistoryLoad();
+  if (response.schemaVersion !== historySchemaVersion || !Array.isArray(response.sessions) || response.sessions.length === 0) {
+    const legacy = isTauriRuntime() ? loadLegacyAiChatHistory() : null;
+    if (legacy && legacy.sessions.length > 0) await migrateLegacyAiChatHistory(legacy);
+    return legacy;
   }
+  return {
+    activeSessionId: response.activeSessionId,
+    sessions: response.sessions.filter(isAiChatSession),
+  };
 }
 
 export async function saveAiChatHistory(state: AiChatSessionState): Promise<void> {
   const compacted = compactAiChatHistory(state);
-  if (isTauriRuntime()) {
-    await luxCommands.aiChatHistorySave(compacted);
-    removeLegacyAiChatHistory();
+  if (isBrowserPreviewRuntime()) {
+    window.localStorage.setItem(legacyAiChatSessionsStorageKey, JSON.stringify(compacted));
     return;
   }
-  window.localStorage.setItem(legacyAiChatSessionsStorageKey, JSON.stringify(compacted));
+  await luxCommands.aiChatHistorySave(compacted);
+  if (isTauriRuntime()) removeLegacyAiChatHistory();
 }
 
 export async function migrateLegacyAiChatHistory(state: AiChatSessionState): Promise<void> {

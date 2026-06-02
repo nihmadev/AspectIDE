@@ -14,13 +14,26 @@
 .ai-tool-calls-summary {
   display: flex;
   align-items: center;
+  width: 100%;
   min-width: 0;
   gap: 8px;
-  padding-left: 3px;
+  padding: 4px 5px 4px 3px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
   color: #7e7e7e;
   font: 10px/1.3 var(--font-ui);
   letter-spacing: 0.04em;
+  text-align: left;
   text-transform: uppercase;
+  cursor: pointer;
+  transition: background 130ms ease, color 130ms ease;
+}
+
+.ai-tool-calls-summary:hover,
+.ai-tool-calls-summary[aria-expanded="true"] {
+  background: rgba(255, 255, 255, 0.035);
+  color: #a4a4a4;
 }
 
 .ai-tool-calls-rail {
@@ -63,10 +76,105 @@
   color: #ff9d9d;
 }
 
+.ai-tool-calls-badge[data-status="neutral"] {
+  background: rgba(143, 181, 217, 0.12);
+  color: #aac8df;
+}
+
+.ai-tool-calls-caret {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: #6f6f6f;
+  transition: transform 160ms cubic-bezier(0.4, 0, 0.2, 1), color 130ms ease;
+}
+
+.ai-tool-calls-caret[data-expanded="true"] {
+  transform: rotate(90deg);
+  color: #a2a2a2;
+}
+
 .ai-tool-calls-list {
   display: grid;
   gap: 2px;
   min-width: 0;
+}
+
+/* ---- Batched tool calls ---- */
+
+.ai-tool-call-batch {
+  display: grid;
+  min-width: 0;
+  border-radius: 6px;
+}
+
+.ai-tool-call-batch-head {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #9f9f9f;
+  cursor: pointer;
+  font: 10.5px/1 var(--font-ui);
+  text-align: left;
+  transition: background 130ms ease, border-color 130ms ease, color 130ms ease;
+}
+
+.ai-tool-call-batch-head:hover,
+.ai-tool-call-batch[data-open="true"] .ai-tool-call-batch-head {
+  border-color: #2d2d2d;
+  background: #1f1f1f;
+  color: #d0d0d0;
+}
+
+.ai-tool-call-batch[data-active="true"] .ai-tool-call-batch-head {
+  border-color: rgba(143, 181, 217, 0.24);
+  color: #bfd4e5;
+}
+
+.ai-tool-call-batch-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ai-tool-call-batch-head strong {
+  display: inline-grid;
+  min-width: 18px;
+  height: 17px;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: #282828;
+  color: #c4c4c4;
+  font: 9.5px/1 var(--font-mono);
+}
+
+.ai-tool-call-batch-caret {
+  color: #6f6f6f;
+  transition: transform 160ms cubic-bezier(0.4, 0, 0.2, 1), color 130ms ease;
+}
+
+.ai-tool-call-batch-caret[data-expanded="true"] {
+  transform: rotate(90deg);
+  color: #a2a2a2;
+}
+
+.ai-tool-call-batch-list {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* ---- Single tool call ---- */

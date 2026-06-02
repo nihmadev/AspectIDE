@@ -21,7 +21,8 @@
     "tauri:dev": "pnpm --filter @lux/desktop tauri dev",
     "tauri:build": "pnpm --filter @lux/desktop tauri build",
     "check:rust": "cargo check --workspace",
-    "test:rust": "cargo test --workspace"
+    "test:rust": "cargo test --workspace",
+    "benchmark:core": "cargo run -p lux-bench -- --assert"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild"]

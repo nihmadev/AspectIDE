@@ -7,13 +7,23 @@ import { normalizePath, type FileTreeDirectories } from "./fileTree";
 import { DEFAULT_LOCALE, type Locale } from "./i18n";
 import { defaultKeybindingProfile } from "./keybindings";
 import type { TerminalOutputBuffer } from "./terminalTypes";
-import type { DocumentEditResult, DocumentSnapshot, FsEntry, GitStatus, KeybindingProfile, LanguageServerInfo, SearchResponse, TerminalSessionInfo, TextEdit, WorkspaceDiagnostic, WorkspaceInfo } from "./types";
+import type { DebugBreakpointsUpdate, DebugResolvedBreakpoint, DebugSourceBreakpoint, DocumentEditResult, DocumentSnapshot, FsEntry, GitStatus, KeybindingProfile, LanguageServerInfo, SearchResponse, TerminalSessionInfo, TextEdit, WorkspaceDiagnostic, WorkspaceInfo } from "./types";
 
 export type Activity = "explorer" | "search" | "git" | "runDebug" | "extensions";
 export type BottomPanelTab = "problems" | "output" | "terminal";
 export type AiIndexStatus = "disabled" | "idle" | "indexing" | "ready";
 export type WorkspaceMode = "agent" | "workspace";
 export type AiChatSessionStatus = "idle" | "thinking" | "streaming" | "running-tools" | "waiting-approval" | "error";
+export type ProjectLoadStage = "idle" | "opening" | "files" | "services" | "indexing" | "ready" | "error";
+
+export type ProjectLoadState = {
+  active: boolean;
+  error: string | null;
+  progress: number;
+  root: string | null;
+  stage: ProjectLoadStage;
+  workspaceName: string | null;
+};
 
 export type AiIndexState = {
   status: AiIndexStatus;
@@ -71,6 +81,11 @@ export type AiChatSessionState = {
   sessions: AiChatSession[];
 };
 
+export type CreateAiChatSessionResult = {
+  id: string;
+  reused: boolean;
+};
+
 const DEFAULT_EDITOR_GROUP_ID = "editor-group-1";
 const MAX_TERMINAL_BUFFER_CHARS = 120_000;
 const createEditorGroupId = () => `editor-group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -106,6 +121,17 @@ export function createEmptyAiIndexState(status: AiIndexStatus = "idle"): AiIndex
   };
 }
 
+export function createIdleProjectLoadState(): ProjectLoadState {
+  return {
+    active: false,
+    error: null,
+    progress: 0,
+    root: null,
+    stage: "idle",
+    workspaceName: null,
+  };
+}
+
 type LuxState = {
   workspaceMode: WorkspaceMode;
   activeActivity: Activity;
@@ -121,6 +147,7 @@ type LuxState = {
   keybindingProfile: KeybindingProfile;
   workspace: WorkspaceInfo | null;
   workspaceFolders: WorkspaceInfo[];
+  projectLoad: ProjectLoadState;
   fileEntries: FsEntry[];
   fileTreeDirectories: FileTreeDirectories;
   fileTreeLoading: boolean;
@@ -140,6 +167,8 @@ type LuxState = {
   languageServers: LanguageServerInfo[];
   languageServersLoading: boolean;
   diagnosticsByPath: Record<string, WorkspaceDiagnostic[]>;
+  debugSourceBreakpointsByPath: Record<string, DebugSourceBreakpoint[]>;
+  debugResolvedBreakpointsByPath: Record<string, DebugResolvedBreakpoint[]>;
   commandPaletteOpen: boolean;
   bottomPanelOpen: boolean;
   bottomPanelTab: BottomPanelTab;
@@ -156,6 +185,7 @@ type LuxState = {
   setAiIndex: (index: Partial<AiIndexState>) => void;
   setAiChatSessions: (state: AiChatSessionState) => void;
   createAiChatSession: (workspaceRoot?: string | null) => string;
+  ensureAiChatSession: (workspaceRoot?: string | null) => CreateAiChatSessionResult;
   setActiveAiChatSession: (sessionId: string) => void;
   closeAiChatSession: (sessionId: string) => void;
   restoreAiChatSession: (sessionId: string) => void;
@@ -169,6 +199,7 @@ type LuxState = {
   setEditorPreferences: (preferences: EditorPreferences) => void;
   setKeybindingProfile: (profile: KeybindingProfile) => void;
   setWorkspace: (workspace: WorkspaceInfo | null) => void;
+  setProjectLoad: (state: Partial<ProjectLoadState>) => void;
   addWorkspaceFolder: (workspace: WorkspaceInfo) => void;
   removeWorkspaceFolder: (root: string) => void;
   setFileEntries: (entries: FsEntry[]) => void;
@@ -214,6 +245,9 @@ type LuxState = {
   setLanguageServersLoading: (loading: boolean) => void;
   setDiagnosticsForPath: (path: string, diagnostics: WorkspaceDiagnostic[]) => void;
   clearDiagnostics: () => void;
+  toggleDebugSourceBreakpoint: (path: string, line: number) => void;
+  setDebugResolvedBreakpoints: (update: DebugBreakpointsUpdate) => void;
+  clearDebugBreakpoints: () => void;
   setCommandPaletteOpen: (open: boolean) => void;
   openBottomPanel: (tab: BottomPanelTab) => void;
   toggleBottomPanel: (tab: BottomPanelTab) => void;
@@ -235,6 +269,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   keybindingProfile: defaultKeybindingProfile(),
   workspace: null,
   workspaceFolders: [],
+  projectLoad: createIdleProjectLoadState(),
   fileEntries: [],
   fileTreeDirectories: {},
   fileTreeLoading: false,
@@ -254,6 +289,8 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   languageServers: [],
   languageServersLoading: false,
   diagnosticsByPath: {},
+  debugSourceBreakpointsByPath: {},
+  debugResolvedBreakpointsByPath: {},
   commandPaletteOpen: false,
   bottomPanelOpen: false,
   bottomPanelTab: "terminal",
@@ -277,6 +314,21 @@ export const useLuxStore = create<LuxState>((set, get) => ({
       aiChatOpen: true,
     }));
     return session.id;
+  },
+  ensureAiChatSession: (workspaceRoot = get().workspace?.root ?? null) => {
+    const current = get();
+    const reusable = current.aiChatSessions.find((session) => !session.closedAt && session.workspaceRoot === workspaceRoot && isEmptyAiChatSession(session));
+    if (reusable) {
+      set({ activeAiChatSessionId: reusable.id, aiChatOpen: true });
+      return { id: reusable.id, reused: true };
+    }
+    const session = createAiChatSession(workspaceRoot);
+    set((state) => ({
+      aiChatSessions: [session, ...state.aiChatSessions],
+      activeAiChatSessionId: session.id,
+      aiChatOpen: true,
+    }));
+    return { id: session.id, reused: false };
   },
   setActiveAiChatSession: (sessionId) => set((state) => {
     const target = state.aiChatSessions.find((session) => session.id === sessionId);
@@ -383,6 +435,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
         : workspaceChatSession?.id ?? fallbackChatSession?.id ?? state.activeAiChatSessionId;
       return {
       workspace,
+      projectLoad: workspace ? state.projectLoad : createIdleProjectLoadState(),
       aiChatOpen: workspace ? (sameWorkspace ? state.aiChatOpen : true) : false,
       aiChatSessions,
       activeAiChatSessionId,
@@ -409,6 +462,8 @@ export const useLuxStore = create<LuxState>((set, get) => ({
       languageServers: workspace && sameWorkspace ? state.languageServers : [],
       languageServersLoading: false,
       diagnosticsByPath: workspace && sameWorkspace ? state.diagnosticsByPath : {},
+      debugSourceBreakpointsByPath: workspace && sameWorkspace ? state.debugSourceBreakpointsByPath : {},
+      debugResolvedBreakpointsByPath: workspace && sameWorkspace ? state.debugResolvedBreakpointsByPath : {},
       explorerExpandedPaths: workspace
         ? sameWorkspace && state.explorerExpandedPaths.length > 0
           ? state.explorerExpandedPaths
@@ -416,6 +471,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
         : [],
       };
     }),
+  setProjectLoad: (projectLoad) => set((state) => ({ projectLoad: { ...state.projectLoad, ...projectLoad } })),
   addWorkspaceFolder: (workspace) =>
     set((state) => ({
       workspaceFolders: state.workspaceFolders.some((folder) => folder.root === workspace.root)
@@ -754,6 +810,36 @@ export const useLuxStore = create<LuxState>((set, get) => ({
       },
     })),
   clearDiagnostics: () => set({ diagnosticsByPath: {} }),
+  toggleDebugSourceBreakpoint: (path, line) =>
+    set((state) => {
+      const normalizedPath = normalizePath(path);
+      const current = state.debugSourceBreakpointsByPath[normalizedPath] ?? [];
+      const existing = current.some((breakpoint) => breakpoint.line === line);
+      const nextBreakpoints = existing
+        ? current.filter((breakpoint) => breakpoint.line !== line)
+        : [...current, { path: normalizedPath, line, column: null, condition: null, log_message: null }].sort((left, right) => left.line - right.line);
+      const debugSourceBreakpointsByPath = { ...state.debugSourceBreakpointsByPath };
+      const debugResolvedBreakpointsByPath = { ...state.debugResolvedBreakpointsByPath };
+      if (nextBreakpoints.length > 0) {
+        debugSourceBreakpointsByPath[normalizedPath] = nextBreakpoints;
+      } else {
+        delete debugSourceBreakpointsByPath[normalizedPath];
+      }
+      delete debugResolvedBreakpointsByPath[normalizedPath];
+      return { debugSourceBreakpointsByPath, debugResolvedBreakpointsByPath };
+    }),
+  setDebugResolvedBreakpoints: (update) =>
+    set((state) => {
+      const normalizedPath = normalizePath(update.path);
+      const debugResolvedBreakpointsByPath = { ...state.debugResolvedBreakpointsByPath };
+      if (update.breakpoints.length > 0) {
+        debugResolvedBreakpointsByPath[normalizedPath] = update.breakpoints;
+      } else {
+        delete debugResolvedBreakpointsByPath[normalizedPath];
+      }
+      return { debugResolvedBreakpointsByPath };
+    }),
+  clearDebugBreakpoints: () => set({ debugSourceBreakpointsByPath: {}, debugResolvedBreakpointsByPath: {} }),
   setCommandPaletteOpen: (commandPaletteOpen) => set({ commandPaletteOpen }),
   openBottomPanel: (bottomPanelTab) => set({ bottomPanelOpen: true, bottomPanelTab }),
   toggleBottomPanel: (bottomPanelTab) =>
@@ -821,6 +907,10 @@ function normalizeAiChatSession(session: AiChatSession): AiChatSession {
     createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(),
     updatedAt: Number.isFinite(session.updatedAt) ? session.updatedAt : Date.now(),
   };
+}
+
+function isEmptyAiChatSession(session: AiChatSession) {
+  return session.messages.length === 0 && session.status === "idle" && !session.lastError;
 }
 
 function nextChatSessionTitle(session: AiChatSession, message: AiChatMessage) {

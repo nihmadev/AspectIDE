@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Activity,
@@ -189,12 +189,18 @@ type AiToolCallsGroupProps = {
 };
 
 export function AiToolCallsGroup({ onApprovalDecision, t, toolCalls }: AiToolCallsGroupProps) {
-  if (toolCalls.length === 0) return null;
-
   const approvalCount = toolCalls.filter((call) => call.status === "approval").length;
   const runningCount = toolCalls.filter((call) => call.status === "running").length;
   const errorCount = toolCalls.filter((call) => call.status === "error").length;
   const active = approvalCount > 0 || runningCount > 0;
+  const [userToggled, setUserToggled] = useState<boolean | null>(null);
+  const open = userToggled ?? active;
+  const groupedBatches = useMemo(() => groupToolCalls(toolCalls), [toolCalls]);
+  useEffect(() => {
+    if (active) setUserToggled(null);
+  }, [active]);
+
+  if (toolCalls.length === 0) return null;
 
   const summary = approvalCount > 0
     ? t("aiTools.summary.waitingApproval", { count: approvalCount })
@@ -203,19 +209,113 @@ export function AiToolCallsGroup({ onApprovalDecision, t, toolCalls }: AiToolCal
       : t("aiTools.summary.ran", { count: toolCalls.length });
 
   return (
-    <div className="ai-tool-calls-group" data-active={active || undefined}>
-      <div className="ai-tool-calls-summary">
+    <div className="ai-tool-calls-group" data-active={active || undefined} data-open={open || undefined}>
+      <button type="button" className="ai-tool-calls-summary" onClick={() => setUserToggled(!open)} aria-expanded={open}>
         <span className="ai-tool-calls-rail" aria-hidden="true" />
         <span className="ai-tool-calls-summary-label">{summary}</span>
+        {groupedBatches.length > 1 && <span className="ai-tool-calls-badge" data-status="neutral">{t("aiTools.summary.groups", { count: groupedBatches.length })}</span>}
         {errorCount > 0 && <span className="ai-tool-calls-badge" data-status="error">{t("aiTools.summary.failed", { count: errorCount })}</span>}
-      </div>
-      <div className="ai-tool-calls-list">
-        {toolCalls.map((toolCall) => (
-          <AiToolCall key={toolCall.id} onApprovalDecision={onApprovalDecision} t={t} toolCall={toolCall} />
-        ))}
-      </div>
+        <ChevronRight className="ai-tool-calls-caret" data-expanded={open} size={13} />
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            className="ai-tool-calls-list"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+          >
+            {groupedBatches.map((batch) => (
+              <ToolCallBatch key={batch.id} batch={batch} onApprovalDecision={onApprovalDecision} t={t} />
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
+}
+
+type ToolCallBatchModel = {
+  id: string;
+  tool: string | null;
+  toolCalls: ToolCall[];
+};
+
+function ToolCallBatch({ batch, onApprovalDecision, t }: { batch: ToolCallBatchModel; onApprovalDecision?: (approvalId: string, decision: AiToolApprovalDecision) => void; t: TranslateFn }) {
+  const active = batch.toolCalls.some((call) => call.status === "approval" || call.status === "running");
+  const [userToggled, setUserToggled] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (active) setUserToggled(null);
+  }, [active]);
+  const open = userToggled ?? (active || batch.toolCalls.length <= 2);
+
+  if (batch.toolCalls.length <= 2) {
+    return batch.toolCalls.map((toolCall) => (
+      <AiToolCall key={toolCall.id} onApprovalDecision={onApprovalDecision} t={t} toolCall={toolCall} />
+    ));
+  }
+
+  return (
+    <div className="ai-tool-call-batch" data-open={open || undefined} data-active={active || undefined}>
+      <button type="button" className="ai-tool-call-batch-head" onClick={() => setUserToggled(!open)} aria-expanded={open}>
+        <ChevronRight className="ai-tool-call-batch-caret" data-expanded={open} size={13} />
+        <span>{batch.tool ?? t("aiTools.summary.mixedGroup")}</span>
+        <strong>{batch.toolCalls.length}</strong>
+      </button>
+      <AnimatePresence initial={false}>
+        {open && (
+          <motion.div
+            className="ai-tool-call-batch-list"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
+          >
+            {batch.toolCalls.map((toolCall) => (
+              <AiToolCall key={toolCall.id} onApprovalDecision={onApprovalDecision} t={t} toolCall={toolCall} />
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+function groupToolCalls(toolCalls: ToolCall[]): ToolCallBatchModel[] {
+  const batches: ToolCallBatchModel[] = [];
+  let mixed: ToolCall[] = [];
+  const flush = () => {
+    if (mixed.length === 0) return;
+    const tool = mixed[0]?.tool ?? null;
+    batches.push({
+      id: mixed.map((call) => call.id).join("-"),
+      tool: mixed.every((call) => call.tool === tool) ? tool : null,
+      toolCalls: mixed,
+    });
+    mixed = [];
+  };
+
+  for (let index = 0; index < toolCalls.length;) {
+    const tool = toolCalls[index]?.tool;
+    const run: ToolCall[] = [];
+    while (index < toolCalls.length && toolCalls[index]?.tool === tool) {
+      run.push(toolCalls[index]);
+      index += 1;
+    }
+
+    if (run.length >= 3) {
+      flush();
+      mixed = run;
+      flush();
+      continue;
+    }
+
+    mixed.push(...run);
+    if (mixed.length >= 8) flush();
+  }
+  flush();
+  return batches;
 }
 
 // Example usage in a message:

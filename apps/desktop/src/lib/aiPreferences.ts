@@ -14,6 +14,8 @@ export type AiPreferences = {
   maxIndexedFiles: number;
   toolRoundLimit: AiToolRoundLimit;
   showResponseDuration: boolean;
+  globalInstructions: string;
+  projectInstructionsByWorkspace: Record<string, string>;
   agentMode: AiAgentMode;
   selectedAgentId: string;
   agentProfiles: AiAgentProfile[];
@@ -324,6 +326,8 @@ export const defaultAiPreferences: AiPreferences = {
   maxIndexedFiles: 5000,
   toolRoundLimit: defaultAiToolRoundLimit,
   showResponseDuration: true,
+  globalInstructions: "",
+  projectInstructionsByWorkspace: {},
   agentMode: "agent",
   selectedAgentId: "agent",
   agentProfiles: defaultAiAgentProfiles,
@@ -371,6 +375,8 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     maxIndexedFiles: clampInteger(source.maxIndexedFiles, 500, 20000, defaultAiPreferences.maxIndexedFiles),
     toolRoundLimit: normalizeToolRoundLimit(resolveToolRoundLimitSource(source)),
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
+    globalInstructions: normalizeEditableText(source.globalInstructions, defaultAiPreferences.globalInstructions, preserveText),
+    projectInstructionsByWorkspace: normalizeProjectInstructions(source.projectInstructionsByWorkspace, preserveText),
     agentMode: selectedAgent.mode,
     selectedAgentId,
     agentProfiles,
@@ -401,6 +407,15 @@ export function getAiAgentProfile(profiles: AiAgentProfile[], profileId: string)
 
 export function getAiModel(provider: AiProviderConfig | null | undefined, modelId: string) {
   return provider?.models.find((model) => model.id === modelId) ?? null;
+}
+
+export function workspaceInstructionsKey(workspaceRoot: string | null | undefined) {
+  return workspaceRoot?.trim().replaceAll("\\", "/") ?? "";
+}
+
+export function getAiProjectInstructions(preferences: AiPreferences, workspaceRoot: string | null | undefined) {
+  const key = workspaceInstructionsKey(workspaceRoot);
+  return key ? preferences.projectInstructionsByWorkspace[key] ?? "" : "";
 }
 
 export function createAiProviderConfig(existingProviders: AiProviderConfig[], presetId: AiProviderPresetId = "custom"): AiProviderConfig {
@@ -503,6 +518,18 @@ function normalizeProviders(value: unknown, preserveText: boolean): AiProviderCo
     : [];
   const normalized = dedupeById(providers);
   return normalized.length > 0 ? normalized : cloneDefaultProviders();
+}
+
+function normalizeProjectInstructions(value: unknown, preserveText: boolean): Record<string, string> {
+  if (!isRecord(value)) return {};
+  const instructions: Record<string, string> = {};
+  for (const [workspaceRoot, text] of Object.entries(value)) {
+    const key = workspaceInstructionsKey(workspaceRoot);
+    if (!key || typeof text !== "string") continue;
+    const normalizedText = preserveText ? text : text.trim();
+    if (normalizedText) instructions[key] = normalizedText;
+  }
+  return instructions;
 }
 
 function normalizeProvider(value: unknown, preserveText: boolean): AiProviderConfig | null {

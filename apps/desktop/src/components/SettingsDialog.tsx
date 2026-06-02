@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Cpu, Database, Eye, FileText, Globe, Plus, RotateCcw, Search, Settings, Sparkles, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Cpu, Database, Eye, FileText, Globe, Plus, RotateCcw, Search, Settings, Sparkles, Trash2, Wifi, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
@@ -12,15 +12,16 @@ import {
   createAiEffortConfig,
   createAiModelConfig,
   createAiProviderConfig,
-  defaultAiAgentProfiles,
   defaultLimitedAiToolRoundLimit,
   defaultAiPreferences,
   getAiAgentProfile,
   getAiModel,
+  getAiProjectInstructions,
   getAiProvider,
   isDefaultAiAgentProfile,
   mergeAiPreferences,
   normalizeAiPreferences,
+  workspaceInstructionsKey,
   type AiAgentMode,
   type AiEffortConfig,
   type AiModelConfig,
@@ -39,10 +40,13 @@ import {
   type RenderWhitespaceSetting,
   type WordWrapSetting,
 } from "../lib/editorPreferences";
+import { displayPath } from "../lib/fileTree";
 import { LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from "../lib/i18n";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
+import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
 import { useLuxStore } from "../lib/store";
-import { luxCommands } from "../lib/tauri";
+import { luxCommands, type AiProviderDiagnosticResponse } from "../lib/tauri";
+import type { FsEntry, WorkspaceInfo } from "../lib/types";
 
 const scope = "user" as const;
 
@@ -130,6 +134,7 @@ export function SettingsDialog() {
   const setOpen = useLuxStore((state) => state.setSettingsOpen);
   const aiPreferences = useLuxStore((state) => state.aiPreferences);
   const aiIndex = useLuxStore((state) => state.aiIndex);
+  const fileEntries = useLuxStore((state) => state.fileEntries);
   const setAiPreferences = useLuxStore((state) => state.setAiPreferences);
   const updateAiPreferences = useLuxStore((state) => state.updateAiPreferences);
   const editorPreferences = useLuxStore((state) => state.editorPreferences);
@@ -137,6 +142,7 @@ export function SettingsDialog() {
   const updateEditorPreferences = useLuxStore((state) => state.updateEditorPreferences);
   const locale = useLuxStore((state) => state.locale);
   const setLocale = useLuxStore((state) => state.setLocale);
+  const workspace = useLuxStore((state) => state.workspace);
   const [activeSectionId, setActiveSectionId] = useState<SettingsSectionId>("general");
   const [query, setQuery] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -252,7 +258,7 @@ export function SettingsDialog() {
                   <h2>{t(activeSection.titleKey)}</h2>
                   <p>{t(activeSection.descriptionKey)}</p>
                 </div>
-                {activeSectionId !== "general" && (
+                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && (
                   <button className="settings-reset-button" type="button" onClick={() => resetSection(activeSectionId, persistEditorPreferences, persistAiPreferences, aiPreferences)}>
                     <RotateCcw size={14} /> {t("settings.reset", { group: t(activeSection.titleKey) })}
                   </button>
@@ -268,7 +274,7 @@ export function SettingsDialog() {
                   </div>
                 )}
                 {activeSectionId === "ai-runtime" && <AiActiveCard preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
-                {activeSectionId === "ai-instructions" && <AiInstructionsSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+                {activeSectionId === "ai-instructions" && <AiInstructionsSection fileEntries={fileEntries} preferences={aiPreferences} workspace={workspace} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-providers" && <AiProvidersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-indexing" && <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
               </div>
@@ -400,39 +406,91 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
   );
 }
 
-function AiInstructionsSection({ onChange, preferences, t }: { onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
-  const selectedAgent = getAiAgentProfile(preferences.agentProfiles, preferences.selectedAgentId) ?? preferences.agentProfiles[0];
-  const defaultProfile = defaultAiAgentProfiles.find((profile) => profile.id === selectedAgent.id);
+function AiInstructionsSection({ fileEntries, onChange, preferences, t, workspace }: { fileEntries: FsEntry[]; onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn; workspace: WorkspaceInfo | null }) {
+  const projectInstructions = getAiProjectInstructions(preferences, workspace?.root);
+  const detectedInstructionFiles = useMemo(() => detectWorkspaceInstructionFiles(fileEntries, workspace), [fileEntries, workspace]);
 
-  const updateSelectedAgent = (selectedAgentId: string) => {
-    const profile = getAiAgentProfile(preferences.agentProfiles, selectedAgentId);
-    if (profile) onChange({ selectedAgentId: profile.id });
-  };
-  const updateSelectedMode = (mode: AiAgentMode) => {
-    onChange({ agentProfiles: preferences.agentProfiles.map((profile) => profile.id === selectedAgent.id ? { ...profile, mode } : profile) });
-  };
-  const updateSelectedInstructions = (instructions: string) => {
-    onChange({ agentProfiles: preferences.agentProfiles.map((profile) => profile.id === selectedAgent.id ? { ...profile, instructions } : profile) });
-  };
-  const resetSelectedInstructions = () => {
-    if (!defaultProfile) return;
-    onChange({ agentProfiles: preferences.agentProfiles.map((profile) => profile.id === selectedAgent.id ? { ...profile, instructions: defaultProfile.instructions, name: defaultProfile.name, mode: defaultProfile.mode } : profile) });
+  const updateProjectInstructions = (instructions: string) => {
+    if (!workspace) return;
+    const key = workspaceInstructionsKey(workspace.root);
+    const projectInstructionsByWorkspace = { ...preferences.projectInstructionsByWorkspace };
+    if (instructions.trim()) projectInstructionsByWorkspace[key] = instructions;
+    else delete projectInstructionsByWorkspace[key];
+    onChange({ projectInstructionsByWorkspace });
   };
 
   return (
-    <SettingsPanel title={t("settings.instructions.profile.title")} description={t("settings.instructions.profile.description")}>
-      <div className="settings-toolbar instructions-toolbar">
-        <button type="button" onClick={resetSelectedInstructions} disabled={!defaultProfile}>
-          <RotateCcw size={14} /> {t("settings.instructions.resetProfile")}
-        </button>
-      </div>
-      <SettingsGrid>
-        <SelectSetting label={t("settings.instructions.profile.label")} detail={t("settings.instructions.profile.detail")} value={selectedAgent.id} options={preferences.agentProfiles.map((profile) => ({ label: profile.name, value: profile.id }))} onChange={updateSelectedAgent} />
-        <SegmentedSetting<AiAgentMode> label={t("settings.aiRuntime.mode.label")} detail={t("settings.aiRuntime.mode.detail")} value={selectedAgent.mode} options={AI_AGENT_MODES.map((mode) => ({ label: t(`settings.aiRuntime.mode.${mode}` as MessageKey), value: mode }))} onChange={updateSelectedMode} />
-        <TextareaSetting label={t("settings.instructions.body.label")} detail={t("settings.instructions.body.detail")} value={selectedAgent.instructions} rows={12} onChange={updateSelectedInstructions} wide />
-      </SettingsGrid>
-    </SettingsPanel>
+    <div className="settings-section-stack instructions-section-stack">
+      <SettingsPanel title={t("settings.instructions.global.title")} description={t("settings.instructions.global.description")}>
+        <SettingsGrid>
+          <TextareaSetting
+            label={t("settings.instructions.global.label")}
+            detail={t("settings.instructions.global.detail")}
+            placeholder={t("settings.instructions.global.placeholder")}
+            value={preferences.globalInstructions}
+            rows={8}
+            onChange={(globalInstructions) => onChange({ globalInstructions })}
+            wide
+          />
+        </SettingsGrid>
+      </SettingsPanel>
+
+      <SettingsPanel title={t("settings.instructions.project.title")} description={t("settings.instructions.project.description")}>
+        {workspace ? (
+          <>
+            <div className="instruction-workspace-card">
+              <span>{t("settings.instructions.project.currentWorkspace")}</span>
+              <strong>{workspace.name}</strong>
+              <small>{displayPath(workspace.root)}</small>
+            </div>
+            <SettingsGrid>
+              <TextareaSetting
+                label={t("settings.instructions.project.label")}
+                detail={t("settings.instructions.project.detail")}
+                placeholder={t("settings.instructions.project.placeholder")}
+                value={projectInstructions}
+                rows={9}
+                onChange={updateProjectInstructions}
+                wide
+              />
+            </SettingsGrid>
+          </>
+        ) : (
+          <div className="settings-empty-note">{t("settings.instructions.project.noWorkspace")}</div>
+        )}
+      </SettingsPanel>
+
+      <SettingsPanel title={t("settings.instructions.detected.title")} description={t("settings.instructions.detected.description")}>
+        {workspace && detectedInstructionFiles.length > 0 ? (
+          <div className="instruction-file-list" aria-label={t("settings.instructions.detected.title")}>
+            {detectedInstructionFiles.map((entry) => (
+              <div className="instruction-file-row" key={entry.path} title={displayPath(entry.path)}>
+                <FileText size={14} />
+                <span>{relativeInstructionPath(entry.path, workspace.root)}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="settings-empty-note">{workspace ? t("settings.instructions.detected.empty") : t("settings.instructions.project.noWorkspace")}</div>
+        )}
+      </SettingsPanel>
+    </div>
   );
+}
+
+function detectWorkspaceInstructionFiles(fileEntries: FsEntry[], workspace: WorkspaceInfo | null) {
+  if (!workspace) return [];
+  return fileEntries
+    .filter((entry) => entry.kind === "file" && isRulesContextPath(entry.path, workspace.root))
+    .sort((left, right) => relativeInstructionPath(left.path, workspace.root).localeCompare(relativeInstructionPath(right.path, workspace.root), undefined, { numeric: true, sensitivity: "base" }));
+}
+
+function relativeInstructionPath(path: string, workspaceRoot: string) {
+  const normalizedPath = displayPath(path);
+  const normalizedRoot = displayPath(workspaceRoot).replace(/\/+$/g, "");
+  const lowerPath = normalizedPath.toLowerCase();
+  const lowerRoot = normalizedRoot.toLowerCase();
+  return lowerPath.startsWith(`${lowerRoot}/`) ? normalizedPath.slice(normalizedRoot.length + 1) : normalizedPath;
 }
 
 // Provider management uses a master-to-detail flow: a list of provider tiles, and a focused
@@ -548,8 +606,18 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
   updateProviders: (providers: AiProviderConfig[], selectedProviderId?: string, selectedModelId?: string, selectedEffortId?: string) => void;
 }) {
   const [editingModelId, setEditingModelId] = useState(provider.models[0]?.id ?? "");
+  const [providerDiagnostic, setProviderDiagnostic] = useState<AiProviderDiagnosticResponse | null>(null);
+  const [providerDiagnosticRunning, setProviderDiagnosticRunning] = useState(false);
   const editingModel = getAiModel(provider, editingModelId) ?? provider.models[0];
   const canRemoveModel = provider.models.length > 1;
+  const diagnosticState = providerDiagnosticRunning ? "checking" : providerDiagnostic?.ok === false ? "error" : providerDiagnostic?.ok ? "ok" : "idle";
+  const diagnosticLabel = providerDiagnosticRunning
+    ? t("settings.providers.diagnostic.checking")
+    : providerDiagnostic
+      ? providerDiagnostic.ok
+        ? t("settings.providers.diagnostic.ok", { latency: providerDiagnostic.latencyMs })
+        : t("settings.providers.diagnostic.failed")
+      : t("settings.providers.diagnostic.notRun");
 
   useEffect(() => {
     if (provider.models.some((model) => model.id === editingModelId)) return;
@@ -595,6 +663,36 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
       isRemovingActiveModel ? nextModel.effortLevels[0]?.id ?? "" : preferences.selectedEffortId,
     );
   };
+  const runProviderDiagnostic = async () => {
+    if (!editingModel || providerDiagnosticRunning) return;
+    setProviderDiagnosticRunning(true);
+    setProviderDiagnostic(null);
+    try {
+      const result = await luxCommands.aiProviderDiagnostic({
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey || null,
+        payload: {
+          model: editingModel.alias || editingModel.id,
+          messages: [{ role: "user", content: "Reply with OK." }],
+          max_tokens: 8,
+          stream: false,
+          temperature: 0,
+        },
+      });
+      setProviderDiagnostic(result);
+    } catch (error) {
+      setProviderDiagnostic({
+        ok: false,
+        status: null,
+        latencyMs: 0,
+        error: error instanceof Error ? error.message : String(error),
+        model: editingModel.alias || editingModel.id,
+        baseUrl: provider.baseUrl,
+      });
+    } finally {
+      setProviderDiagnosticRunning(false);
+    }
+  };
 
   return (
     <div className="provider-detail">
@@ -616,6 +714,17 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
           </button>
         </div>
       </div>
+
+      <section className="provider-diagnostic-card" data-state={diagnosticState}>
+        <div>
+          <span><Wifi size={15} /> {t("settings.providers.diagnostic.title")}</span>
+          <strong>{diagnosticLabel}</strong>
+          <small>{providerDiagnostic?.error ?? (providerDiagnostic?.ok ? t("settings.providers.diagnostic.okDetail", { status: providerDiagnostic.status ?? "-", latency: providerDiagnostic.latencyMs }) : t("settings.providers.diagnostic.description"))}</small>
+        </div>
+        <button type="button" disabled={!editingModel || providerDiagnosticRunning} onClick={() => void runProviderDiagnostic()}>
+          <Wifi size={14} /> {t("settings.providers.diagnostic.check")}
+        </button>
+      </section>
 
       <SettingsPanel title={t("settings.providers.connection.title")}>
         <SettingsGrid>
@@ -651,40 +760,74 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
       </SettingsPanel>
 
       <SettingsPanel title={t("settings.providers.models.title")} description={t("settings.providers.models.description")}>
-        <div className="model-toolbar">
-          <div className="model-tabs">
-            {provider.models.map((model) => (
-              <button key={model.id} type="button" data-active={model.id === editingModel.id} onClick={() => setEditingModelId(model.id)}>{model.name}</button>
-            ))}
-          </div>
-          <div>
-            <button type="button" onClick={addModel}><Plus size={14} /> {t("settings.providers.model")}</button>
-            <button type="button" disabled={!canRemoveModel} onClick={removeModel}><Trash2 size={14} /> {t("settings.providers.model")}</button>
-          </div>
-        </div>
-        <SettingsGrid>
-          <TextSetting label={t("settings.providers.modelName.label")} value={editingModel.name} onChange={(name) => updateEditingModel({ name })} />
-          <TextSetting label={t("settings.providers.modelAlias.label")} value={editingModel.alias} onChange={(alias) => updateEditingModel({ alias })} />
-        </SettingsGrid>
-        <div className="effort-editor">
-          <div>
-            <strong>{t("settings.providers.thinkingEffort")}</strong>
-            <button type="button" onClick={() => {
-              const nextEffort = createAiEffortConfig(editingModel.effortLevels);
-              updateEfforts([...editingModel.effortLevels, nextEffort], nextEffort.id);
-            }}><Plus size={14} /> {t("settings.providers.addEffort")}</button>
-          </div>
-          {editingModel.effortLevels.length === 0 ? <p>{t("settings.providers.noEffortSelector")}</p> : editingModel.effortLevels.map((effort) => (
-            <div className="effort-row" key={effort.id}>
-              <input value={effort.label} aria-label={t("settings.providers.effortLabelAria", { id: effort.id })} onChange={(event) => {
-                updateEfforts(editingModel.effortLevels.map((candidate) => candidate.id === effort.id ? { ...candidate, label: event.currentTarget.value } : candidate), preferences.selectedEffortId);
-              }} />
-              <button type="button" onClick={() => {
-                const nextEfforts = editingModel.effortLevels.filter((candidate) => candidate.id !== effort.id);
-                updateEfforts(nextEfforts, nextEfforts[0]?.id ?? "");
-              }}><Trash2 size={14} /></button>
+        <div className="provider-model-manager">
+          <div className="provider-model-list">
+            <div className="provider-model-list-head">
+              <strong>{t("settings.providers.models.listTitle")}</strong>
+              <button type="button" onClick={addModel}><Plus size={14} /> {t("settings.providers.addModel")}</button>
             </div>
-          ))}
+            <div className="provider-model-rows" role="listbox" aria-label={t("settings.providers.models.listTitle")}>
+              {provider.models.map((model) => {
+                const activeModel = provider.id === preferences.selectedProviderId && model.id === preferences.selectedModelId;
+                return (
+                  <button
+                    key={model.id}
+                    type="button"
+                    role="option"
+                    aria-selected={model.id === editingModel.id}
+                    className="provider-model-row"
+                    data-active={model.id === editingModel.id}
+                    onClick={() => setEditingModelId(model.id)}
+                  >
+                    <span className="provider-model-row-main">
+                      <strong>{model.name || t("settings.providers.untitledModel")}</strong>
+                      <small>{model.alias || model.id}</small>
+                    </span>
+                    <span className="provider-model-row-side">
+                      {activeModel && <em>{t("settings.providers.activeModel")}</em>}
+                      <small>{t("settings.providers.effortCount", { count: model.effortLevels.length })}</small>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="provider-model-detail">
+            <div className="provider-model-detail-head">
+              <div>
+                <strong>{t("settings.providers.modelDetails")}</strong>
+                <span>{editingModel.alias || editingModel.id}</span>
+              </div>
+              <button type="button" className="icon-action danger-button" disabled={!canRemoveModel} onClick={removeModel} aria-label={t("settings.providers.removeModel")} title={t("settings.providers.removeModel")}>
+                <Trash2 size={15} />
+              </button>
+            </div>
+            <SettingsGrid>
+              <TextSetting label={t("settings.providers.modelName.label")} value={editingModel.name} onChange={(name) => updateEditingModel({ name })} />
+              <TextSetting label={t("settings.providers.modelAlias.label")} value={editingModel.alias} onChange={(alias) => updateEditingModel({ alias })} />
+            </SettingsGrid>
+            <div className="effort-editor">
+              <div>
+                <strong>{t("settings.providers.thinkingEffort")}</strong>
+                <button type="button" onClick={() => {
+                  const nextEffort = createAiEffortConfig(editingModel.effortLevels);
+                  updateEfforts([...editingModel.effortLevels, nextEffort], nextEffort.id);
+                }}><Plus size={14} /> {t("settings.providers.addEffort")}</button>
+              </div>
+              {editingModel.effortLevels.length === 0 ? <p>{t("settings.providers.noEffortSelector")}</p> : editingModel.effortLevels.map((effort) => (
+                <div className="effort-row" key={effort.id}>
+                  <input value={effort.label} aria-label={t("settings.providers.effortLabelAria", { id: effort.id })} onChange={(event) => {
+                    updateEfforts(editingModel.effortLevels.map((candidate) => candidate.id === effort.id ? { ...candidate, label: event.currentTarget.value } : candidate), preferences.selectedEffortId);
+                  }} />
+                  <button type="button" aria-label={t("settings.providers.removeEffort", { label: effort.label || effort.id })} title={t("settings.providers.removeEffort", { label: effort.label || effort.id })} onClick={() => {
+                    const nextEfforts = editingModel.effortLevels.filter((candidate) => candidate.id !== effort.id);
+                    updateEfforts(nextEfforts, nextEfforts[0]?.id ?? "");
+                  }}><Trash2 size={14} /></button>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       </SettingsPanel>
     </div>

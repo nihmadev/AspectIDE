@@ -9,7 +9,9 @@ use std::{
 };
 
 use chrono::Utc;
-use lux_core::{AppError, AppResult, BufferId, DocumentSnapshot, TextEdit};
+use lux_core::{
+    file_view_descriptor_for_path, AppError, AppResult, BufferId, DocumentSnapshot, TextEdit,
+};
 
 #[derive(Default)]
 pub struct DocumentStore {
@@ -85,6 +87,7 @@ impl DocumentStore {
             title: file_title(&indexed_path),
             path: Some(indexed_path.clone()),
             text,
+            view: file_view_descriptor_for_path(&indexed_path),
             version: 1,
             is_dirty: false,
             is_untitled: false,
@@ -105,6 +108,7 @@ impl DocumentStore {
             title,
             language_id: "plaintext".to_string(),
             text: String::new(),
+            view: lux_core::FileViewDescriptor::default(),
             version: 1,
             is_dirty: true,
             is_untitled: true,
@@ -220,6 +224,7 @@ impl DocumentStore {
         document.path = Some(normalized_path.clone());
         document.title = file_title(&normalized_path);
         document.language_id = language_id_for_path(&normalized_path);
+        document.view = file_view_descriptor_for_path(&normalized_path);
         document.is_untitled = false;
         self.by_path.insert(normalized_path, id);
         Ok(DocumentPathAttachment {

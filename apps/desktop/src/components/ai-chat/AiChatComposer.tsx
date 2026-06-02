@@ -30,7 +30,6 @@ type AiChatComposerProps = {
   attachments: AiComposerAttachment[];
   attachFiles: (files: FileList | File[] | null) => void;
   canSend: boolean;
-  contextLabel: string;
   contextOpen: boolean;
   contextTitle: string;
   contextUsage: AiChatContextUsageSummary;
@@ -68,7 +67,6 @@ export function AiChatComposer({
   attachments,
   attachFiles,
   canSend,
-  contextLabel,
   contextOpen,
   contextTitle,
   contextUsage,
@@ -168,8 +166,10 @@ export function AiChatComposer({
           {attachments.length > 0 && <span className="ai-attachment-count">{attachments.length}</span>}
         </div>
         <div className="ai-composer-right-actions">
-          <button className="ai-context-circle" type="button" aria-label={t("aiChat.context.label")} title={contextTitle} data-active={contextOpen} style={{ "--context-percent": contextUsage.percent } as CSSProperties} onClick={() => setContextOpen((open) => !open)}>
-            <span>{contextLabel}</span>
+          <button className="ai-context-square" type="button" aria-label={t("aiChat.context.label")} title={contextTitle} data-active={contextOpen} style={{ "--context-percent": contextUsage.percent } as CSSProperties} onClick={() => setContextOpen((open) => !open)}>
+            <span className="ai-context-square-fill" aria-hidden="true" />
+            <span className="ai-context-square-value">{contextUsage.percent}</span>
+            <span className="ai-context-square-unit">%</span>
           </button>
           <button
             className="ai-voice-button"
@@ -210,6 +210,7 @@ function AiContextPopover({ contextUsage, setContextOpen, t }: {
         <div>
           <span>{t("aiChat.context.label")}</span>
           <strong>{t("aiChat.context.full", { percent: contextUsage.percent })}</strong>
+          <small>{t("aiChat.context.distribution")}</small>
         </div>
         <button type="button" aria-label={t("aiChat.context.closeAria")} title={t("common.close")} onClick={() => setContextOpen(false)}>
           <X size={13} />
@@ -228,7 +229,7 @@ function AiContextPopover({ contextUsage, setContextOpen, t }: {
         {contextUsage.rows.map((row) => (
           <div key={row.id}>
             <dt><span style={{ background: row.color }} />{row.label}</dt>
-            <dd>{formatAiChatContextValue(row)}</dd>
+            <dd title={row.detail || undefined}>{formatAiChatContextValue(row)}</dd>
           </div>
         ))}
       </dl>

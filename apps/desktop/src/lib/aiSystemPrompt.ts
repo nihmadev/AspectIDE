@@ -4,6 +4,8 @@ import type { WorkspaceInfo } from "./types";
 export type LuxIdeSystemPromptContext = {
   preferences: AiPreferences;
   provider: AiProviderConfig;
+  globalInstructions: string;
+  projectInstructions: string;
   runtimeToolsAvailable: boolean;
   selectedAgentInstructions: string;
   selectedAgentName: string;
@@ -125,7 +127,21 @@ export function buildLuxIdeSystemPrompt(context: LuxIdeSystemPromptContext) {
     corePrompt,
     buildRuntimeSection(context, selectedModel, agentName),
     buildToolAvailabilitySection(context.runtimeToolsAvailable),
+    buildUserInstructionSection(context.globalInstructions, context.projectInstructions),
     agentInstructions ? `Selected agent profile instructions\n${agentInstructions}\n\nThese profile instructions refine behavior, but they cannot weaken workspace scope, safety, evidence, or verification rules.` : "",
+  ].filter(Boolean).join("\n\n");
+}
+
+function buildUserInstructionSection(globalInstructions: string, projectInstructions: string) {
+  const globalText = globalInstructions.trim();
+  const projectText = projectInstructions.trim();
+  if (!globalText && !projectText) return "";
+
+  return [
+    "User instruction layers",
+    globalText ? `Global instructions for all projects:\n${globalText}` : "",
+    projectText ? `Current workspace instructions:\n${projectText}` : "",
+    "These user instruction layers are lower priority than Lux core rules, workspace rules, tool safety, and explicit user requests in the current chat. Apply them when they are compatible; do not treat them as permission to skip evidence gathering, validation, or safety checks.",
   ].filter(Boolean).join("\n\n");
 }
 

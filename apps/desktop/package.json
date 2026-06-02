@@ -11,8 +11,8 @@
   },
   "type": "module",
   "scripts": {
-    "dev": "node ./scripts/kill-dev-port.mjs 5173 && vite --host 127.0.0.1 --port 5173 --strictPort",
-    "build": "pnpm run verify:ai-index && pnpm run verify:ai-prompt && pnpm run verify:ai-tools && tsc --noEmit && vite build",
+    "dev": "node ./scripts/kill-dev-port.mjs 5173 && node ./scripts/start-browser-preview.mjs",
+    "build": "pnpm run verify:ai-index && pnpm run verify:ai-prompt && pnpm run verify:ai-tools && pnpm run verify:ai-transport && pnpm run verify:ai-chat-persistence && tsc --noEmit && vite build && pnpm run verify:bundle-budget",
     "compare:ai-agents": "node ./scripts/compare-ai-agents.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "benchmark:ai-agent": "node ./scripts/benchmark-ai-agent.mjs",
@@ -20,6 +20,9 @@
     "verify:ai-tools": "node ./scripts/verify-ai-tools.mjs",
     "verify:ai-index": "node ./scripts/verify-ai-index.mjs",
     "verify:ai-prompt": "node ./scripts/verify-ai-prompt.mjs",
+    "verify:ai-transport": "node ./scripts/verify-ai-transport.mjs",
+    "verify:ai-chat-persistence": "node ./scripts/verify-ai-chat-persistence.mjs",
+    "verify:bundle-budget": "node ./scripts/verify-bundle-budget.mjs",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },

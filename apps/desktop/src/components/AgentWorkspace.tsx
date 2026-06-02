@@ -1,4 +1,4 @@
-import { Edit3, FolderOpen, MessageSquare, MessageSquarePlus, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { Archive, Edit3, FolderOpen, History, MessageSquare, MessageSquarePlus, Plus, Search, Settings, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { LazyAiChatPanel } from "./LazyAiChatPanel";
@@ -6,50 +6,66 @@ import { aiChatSessionTitle, aiChatStatusLabel } from "../lib/aiChatPresentation
 import { useTranslation } from "../lib/i18n/useTranslation";
 import { useLuxStore, type AiChatSession } from "../lib/store";
 import { luxCommands } from "../lib/tauri";
+import type { MessageKey } from "../lib/i18n";
+
+type AgentProjectLoadSummary = {
+  active: boolean;
+  labelKey: MessageKey;
+  progress: number;
+};
 
 type AgentWorkspaceProps = {
+  projectLoad: AgentProjectLoadSummary;
   onOpenProject: () => void;
 };
 
-export function AgentWorkspace({ onOpenProject }: AgentWorkspaceProps) {
+export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspaceProps) {
   const { t } = useTranslation();
   const activeSessionId = useLuxStore((state) => state.activeAiChatSessionId);
   const chatSessions = useLuxStore((state) => state.aiChatSessions);
   const closeChatSession = useLuxStore((state) => state.closeAiChatSession);
-  const createChatSession = useLuxStore((state) => state.createAiChatSession);
   const deleteChatSession = useLuxStore((state) => state.deleteAiChatSession);
+  const ensureChatSession = useLuxStore((state) => state.ensureAiChatSession);
   const renameChatSession = useLuxStore((state) => state.renameAiChatSession);
   const restoreChatSession = useLuxStore((state) => state.restoreAiChatSession);
   const setActiveChatSession = useLuxStore((state) => state.setActiveAiChatSession);
   const setSettingsOpen = useLuxStore((state) => state.setSettingsOpen);
   const workspace = useLuxStore((state) => state.workspace);
   const sortedChatSessions = [...chatSessions].sort(compareAgentChatSessions);
+  const openChatSessions = sortedChatSessions.filter((session) => !session.closedAt);
+  const archivedChatSessions = sortedChatSessions.filter((session) => session.closedAt);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const startNewChat = () => {
+    const result = ensureChatSession(workspace?.root ?? null);
+    if (result.reused) window.alert(t("agent.chat.emptyExists"));
+  };
 
   return (
     <main className="agent-workspace" aria-label={t("agent.workspace.label")}>
       <aside className="agent-rail">
         <nav className="agent-nav" aria-label={t("agent.navigation.label")}>
-          <AgentNavButton icon={<Plus size={15} />} label={t("agent.newChat")} onClick={() => createChatSession(workspace?.root ?? null)} />
+          <AgentNavButton icon={<Plus size={15} />} label={t("agent.newChat")} onClick={startNewChat} />
+          <AgentNavButton icon={<History size={15} />} label={t("aiChat.history.aria")} active={historyOpen} onClick={() => setHistoryOpen((open) => !open)} />
           <AgentNavButton icon={<Search size={15} />} label={t("agent.search")} />
         </nav>
 
         <div className="agent-scroll-list">
           <AgentSidebarSection title={t("agent.sidebar.currentProject")}>
             {workspace ? (
-              <ProjectHeaderButton icon={<FolderOpen size={14} />} label={workspace.name} onClick={onOpenProject} />
+              <ProjectHeaderButton icon={<FolderOpen size={14} />} label={workspace.name} loading={projectLoad} onClick={onOpenProject} />
             ) : (
-              <ProjectHeaderButton icon={<FolderOpen size={14} />} label={t("agent.openProject")} onClick={onOpenProject} />
+              <ProjectHeaderButton icon={<FolderOpen size={14} />} label={t("agent.openProject")} loading={projectLoad} onClick={onOpenProject} />
             )}
           </AgentSidebarSection>
 
           <AgentSidebarSection title={t("agent.sidebar.chats")}>
-            {sortedChatSessions.map((session) => (
+            {openChatSessions.map((session) => (
               <AgentChatRow
                 key={session.id}
                 active={session.id === activeSessionId}
                 session={session}
                 onClose={() => closeChatSession(session.id)}
-                onCreateChat={() => createChatSession(session.workspaceRoot ?? workspace?.root ?? null)}
+                onCreateChat={startNewChat}
                 onDelete={() => deleteChatSession(session.id)}
                 onRename={(title) => renameChatSession(session.id, title)}
                 onRestore={() => restoreChatSession(session.id)}
@@ -57,6 +73,26 @@ export function AgentWorkspace({ onOpenProject }: AgentWorkspaceProps) {
               />
             ))}
           </AgentSidebarSection>
+
+          {historyOpen && (
+            <AgentSidebarSection title={t("agent.sidebar.history")}>
+              {archivedChatSessions.length === 0 ? (
+                <div className="agent-history-empty">{t("agent.chat.historyEmpty")}</div>
+              ) : archivedChatSessions.map((session) => (
+                <AgentChatRow
+                  key={session.id}
+                  active={session.id === activeSessionId}
+                  session={session}
+                  onClose={() => closeChatSession(session.id)}
+                  onCreateChat={startNewChat}
+                  onDelete={() => deleteChatSession(session.id)}
+                  onRename={(title) => renameChatSession(session.id, title)}
+                  onRestore={() => restoreChatSession(session.id)}
+                  onSelect={() => setActiveChatSession(session.id)}
+                />
+              ))}
+            </AgentSidebarSection>
+          )}
 
         </div>
 
@@ -73,9 +109,9 @@ export function AgentWorkspace({ onOpenProject }: AgentWorkspaceProps) {
   );
 }
 
-function AgentNavButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick?: () => void }) {
+function AgentNavButton({ active = false, icon, label, onClick }: { active?: boolean; icon: ReactNode; label: string; onClick?: () => void }) {
   return (
-    <button className="agent-nav-button" type="button" onClick={onClick}>
+    <button className="agent-nav-button" type="button" data-active={active || undefined} onClick={onClick}>
       {icon}
       <span>{label}</span>
     </button>
@@ -91,11 +127,13 @@ function AgentSidebarSection({ children, title }: { children: ReactNode; title: 
   );
 }
 
-function ProjectHeaderButton({ icon, label, onClick }: { icon: ReactNode; label: string; onClick: () => void }) {
+function ProjectHeaderButton({ icon, label, loading, onClick }: { icon: ReactNode; label: string; loading: AgentProjectLoadSummary; onClick: () => void }) {
+  const { t } = useTranslation();
   return (
-    <button className="agent-project-row" type="button" onClick={onClick}>
+    <button className="agent-project-row" type="button" disabled={loading.active} data-loading={loading.active || undefined} onClick={onClick}>
       {icon}
       <span>{label}</span>
+      {loading.active && <small>{t(loading.labelKey)} {Math.round(loading.progress)}%</small>}
     </button>
   );
 }
@@ -182,7 +220,7 @@ function AgentChatRow({ active, onClose, onCreateChat, onDelete, onRename, onRes
       ) : (
         <button
           type="button"
-          title={closed ? `${title} (${t("agent.chat.closed")})` : title}
+          title={title}
           onClick={onSelect}
           onMouseDown={(event) => {
             if (event.button !== 1) return;
@@ -193,7 +231,7 @@ function AgentChatRow({ active, onClose, onCreateChat, onDelete, onRename, onRes
           <MessageSquare size={14} />
           <span>{title}</span>
           {session.status !== "idle" && <small>{aiChatStatusLabel(session.status, true, t)}</small>}
-          {closed && <small>{t("agent.chat.closed")}</small>}
+          {closed && <Archive size={12} className="agent-chat-archive-icon" />}
         </button>
       )}
       {closed ? (

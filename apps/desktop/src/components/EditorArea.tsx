@@ -4,6 +4,7 @@ import { Panel, Group, Separator } from "react-resizable-panels";
 import { useMutation } from "@tanstack/react-query";
 import type { editor } from "monaco-editor";
 import { useEditorCloseGuard } from "./EditorCloseGuard";
+import { FilePreviewPane } from "./FilePreviewPane";
 import { useTranslation } from "../lib/i18n/useTranslation";
 import { resetEditorFontZoom, updateEditorFontSize, zoomEditorFontIn, zoomEditorFontOut } from "../lib/editorPreferenceCommands";
 import {
@@ -16,6 +17,7 @@ import {
 } from "../lib/editorCloseTargets";
 import { documentDisplayPath, documentRelativePath, documentTitle } from "../lib/documents";
 import { normalizePath, parentPath } from "../lib/fileTree";
+import { applyDebugBreakpointDecorations, registerDebugBreakpointGutter } from "../lib/monacoDebugAdapters";
 import {
   applyDiagnosticsMarkers,
   disposeLspProviders,
@@ -66,6 +68,9 @@ export function EditorArea() {
   const setSidebarVisible = useLuxStore((state) => state.setSidebarVisible);
   const editorPreferences = useLuxStore((state) => state.editorPreferences);
   const diagnosticsByPath = useLuxStore((state) => state.diagnosticsByPath);
+  const debugSourceBreakpointsByPath = useLuxStore((state) => state.debugSourceBreakpointsByPath);
+  const debugResolvedBreakpointsByPath = useLuxStore((state) => state.debugResolvedBreakpointsByPath);
+  const toggleDebugSourceBreakpoint = useLuxStore((state) => state.toggleDebugSourceBreakpoint);
   const pendingEditorReveal = useLuxStore((state) => state.pendingEditorReveal);
   const setPendingEditorReveal = useLuxStore((state) => state.setPendingEditorReveal);
   const consumePendingEditorReveal = useLuxStore((state) => state.consumePendingEditorReveal);
@@ -207,6 +212,8 @@ export function EditorArea() {
               }}
               documents={group.documentIds.map((documentId) => documentsById.get(documentId)).filter(Boolean) as DocumentSnapshot[]}
               diagnosticsByPath={diagnosticsByPath}
+              debugResolvedBreakpointsByPath={debugResolvedBreakpointsByPath}
+              debugSourceBreakpointsByPath={debugSourceBreakpointsByPath}
               editorPreferences={editorPreferences}
               pendingEditorReveal={pendingEditorReveal}
               setPendingEditorReveal={setPendingEditorReveal}
@@ -225,6 +232,7 @@ export function EditorArea() {
               setSidebarVisible={setSidebarVisible}
               splitActiveEditor={splitActiveEditor}
               splitDocumentInGroup={splitDocumentInGroup}
+              toggleDebugSourceBreakpoint={toggleDebugSourceBreakpoint}
               applyEditorChanges={applyEditorChanges}
               updateOpenDocuments={updateOpenDocuments}
               upsertDocument={upsertDocument}
@@ -249,6 +257,8 @@ function EditorGroupPane({
   closeSavedDocumentsInGroup,
   documents,
   diagnosticsByPath,
+  debugResolvedBreakpointsByPath,
+  debugSourceBreakpointsByPath,
   editorPreferences,
   pendingEditorReveal,
   setPendingEditorReveal,
@@ -266,6 +276,7 @@ function EditorGroupPane({
   setSidebarVisible,
   splitActiveEditor,
   splitDocumentInGroup,
+  toggleDebugSourceBreakpoint,
   applyEditorChanges,
   updateOpenDocuments,
   upsertDocument,
@@ -282,6 +293,8 @@ function EditorGroupPane({
   closeSavedDocumentsInGroup: (groupId: string) => void;
   documents: DocumentSnapshot[];
   diagnosticsByPath: Record<string, WorkspaceDiagnostic[]>;
+  debugResolvedBreakpointsByPath: ReturnType<typeof useLuxStore.getState>["debugResolvedBreakpointsByPath"];
+  debugSourceBreakpointsByPath: ReturnType<typeof useLuxStore.getState>["debugSourceBreakpointsByPath"];
   editorPreferences: typeof useLuxStore.getState extends () => infer T ? T extends { editorPreferences: infer P } ? P : never : never;
   pendingEditorReveal: ReturnType<typeof useLuxStore.getState>["pendingEditorReveal"];
   setPendingEditorReveal: ReturnType<typeof useLuxStore.getState>["setPendingEditorReveal"];
@@ -299,6 +312,7 @@ function EditorGroupPane({
   setSidebarVisible: (visible: boolean) => void;
   splitActiveEditor: () => void;
   splitDocumentInGroup: (groupId: string, documentId: string, side: "left" | "right") => void;
+  toggleDebugSourceBreakpoint: (path: string, line: number) => void;
   applyEditorChanges: (id: string, event: editor.IModelContentChangedEvent, value: string | undefined) => void;
   updateOpenDocuments: ReturnType<typeof useLuxStore.getState>["updateOpenDocuments"];
   upsertDocument: ReturnType<typeof useLuxStore.getState>["upsertDocument"];
@@ -309,16 +323,38 @@ function EditorGroupPane({
   const editorRef = useRef<MonacoEditorInstance | null>(null);
   const monacoRef = useRef<MonacoInstance | null>(null);
   const lspProviderDisposablesRef = useRef<MonacoDisposable[]>([]);
+  const breakpointGutterDisposableRef = useRef<MonacoDisposable | null>(null);
+  const breakpointDecorationsRef = useRef<string[]>([]);
   const diagnostics = activeDocument.path ? diagnosticsByPath[normalizePath(activeDocument.path)] ?? noDiagnostics : noDiagnostics;
+  const activeDocumentPath = activeDocument.path ? normalizePath(activeDocument.path) : null;
+  const sourceBreakpoints = activeDocumentPath ? debugSourceBreakpointsByPath[activeDocumentPath] ?? [] : [];
+  const resolvedBreakpoints = activeDocumentPath ? debugResolvedBreakpointsByPath[activeDocumentPath] ?? [] : [];
+  const isMonacoDocument = activeDocument.view.strategy === "monacoText" || activeDocument.view.strategy === "diagramPreview";
+  const isEditableDocument = activeDocument.view.mode === "editableText";
 
   useEffect(() => () => {
     disposeLspProviders(lspProviderDisposablesRef.current);
     lspProviderDisposablesRef.current = [];
+    breakpointGutterDisposableRef.current?.dispose();
+    breakpointGutterDisposableRef.current = null;
   }, []);
 
   useEffect(() => {
+    if (!isMonacoDocument) return;
     applyDiagnosticsMarkers(editorRef.current, monacoRef.current, group.id, diagnostics);
-  }, [activeDocument.path, diagnostics, group.id]);
+  }, [activeDocument.path, diagnostics, group.id, isMonacoDocument]);
+
+  useEffect(() => {
+    if (!isMonacoDocument) return;
+    breakpointDecorationsRef.current = applyDebugBreakpointDecorations(
+      editorRef.current,
+      monacoRef.current,
+      breakpointDecorationsRef.current,
+      activeDocument,
+      sourceBreakpoints,
+      resolvedBreakpoints,
+    );
+  }, [activeDocument, isMonacoDocument, resolvedBreakpoints, sourceBreakpoints]);
 
   useEffect(() => {
     if (pendingEditorReveal?.documentId !== activeDocument.id) return;
@@ -326,6 +362,7 @@ function EditorGroupPane({
   }, [activeDocument.id, consumePendingEditorReveal, pendingEditorReveal]);
 
   useEffect(() => {
+    if (!isMonacoDocument) return;
     if (!editorRef.current || !monacoRef.current) return;
     disposeLspProviders(lspProviderDisposablesRef.current);
     lspProviderDisposablesRef.current = registerLspProviders({
@@ -337,7 +374,17 @@ function EditorGroupPane({
       updateOpenDocuments,
       t,
     });
-  }, [activeDocument, setPendingEditorReveal, updateOpenDocuments, upsertDocument, t]);
+    breakpointGutterDisposableRef.current?.dispose();
+    breakpointGutterDisposableRef.current = registerDebugBreakpointGutter(editorRef.current, monacoRef.current, activeDocument, toggleDebugSourceBreakpoint);
+    breakpointDecorationsRef.current = applyDebugBreakpointDecorations(
+      editorRef.current,
+      monacoRef.current,
+      breakpointDecorationsRef.current,
+      activeDocument,
+      sourceBreakpoints,
+      resolvedBreakpoints,
+    );
+  }, [activeDocument, isMonacoDocument, resolvedBreakpoints, setPendingEditorReveal, sourceBreakpoints, toggleDebugSourceBreakpoint, updateOpenDocuments, upsertDocument, t]);
 
   return (
     <>
@@ -418,7 +465,7 @@ function EditorGroupPane({
                 type="button"
                 aria-label={t("editor.action.saveAllFiles")}
                 title={t("editor.action.saveAllFiles")}
-                disabled={!documents.some((document) => document.is_dirty)}
+              disabled={!documents.some((document) => document.is_dirty)}
                 onClick={saveAllOpenDocuments}
               >
                 <SaveAll size={15} />
@@ -449,56 +496,65 @@ function EditorGroupPane({
               type="button"
               aria-label={t("editor.action.saveFile")}
               title={t("editor.action.saveFile")}
+              disabled={!isEditableDocument && !activeDocument.is_dirty}
               onClick={() => saveDocument(activeDocument.id)}
             >
               <Save size={15} />
             </button>
           </div>
-          <Suspense fallback={<div className="editor-loading">{t("editor.status.loading")}</div>}>
-            <MonacoEditor
-              height="100%"
-              theme="vs-dark"
-              path={`${group.id}:${documentDisplayPath(activeDocument)}`}
-              language={activeDocument.language_id}
-              value={activeDocument.text}
-              options={{
-                automaticLayout: true,
-                fontFamily: "JetBrains Mono, Cascadia Code, Consolas, monospace",
-                fontLigatures: editorPreferences.fontLigatures,
-                fontSize: editorPreferences.fontSize,
-                lineHeight: editorPreferences.lineHeight,
-                minimap: { enabled: editorPreferences.minimap, scale: 0.75 },
-                mouseWheelZoom: false,
-                padding: { top: 18, bottom: 18 },
-                renderWhitespace: editorPreferences.renderWhitespace,
-                smoothScrolling: editorPreferences.smoothScrolling,
-                scrollBeyondLastLine: false,
-                tabSize: editorPreferences.tabSize,
-                unicodeHighlight: { ambiguousCharacters: editorPreferences.unicodeHighlightAmbiguousCharacters },
-                wordWrap: editorPreferences.wordWrap,
-                renderLineHighlight: "all",
-              }}
-              onChange={(value, event) => {
-                applyEditorChanges(activeDocument.id, event, value);
-              }}
-              onMount={(editor, monaco) => {
-                editorRef.current = editor;
-                monacoRef.current = monaco;
-                disposeLspProviders(lspProviderDisposablesRef.current);
-                lspProviderDisposablesRef.current = registerLspProviders({
-                  document: activeDocument,
-                  editor,
-                  monaco,
-                  setPendingEditorReveal,
-                  upsertDocument,
-                  updateOpenDocuments,
-                  t,
-                });
-                applyDiagnosticsMarkers(editor, monaco, group.id, diagnostics);
-                revealEditorTarget(editor, consumePendingEditorReveal(activeDocument.id));
-              }}
-            />
-          </Suspense>
+          {isMonacoDocument ? (
+            <Suspense fallback={<div className="editor-loading">{t("editor.status.loading")}</div>}>
+              <MonacoEditor
+                height="100%"
+                theme="vs-dark"
+                path={`${group.id}:${documentDisplayPath(activeDocument)}`}
+                language={activeDocument.language_id}
+                value={activeDocument.text}
+                options={{
+                  automaticLayout: true,
+                  fontFamily: "JetBrains Mono, Cascadia Code, Consolas, monospace",
+                  fontLigatures: editorPreferences.fontLigatures,
+                  fontSize: editorPreferences.fontSize,
+                  lineHeight: editorPreferences.lineHeight,
+                  minimap: { enabled: editorPreferences.minimap, scale: 0.75 },
+                  mouseWheelZoom: false,
+                  padding: { top: 18, bottom: 18 },
+                  readOnly: activeDocument.view.mode === "readOnlyText",
+                  renderWhitespace: editorPreferences.renderWhitespace,
+                  smoothScrolling: editorPreferences.smoothScrolling,
+                  scrollBeyondLastLine: false,
+                  tabSize: editorPreferences.tabSize,
+                  unicodeHighlight: { ambiguousCharacters: editorPreferences.unicodeHighlightAmbiguousCharacters },
+                  wordWrap: editorPreferences.wordWrap,
+                  renderLineHighlight: "all",
+                  glyphMargin: true,
+                }}
+                onChange={(value, event) => {
+                  if (!isEditableDocument) return;
+                  applyEditorChanges(activeDocument.id, event, value);
+                }}
+                onMount={(editor, monaco) => {
+                  editorRef.current = editor;
+                  monacoRef.current = monaco;
+                  disposeLspProviders(lspProviderDisposablesRef.current);
+                  lspProviderDisposablesRef.current = activeDocument.view.mode === "editableText" ? registerLspProviders({
+                    document: activeDocument,
+                    editor,
+                    monaco,
+                    setPendingEditorReveal,
+                    upsertDocument,
+                    updateOpenDocuments,
+                    t,
+                  }) : [];
+                  breakpointGutterDisposableRef.current?.dispose();
+                  breakpointGutterDisposableRef.current = activeDocument.view.mode === "editableText" ? registerDebugBreakpointGutter(editor, monaco, activeDocument, toggleDebugSourceBreakpoint) : null;
+                  applyDiagnosticsMarkers(editor, monaco, group.id, diagnostics);
+                  breakpointDecorationsRef.current = applyDebugBreakpointDecorations(editor, monaco, breakpointDecorationsRef.current, activeDocument, sourceBreakpoints, resolvedBreakpoints);
+                  revealEditorTarget(editor, consumePendingEditorReveal(activeDocument.id));
+                }}
+              />
+            </Suspense>
+          ) : <FilePreviewPane document={activeDocument} />}
         </div>
       </Panel>
     </>
@@ -567,8 +623,8 @@ function EditorTab({
 
   const menuGroups: EditorTabMenuAction[][] = [
     [
-      { label: t("common.save"), shortcut: "Ctrl+S", disabled: !document.is_dirty, onClick: () => saveDocument(document.id) },
-      { label: t("common.saveAs"), shortcut: "Ctrl+Shift+S", onClick: () => saveDocumentAs(document.id) },
+      { label: t("common.save"), shortcut: "Ctrl+S", disabled: !document.is_dirty || !document.view.editable, onClick: () => saveDocument(document.id) },
+      { label: t("common.saveAs"), shortcut: "Ctrl+Shift+S", disabled: !document.view.editable, onClick: () => saveDocumentAs(document.id) },
     ],
     [
       { label: t("common.close"), shortcut: "Ctrl+F4", onClick: closeTab },

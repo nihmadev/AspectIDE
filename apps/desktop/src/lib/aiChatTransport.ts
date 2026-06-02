@@ -1,5 +1,5 @@
 import type { AiModelConfig, AiProviderConfig } from "./aiPreferences";
-import { isTauriRuntime, luxCommands, subscribeAiChatStream } from "./tauri";
+import { createDesktopRuntimeError, isBrowserPreviewRuntime, isTauriRuntime, luxCommands, subscribeAiChatStream } from "./tauri";
 
 export type ChatCompletionMessage = {
   role: "system" | "user" | "assistant" | "tool";
@@ -66,6 +66,9 @@ export async function requestChatCompletion(
 ): Promise<ChatCompletionResult> {
   throwIfAborted(input.abortSignal);
   const desktopRuntime = isTauriRuntime();
+  const browserPreviewRuntime = isBrowserPreviewRuntime();
+  if (!desktopRuntime && !browserPreviewRuntime) throw createDesktopRuntimeError("AI chat completion");
+
   const toolsEnabled = options.toolsEnabled ?? true;
   const payload = {
     model: input.selectedModel.alias || input.selectedModel.id,
@@ -77,22 +80,11 @@ export async function requestChatCompletion(
   };
 
   if (desktopRuntime) {
-    try {
-      return await requestStreamingChatCompletion(input, payload, onStreamProgress);
-    } catch (error) {
-      throwIfAborted(input.abortSignal);
-      if (!isStreamFallbackAllowed(error)) throw error;
-    }
+    return requestStreamingChatCompletion(input, payload, onStreamProgress);
   }
 
   const startedAtMs = performance.now();
-  const response = desktopRuntime
-    ? await luxCommands.aiChatCompletion({
-      baseUrl: input.provider.baseUrl,
-      apiKey: input.provider.apiKey || null,
-      payload,
-    })
-    : await requestBrowserChatCompletion(input, payload);
+  const response = await requestBrowserChatCompletion(input, payload);
   throwIfAborted(input.abortSignal);
   return { body: response.body, streamed: false, timing: elapsedTiming(startedAtMs) };
 }
@@ -137,7 +129,7 @@ function chatCompletionEndpoint(baseUrl: string) {
   const trimmed = baseUrl.trim().replace(/\/+$/g, "");
   if (!trimmed) throw new Error("AI provider base URL is empty");
   const url = parseProviderBaseUrl(trimmed);
-  if (!isTauriRuntime() && isLocalLoopbackUrl(url)) {
+  if (isBrowserPreviewRuntime() && isLocalLoopbackUrl(url)) {
     const proxyPath = url.pathname.replace(/\/+$/g, "");
     const chatPath = proxyPath.endsWith("/chat/completions") ? proxyPath : `${proxyPath}/chat/completions`;
     return `/__lux_ai_proxy${chatPath}`;
@@ -345,10 +337,6 @@ function streamAccumulatorToCompletion(accumulator: StreamAccumulator) {
       },
     }],
   };
-}
-
-function isStreamFallbackAllowed(error: unknown) {
-  return !hasStreamingStarted(error) && !isAbortErrorLike(error);
 }
 
 function markStreamingStarted(error: unknown) {

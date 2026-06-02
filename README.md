@@ -92,6 +92,8 @@ For web-only frontend iteration:
 pnpm dev:web
 ```
 
+`pnpm dev:web` is an explicit browser-preview mode for UI iteration only. Production behavior requires the Tauri desktop runtime; browser fallbacks for documents, settings, AI chat history, terminal echo, and LSP no-op responses are disabled outside dev preview. To inspect a built browser preview intentionally, build/run with `VITE_LUX_BROWSER_PREVIEW=1`.
+
 For a production desktop bundle:
 
 ```powershell
@@ -108,9 +110,12 @@ pnpm build
 cargo fmt --all --check
 cargo check --workspace
 cargo test --workspace
+cargo run -p lux-bench -- --assert --output target/lux-bench-report.json
 ```
 
 UI changes should also be verified in the running app, including console health, panel layout, keyboard flow, and the affected workflow.
+
+`lux-bench` is the repeatable core-performance gate. It generates a deterministic temporary workspace and checks Rust-owned file indexing, literal search, and workspace event batching against conservative thresholds, printing a JSON report and optionally writing it with `--output` for CI artifacts or local comparison.
 
 ## Roadmap
 

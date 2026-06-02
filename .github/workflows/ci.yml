@@ -26,6 +26,16 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cargo test
         run: cargo test --workspace
+      - name: Core performance benchmark
+        run: cargo run -p lux-bench -- --assert --output target/lux-bench-report.json
+      - name: Upload performance benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lux-core-performance-report
+          path: target/lux-bench-report.json
+          if-no-files-found: ignore
+          retention-days: 14
 
   frontend:
     name: Frontend
@@ -43,3 +53,5 @@ jobs:
         run: pnpm typecheck
       - name: Build
         run: pnpm build
+      - name: Release policy tests
+        run: node .github/scripts/test-release-policy.mjs

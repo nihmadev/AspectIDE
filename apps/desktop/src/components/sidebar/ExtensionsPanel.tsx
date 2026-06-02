@@ -1,10 +1,10 @@
-import { Loader2, Package, RefreshCw, Search, ShieldAlert } from "lucide-react";
+import { Loader2, Package, Play, RefreshCw, Search, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useTranslation, type TranslateFn } from "../../lib/i18n/useTranslation";
 import { useLuxStore } from "../../lib/store";
 import { luxCommands } from "../../lib/tauri";
-import type { ExtensionInfo } from "../../lib/types";
+import type { ExtensionActivationPlan, ExtensionContributionRegistry, ExtensionInfo } from "../../lib/types";
 import { readErrorMessage, TreeMessage } from "./SidebarShared";
 
 export function ExtensionsPanel() {
@@ -15,6 +15,14 @@ export function ExtensionsPanel() {
 
   const extensionsMutation = useMutation({
     mutationFn: luxCommands.extensionsList,
+  });
+
+  const activationPlanMutation = useMutation({
+    mutationFn: luxCommands.extensionsActivationPlan,
+  });
+
+  const contributionRegistryMutation = useMutation({
+    mutationFn: luxCommands.extensionsContributionRegistry,
   });
 
   const openExtensionManifestMutation = useMutation({
@@ -28,9 +36,11 @@ export function ExtensionsPanel() {
 
   useEffect(() => {
     extensionsMutation.mutate();
+    activationPlanMutation.mutate();
   }, []);
 
   const extensions = extensionsMutation.data ?? [];
+  const activationPlan = activationPlanMutation.data ?? null;
   const visibleExtensions = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) return extensions;
@@ -48,6 +58,8 @@ export function ExtensionsPanel() {
         onSubmit={(event) => {
           event.preventDefault();
           extensionsMutation.mutate();
+          activationPlanMutation.mutate();
+          contributionRegistryMutation.reset();
         }}
       >
         <Search size={15} />
@@ -55,12 +67,41 @@ export function ExtensionsPanel() {
       </form>
       <div className="panel-caption extensions-caption">
         <span>{extensionCaption(extensionsMutation.isPending, visibleExtensions.length, extensions.length, t)}</span>
-        <button className="icon-button compact" type="button" aria-label={t("sidebar.extensions.actions.refresh")} title={t("sidebar.extensions.actions.refresh")} onClick={() => extensionsMutation.mutate()} disabled={extensionsMutation.isPending}>
+        <button
+          className="icon-button compact"
+          type="button"
+          aria-label={t("sidebar.extensions.actions.refresh")}
+          title={t("sidebar.extensions.actions.refresh")}
+          onClick={() => {
+            extensionsMutation.mutate();
+            activationPlanMutation.mutate();
+            contributionRegistryMutation.reset();
+          }}
+          disabled={extensionsMutation.isPending || activationPlanMutation.isPending || contributionRegistryMutation.isPending}
+        >
           {extensionsMutation.isPending ? <Loader2 size={14} className="spin-icon" /> : <RefreshCw size={14} />}
         </button>
       </div>
+      <div className="extensions-caption extensions-activation-caption">
+        <span>{activationPlanCaption(activationPlanMutation.isPending, activationPlan, t)}</span>
+        <button
+          className="icon-button compact"
+          type="button"
+          aria-label={t("sidebar.extensions.actions.activate")}
+          title={t("sidebar.extensions.actions.activate")}
+          onClick={() => contributionRegistryMutation.mutate()}
+          disabled={!activationPlan || activationPlan.candidates.length === 0 || contributionRegistryMutation.isPending}
+        >
+          {contributionRegistryMutation.isPending ? <Loader2 size={14} className="spin-icon" /> : <Play size={14} />}
+        </button>
+      </div>
+      <div className="extensions-caption extensions-runtime-caption">
+        <span>{contributionRegistryCaption(contributionRegistryMutation.isPending, contributionRegistryMutation.data ?? null, t)}</span>
+      </div>
       <div className="extensions-list" role="list" aria-label={t("sidebar.extensions.installed")}>
         {extensionsMutation.error ? <TreeMessage depth={0} tone="error" text={readErrorMessage(extensionsMutation.error, t)} /> : null}
+        {activationPlanMutation.error ? <TreeMessage depth={0} tone="error" text={readErrorMessage(activationPlanMutation.error, t)} /> : null}
+        {contributionRegistryMutation.error ? <TreeMessage depth={0} tone="error" text={readErrorMessage(contributionRegistryMutation.error, t)} /> : null}
         {openError ? <TreeMessage depth={0} tone="error" text={openError} /> : null}
         {!extensionsMutation.isPending && visibleExtensions.length === 0 ? (
           <div className="extensions-empty-state">
@@ -112,6 +153,32 @@ function extensionCaption(loading: boolean, visibleCount: number, totalCount: nu
   if (totalCount === 0) return t("sidebar.extensions.installed");
   if (visibleCount === totalCount) return t("sidebar.extensions.installedCount", { count: totalCount });
   return t("sidebar.extensions.visibleCount", { visibleCount, totalCount });
+}
+
+function activationPlanCaption(loading: boolean, plan: ExtensionActivationPlan | null, t: TranslateFn) {
+  if (loading) return t("sidebar.extensions.activation.scanning");
+  if (!plan) return t("sidebar.extensions.activation.notLoaded");
+  if (plan.candidates.length === 0 && plan.blocked.length === 0) return t("sidebar.extensions.activation.empty");
+  const abiVersions = [...new Set(plan.candidates.map((candidate) => candidate.host_contract.abi.version))].join(", ") || "-";
+  const imports = plan.candidates.reduce((total, candidate) => total + candidate.host_contract.abi.imports.length, 0);
+  return t("sidebar.extensions.activation.summary", {
+    candidates: plan.candidates.length,
+    blocked: plan.blocked.length,
+    abiVersions,
+    imports,
+  });
+}
+
+function contributionRegistryCaption(loading: boolean, registry: ExtensionContributionRegistry | null, t: TranslateFn) {
+  if (loading) return t("sidebar.extensions.activation.running");
+  if (!registry) return t("sidebar.extensions.activation.runtimeNotRun");
+  return t("sidebar.extensions.activation.registrySummary", {
+    registered: registry.registered.length,
+    unavailable: registry.unavailable.length,
+    activated: registry.activation.activated.length,
+    failed: registry.activation.failed.length,
+    blocked: registry.activation.plan.blocked.length,
+  });
 }
 
 function formatExtensionContributes(extension: ExtensionInfo, t: TranslateFn) {

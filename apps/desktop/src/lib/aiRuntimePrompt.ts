@@ -16,6 +16,8 @@ export function buildInitialMessages(input: AiChatSendInput): ChatCompletionMess
   const system = buildLuxIdeSystemPrompt({
     preferences: input.preferences,
     provider: input.provider,
+    globalInstructions: input.globalInstructions,
+    projectInstructions: input.projectInstructions,
     runtimeToolsAvailable: isTauriRuntime(),
     selectedAgentInstructions: input.selectedAgentInstructions,
     selectedAgentName: input.selectedAgentName,

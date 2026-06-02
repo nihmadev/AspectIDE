@@ -24,6 +24,7 @@ lux-core = { path = "../../../crates/lux-core" }
 lux-dap = { path = "../../../crates/lux-dap" }
 lux-editor = { path = "../../../crates/lux-editor" }
 lux-extensions = { path = "../../../crates/lux-extensions" }
+lux-file-intel = { path = "../../../crates/lux-file-intel" }
 lux-fs = { path = "../../../crates/lux-fs" }
 lux-git = { path = "../../../crates/lux-git" }
 lux-lsp = { path = "../../../crates/lux-lsp" }

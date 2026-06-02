@@ -4,6 +4,7 @@ members = [
   "crates/lux-core",
   "crates/lux-workspace",
   "crates/lux-fs",
+  "crates/lux-file-intel",
   "crates/lux-editor",
   "crates/lux-search",
   "crates/lux-lsp",
@@ -12,6 +13,7 @@ members = [
   "crates/lux-git",
   "crates/lux-settings",
   "crates/lux-extensions",
+  "crates/lux-bench",
 ]
 resolver = "2"
 
@@ -23,18 +25,26 @@ authors = ["Lux IDE Team"]
 [workspace.dependencies]
 anyhow = "1.0"
 base64 = "0.22"
+calamine = "0.35.0"
 chrono = { version = "0.4", features = ["serde"] }
+csv = "1.4.0"
 ignore = "0.4"
 lsp-types = "0.97"
 notify = "8.0"
 portable-pty = "0.9"
+pdf-extract = "0.10.0"
+quick-xml = "0.40.1"
 rayon = "1.10"
 globset = "0.4"
 regex = "1.11"
+rusqlite = { version = "0.40.0", default-features = false, features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-tokio = { version = "1.43", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.43", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"
 ts-rs = { version = "10.1", features = ["chrono-impl", "uuid-impl"] }
 uuid = { version = "1.13", features = ["serde", "v4"] }
+wasmparser = "0.251.0"
+wasmtime = { version = "45.0.0", default-features = false, features = ["cranelift", "runtime", "std"] }
+zip = { version = "4.6.1", default-features = false, features = ["deflate"] }

@@ -47,6 +47,14 @@ Release flow:
 
 1. Update both version fields to the same semantic version.
 2. Push a tag such as `v1.0.0`, or run the `Release Installers` workflow manually with the same tag.
-3. The workflow runs quality gates, builds native Tauri bundles on Windows, macOS, and Linux runners, and publishes installer assets to the GitHub Release.
+3. The workflow verifies that source config does not commit signing/updater secrets, prepares a signed release config in the CI checkout, runs quality gates, builds native Tauri bundles on Windows, macOS, and Linux runners, and publishes installer assets to the GitHub Release.
+
+Required GitHub release secrets:
+
+- `WINDOWS_CERTIFICATE_PFX_BASE64`, `WINDOWS_CERTIFICATE_PASSWORD`, `WINDOWS_CERTIFICATE_THUMBPRINT`
+- `APPLE_CERTIFICATE_P12_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_PROVIDER_SHORT_NAME`, `APPLE_SIGNING_IDENTITY`
+- `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `TAURI_UPDATER_PUBLIC_KEY`, `TAURI_UPDATER_ENDPOINTS`
+
+`TAURI_UPDATER_ENDPOINTS` must list production HTTPS manifest URLs for all public channels: `stable`, `beta`, and `nightly`. The release verifier rejects local, placeholder, duplicated, or unsigned-updater configuration before installers are built.
 
 Published assets include Windows NSIS installer, macOS app/dmg bundles, Linux AppImage/deb/rpm packages, `SHA256SUMS.txt`, and `release-manifest.json`. Public macOS releases still require Apple Developer ID signing and notarization secrets before they should be treated as fully trusted distribution builds.

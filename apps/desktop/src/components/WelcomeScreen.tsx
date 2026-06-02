@@ -5,13 +5,14 @@ import { useTranslation } from "../lib/i18n/useTranslation";
 import type { RecentWorkspace } from "../lib/types";
 
 type WelcomeScreenProps = {
+  loading?: boolean;
   onOpenProject: () => void;
   onForgetRecentWorkspace: (root: string) => void;
   onOpenRecentWorkspace: (root: string) => void;
   recentWorkspaces: RecentWorkspace[];
 };
 
-export function WelcomeScreen({ onForgetRecentWorkspace, onOpenProject, onOpenRecentWorkspace, recentWorkspaces }: WelcomeScreenProps) {
+export function WelcomeScreen({ loading = false, onForgetRecentWorkspace, onOpenProject, onOpenRecentWorkspace, recentWorkspaces }: WelcomeScreenProps) {
   const { t } = useTranslation();
   return (
     <main className="welcome-screen">
@@ -26,7 +27,7 @@ export function WelcomeScreen({ onForgetRecentWorkspace, onOpenProject, onOpenRe
           </div>
 
           <div className="welcome-actions" aria-label={t("welcome.projectActions")}>
-            <button className="welcome-action-card" type="button" onClick={onOpenProject}>
+            <button className="welcome-action-card" type="button" disabled={loading} onClick={onOpenProject}>
               <FolderOpen size={17} strokeWidth={1.8} />
               <span>{t("welcome.openProject")}</span>
               <small>{t("welcome.openProjectHint")}</small>
@@ -46,6 +47,7 @@ export function WelcomeScreen({ onForgetRecentWorkspace, onOpenProject, onOpenRe
                   <RecentWorkspaceRow
                     key={workspace.root}
                     workspace={workspace}
+                    loading={loading}
                     onForgetRecentWorkspace={onForgetRecentWorkspace}
                     onOpenRecentWorkspace={onOpenRecentWorkspace}
                   />
@@ -70,10 +72,12 @@ export function WelcomeScreen({ onForgetRecentWorkspace, onOpenProject, onOpenRe
 function RecentWorkspaceRow({
   onForgetRecentWorkspace,
   onOpenRecentWorkspace,
+  loading,
   workspace,
 }: {
   onForgetRecentWorkspace: (root: string) => void;
   onOpenRecentWorkspace: (root: string) => void;
+  loading: boolean;
   workspace: RecentWorkspace;
 }) {
   const { t } = useTranslation();
@@ -85,14 +89,14 @@ function RecentWorkspaceRow({
 
   return (
     <div className="recent-row-wrap">
-      <button className="recent-row" type="button" onClick={() => onOpenRecentWorkspace(workspace.root)} title={rootLabel}>
+      <button className="recent-row" type="button" disabled={loading} onClick={() => onOpenRecentWorkspace(workspace.root)} title={rootLabel}>
         <FolderOpen className="recent-row-icon" size={14} strokeWidth={1.8} />
         <span className="recent-row-text">
           <span>{workspace.name}</span>
           <small>{rootLabel}</small>
         </span>
       </button>
-      <button className="recent-forget-button" type="button" aria-label={t("welcome.removeRecent", { name: workspace.name })} title={t("welcome.removeFromRecentProjects")} onClick={forget}>
+      <button className="recent-forget-button" type="button" disabled={loading} aria-label={t("welcome.removeRecent", { name: workspace.name })} title={t("welcome.removeFromRecentProjects")} onClick={forget}>
         <X size={13} />
       </button>
     </div>

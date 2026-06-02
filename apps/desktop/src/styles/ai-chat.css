@@ -1,11 +1,20 @@
 .ai-chat-panel {
+  --ai-chat-bg: #181818;
+  --ai-chat-surface: #202020;
+  --ai-chat-surface-strong: #272727;
+  --ai-chat-border: #2b2b2b;
+  --ai-chat-accent: #8fb5d9;
+  --ai-chat-accent-soft: rgba(143, 181, 217, 0.14);
+  --ai-chat-success: #78d99b;
+  --ai-chat-warning: #e2b341;
+  --ai-chat-danger: #f06a6a;
   display: grid;
   grid-template-rows: 35px minmax(0, 1fr) auto;
   height: 100%;
   min-width: 0;
   min-height: 0;
   border-left: 1px solid #252525;
-  background: #181818;
+  background: var(--ai-chat-bg);
 }
 
 .ai-chat-panel-loading {
@@ -89,7 +98,7 @@
 
 /* First-commit Agent home: a clean centered greeting + one composer card â€”
    no header chrome, no session tabs, no suggestions, no context meter. */
-.ai-chat-composer[data-agent-home="true"] .ai-context-circle {
+.ai-chat-composer[data-agent-home="true"] .ai-context-square {
   display: none;
 }
 
@@ -160,7 +169,7 @@
 .ai-composer-actions,
 .ai-composer-left-actions,
 .ai-composer-right-actions,
-.ai-context-circle,
+.ai-context-square,
 .ai-voice-button,
 .ai-send-button {
   display: flex;
@@ -227,48 +236,6 @@
 
 .ai-chat-header-actions {
   gap: 1px;
-}
-
-.ai-provider-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 24px;
-  max-width: 142px;
-  min-width: 0;
-  padding: 0 8px;
-  border: 1px solid #303030;
-  border-radius: 5px;
-  background: #202020;
-  color: #a9a9a9;
-  font: 10px/1 var(--font-ui);
-}
-
-.ai-provider-status span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ai-provider-status:hover:not(:disabled) {
-  border-color: #3a3a3a;
-  background: #262626;
-  color: #ededed;
-}
-
-.ai-provider-status[data-state="ok"] {
-  border-color: rgba(78, 201, 138, 0.34);
-  color: #98ddb7;
-}
-
-.ai-provider-status[data-state="error"] {
-  border-color: rgba(241, 76, 76, 0.34);
-  color: #ffaaaa;
-}
-
-.ai-provider-status[data-state="checking"] svg {
-  animation: ai-thinking-pulse 1.1s ease-in-out infinite;
 }
 
 .ai-chat-body {
@@ -542,9 +509,9 @@
   width: 100%;
   max-width: 92%;
   min-width: 0;
-  border: 1px solid #2b2b2b;
+  border: 1px solid var(--ai-chat-border);
   border-radius: 8px;
-  background: #1b1b1b;
+  background: linear-gradient(180deg, #1f2020, #191919);
   overflow: hidden;
 }
 
@@ -577,8 +544,13 @@
   transform: rotate(90deg);
 }
 
+.ai-reasoning[data-streaming="true"] {
+  border-color: rgba(143, 181, 217, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(143, 181, 217, 0.06);
+}
+
 .ai-reasoning[data-streaming="true"] .ai-reasoning-header {
-  color: #b9b1d6;
+  color: #c6d7e5;
 }
 
 .ai-reasoning[data-streaming="true"] .ai-reasoning-header span {
@@ -850,18 +822,19 @@
   max-width: 92%;
   gap: 5px;
   padding: 7px 9px;
-  border: 1px solid #303030;
+  border: 1px solid rgba(143, 181, 217, 0.24);
   border-radius: 7px;
-  background: #1f1f1f;
-  color: #bdbdbd;
+  background: linear-gradient(135deg, rgba(143, 181, 217, 0.13), rgba(120, 217, 155, 0.06)), #1c1c1c;
+  color: #c8d1d8;
   font: 11px/1 var(--font-ui);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.018);
 }
 
 .ai-thinking-indicator span {
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: #8fb5d9;
+  background: var(--ai-chat-accent);
   animation: ai-thinking-pulse 1s ease-in-out infinite;
 }
 
@@ -881,12 +854,22 @@
   text-transform: uppercase;
 }
 
+.ai-thinking-indicator[data-status="running-tools"] {
+  border-color: rgba(120, 217, 155, 0.24);
+  background: linear-gradient(135deg, rgba(120, 217, 155, 0.13), rgba(143, 181, 217, 0.06)), #1c1c1c;
+}
+
 .ai-thinking-indicator[data-status="running-tools"] span {
-  background: #4ec98a;
+  background: var(--ai-chat-success);
+}
+
+.ai-thinking-indicator[data-status="waiting-approval"] {
+  border-color: rgba(226, 179, 65, 0.28);
+  background: linear-gradient(135deg, rgba(226, 179, 65, 0.15), rgba(143, 181, 217, 0.05)), #1c1c1c;
 }
 
 .ai-thinking-indicator[data-status="waiting-approval"] span {
-  background: #e2b341;
+  background: var(--ai-chat-warning);
 }
 
 @keyframes ai-thinking-pulse {
@@ -1213,46 +1196,63 @@
   font: 10px/1 var(--font-ui);
 }
 
-.ai-context-circle {
+.ai-context-square {
   position: relative;
   justify-content: center;
-  width: 30px;
+  width: 32px;
   height: 30px;
   padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: #cfcfcf;
+  overflow: hidden;
+  border: 1px solid #383838;
+  border-radius: 7px;
+  background: #202020;
+  color: #e1e1e1;
   cursor: pointer;
-  font: 9px/1 var(--font-mono);
+  font: 9.5px/1 var(--font-mono);
   font-weight: 700;
-  transition: color 140ms ease;
+  isolation: isolate;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease, transform 140ms ease;
 }
 
-.ai-context-circle::before {
-  content: "";
+.ai-context-square-fill {
   position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: conic-gradient(var(--accent) calc(var(--context-percent, 0) * 1%), #343434 0);
-  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
-  mask: radial-gradient(farthest-side, transparent calc(100% - 4px), #000 calc(100% - 3px));
-  transition: background 200ms ease;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: -1;
+  height: calc(var(--context-percent, 0) * 1%);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.95), rgba(232, 232, 232, 0.88));
+  opacity: 0.96;
+  transition: height 260ms cubic-bezier(0.4, 0, 0.2, 1), opacity 140ms ease;
 }
 
-.ai-context-circle span {
+.ai-context-square-value,
+.ai-context-square-unit {
   position: relative;
   z-index: 1;
+  mix-blend-mode: difference;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.22);
 }
 
-.ai-context-circle:hover,
-.ai-context-circle[data-active="true"] {
+.ai-context-square-value {
+  font-size: 10px;
+}
+
+.ai-context-square-unit {
+  margin-left: 1px;
+  font-size: 7px;
+  font-weight: 800;
+}
+
+.ai-context-square:hover,
+.ai-context-square[data-active="true"] {
+  border-color: #5c6b76;
+  background: #252525;
   color: #ffffff;
 }
 
-.ai-context-circle:hover::before,
-.ai-context-circle[data-active="true"]::before {
-  background: conic-gradient(#5aa8f0 calc(var(--context-percent, 0) * 1%), #3a4654 0);
+.ai-context-square:hover {
+  transform: translateY(-1px);
 }
 
 .ai-context-popover {
@@ -1294,6 +1294,13 @@
   color: #d8d8d8;
   font-size: 11px;
   font-weight: 700;
+}
+
+.ai-context-popover-head small {
+  color: #888888;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
 }
 
 .ai-context-popover-head button {

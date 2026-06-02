@@ -99,6 +99,8 @@ export type AiChatSendInput = {
   openDocuments: DocumentSnapshot[];
   preferences: AiPreferences;
   provider: AiProviderConfig;
+  globalInstructions: string;
+  projectInstructions: string;
   selectedAgentInstructions: string;
   selectedAgentName: string;
   selectedModel: AiModelConfig;

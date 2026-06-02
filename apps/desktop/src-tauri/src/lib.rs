@@ -21,6 +21,7 @@ use std::{
 mod debug;
 mod editor;
 mod extensions;
+mod file_intel;
 mod git;
 mod lsp;
 mod search;
@@ -49,12 +50,19 @@ use tokio::sync::oneshot;
 use ai_tools::{
     ai_file_delete, ai_file_patch, ai_file_str_replace, ai_file_write, ai_shell, ai_symbol_context,
 };
-use debug::debug_workspace_info;
+use debug::{
+    debug_evaluate, debug_execute, debug_scopes, debug_sessions, debug_set_breakpoints,
+    debug_stack_trace, debug_start, debug_stop, debug_variables, debug_workspace_info,
+};
 use editor::{
     editor_apply_edits, editor_apply_workspace_edit, editor_new_file, editor_open_file,
     editor_save_file, editor_save_file_as, editor_update_text,
 };
-use extensions::extensions_list;
+use extensions::{
+    extensions_activate, extensions_activation_plan, extensions_command_routes,
+    extensions_contribution_registry, extensions_execute_command, extensions_list,
+};
+use file_intel::{file_asset_data, file_inspect, file_open_external, file_supported_formats};
 use git::{git_diff, git_status};
 use lsp::{
     diagnostics_snapshot, lsp_code_actions, lsp_completion, lsp_definition, lsp_document_symbols,
@@ -80,6 +88,7 @@ struct AppState {
     diagnostics: Mutex<Vec<WorkspaceDiagnostic>>,
     ai_streams: Mutex<BTreeMap<String, oneshot::Sender<()>>>,
     lsp: tokio::sync::Mutex<Option<lux_lsp::LspManager>>,
+    debug: tokio::sync::Mutex<Option<lux_dap::DebugSessionManager>>,
     settings: Mutex<Option<SettingsStore>>,
     terminals: Mutex<Option<Arc<TerminalService>>>,
 }
@@ -104,6 +113,7 @@ async fn workspace_open(
     let workspace = lux_workspace::open_workspace(path).map_err(String::from)?;
     workspace_watcher::stop(&state)?;
     lsp::shutdown(&state).await;
+    debug::stop_all(&state).await;
     terminal::close_all(&state)?;
     *state.documents.lock().map_err(lock_error)? = DocumentStore::default();
     lsp::clear_diagnostics(&app, &state)?;
@@ -129,6 +139,7 @@ async fn workspace_close(app: AppHandle, state: State<'_, SharedState>) -> Resul
     lsp::clear_diagnostics(&app, &state)?;
     terminal::close_all(&state)?;
     lsp::shutdown(&state).await;
+    debug::stop_all(&state).await;
     emit_event(&app, LuxEvent::WorkspaceChanged { workspace: None })?;
     Ok(())
 }
@@ -443,11 +454,19 @@ pub fn run() {
                 .lock()
                 .map_err(|_| "terminals lock poisoned")? = Some(terminal_service);
             let (diagnostics_tx, mut diagnostics_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (debug_tx, mut debug_rx) = tokio::sync::mpsc::unbounded_channel();
             *state.lsp.blocking_lock() = Some(lux_lsp::LspManager::new(diagnostics_tx));
+            *state.debug.blocking_lock() = Some(lux_dap::DebugSessionManager::new(debug_tx));
             let diagnostics_state = state.inner().clone();
             tauri::async_runtime::spawn(async move {
                 while let Some(update) = diagnostics_rx.recv().await {
                     let _ = lsp::apply_diagnostics_update(&lsp_handle, &diagnostics_state, update);
+                }
+            });
+            let debug_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(update) = debug_rx.recv().await {
+                    let _ = debug::apply_debug_update(&debug_handle, update);
                 }
             });
             Ok(())
@@ -466,6 +485,10 @@ pub fn run() {
             fs_copy,
             fs_delete,
             fs_reveal_in_file_explorer,
+            file_supported_formats,
+            file_inspect,
+            file_asset_data,
+            file_open_external,
             editor_open_file,
             editor_new_file,
             editor_update_text,
@@ -498,7 +521,21 @@ pub fn run() {
             git_status,
             git_diff,
             extensions_list,
+            extensions_activation_plan,
+            extensions_activate,
+            extensions_contribution_registry,
+            extensions_command_routes,
+            extensions_execute_command,
             debug_workspace_info,
+            debug_start,
+            debug_stop,
+            debug_sessions,
+            debug_stack_trace,
+            debug_scopes,
+            debug_variables,
+            debug_evaluate,
+            debug_execute,
+            debug_set_breakpoints,
             lsp_servers,
             diagnostics_snapshot,
             lsp_hover,

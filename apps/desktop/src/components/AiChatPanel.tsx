@@ -1,4 +1,4 @@
-import { ArrowDown, Brain, MessageSquarePlus, PanelRightClose, Plus, RotateCcw, Sparkles, Wifi, X } from "lucide-react";
+import { ArrowDown, Brain, MessageSquarePlus, PanelRightClose, RotateCcw, Sparkles, X } from "lucide-react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AiChatComposer } from "./ai-chat/AiChatComposer";
@@ -8,11 +8,11 @@ import { loadAiChatHistory, saveAiChatHistory } from "../lib/aiChatHistory";
 import { aiChatSessionTitle, aiChatStatusLabel } from "../lib/aiChatPresentation";
 import { documentDisplayPath } from "../lib/documents";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
-import { AI_PREFERENCES_KEY, getAiModel, getAiProvider, mergeAiPreferences, type AiPreferences } from "../lib/aiPreferences";
+import { AI_PREFERENCES_KEY, getAiModel, getAiProjectInstructions, getAiProvider, mergeAiPreferences, type AiPreferences } from "../lib/aiPreferences";
 import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
 import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision, AiToolApprovalRequest } from "../lib/aiChatTypes";
 import { selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
-import { luxCommands, type AiProviderDiagnosticResponse } from "../lib/tauri";
+import { luxCommands } from "../lib/tauri";
 import { useVoiceInput } from "../lib/useVoiceInput";
 
 type ChatAttachment = {
@@ -58,8 +58,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const [sendingSessionId, setSendingSessionId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [lastUserDraft, setLastUserDraft] = useState<string | null>(null);
-  const [providerDiagnostic, setProviderDiagnostic] = useState<AiProviderDiagnosticResponse | null>(null);
-  const [providerDiagnosticRunning, setProviderDiagnosticRunning] = useState(false);
   const [showScrollDown, setShowScrollDown] = useState(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -68,6 +66,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const approvalResolversRef = useRef(new Map<string, (decision: AiToolApprovalDecision) => void>());
   const persistedSessionsLoadedRef = useRef(false);
   const skipNextSessionPersistRef = useRef(true);
+  const historyPersistTimerRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const messages = activeChatSession?.messages ?? [];
   const activeStatus = activeChatSession?.status ?? "idle";
@@ -90,6 +89,8 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const selectedProvider = getAiProvider(aiPreferences.providers, aiPreferences.selectedProviderId) ?? aiPreferences.providers[0] ?? null;
   const selectedModel = getAiModel(selectedProvider, aiPreferences.selectedModelId) ?? selectedProvider?.models[0] ?? null;
   const selectedAgent = aiPreferences.agentProfiles.find((profile) => profile.id === aiPreferences.selectedAgentId) ?? aiPreferences.agentProfiles[0] ?? null;
+  const projectInstructions = getAiProjectInstructions(aiPreferences, workspace?.root);
+  const runtimeInstructionText = [selectedAgent?.instructions ?? "", aiPreferences.globalInstructions, projectInstructions].filter((entry) => entry.trim()).join("\n");
   const modelSupportsEffort = Boolean(selectedModel?.effortLevels.length);
   const agentOptions = aiPreferences.agentProfiles.map((profile) => ({ label: profile.name, value: profile.id }));
   const modelOptions = selectedProvider?.models.map((model) => ({ label: model.name, value: model.id })) ?? [];
@@ -97,7 +98,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const contextUsage = useMemo(() => buildAiChatContextUsageSummary({
     activeDocumentPath: activeDocument ? documentDisplayPath(activeDocument) : null,
     aiIndexStatus: aiIndex.status,
-    agentInstruction: selectedAgent?.instructions ?? "",
+    agentInstruction: runtimeInstructionText,
     agentName: selectedAgent?.name ?? "",
     attachments,
     conversation: messages,
@@ -105,28 +106,13 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     preferences: aiPreferences,
     selectedModelAlias: selectedModel?.alias ?? selectedModel?.id ?? "",
     t,
-  }), [activeDocument, aiIndex.status, aiPreferences, attachments, message, messages, selectedAgent, selectedModel, t]);
-  const contextLabel = t("aiChat.context.percentBadge", { percent: contextUsage.percent });
+  }), [activeDocument, aiIndex.status, aiPreferences, attachments, message, messages, runtimeInstructionText, selectedAgent, selectedModel, t]);
   const contextTitle = t("aiChat.context.tooltip", {
     percent: contextUsage.percent,
     totalTokens: formatCompactTokens(contextUsage.totalTokens),
     tokenBudget: formatCompactTokens(contextUsage.tokenBudget),
   });
   const canSend = Boolean(selectedProvider && selectedModel && message.trim()) && !sending && !activeSessionClosed;
-  const providerStatusLabel = providerDiagnosticRunning
-    ? t("aiChat.provider.checking")
-    : providerDiagnostic
-      ? providerDiagnostic.ok
-        ? t("aiChat.provider.ok", { latency: providerDiagnostic.latencyMs })
-        : t("aiChat.provider.failed")
-      : t("aiChat.provider.ready");
-  const providerStatusTitle = providerDiagnostic
-    ? providerDiagnostic.ok
-      ? t("aiChat.provider.okDetail", { status: providerDiagnostic.status ?? "-", latency: providerDiagnostic.latencyMs })
-      : providerDiagnostic.error ?? t("aiChat.provider.failed")
-    : selectedProvider
-      ? `${selectedProvider.name} / ${selectedModel?.name ?? aiPreferences.selectedModelId}`
-      : t("aiChat.send.disabledTooltip");
   const renderComposerContent = () => (
     <AiChatComposer
       activeSessionSending={activeSessionSending}
@@ -135,7 +121,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       attachments={attachments}
       attachFiles={attachFiles}
       canSend={canSend}
-      contextLabel={contextLabel}
       contextOpen={contextOpen}
       contextTitle={contextTitle}
       contextUsage={contextUsage}
@@ -172,6 +157,8 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     persistedSessionsLoadedRef.current = true;
     void loadAiChatHistory().then((history) => {
       if (history && history.sessions.length > 0) setAiChatSessions(history);
+    }).catch((error) => {
+      setSendError(readErrorMessage(error));
     }).finally(() => {
       skipNextSessionPersistRef.current = false;
     });
@@ -182,11 +169,27 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     if (skipNextSessionPersistRef.current) {
       return;
     }
-    void saveAiChatHistory({
-      activeSessionId: activeAiChatSessionId,
-      sessions: aiChatSessions,
-    }).catch(() => undefined);
-  }, [activeAiChatSessionId, aiChatSessions]);
+    if (historyPersistTimerRef.current !== null) {
+      window.clearTimeout(historyPersistTimerRef.current);
+      historyPersistTimerRef.current = null;
+    }
+    if (sendingSessionId !== null) return;
+
+    historyPersistTimerRef.current = window.setTimeout(() => {
+      historyPersistTimerRef.current = null;
+      void saveAiChatHistory({
+        activeSessionId: activeAiChatSessionId,
+        sessions: aiChatSessions,
+      }).catch((error) => setSendError(readErrorMessage(error)));
+    }, 450);
+
+    return () => {
+      if (historyPersistTimerRef.current !== null) {
+        window.clearTimeout(historyPersistTimerRef.current);
+        historyPersistTimerRef.current = null;
+      }
+    };
+  }, [activeAiChatSessionId, aiChatSessions, sendingSessionId]);
 
   const updateAiPreference = useCallback((patch: Partial<AiPreferences>) => {
     const nextPreferences = mergeAiPreferences(aiPreferences, patch);
@@ -299,37 +302,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     resolveAllToolApprovals("rejected");
   }, []);
 
-  const runProviderDiagnostic = useCallback(async () => {
-    if (!selectedProvider || !selectedModel || providerDiagnosticRunning) return;
-    setProviderDiagnosticRunning(true);
-    setProviderDiagnostic(null);
-    try {
-      const result = await luxCommands.aiProviderDiagnostic({
-        baseUrl: selectedProvider.baseUrl,
-        apiKey: selectedProvider.apiKey || null,
-        payload: {
-          model: selectedModel.alias || selectedModel.id,
-          messages: [{ role: "user", content: "Reply with OK." }],
-          max_tokens: 8,
-          stream: false,
-          temperature: 0,
-        },
-      });
-      setProviderDiagnostic(result);
-    } catch (error) {
-      setProviderDiagnostic({
-        ok: false,
-        status: null,
-        latencyMs: 0,
-        error: formatAiError(error, t),
-        model: selectedModel.alias || selectedModel.id,
-        baseUrl: selectedProvider.baseUrl,
-      });
-    } finally {
-      setProviderDiagnosticRunning(false);
-    }
-  }, [providerDiagnosticRunning, selectedModel, selectedProvider, t]);
-
   const requestToolApproval = useCallback((request: AiToolApprovalRequest) => {
     return new Promise<AiToolApprovalDecision>((resolve) => {
       approvalResolversRef.current.set(request.id, resolve);
@@ -386,6 +358,8 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         openDocuments,
         preferences: aiPreferences,
         provider: selectedProvider,
+        globalInstructions: aiPreferences.globalInstructions,
+        projectInstructions,
         selectedAgentInstructions: selectedAgent?.instructions ?? "",
         selectedAgentName: selectedAgent?.name ?? "",
         selectedModel,
@@ -423,7 +397,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       setSendingSessionId((currentSessionId) => currentSessionId === sessionId ? null : currentSessionId);
       requestAnimationFrame(() => resizeComposerTextarea());
     }
-  }, [activeChatSession?.id, activeDocument, activeSessionClosed, activeTerminalId, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, replaceAiChatMessages, requestToolApproval, resizeComposerTextarea, selectedAgent, selectedModel, selectedProvider, sending, setAiChatSessionStatus, t, terminal, terminalOutputBuffers, terminalSessions, updateAiChatMessage, workspace]);
+  }, [activeChatSession?.id, activeDocument, activeSessionClosed, activeTerminalId, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, projectInstructions, replaceAiChatMessages, requestToolApproval, resizeComposerTextarea, selectedAgent, selectedModel, selectedProvider, sending, setAiChatSessionStatus, t, terminal, terminalOutputBuffers, terminalSessions, updateAiChatMessage, workspace]);
 
   const retryLastRequest = useCallback(() => {
     const draft = lastUserDraft ?? [...messages].reverse().find((entry) => entry.role === "user")?.content ?? "";
@@ -439,16 +413,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     }
     void handleSend(draft);
   }, [activeChatSession, activeSessionClosed, handleSend, lastUserDraft, messages, replaceAiChatMessages, sending]);
-
-  const regenerateLastResponse = useCallback(() => {
-    if (!activeChatSession || sending || activeSessionClosed) return;
-    const lastUserIndex = findLastUserMessageIndex(activeChatSession.messages);
-    if (lastUserIndex < 0) return;
-    const draft = activeChatSession.messages[lastUserIndex].content;
-    const nextHistory = activeChatSession.messages.slice(0, lastUserIndex);
-    replaceAiChatMessages(activeChatSession.id, nextHistory);
-    void handleSend(draft, nextHistory);
-  }, [activeChatSession, activeSessionClosed, handleSend, replaceAiChatMessages, sending]);
 
   const handleComposerKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey) return;
@@ -467,23 +431,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
               <span className="ai-chat-status-chip" data-status={activeStatus}>{aiChatStatusLabel(activeStatus, true, t)}</span>
             </div>
             <div className="ai-chat-header-actions">
-              <button
-                className="ai-provider-status"
-                type="button"
-                data-state={providerDiagnosticRunning ? "checking" : providerDiagnostic?.ok === false ? "error" : providerDiagnostic?.ok ? "ok" : "idle"}
-                aria-label={t("aiChat.provider.check")}
-                title={providerStatusTitle}
-                disabled={!selectedProvider || !selectedModel || providerDiagnosticRunning}
-                onClick={() => void runProviderDiagnostic()}
-              >
-                <Wifi size={13} />
-                <span>{providerStatusLabel}</span>
-              </button>
-              {presentation !== "agent" && (
-                <button className="icon-button compact" type="button" aria-label={t("agent.newChat")} title={t("agent.newChat")} onClick={() => createAiChatSession(workspace?.root ?? null)}>
-                  <Plus size={15} />
-                </button>
-              )}
               {showCloseButton && <button className="icon-button compact" type="button" aria-label={t("aiChat.closeChat")} title={t("aiChat.closeChat")} onClick={() => setAiChatOpen(false)}>
                 <PanelRightClose size={15} />
               </button>}
@@ -508,14 +455,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
               {activeSessionClosed && <AiChatClosedNotice onRestore={() => restoreAiChatSession(activeAiChatSessionId)} t={t} />}
               {sendError && <AiChatError message={sendError} canRetry={Boolean(lastUserDraft)} onRetry={retryLastRequest} t={t} />}
               {activeLastError && !sendError && <AiChatError message={activeLastError} canRetry={Boolean(lastUserDraft)} onRetry={retryLastRequest} t={t} />}
-              {!activeSessionSending && messages.some((entry) => entry.role === "assistant") && (
-                <div className="ai-chat-thread-actions">
-                  <button type="button" onClick={regenerateLastResponse} disabled={sending || activeSessionClosed}>
-                    <RotateCcw size={13} />
-                    <span>{t("aiChat.regenerate")}</span>
-                  </button>
-                </div>
-              )}
             </section>
           ) : (
             <section className="ai-chat-empty">

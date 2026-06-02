@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use lux_core::{
-    BufferId, DocumentEditResult, DocumentSnapshot, LspWorkspaceEdit, LuxEvent, TextEdit,
-    WorkspaceEditResult,
+    file_view_descriptor_for_path, BufferId, DocumentEditResult, DocumentSnapshot, FileOpenMode,
+    LspWorkspaceEdit, LuxEvent, TextEdit, WorkspaceEditResult,
 };
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -33,15 +33,28 @@ pub async fn editor_open_file(
                 document: document.clone(),
             },
         )?;
-        lsp::forward_document_open(&app, &state, &document).await?;
+        if matches!(
+            document.view.mode,
+            FileOpenMode::EditableText | FileOpenMode::ReadOnlyText
+        ) {
+            lsp::forward_document_open(&app, &state, &document).await?;
+        }
         return Ok(document);
     }
 
-    let read_path = canonical.clone();
-    let text = tokio::task::spawn_blocking(move || std::fs::read_to_string(read_path))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
+    let view = file_view_descriptor_for_path(&canonical);
+    let text = if matches!(
+        view.mode,
+        FileOpenMode::EditableText | FileOpenMode::ReadOnlyText
+    ) {
+        let read_path = canonical.clone();
+        tokio::task::spawn_blocking(move || std::fs::read_to_string(read_path))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?
+    } else {
+        String::new()
+    };
 
     let document = {
         let mut documents = state.documents.lock().map_err(lock_error)?;
@@ -55,7 +68,12 @@ pub async fn editor_open_file(
             document: document.clone(),
         },
     )?;
-    lsp::forward_document_open(&app, &state, &document).await?;
+    if matches!(
+        view.mode,
+        FileOpenMode::EditableText | FileOpenMode::ReadOnlyText
+    ) {
+        lsp::forward_document_open(&app, &state, &document).await?;
+    }
     Ok(document)
 }
 
