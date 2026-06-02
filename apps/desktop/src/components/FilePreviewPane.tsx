@@ -1,4 +1,4 @@
-﻿import { Copy, Database, ExternalLink, FileArchive, FileText, ImageIcon, Music, RefreshCw, Table2, Video } from "lucide-react";
+import { Copy, Database, ExternalLink, FileArchive, FileText, ImageIcon, Music, RefreshCw, Table2, Video } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { documentDisplayPath } from "../lib/documents";
 import { luxCommands, type FileAssetResponse } from "../lib/tauri";
@@ -9,7 +9,7 @@ type FilePreviewPaneProps = {
 };
 
 const previewOptions = {
-  maxTextBytes: 1_000_000n,
+  maxTextBytes: 1_000_000,
   maxRows: 120,
   maxColumns: 32,
   maxArchiveEntries: 500,
@@ -65,7 +65,7 @@ export function FilePreviewPane({ document }: FilePreviewPaneProps) {
           <PreviewIcon kind={inspection?.preview.kind ?? strategyToKind(descriptor.strategy)} />
           <div>
             <strong>{title}</strong>
-            <span>{metaItems.join(" Â· ")}</span>
+            <span>{metaItems.join(" Ã‚Â· ")}</span>
           </div>
         </div>
         <div className="file-preview-actions">
@@ -124,7 +124,7 @@ function TablePreview({ headers, rowCount, rows, truncated }: { headers: string[
   const columnCount = Math.max(headers.length, ...rows.map((row) => row.length), 1);
   return (
     <div className="file-preview-table-wrap">
-      <PreviewSummary text={`${rowCount} row${rowCount === 1 ? "" : "s"}${truncated ? " Â· truncated" : ""}`} />
+      <PreviewSummary text={`${rowCount} row${rowCount === 1 ? "" : "s"}${truncated ? " - truncated" : ""}`} />
       <table className="file-preview-table">
         {headers.length > 0 && <thead><tr>{Array.from({ length: columnCount }, (_, index) => <th key={index}>{headers[index] ?? `Column ${index + 1}`}</th>)}</tr></thead>}
         <tbody>{rows.map((row, rowIndex) => <tr key={rowIndex}>{Array.from({ length: columnCount }, (_, index) => <td key={index}>{row[index] ?? ""}</td>)}</tr>)}</tbody>
@@ -150,7 +150,7 @@ function OfficePreview({ preview }: { preview: Extract<FilePreview, { kind: "off
 }
 
 function ArchivePreview({ preview }: { preview: Extract<FilePreview, { kind: "archive" }> }) {
-  return <div className="file-preview-archive"><PreviewSummary text={`${preview.total_entries} entr${preview.total_entries === 1 ? "y" : "ies"}${preview.truncated ? " Â· truncated" : ""}`} /><ArchiveEntryList entries={preview.entries} /></div>;
+  return <div className="file-preview-archive"><PreviewSummary text={`${preview.total_entries} entr${preview.total_entries === 1 ? "y" : "ies"}${preview.truncated ? " - truncated" : ""}`} /><ArchiveEntryList entries={preview.entries} /></div>;
 }
 
 function ArchiveEntryList({ entries }: { entries: Array<{ path: string; compressedSize: number; uncompressedSize: number; isDir: boolean }> }) {
@@ -158,7 +158,7 @@ function ArchiveEntryList({ entries }: { entries: Array<{ path: string; compress
 }
 
 function NotebookPreview({ preview }: { preview: Extract<FilePreview, { kind: "notebook" }> }) {
-  return <div className="file-preview-sections"><PreviewSummary text={`${preview.cell_count} cell${preview.cell_count === 1 ? "" : "s"}`} />{preview.cells.map((cell) => <section className="file-preview-section" key={cell.index}><h3>Cell {cell.index + 1} Â· {cell.cellType}</h3><pre>{cell.text}</pre>{cell.outputText && <pre>{cell.outputText}</pre>}</section>)}</div>;
+  return <div className="file-preview-sections"><PreviewSummary text={`${preview.cell_count} cell${preview.cell_count === 1 ? "" : "s"}`} />{preview.cells.map((cell) => <section className="file-preview-section" key={cell.index}><h3>Cell {cell.index + 1} - {cell.cellType}</h3><pre>{cell.text}</pre>{cell.outputText && <pre>{cell.outputText}</pre>}</section>)}</div>;
 }
 
 function BinaryPreview({ preview }: { preview: Extract<FilePreview, { kind: "binary" }> }) {
@@ -198,3 +198,4 @@ function formatBytes(bytes: bigint | number) {
   if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
   return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
+

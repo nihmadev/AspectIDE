@@ -647,7 +647,7 @@ async function inspectFileTool(args: UnknownRecord): Promise<ToolResult> {
   const maxColumns = clamp(numberArg(args, "maxColumns", 24), 1, 200);
   const maxBytes = clamp(numberArg(args, "maxBytes", 120_000), 1_000, 1_000_000);
   const inspection = await luxCommands.fileInspect(path, {
-    maxTextBytes: BigInt(maxBytes),
+    maxTextBytes: Number(maxBytes),
     maxRows,
     maxColumns,
     maxArchiveEntries: maxRows,
@@ -1384,3 +1384,4 @@ function throwIfAborted(signal: AbortSignal) {
 function isAbortErrorLike(error: unknown) {
   return error instanceof DOMException && error.name === "AbortError";
 }
+

@@ -443,7 +443,7 @@ function defaultTextView() {
     previewable: true,
     aiReadable: true,
     binary: false,
-    maxInlineBytes: 1_000_000n,
+    maxInlineBytes: 1_000_000,
     notes: [],
   };
 }
@@ -520,3 +520,4 @@ export async function subscribeAiChatStream(handler: (event: AiChatStreamEvent) 
   }
   return listen<AiChatStreamEvent>("lux://ai-chat-stream", (event) => handler(event.payload));
 }
+

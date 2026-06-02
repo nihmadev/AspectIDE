@@ -61,7 +61,7 @@ function parseRuntimeToolDefinitions(source) {
 }
 
 function parseSwitchCases(source) {
-  const match = source.match(/async function runRuntimeTool[\s\S]*?switch \(name\) \{([\s\S]*?)\n\s*default:/);
+  const match = source.match(/async function runRuntimeTool[\s\S]*?switch \(name\) \{([\s\S]*?)\r?\n\s*default:/);
   if (!match) throw new Error("runRuntimeTool switch not found.");
   return [...match[1].matchAll(/case\s+"([A-Za-z0-9_]+)"/g)].map((entry) => entry[1]);
 }
