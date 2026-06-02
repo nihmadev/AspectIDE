@@ -77,6 +77,7 @@ function FallingFiles({ active }: { active: boolean }) {
 
     /* ── Sprite cache: pre-render each unique file card once ── */
     const spriteCache = new Map<string, HTMLCanvasElement>();
+    const drawCtx = ctx;
 
     function buildSprite(ext: string, w: number, h: number): HTMLCanvasElement {
       const key = ext + "|" + w.toFixed(1) + "|" + h.toFixed(1);
@@ -95,18 +96,15 @@ function FallingFiles({ active }: { active: boolean }) {
       const fold = Math.min(10, w * 0.24);
       const ba = 0.75;
 
-      // Stroke
       s.globalAlpha = ba;
       s.strokeStyle = "rgba(255,255,255,0.5)";
       s.lineWidth = 1;
       s.strokeRect(0.5, 0.5, w - 1, h - 1);
 
-      // Fill
       s.globalAlpha = ba * 0.33;
       s.fillStyle = "rgba(255,255,255,0.12)";
       s.fillRect(0.5, 0.5, w - 1, h - 1);
 
-      // Fold corner
       s.globalAlpha = ba * 0.8;
       s.beginPath();
       s.moveTo(w - fold, 0);
@@ -115,7 +113,6 @@ function FallingFiles({ active }: { active: boolean }) {
       s.closePath();
       s.stroke();
 
-      // Code lines
       s.globalAlpha = ba * 0.45;
       const lineEnds = [w - 11, w - 15, w - 19];
       s.beginPath();
@@ -126,7 +123,6 @@ function FallingFiles({ active }: { active: boolean }) {
       }
       s.stroke();
 
-      // Extension label
       s.globalAlpha = ba * 0.9;
       s.font = "600 8px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
       s.textAlign = "left";
@@ -145,7 +141,7 @@ function FallingFiles({ active }: { active: boolean }) {
       canvas.height = Math.max(1, Math.floor(height * dpr));
       canvas.style.width = width + "px";
       canvas.style.height = height + "px";
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      drawCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
     function spawn(): void {
@@ -178,7 +174,7 @@ function FallingFiles({ active }: { active: boolean }) {
       const dt = lastTime ? Math.min((time - lastTime) / 1000, 0.045) : 0.016;
       lastTime = time;
 
-      ctx.clearRect(0, 0, width, height);
+      drawCtx.clearRect(0, 0, width, height);
       spawnAccumulator += dt * spawnRate;
       while (spawnAccumulator >= 1 && particles.length < maxParticles) {
         spawn();
@@ -201,12 +197,12 @@ function FallingFiles({ active }: { active: boolean }) {
         const alpha = 0.3 * p.alpha * appear * fadeOut;
         if (alpha <= 0.008) continue;
 
-        ctx.save();
-        ctx.globalAlpha = alpha;
-        ctx.translate(p.x, p.y);
-        ctx.rotate(p.rotation);
-        ctx.drawImage(p.sprite, -p.width / 2, -p.height / 2, p.width, p.height);
-        ctx.restore();
+        drawCtx.save();
+        drawCtx.globalAlpha = alpha;
+        drawCtx.translate(p.x, p.y);
+        drawCtx.rotate(p.rotation);
+        drawCtx.drawImage(p.sprite, -p.width / 2, -p.height / 2, p.width, p.height);
+        drawCtx.restore();
       }
 
       raf = requestAnimationFrame(animate);
