@@ -885,7 +885,7 @@ function createAiChatSession(workspaceRoot: string | null): AiChatSession {
 }
 
 function normalizeAiChatSessionState(chatState: AiChatSessionState): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
-  let sessions = chatState.sessions.length > 0 ? chatState.sessions.map(normalizeAiChatSession) : [createAiChatSession(null)];
+  let sessions = chatState.sessions.length > 0 ? chatState.sessions.map((session) => normalizeAiChatSession(session)) : [createAiChatSession(null)];
   let activeAiChatSessionId = sessions.some((session) => session.id === chatState.activeSessionId) ? chatState.activeSessionId : sessions[0].id;
   const activeSession = sessions.find((session) => session.id === activeAiChatSessionId);
   if (!activeSession || activeSession.closedAt) {
