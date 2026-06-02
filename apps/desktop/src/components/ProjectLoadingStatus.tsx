@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+﻿import { useEffect, useRef } from "react";
 import type { ProjectLoadSummary } from "../lib/projectLoadPresentation";
 import { useTranslation } from "../lib/i18n/useTranslation";
 
@@ -8,6 +8,7 @@ type ProjectLoadingStatusProps = {
 };
 
 type FallingFileParticle = {
+  sprite: HTMLCanvasElement;
   alpha: number;
   drift: number;
   extension: string;
@@ -56,7 +57,7 @@ export function ProjectLoadingStatus({ onDismissError, summary }: ProjectLoading
 }
 
 function FallingFiles({ active }: { active: boolean }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -64,160 +65,172 @@ function FallingFiles({ active }: { active: boolean }) {
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    const targetCanvas = canvas;
-    const context = ctx;
 
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     let width = 0;
     let height = 0;
-    let particles: FallingFileParticle[] = [];
     let raf = 0;
     let lastTime = 0;
     let spawnAccumulator = 0;
+    let particles: FallingFileParticle[] = [];
 
-    function resize() {
-      width = window.innerWidth;
-      height = window.innerHeight;
-      targetCanvas.width = Math.max(1, Math.floor(width * dpr));
-      targetCanvas.height = Math.max(1, Math.floor(height * dpr));
-      targetCanvas.style.width = width + "px";
-      targetCanvas.style.height = height + "px";
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    /* ── Sprite cache: pre-render each unique file card once ── */
+    const spriteCache = new Map<string, HTMLCanvasElement>();
+
+    function buildSprite(ext: string, w: number, h: number): HTMLCanvasElement {
+      const key = ext + "|" + w.toFixed(1) + "|" + h.toFixed(1);
+      const cached = spriteCache.get(key);
+      if (cached) return cached;
+
+      const sw = Math.ceil(w * dpr);
+      const sh = Math.ceil(h * dpr);
+      const sprite = document.createElement("canvas");
+      sprite.width = sw;
+      sprite.height = sh;
+
+      const s = sprite.getContext("2d")!;
+      s.scale(dpr, dpr);
+
+      const fold = Math.min(10, w * 0.24);
+      const ba = 0.75;
+
+      // Stroke
+      s.globalAlpha = ba;
+      s.strokeStyle = "rgba(255,255,255,0.5)";
+      s.lineWidth = 1;
+      s.strokeRect(0.5, 0.5, w - 1, h - 1);
+
+      // Fill
+      s.globalAlpha = ba * 0.33;
+      s.fillStyle = "rgba(255,255,255,0.12)";
+      s.fillRect(0.5, 0.5, w - 1, h - 1);
+
+      // Fold corner
+      s.globalAlpha = ba * 0.8;
+      s.beginPath();
+      s.moveTo(w - fold, 0);
+      s.lineTo(w - fold, fold);
+      s.lineTo(w, fold);
+      s.closePath();
+      s.stroke();
+
+      // Code lines
+      s.globalAlpha = ba * 0.45;
+      const lineEnds = [w - 11, w - 15, w - 19];
+      s.beginPath();
+      for (let row = 0; row < 3; row++) {
+        const ly = 14 + row * 7;
+        s.moveTo(7, ly);
+        s.lineTo(lineEnds[row], ly);
+      }
+      s.stroke();
+
+      // Extension label
+      s.globalAlpha = ba * 0.9;
+      s.font = "600 8px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
+      s.textAlign = "left";
+      s.textBaseline = "middle";
+      s.fillStyle = "rgba(255,255,255,0.72)";
+      s.fillText(ext, 7, h - 10);
+
+      spriteCache.set(key, sprite);
+      return sprite;
     }
 
-    function spawn() {
-      const scale = 0.74 + Math.random() * 0.62;
-      const fileWidth = 42 * scale;
-      const fileHeight = 56 * scale;
+    function resize(): void {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = Math.max(1, Math.floor(width * dpr));
+      canvas.height = Math.max(1, Math.floor(height * dpr));
+      canvas.style.width = width + "px";
+      canvas.style.height = height + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function spawn(): void {
+      const scale = 0.74 + Math.random() * 0.56;
+      const pw = 42 * scale;
+      const ph = 56 * scale;
+      const ext = FALLING_FILE_EXTENSIONS[Math.floor(Math.random() * FALLING_FILE_EXTENSIONS.length)];
 
       particles.push({
+        sprite: buildSprite(ext, pw, ph),
         alpha: 0.2 + Math.random() * 0.45,
         drift: (Math.random() - 0.5) * 18,
-        extension: FALLING_FILE_EXTENSIONS[Math.floor(Math.random() * FALLING_FILE_EXTENSIONS.length)],
-        height: fileHeight,
+        extension: ext,
+        height: ph,
         life: 0,
         maxLife: 4.2 + Math.random() * 2.4,
         rotation: (Math.random() - 0.5) * 0.7,
         rotationSpeed: (Math.random() - 0.5) * 0.9,
-        speed: 62 + Math.random() * 76,
-        width: fileWidth,
-        x: width * (0.18 + Math.random() * 0.64),
-        y: -fileHeight - Math.random() * 80,
+        speed: prefersReducedMotion ? 40 + Math.random() * 30 : 62 + Math.random() * 76,
+        width: pw,
+        x: width * (0.12 + Math.random() * 0.76),
+        y: -ph - Math.random() * 80,
       });
     }
 
-    function animate(time: number) {
+    const maxParticles = prefersReducedMotion ? 14 : 20;
+    const spawnRate = prefersReducedMotion ? 1.8 : 4.5;
+
+    function animate(time: number): void {
       const dt = lastTime ? Math.min((time - lastTime) / 1000, 0.045) : 0.016;
       lastTime = time;
 
-      context.clearRect(0, 0, width, height);
-      spawnAccumulator += dt * (prefersReducedMotion ? 1.6 : 8.6);
-      while (spawnAccumulator >= 1 && particles.length < 90) {
+      ctx.clearRect(0, 0, width, height);
+      spawnAccumulator += dt * spawnRate;
+      while (spawnAccumulator >= 1 && particles.length < maxParticles) {
         spawn();
         spawnAccumulator -= 1;
       }
 
       for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
-        p.life += dt;
-        p.y += p.speed * dt;
-        p.x += Math.sin(p.life * 1.25) * p.drift * dt;
-        p.rotation += p.rotationSpeed * dt;
-
         if (p.life >= p.maxLife || p.y > height + p.height) {
           particles.splice(i, 1);
           continue;
         }
+        p.life += dt;
+        p.y += (p.speed + p.drift * 0.04) * dt;
+        p.x += Math.sin(p.life * 1.25) * p.drift * dt;
+        p.rotation += p.rotationSpeed * dt;
 
         const appear = Math.min(1, p.life / 0.7);
-        const disappearByLife = Math.max(0, 1 - Math.max(0, p.life - p.maxLife + 1.15) / 1.15);
-        const disappearByDepth = Math.max(0, 1 - Math.max(0, p.y - height * 0.62) / (height * 0.34));
-        const alpha = p.alpha * appear * Math.min(disappearByLife, disappearByDepth);
+        const fadeOut = Math.max(0, 1 - Math.max(0, p.y - height * 0.55) / (height * 0.42));
+        const alpha = 0.3 * p.alpha * appear * fadeOut;
+        if (alpha <= 0.008) continue;
 
-        drawFallingFile(context, p, alpha);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rotation);
+        ctx.drawImage(p.sprite, -p.width / 2, -p.height / 2, p.width, p.height);
+        ctx.restore();
       }
 
       raf = requestAnimationFrame(animate);
     }
 
+    /* ── Bootstrap ── */
     resize();
-    for (let i = 0; i < 24; i++) {
-      spawn();
-      particles[i].y = Math.random() * height * 0.78;
-      particles[i].life = Math.random() * 2.2;
+    for (let i = 0; i < 10; i++) spawn();
+    for (const p of particles) {
+      p.y = Math.random() * height * 0.7;
+      p.life = Math.random() * 2.0;
     }
 
-    window.addEventListener("resize", resize);
     raf = requestAnimationFrame(animate);
+
+    window.addEventListener("resize", resize);
 
     return () => {
       window.removeEventListener("resize", resize);
       cancelAnimationFrame(raf);
       particles = [];
+      spriteCache.clear();
     };
   }, [active]);
 
   return <canvas ref={canvasRef} className="project-loading-canvas" aria-hidden="true" />;
-}
-
-function drawFallingFile(ctx: CanvasRenderingContext2D, particle: FallingFileParticle, alpha: number) {
-  if (alpha <= 0.01) return;
-
-  const fold = Math.min(10, particle.width * 0.24);
-  const radius = Math.min(6, particle.width * 0.12);
-  const x = -particle.width / 2;
-  const y = -particle.height / 2;
-
-  ctx.save();
-  ctx.translate(particle.x, particle.y);
-  ctx.rotate(particle.rotation);
-  ctx.globalAlpha = alpha;
-
-  ctx.shadowBlur = 22;
-  ctx.shadowColor = "rgba(255, 255, 255, 0.16)";
-  ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.42)";
-  ctx.lineWidth = 1;
-
-  ctx.beginPath();
-  ctx.moveTo(x + radius, y);
-  ctx.lineTo(x + particle.width - fold, y);
-  ctx.lineTo(x + particle.width, y + fold);
-  ctx.lineTo(x + particle.width, y + particle.height - radius);
-  ctx.quadraticCurveTo(x + particle.width, y + particle.height, x + particle.width - radius, y + particle.height);
-  ctx.lineTo(x + radius, y + particle.height);
-  ctx.quadraticCurveTo(x, y + particle.height, x, y + particle.height - radius);
-  ctx.lineTo(x, y + radius);
-  ctx.quadraticCurveTo(x, y, x + radius, y);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
-
-  ctx.shadowBlur = 0;
-  ctx.beginPath();
-  ctx.moveTo(x + particle.width - fold, y);
-  ctx.lineTo(x + particle.width - fold, y + fold);
-  ctx.lineTo(x + particle.width, y + fold);
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.34)";
-  ctx.stroke();
-
-  ctx.fillStyle = "rgba(255, 255, 255, 0.72)";
-  ctx.font = "600 8px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-  ctx.fillText(particle.extension, x + 7, y + particle.height - 10);
-
-  ctx.strokeStyle = "rgba(255, 255, 255, 0.22)";
-  ctx.lineWidth = 1;
-  for (let row = 0; row < 3; row++) {
-    const lineY = y + 14 + row * 7;
-    const lineEnd = x + particle.width - 11 - row * 4;
-    ctx.beginPath();
-    ctx.moveTo(x + 7, lineY);
-    ctx.lineTo(lineEnd, lineY);
-    ctx.stroke();
-  }
-
-  ctx.restore();
 }

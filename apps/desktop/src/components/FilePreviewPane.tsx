@@ -65,7 +65,7 @@ export function FilePreviewPane({ document }: FilePreviewPaneProps) {
           <PreviewIcon kind={inspection?.preview.kind ?? strategyToKind(descriptor.strategy)} />
           <div>
             <strong>{title}</strong>
-            <span>{metaItems.join(" Ã‚Â· ")}</span>
+            <span>{metaItems.join(" Ãƒâ€šÃ‚Â· ")}</span>
           </div>
         </div>
         <div className="file-preview-actions">
@@ -92,7 +92,7 @@ function PreviewBody({ asset, fallbackPath, inspection }: { asset: FileAssetResp
     case "text":
       return <pre className="file-preview-text">{inspection.preview.text}</pre>;
     case "table":
-      return <TablePreview headers={inspection.preview.headers} rows={inspection.preview.rows} rowCount={inspection.preview.row_count} truncated={inspection.preview.truncated} />;
+      return <TablePreview headers={inspection.preview.headers} rows={inspection.preview.rows} rowCount={inspection.preview.rowCount} truncated={inspection.preview.truncated} />;
     case "spreadsheet":
       return <SpreadsheetPreview preview={inspection.preview} />;
     case "database":
@@ -150,7 +150,7 @@ function OfficePreview({ preview }: { preview: Extract<FilePreview, { kind: "off
 }
 
 function ArchivePreview({ preview }: { preview: Extract<FilePreview, { kind: "archive" }> }) {
-  return <div className="file-preview-archive"><PreviewSummary text={`${preview.total_entries} entr${preview.total_entries === 1 ? "y" : "ies"}${preview.truncated ? " - truncated" : ""}`} /><ArchiveEntryList entries={preview.entries} /></div>;
+  return <div className="file-preview-archive"><PreviewSummary text={`${preview.totalEntries} entr${preview.totalEntries === 1 ? "y" : "ies"}${preview.truncated ? " - truncated" : ""}`} /><ArchiveEntryList entries={preview.entries} /></div>;
 }
 
 function ArchiveEntryList({ entries }: { entries: Array<{ path: string; compressedSize: number; uncompressedSize: number; isDir: boolean }> }) {
@@ -158,7 +158,7 @@ function ArchiveEntryList({ entries }: { entries: Array<{ path: string; compress
 }
 
 function NotebookPreview({ preview }: { preview: Extract<FilePreview, { kind: "notebook" }> }) {
-  return <div className="file-preview-sections"><PreviewSummary text={`${preview.cell_count} cell${preview.cell_count === 1 ? "" : "s"}`} />{preview.cells.map((cell) => <section className="file-preview-section" key={cell.index}><h3>Cell {cell.index + 1} - {cell.cellType}</h3><pre>{cell.text}</pre>{cell.outputText && <pre>{cell.outputText}</pre>}</section>)}</div>;
+  return <div className="file-preview-sections"><PreviewSummary text={`${preview.cellCount} cell${preview.cellCount === 1 ? "" : "s"}`} />{preview.cells.map((cell) => <section className="file-preview-section" key={cell.index}><h3>Cell {cell.index + 1} - {cell.cellType}</h3><pre>{cell.text}</pre>{cell.outputText && <pre>{cell.outputText}</pre>}</section>)}</div>;
 }
 
 function BinaryPreview({ preview }: { preview: Extract<FilePreview, { kind: "binary" }> }) {
