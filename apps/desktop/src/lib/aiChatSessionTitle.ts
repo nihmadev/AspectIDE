@@ -1,5 +1,6 @@
 import { firstChoice, requestChatCompletion, type ChatCompletionMessage } from "./aiChatTransport";
 import type { AiModelConfig, AiProviderConfig } from "./aiPreferences";
+import { isTauriRuntime, luxCommands } from "./tauri";
 
 export const DEFAULT_CHAT_SESSION_TITLE = "New chat";
 export const MAX_CHAT_SESSION_TITLE_CHARS = 42;
@@ -58,6 +59,22 @@ export async function generateChatSessionTitle(input: {
   const fallback = heuristicChatSessionTitle(input.firstUserMessage);
   const snippet = input.firstUserMessage.trim().slice(0, 1_200);
   if (!snippet) return fallback;
+
+  // Native Rust path: title generation runs through the Rust transport.
+  if (isTauriRuntime()) {
+    try {
+      const title = await luxCommands.aiGenerateSessionTitle({
+        firstUserMessage: input.firstUserMessage,
+        baseUrl: input.provider.baseUrl,
+        apiKey: input.provider.apiKey || null,
+        models: input.provider.models.map((model) => ({ id: model.id, alias: model.alias, name: model.name })),
+        activeModelAlias: input.model.alias || input.model.id,
+      });
+      return title || fallback;
+    } catch {
+      return fallback;
+    }
+  }
 
   const titleModel = resolveTitleGenerationModel(input.provider, input.model);
   const system = [

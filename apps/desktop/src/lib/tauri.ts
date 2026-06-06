@@ -588,6 +588,10 @@ export const luxCommands = {
   aiResolveTurnApproval: (turnId: string, requestId: string, decision: "approved" | "rejected") =>
     invokeRequired<null>("ai_resolve_turn_approval", { turnId, requestId, decision }),
   aiCancelTurn: (turnId: string) => invokeRequired<null>("ai_cancel_turn", { turnId }),
+  aiGenerateSessionTitle: (input: {
+    firstUserMessage: string; baseUrl: string; apiKey: string | null;
+    models: { id: string; alias: string; name: string }[]; activeModelAlias: string;
+  }) => invokeRequired<string>("ai_generate_session_title", { input }),
   aiWorkspaceIndex: (maxFiles?: number | null, maxScan?: number | null) =>
     invokeRequired<{
       workspaceRoot: string; scanned: number; indexedFiles: number; truncated: boolean;
