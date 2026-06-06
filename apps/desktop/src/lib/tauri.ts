@@ -584,6 +584,10 @@ export const luxCommands = {
     providerName: string; providerProtocol: string;
     workspaceRoot: string; runtimeToolsAvailable: boolean; agentBrowserEnabled: boolean;
   }) => invokeRequired<string>("ai_build_system_prompt", { input }),
+  aiRunTurn: (input: AiRunTurnInput) => invokeRequired<null>("ai_run_turn", { input }),
+  aiResolveTurnApproval: (turnId: string, requestId: string, decision: "approved" | "rejected") =>
+    invokeRequired<null>("ai_resolve_turn_approval", { turnId, requestId, decision }),
+  aiCancelTurn: (turnId: string) => invokeRequired<null>("ai_cancel_turn", { turnId }),
   aiWorkspaceIndex: (maxFiles?: number | null, maxScan?: number | null) =>
     invokeRequired<{
       workspaceRoot: string; scanned: number; indexedFiles: number; truncated: boolean;
@@ -783,5 +787,53 @@ export async function subscribeAiChatStream(handler: (event: AiChatStreamEvent) 
     return () => undefined;
   }
   return listen<AiChatStreamEvent>("lux://ai-chat-stream", (event) => handler(event.payload));
+}
+
+/** Input for the native Rust turn-loop (`ai_run_turn`). */
+export type AiRunTurnInput = {
+  turnId: string;
+  messageId: string;
+  sessionId: string;
+  message: string;
+  history: Array<{ role: string; content: string }>;
+  baseUrl: string;
+  apiKey: string | null;
+  model: string;
+  agentMode: string;
+  toolRoundLimit: number | null;
+  toolApprovalMode: string;
+  promptInput: {
+    agentMode: string; agentName: string; agentInstructions: string;
+    globalInstructions: string; projectInstructions: string; projectAgentsSnip: string;
+    toolApprovalMode: string; toolRoundLimit: number | null;
+    selectedEffortId: string; selectedModelAlias: string;
+    providerName: string; providerProtocol: string;
+    workspaceRoot: string; runtimeToolsAvailable: boolean; agentBrowserEnabled: boolean;
+  };
+  agentBrowserEnabled: boolean;
+  activeDocumentPath: string | null;
+  openDocumentPaths: string[];
+  terminalContext: unknown | null;
+};
+
+/** Native turn-loop events emitted by the Rust `ai_run_turn` command. */
+export type AiTurnEvent =
+  | { kind: "assistantCreated"; turnId: string; messageId: string }
+  | { kind: "streamDelta"; turnId: string; content: string; reasoning: string }
+  | { kind: "statusChange"; turnId: string; phase: string }
+  | { kind: "toolCallStarted"; turnId: string; callId: string; tool: string; input: string }
+  | { kind: "toolCallCompleted"; turnId: string; callId: string; status: string; output: string; error: string | null }
+  | { kind: "approvalRequired"; turnId: string; requestId: string; tool: string; title: string; summary: string; preview: string; risk: string }
+  | { kind: "turnUsage"; turnId: string; promptTokens: number; completionTokens: number; totalTokens: number }
+  | { kind: "turnDone"; turnId: string; messageId: string; content: string; durationMs: number }
+  | { kind: "turnError"; turnId: string; error: string }
+  | { kind: "turnCancelled"; turnId: string };
+
+export async function subscribeAiTurn(handler: (event: AiTurnEvent) => void) {
+  if (!isTauriRuntime()) {
+    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://ai-turn");
+    return () => undefined;
+  }
+  return listen<AiTurnEvent>("lux://ai-turn", (event) => handler(event.payload));
 }
 

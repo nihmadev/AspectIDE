@@ -564,6 +564,7 @@ pub fn run() {
             ai_session::ai_session_todos_set,
             ai_turn::ai_run_turn,
             ai_turn::ai_resolve_turn_approval,
+            ai_turn::ai_cancel_turn,
             ai_workspace::ai_repo_map,
             ai_workspace::ai_workspace_index,
             ai_symbol_context,

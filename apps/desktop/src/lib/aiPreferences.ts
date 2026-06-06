@@ -30,6 +30,13 @@ export type AiPreferences = {
   maxParallelSubagents: number;
   showResponseDuration: boolean;
   /**
+   * Run the chat turn through the native Rust turn-loop (`ai_run_turn`) instead of
+   * the TypeScript orchestration. The Rust path runs the model↔tool loop, dispatch,
+   * and approvals natively; TS only renders `lux://ai-turn` events. Defaults on in
+   * the desktop runtime.
+   */
+  nativeTurnLoop: boolean;
+  /**
    * Declarative tool permission rules, one per entry, format `[allow|deny|ask:]Tool(glob)`.
    * Examples: `allow:Bash(git *)`, `deny:Write(*.env)`, `ask:Bash(rm *)`. Evaluated in the
    * Rust permission engine before the approval prompt (deny > ask > allow).
@@ -384,6 +391,7 @@ export const defaultAiPreferences: AiPreferences = {
   toolRoundLimit: defaultAiToolRoundLimit,
   maxParallelSubagents: defaultMaxParallelSubagents,
   showResponseDuration: true,
+  nativeTurnLoop: true,
   toolPermissionRules: [],
   globalInstructions: "",
   projectInstructionsByWorkspace: {},
@@ -459,6 +467,7 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     toolRoundLimit: normalizeToolRoundLimit(resolveToolRoundLimitSource(source)),
     maxParallelSubagents: clampInteger(source.maxParallelSubagents, maxParallelSubagentsMin, maxParallelSubagentsMax, defaultMaxParallelSubagents),
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
+    nativeTurnLoop: typeof source.nativeTurnLoop === "boolean" ? source.nativeTurnLoop : defaultAiPreferences.nativeTurnLoop,
     toolPermissionRules: Array.isArray(source.toolPermissionRules)
       ? source.toolPermissionRules
           .filter((rule): rule is string => typeof rule === "string" && rule.trim().length > 0)

@@ -98,6 +98,7 @@ import { buildPlanHandoffUserMessage, extractPlanHandoffPayload } from "../lib/a
 import { readEditorDocumentAttachment, readSelectionAttachment } from "../lib/aiChatDocumentAttachment";
 import { formatSelectionLabel, getEditorSelectionSnapshot } from "../lib/editorSelectionBridge";
 import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
+import { runNativeChatTurn } from "../lib/aiNativeTurn";
 import { dragEventHasEditorTab, readEditorTabDrop } from "../lib/editorChatBridge";
 import {
   abortAiChatTurn,
@@ -113,7 +114,7 @@ import {
 } from "../lib/aiChatTurnRuntime";
 import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision, AiToolApprovalRequest } from "../lib/aiChatTypes";
 import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
-import { luxCommands } from "../lib/tauri";
+import { isTauriRuntime, luxCommands } from "../lib/tauri";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import {
   getComposerAttachments,
@@ -1061,7 +1062,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         }
         return readEditorDocumentAttachment(document, attachmentOptions);
       }));
-      completedAssistantMessage = await sendAiChatMessage({
+      // Native Rust turn-loop is the primary path in the desktop runtime; the TS
+      // orchestration remains as the browser/dev fallback and behind the toggle.
+      const useNativeTurn = runtimePreferences.nativeTurnLoop && isTauriRuntime();
+      const runTurn = useNativeTurn ? runNativeChatTurn : sendAiChatMessage;
+      completedAssistantMessage = await runTurn({
         abortSignal: abortController.signal,
         activeDocument,
         attachments: runtimeAttachments,

@@ -124,6 +124,8 @@ export const messagesEn = {
   "settings.aiRuntime.permissionRules.placeholder": "allow:Shell(git *)\ndeny:Write(*.env)\nask:Shell(rm *)",
   "settings.aiRuntime.responseDuration.label": "Response time",
   "settings.aiRuntime.responseDuration.detail": "Show how long each AI answer took in milliseconds and seconds",
+  "settings.aiRuntime.nativeTurnLoop.label": "Native turn engine (Rust)",
+  "settings.aiRuntime.nativeTurnLoop.detail": "Run the chat turn through the native Rust engine (faster, lower overhead). Turn off to use the legacy TypeScript path.",
   "settings.aiRuntime.contextAutoCompact.label": "Auto-compact context",
   "settings.aiRuntime.contextAutoCompact.detail": "Before each send, compress older turns when usage crosses the threshold below",
   "settings.aiRuntime.contextAutoCompactThreshold.label": "Auto-compact threshold (%)",

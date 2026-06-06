@@ -76,6 +76,15 @@ pub enum TurnEvent {
         risk: String,
     },
 
+    /// Token usage reported for the turn.
+    #[serde(rename_all = "camelCase")]
+    TurnUsage {
+        turn_id: String,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+        total_tokens: u64,
+    },
+
     /// Turn completed successfully.
     #[serde(rename_all = "camelCase")]
     TurnDone {
@@ -153,6 +162,13 @@ pub fn emit_turn_event(app: &tauri::AppHandle, event: &TurnEvent) -> Result<(), 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnInput {
+    /// Frontend-provided turn id so it can subscribe to `lux://ai-turn` before the
+    /// loop starts. If omitted, Rust generates one.
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    /// Frontend-provided assistant message id (matches the rendered message shell).
+    #[serde(default)]
+    pub message_id: Option<String>,
     pub session_id: String,
     pub message: String,
     pub history: Vec<serde_json::Value>,
@@ -185,8 +201,8 @@ pub async fn ai_run_turn(
     state: tauri::State<'_, crate::SharedState>,
     input: TurnInput,
 ) -> Result<(), String> {
-    let turn_id = uuid::Uuid::new_v4().to_string();
-    let message_id = uuid::Uuid::new_v4().to_string();
+    let turn_id = input.turn_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let message_id = input.message_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let started_at = std::time::Instant::now();
     let max_rounds = input.tool_round_limit.unwrap_or(32).min(128) as usize;
 
@@ -217,6 +233,9 @@ pub async fn ai_run_turn(
     );
 
     let mut final_content = String::new();
+    let mut usage_prompt: u64 = 0;
+    let mut usage_completion: u64 = 0;
+    let mut usage_total: u64 = 0;
 
     // ── Model ↔ tool loop ──
     for round in 0..max_rounds {
@@ -251,6 +270,13 @@ pub async fn ai_run_turn(
                 return Ok(());
             }
         };
+
+        // Accumulate token usage if the provider reported it.
+        if let Some(usage) = response.body.get("usage") {
+            usage_prompt += usage.get("prompt_tokens").or_else(|| usage.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+            usage_completion += usage.get("completion_tokens").or_else(|| usage.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
+            usage_total += usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        }
 
         let assistant = parse_assistant_message(&response.body);
 
@@ -326,6 +352,14 @@ pub async fn ai_run_turn(
     if final_content.is_empty() {
         final_content = "Done.".to_string();
     }
+    if usage_prompt > 0 || usage_completion > 0 || usage_total > 0 {
+        let _ = emit_turn_event(&app, &TurnEvent::TurnUsage {
+            turn_id: turn_id.clone(),
+            prompt_tokens: usage_prompt,
+            completion_tokens: usage_completion,
+            total_tokens: if usage_total > 0 { usage_total } else { usage_prompt + usage_completion },
+        });
+    }
     let _ = emit_turn_event(&app, &TurnEvent::TurnDone {
         turn_id,
         message_id,
@@ -333,6 +367,13 @@ pub async fn ai_run_turn(
         duration_ms,
     });
 
+    Ok(())
+}
+
+/// Cancel a running native turn — aborts pending approvals and signals stop.
+#[tauri::command]
+pub fn ai_cancel_turn(turn_id: String) -> Result<(), String> {
+    cancel_approvals_for_turn(&turn_id);
     Ok(())
 }
 

@@ -647,6 +647,7 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
           onChange={(maxParallelSubagents) => onChange({ maxParallelSubagents })}
         />
         <ToggleSetting label={t("settings.aiRuntime.responseDuration.label")} detail={t("settings.aiRuntime.responseDuration.detail")} checked={preferences.showResponseDuration} onChange={(showResponseDuration) => onChange({ showResponseDuration })} />
+        <ToggleSetting label={t("settings.aiRuntime.nativeTurnLoop.label")} detail={t("settings.aiRuntime.nativeTurnLoop.detail")} checked={preferences.nativeTurnLoop} onChange={(nativeTurnLoop) => onChange({ nativeTurnLoop })} />
         <ToggleSetting
           label={t("settings.aiRuntime.contextAutoCompact.label")}
           detail={t("settings.aiRuntime.contextAutoCompact.detail")}

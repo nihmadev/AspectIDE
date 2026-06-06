@@ -118,6 +118,8 @@ export const messagesRu: Messages = {
   "settings.aiRuntime.toolRoundLimit.detail": "Максимум подряд идущих раундов вызова tools перед финальным ответом без новых tools",
   "settings.aiRuntime.responseDuration.label": "Время ответа",
   "settings.aiRuntime.responseDuration.detail": "Показывать длительность каждого ответа ИИ в миллисекундах и секундах",
+  "settings.aiRuntime.nativeTurnLoop.label": "Нативный движок (Rust)",
+  "settings.aiRuntime.nativeTurnLoop.detail": "Выполнять ход чата через нативный Rust-движок (быстрее, меньше накладных расходов). Выключи для старого TypeScript-пути.",
   "settings.aiRuntime.contextAutoCompact.label": "Авто-сжатие контекста",
   "settings.aiRuntime.contextAutoCompact.detail": "Перед отправкой сжимать старые ходы, когда заполнение достигает порога ниже",
   "settings.aiRuntime.contextAutoCompactThreshold.label": "Порог авто-сжатия (%)",
