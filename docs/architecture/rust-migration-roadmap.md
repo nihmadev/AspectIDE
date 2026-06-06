@@ -104,6 +104,23 @@ Delete migrated `ai*.ts`; keep only view-model adapters and the optional browser
 - All gates green; measured latency/CPU improvement on a real turn; zero behavior regressions
   versus the golden fixtures.
 
+## Tool dispatch status (Stage 3-4)
+
+**46/48 tools dispatch natively in the Rust turn-loop** (no IPC to TS runtime):
+- Search: SemanticSearch, RelatedFiles, SymbolContext, Grep, Glob
+- Context: RepoMap, WorkspaceIndex, DiagnosticsContext, ReadLints, GitContext,
+  RulesContext, DocsContext, MemoryContext, ActiveContext, FastContext
+- Files: Read, Write, StrReplace, Delete, PatchEngine, InspectFile
+- Exec: Shell, TerminalContext, TerminalWrite, TestHealth
+- Web: WebFetch
+- Analysis: ImpactAnalysis, ReviewDiff, FailureAnalyzer, SecretGuard
+- Orchestration: Goal, TodoWrite, AgentMessage, Task (subagent)
+- Browser (12): Status/Open/Act/Snapshot/Screenshot/Close/Chat/Dashboard/Install/Help/Doctor/Invoke
+
+**Remaining 2** (stateful, deferred — large + editor-state-coupled):
+- ContextBudgeter — ranked context packet under a char budget (composes tools + scoring engine)
+- Checkpoint — in-session file-snapshot store with diff/restore via PatchEngine
+
 ## Progress log
 - 2026-06-06 — Stage 0 complete (security/resilience foundation in Rust). Roadmap created.
 - 2026-06-06 — Stage 1 complete. Ported 7 modules (~2000 LOC Rust, 37 unit tests):
@@ -136,3 +153,9 @@ Delete migrated `ai*.ts`; keep only view-model adapters and the optional browser
   Write/StrReplace/Delete have approval flow via TurnEvent::ApprovalRequired +
   tokio::oneshot. Remaining: SSE streaming (non-blocking), PatchEngine, WebFetch,
   TestHealth, FailureAnalyzer, Browser*, subagent spawning.
+- 2026-06-06 — Stage 3-4 mostly complete. 46/48 tools dispatch natively in the Rust
+  turn-loop. New native modules: ai_session (goals+todos), ai_context_sources
+  (Rules/Docs/Memory), ai_tool_defs (48 defs), ai_turn run_subagent (isolated Task loop).
+  Only ContextBudgeter + Checkpoint remain in TS — stateful, editor-coupled, low-frequency,
+  and depend on UI report callbacks / editor snapshots that stay bridged to the frontend.
+  85 Rust tests passing.
