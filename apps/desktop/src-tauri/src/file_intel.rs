@@ -5,7 +5,10 @@ use lux_core::{FileFormatSupport, FileInspection, FileInspectionOptions};
 use serde::Serialize;
 use tauri::State;
 
-use super::{resolve_workspace_path, SharedState};
+use super::{
+    media_intel::{build_media_ai_context, FileMediaAiContextRequest, FileMediaAiContextResponse},
+    resolve_workspace_path, SharedState,
+};
 
 const FILE_ASSET_MAX_BYTES: u64 = 80 * 1024 * 1024;
 
@@ -40,6 +43,19 @@ pub async fn file_inspect(
     .await
     .map_err(|error| error.to_string())?
     .map_err(String::from)
+}
+
+#[tauri::command]
+pub async fn file_media_ai_context(
+    state: State<'_, SharedState>,
+    request: FileMediaAiContextRequest,
+) -> Result<FileMediaAiContextResponse, String> {
+    let path = resolve_workspace_path(&state, &request.path)?;
+    Ok(tokio::task::spawn_blocking(move || {
+        build_media_ai_context(FileMediaAiContextRequest { path, ..request })
+    })
+    .await
+    .map_err(|error| error.to_string())?)
 }
 
 #[tauri::command]

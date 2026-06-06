@@ -1,3 +1,12 @@
+import { automaticAgentProfileInstructions } from "./aiAutomaticModeInstructions";
+import {
+  clampContextAutoCompactThreshold,
+  clampModelContextTokens,
+  DEFAULT_CONTEXT_AUTO_COMPACT_THRESHOLD,
+  inferContextTokensFromModelRef,
+} from "./aiModelContext";
+import { defaultMaxParallelSubagents, maxParallelSubagentsMax, maxParallelSubagentsMin } from "./aiSubagentPolicy";
+
 export const AI_PREFERENCES_KEY = "ai.preferences";
 
 export const aiToolRoundLimitMin = 1;
@@ -12,8 +21,20 @@ export type AiPreferences = {
   realtimeIndexing: boolean;
   includeImages: boolean;
   maxIndexedFiles: number;
+  /** When true, chat history is compacted before send once estimated usage crosses the threshold. */
+  contextAutoCompactEnabled: boolean;
+  /** Fraction of the active model context window that triggers auto-compaction (0.5–0.95). */
+  contextAutoCompactThreshold: number;
   toolRoundLimit: AiToolRoundLimit;
+  /** Max concurrent Task subagents per chat session (agent-managed). */
+  maxParallelSubagents: number;
   showResponseDuration: boolean;
+  /**
+   * Declarative tool permission rules, one per entry, format `[allow|deny|ask:]Tool(glob)`.
+   * Examples: `allow:Bash(git *)`, `deny:Write(*.env)`, `ask:Bash(rm *)`. Evaluated in the
+   * Rust permission engine before the approval prompt (deny > ask > allow).
+   */
+  toolPermissionRules: string[];
   globalInstructions: string;
   projectInstructionsByWorkspace: Record<string, string>;
   agentMode: AiAgentMode;
@@ -23,16 +44,46 @@ export type AiPreferences = {
   selectedModelId: string;
   selectedEffortId: string;
   toolApprovalMode: AiToolApprovalMode;
+  fileEditTrustMode: AiFileEditTrustMode;
   providers: AiProviderConfig[];
   voiceInputEnabled: boolean;
   voiceInputProvider: AiVoiceInputProvider;
   voiceInputLanguage: AiVoiceInputLanguage;
   localSttCommand: string;
   localSttModelPath: string;
+  agentBrowserEnabled: boolean;
+  agentBrowserCommand: string;
+  agentBrowserHeaded: boolean;
+  agentBrowserAllowedDomains: string;
+  agentBrowserMaxOutput: number;
+  agentBrowserPersistSession: boolean;
+  agentBrowserProfile: string;
+  agentBrowserStatePath: string;
+  agentBrowserContentBoundaries: boolean;
+  agentBrowserIgnoreHttpsErrors: boolean;
+  agentBrowserAutoStreamPreview: boolean;
+  agentBrowserDashboardPort: number;
+  agentBrowserAllowFileAccess: boolean;
+  /** Cloud/local engine provider: chrome, browserless, browserbase, kernel, agentcore, ios, … */
+  agentBrowserProvider: string;
+  agentBrowserProxy: string;
 };
 
-export type AiAgentMode = "agent" | "plan" | "ask";
+export type AiAgentMode = "agent" | "automatic" | "plan" | "ask";
+
+/** Display and cycle order for agent mode selectors (composer, settings, slash /agent). */
+export const AI_AGENT_MODE_ORDER: readonly AiAgentMode[] = ["automatic", "agent", "plan", "ask"];
+
+export function isFullExecutionAgentMode(mode: AiAgentMode | string | undefined): mode is "agent" | "automatic" {
+  return mode === "agent" || mode === "automatic";
+}
+
+export function isReadOnlyAgentMode(mode: AiAgentMode | string | undefined): boolean {
+  return mode === "plan" || mode === "ask";
+}
 export type AiToolApprovalMode = "default" | "full-access";
+/** apply-immediately: writes go to disk at once; preview-before-apply: in-editor preview until user accepts. */
+export type AiFileEditTrustMode = "apply-immediately" | "preview-before-apply";
 export type AiVoiceInputLanguage = "auto" | "ru-RU" | "en-US";
 export type AiVoiceInputProvider = "native-webview" | "local";
 
@@ -78,6 +129,8 @@ export type AiModelConfig = {
   id: string;
   name: string;
   alias: string;
+  /** Max context tokens for this model. Omit or 0 to auto-detect from alias/id. */
+  contextTokens?: number | null;
   effortLevels: AiEffortConfig[];
 };
 
@@ -102,6 +155,7 @@ type AiModelTemplate = {
   id: string;
   name: string;
   alias: string;
+  contextTokens?: number | null;
   effortLevels?: readonly AiEffortConfig[];
 };
 
@@ -296,6 +350,7 @@ export const defaultAiModelId = "gpt-5.5";
 export const defaultAiEffortId = "xhigh";
 
 export const defaultAiAgentProfiles: AiAgentProfile[] = [
+  { id: "automatic", name: "Automatic", mode: "automatic", instructions: automaticAgentProfileInstructions },
   { id: "agent", name: "Agent", mode: "agent", instructions: [
     "Drive the task end to end inside the current workspace: inspect evidence first, make the needed scoped edits, then verify with the narrowest meaningful checks before reporting completion.",
     "Preserve unrelated user work, dirty files, and existing architecture. Prefer existing project patterns, typed APIs, focused modules, and small reversible changes over broad rewrites.",
@@ -324,8 +379,12 @@ export const defaultAiPreferences: AiPreferences = {
   realtimeIndexing: true,
   includeImages: true,
   maxIndexedFiles: 5000,
+  contextAutoCompactEnabled: true,
+  contextAutoCompactThreshold: DEFAULT_CONTEXT_AUTO_COMPACT_THRESHOLD,
   toolRoundLimit: defaultAiToolRoundLimit,
+  maxParallelSubagents: defaultMaxParallelSubagents,
   showResponseDuration: true,
+  toolPermissionRules: [],
   globalInstructions: "",
   projectInstructionsByWorkspace: {},
   agentMode: "agent",
@@ -335,12 +394,28 @@ export const defaultAiPreferences: AiPreferences = {
   selectedModelId: defaultAiModelId,
   selectedEffortId: defaultAiEffortId,
   toolApprovalMode: "full-access",
+  fileEditTrustMode: "preview-before-apply",
   providers: defaultAiProviders,
   voiceInputEnabled: true,
   voiceInputProvider: "native-webview",
   voiceInputLanguage: "auto",
   localSttCommand: "",
   localSttModelPath: "",
+  agentBrowserEnabled: true,
+  agentBrowserCommand: "",
+  agentBrowserHeaded: false,
+  agentBrowserAllowedDomains: "",
+  agentBrowserMaxOutput: 50_000,
+  agentBrowserPersistSession: true,
+  agentBrowserProfile: "",
+  agentBrowserStatePath: "",
+  agentBrowserContentBoundaries: true,
+  agentBrowserIgnoreHttpsErrors: false,
+  agentBrowserAutoStreamPreview: true,
+  agentBrowserDashboardPort: 4848,
+  agentBrowserAllowFileAccess: false,
+  agentBrowserProvider: "",
+  agentBrowserProxy: "",
 };
 
 export function mergeAiPreferences(current: AiPreferences, patch: Partial<AiPreferences>) {
@@ -373,8 +448,23 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     realtimeIndexing: typeof source.realtimeIndexing === "boolean" ? source.realtimeIndexing : defaultAiPreferences.realtimeIndexing,
     includeImages: typeof source.includeImages === "boolean" ? source.includeImages : defaultAiPreferences.includeImages,
     maxIndexedFiles: clampInteger(source.maxIndexedFiles, 500, 20000, defaultAiPreferences.maxIndexedFiles),
+    contextAutoCompactEnabled: typeof source.contextAutoCompactEnabled === "boolean"
+      ? source.contextAutoCompactEnabled
+      : defaultAiPreferences.contextAutoCompactEnabled,
+    contextAutoCompactThreshold: clampContextAutoCompactThreshold(
+      typeof source.contextAutoCompactThreshold === "number"
+        ? source.contextAutoCompactThreshold
+        : defaultAiPreferences.contextAutoCompactThreshold,
+    ),
     toolRoundLimit: normalizeToolRoundLimit(resolveToolRoundLimitSource(source)),
+    maxParallelSubagents: clampInteger(source.maxParallelSubagents, maxParallelSubagentsMin, maxParallelSubagentsMax, defaultMaxParallelSubagents),
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
+    toolPermissionRules: Array.isArray(source.toolPermissionRules)
+      ? source.toolPermissionRules
+          .filter((rule): rule is string => typeof rule === "string" && rule.trim().length > 0)
+          .map((rule) => rule.trim())
+          .slice(0, 100)
+      : defaultAiPreferences.toolPermissionRules,
     globalInstructions: normalizeEditableText(source.globalInstructions, defaultAiPreferences.globalInstructions, preserveText),
     projectInstructionsByWorkspace: normalizeProjectInstructions(source.projectInstructionsByWorkspace, preserveText),
     agentMode: selectedAgent.mode,
@@ -384,12 +474,30 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     selectedModelId,
     selectedEffortId,
     toolApprovalMode,
+    fileEditTrustMode: source.fileEditTrustMode === "apply-immediately" || source.fileEditTrustMode === "preview-before-apply"
+      ? source.fileEditTrustMode
+      : defaultAiPreferences.fileEditTrustMode,
     providers,
     voiceInputEnabled: typeof source.voiceInputEnabled === "boolean" ? source.voiceInputEnabled : defaultAiPreferences.voiceInputEnabled,
     voiceInputProvider: normalizeVoiceInputProvider(source.voiceInputProvider),
     voiceInputLanguage: normalizeVoiceInputLanguage(source.voiceInputLanguage),
     localSttCommand: normalizeEditableText(source.localSttCommand, "", preserveText),
     localSttModelPath: normalizeEditableText(source.localSttModelPath, "", preserveText),
+    agentBrowserEnabled: typeof source.agentBrowserEnabled === "boolean" ? source.agentBrowserEnabled : defaultAiPreferences.agentBrowserEnabled,
+    agentBrowserCommand: normalizeEditableText(source.agentBrowserCommand, "", preserveText),
+    agentBrowserHeaded: typeof source.agentBrowserHeaded === "boolean" ? source.agentBrowserHeaded : defaultAiPreferences.agentBrowserHeaded,
+    agentBrowserAllowedDomains: normalizeEditableText(source.agentBrowserAllowedDomains, "", preserveText),
+    agentBrowserMaxOutput: clampInteger(source.agentBrowserMaxOutput, 4_000, 120_000, defaultAiPreferences.agentBrowserMaxOutput),
+    agentBrowserPersistSession: typeof source.agentBrowserPersistSession === "boolean" ? source.agentBrowserPersistSession : defaultAiPreferences.agentBrowserPersistSession,
+    agentBrowserProfile: normalizeEditableText(source.agentBrowserProfile, "", preserveText),
+    agentBrowserStatePath: normalizeEditableText(source.agentBrowserStatePath, "", preserveText),
+    agentBrowserContentBoundaries: typeof source.agentBrowserContentBoundaries === "boolean" ? source.agentBrowserContentBoundaries : defaultAiPreferences.agentBrowserContentBoundaries,
+    agentBrowserIgnoreHttpsErrors: typeof source.agentBrowserIgnoreHttpsErrors === "boolean" ? source.agentBrowserIgnoreHttpsErrors : defaultAiPreferences.agentBrowserIgnoreHttpsErrors,
+    agentBrowserAutoStreamPreview: typeof source.agentBrowserAutoStreamPreview === "boolean" ? source.agentBrowserAutoStreamPreview : defaultAiPreferences.agentBrowserAutoStreamPreview,
+    agentBrowserDashboardPort: clampInteger(source.agentBrowserDashboardPort, 1024, 65_535, defaultAiPreferences.agentBrowserDashboardPort),
+    agentBrowserAllowFileAccess: typeof source.agentBrowserAllowFileAccess === "boolean" ? source.agentBrowserAllowFileAccess : defaultAiPreferences.agentBrowserAllowFileAccess,
+    agentBrowserProvider: normalizeEditableText(source.agentBrowserProvider, "", preserveText),
+    agentBrowserProxy: normalizeEditableText(source.agentBrowserProxy, "", preserveText),
   };
 }
 
@@ -438,10 +546,12 @@ export function isDefaultAiAgentProfile(profileId: string) {
 
 export function createAiModelConfig(existingModels: AiModelConfig[]): AiModelConfig {
   const id = uniqueConfigId("model", existingModels.map((model) => model.id));
+  const alias = "model-name";
   return {
     id,
     name: "New model",
-    alias: "model-name",
+    alias,
+    contextTokens: inferContextTokensFromModelRef(alias),
     effortLevels: [],
   };
 }
@@ -489,7 +599,17 @@ function normalizeAgentProfiles(value: unknown, preserveText: boolean): AiAgentP
   const byId = new Map<string, AiAgentProfile>();
   for (const profile of cloneDefaultAgentProfiles()) byId.set(profile.id, profile);
   for (const profile of incoming) byId.set(profile.id, profile);
-  return Array.from(byId.values());
+  return sortAgentProfilesByModeOrder(Array.from(byId.values()));
+}
+
+function sortAgentProfilesByModeOrder(profiles: AiAgentProfile[]) {
+  const rank = new Map(AI_AGENT_MODE_ORDER.map((mode, index) => [mode, index]));
+  return [...profiles].sort((left, right) => {
+    const leftRank = rank.get(left.mode) ?? AI_AGENT_MODE_ORDER.length;
+    const rightRank = rank.get(right.mode) ?? AI_AGENT_MODE_ORDER.length;
+    if (leftRank !== rightRank) return leftRank - rightRank;
+    return left.name.localeCompare(right.name);
+  });
 }
 
 function normalizeAgentProfile(value: unknown, preserveText: boolean): AiAgentProfile | null {
@@ -575,12 +695,29 @@ function normalizeModels(value: unknown, preserveText: boolean, fallbackModels: 
 function normalizeModelConfig(value: unknown, preserveText: boolean): AiModelConfig | null {
   if (!isRecord(value)) return null;
   const id = normalizeIdentifier(value.id, "model");
+  const alias = normalizeEditableText(value.alias, id, preserveText);
+  const contextTokens = normalizeModelContextTokens(value.contextTokens, alias || id, preserveText);
   return {
     id,
     name: normalizeEditableText(value.name, id, preserveText),
-    alias: normalizeEditableText(value.alias, id, preserveText),
+    alias,
+    contextTokens,
     effortLevels: normalizeEffortLevels(value.effortLevels, preserveText),
   };
+}
+
+function normalizeModelContextTokens(value: unknown, modelRef: string, preserveText: boolean) {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (preserveText && value <= 0) return null;
+    return value > 0 ? clampModelContextTokens(value) : null;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    if (!Number.isFinite(parsed) || parsed <= 0) return preserveText ? null : inferContextTokensFromModelRef(modelRef);
+    return clampModelContextTokens(parsed);
+  }
+  return null;
 }
 
 function normalizeEffortLevels(value: unknown, preserveText: boolean): AiEffortConfig[] {
@@ -708,7 +845,7 @@ function normalizeIdentifier(value: unknown, fallbackPrefix: string) {
 }
 
 function normalizeAgentMode(value: unknown): AiAgentMode {
-  if (value === "agent" || value === "plan" || value === "ask") return value;
+  if (value === "agent" || value === "automatic" || value === "plan" || value === "ask") return value;
   if (value === "edit") return "plan";
   return defaultAiPreferences.agentMode;
 }
@@ -787,6 +924,7 @@ function cloneModelTemplates(models: readonly AiModelTemplate[]): AiModelConfig[
     id: model.id,
     name: model.name,
     alias: model.alias,
+    contextTokens: model.contextTokens ?? inferContextTokensFromModelRef(model.alias || model.id),
     effortLevels: cloneEfforts(model.effortLevels ?? []),
   }));
 }

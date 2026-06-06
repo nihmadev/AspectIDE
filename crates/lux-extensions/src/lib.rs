@@ -3,7 +3,7 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -174,26 +174,39 @@ const ALLOWED_HOST_IMPORTS: &[HostImportSpec] = &[
 ];
 
 pub fn discover_extensions(root: impl AsRef<Path>) -> AppResult<Vec<ExtensionInfo>> {
-    let root = root.as_ref();
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
+    discover_extensions_in_roots([root.as_ref()])
+}
 
+pub fn discover_extensions_in_roots(
+    roots: impl IntoIterator<Item = impl AsRef<Path>>,
+) -> AppResult<Vec<ExtensionInfo>> {
     let mut extensions = Vec::new();
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        if !file_type.is_dir() {
+    let mut seen_ids = HashSet::new();
+
+    for root in roots {
+        let root = root.as_ref();
+        if !root.exists() {
             continue;
         }
 
-        let extension_root = entry.path();
-        let manifest_path = extension_root.join(MANIFEST_FILE);
-        if !manifest_path.exists() {
-            continue;
-        }
+        for entry in fs::read_dir(root)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_dir() {
+                continue;
+            }
 
-        extensions.push(read_extension_info(extension_root, manifest_path));
+            let extension_root = entry.path();
+            let manifest_path = extension_root.join(MANIFEST_FILE);
+            if !manifest_path.exists() {
+                continue;
+            }
+
+            let extension = read_extension_info(extension_root, manifest_path);
+            if seen_ids.insert(extension.id.clone()) {
+                extensions.push(extension);
+            }
+        }
     }
 
     extensions.sort_by(|left, right| {
@@ -230,7 +243,41 @@ pub fn execute_extension_command(
     root: impl AsRef<Path>,
     command_id: &str,
 ) -> AppResult<ExtensionCommandExecution> {
-    let plan = extension_activation_plan(root)?;
+    execute_extension_command_in_roots([root.as_ref()], command_id)
+}
+
+pub fn extension_activation_plan_in_roots(
+    roots: impl IntoIterator<Item = impl AsRef<Path>>,
+) -> AppResult<ExtensionActivationPlan> {
+    build_activation_plan(discover_extensions_in_roots(roots)?)
+}
+
+pub fn activate_extensions_in_roots(
+    roots: impl IntoIterator<Item = impl AsRef<Path>>,
+) -> AppResult<ExtensionActivationReport> {
+    activate_extension_plan(extension_activation_plan_in_roots(roots)?)
+}
+
+pub fn extension_contribution_registry_in_roots(
+    roots: impl IntoIterator<Item = impl AsRef<Path>>,
+) -> AppResult<ExtensionContributionRegistry> {
+    Ok(build_contribution_registry(activate_extensions_in_roots(roots)?))
+}
+
+pub fn extension_command_routes_in_roots(
+    roots: impl IntoIterator<Item = impl AsRef<Path>>,
+) -> AppResult<Vec<ExtensionCommandRoute>> {
+    let plan = extension_activation_plan_in_roots(roots)?;
+    let routes = command_routes_for_activation_plan(&plan);
+    validate_unique_command_routes(&routes)?;
+    Ok(routes)
+}
+
+pub fn execute_extension_command_in_roots(
+    roots: impl IntoIterator<Item = impl AsRef<Path>>,
+    command_id: &str,
+) -> AppResult<ExtensionCommandExecution> {
+    let plan = extension_activation_plan_in_roots(roots)?;
     Ok(execute_extension_command_from_plan(&plan, command_id))
 }
 

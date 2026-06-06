@@ -1,20 +1,23 @@
-import { Bot, Brain, CornerDownLeft, Mic, Paperclip, SendHorizontal, Sparkles, Square, X } from "lucide-react";
-import type { ChangeEvent, ClipboardEvent, CSSProperties, DragEvent, KeyboardEvent, RefObject } from "react";
+import { Bot, Brain, CornerDownLeft, Mic, Paperclip, SendHorizontal, Server, Sparkles, Square, X } from "lucide-react";
+import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, RefObject } from "react";
 import { CompactDropdown } from "../CompactDropdown";
-import { formatAiChatContextValue, formatCompactTokens, type AiChatContextUsageSummary } from "../../lib/aiChatContextUsage";
+import { AiChatSlashMenu } from "./AiChatSlashMenu";
+import { AiChatMentionMenu } from "./AiChatMentionMenu";
+import type { AiMentionCandidate } from "../../lib/aiChatMentions";
+import { AiComposerAttachments, type AiComposerAttachmentView } from "./AiComposerAttachments";
+import { AiComposerInlineMentions } from "./AiComposerInlineMentions";
+import type { SlashCommandMatch } from "../../lib/aiChatSlashCommands";
+import type { AiChatContextUsageMeta, AiChatContextUsageSummary } from "../../lib/aiChatContextUsage";
+import type { AiChatContextDropSummary } from "../../lib/aiChatContextReport";
+import { AiContextIndicator } from "./AiContextIndicator";
 import type { AiPreferences } from "../../lib/aiPreferences";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
-
-export type AiComposerAttachment = {
-  id: string;
-  name: string;
-  size: number;
-};
 
 export type AiComposerVoiceState = {
   canUseVoice: boolean;
   listening: boolean;
   toggleVoiceInput: () => void;
+  voiceError: string | null;
   voiceMode: string;
   voiceTitle: string;
 };
@@ -26,13 +29,15 @@ type SelectOption = {
 
 type AiChatComposerProps = {
   activeSessionSending: boolean;
+  compacting?: boolean;
   agentOptions: SelectOption[];
-  attachments: AiComposerAttachment[];
+  attachments: AiComposerAttachmentView[];
   attachFiles: (files: FileList | File[] | null) => void;
   canSend: boolean;
   contextOpen: boolean;
   contextTitle: string;
-  contextUsage: AiChatContextUsageSummary;
+  contextUsage: AiChatContextUsageSummary & AiChatContextUsageMeta;
+  contextDrops?: AiChatContextDropSummary | null;
   disabled: boolean;
   draggingFiles: boolean;
   effortOptions: SelectOption[];
@@ -44,10 +49,26 @@ type AiChatComposerProps = {
   handleComposerPaste: (event: ClipboardEvent<HTMLTextAreaElement>) => void;
   handleMessageChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
   handleSend: () => void;
+  mentionActiveIndex: number;
+  mentionCandidates: AiMentionCandidate[];
+  mentionMenuOpen: boolean;
+  mentionMenuRef: RefObject<HTMLDivElement | null>;
+  onMentionHighlight: (index: number) => void;
+  onMentionSelect: (candidate: AiMentionCandidate) => void;
+  onContextCompact?: () => void;
+  onOpenSettings?: () => void;
   isAgentHome: boolean;
   message: string;
+  onSlashHighlight: (index: number) => void;
+  onSlashSelect: (command: SlashCommandMatch) => void;
+  slashActiveIndex: number;
+  slashCommands: SlashCommandMatch[];
+  slashMenuOpen: boolean;
+  slashMenuRef: RefObject<HTMLDivElement | null>;
   modelOptions: SelectOption[];
   modelSupportsEffort: boolean;
+  providerOptions: SelectOption[];
+  selectedProviderId: string;
   preferences: AiPreferences;
   removeAttachment: (id: string) => void;
   selectedModelId: string;
@@ -58,11 +79,13 @@ type AiChatComposerProps = {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   updateAiPreference: (patch: Partial<AiPreferences>) => void;
   updateModel: (selectedModelId: string) => void;
+  updateProvider: (selectedProviderId: string) => void;
   voiceInput: AiComposerVoiceState;
 };
 
 export function AiChatComposer({
   activeSessionSending,
+  compacting = false,
   agentOptions,
   attachments,
   attachFiles,
@@ -70,6 +93,7 @@ export function AiChatComposer({
   contextOpen,
   contextTitle,
   contextUsage,
+  contextDrops,
   disabled,
   draggingFiles,
   effortOptions,
@@ -82,9 +106,25 @@ export function AiChatComposer({
   handleMessageChange,
   handleSend,
   isAgentHome,
+  mentionActiveIndex,
+  mentionCandidates,
+  mentionMenuOpen,
+  mentionMenuRef,
   message,
+  onMentionHighlight,
+  onMentionSelect,
+  onContextCompact,
+  onOpenSettings,
+  onSlashHighlight,
+  onSlashSelect,
+  slashActiveIndex,
+  slashCommands,
+  slashMenuOpen,
+  slashMenuRef,
   modelOptions,
   modelSupportsEffort,
+  providerOptions,
+  selectedProviderId,
   preferences,
   removeAttachment,
   selectedModelId,
@@ -95,6 +135,7 @@ export function AiChatComposer({
   textareaRef,
   updateAiPreference,
   updateModel,
+  updateProvider,
   voiceInput,
 }: AiChatComposerProps) {
   return (
@@ -109,18 +150,64 @@ export function AiChatComposer({
       onDragOver={handleComposerDragOver}
       onDrop={handleComposerDrop}
     >
-      {contextOpen && <AiContextPopover contextUsage={contextUsage} setContextOpen={setContextOpen} t={t} />}
-      <textarea
-        ref={textareaRef}
-        value={message}
-        onChange={handleMessageChange}
-        onKeyDown={handleComposerKeyDown}
-        onPaste={handleComposerPaste}
-        placeholder={t("aiChat.composer.placeholder")}
-        disabled={disabled}
-        rows={1}
+
+      {mentionMenuOpen && (
+        <AiChatMentionMenu
+          activeIndex={mentionActiveIndex}
+          candidates={mentionCandidates}
+          menuRef={mentionMenuRef}
+          onHighlight={onMentionHighlight}
+          onSelect={onMentionSelect}
+          t={t}
+        />
+      )}
+      {slashMenuOpen && (
+        <AiChatSlashMenu
+          activeIndex={slashActiveIndex}
+          commands={slashCommands}
+          menuRef={slashMenuRef}
+          onHighlight={onSlashHighlight}
+          onSelect={onSlashSelect}
+          t={t}
+        />
+      )}
+      <div className="ai-composer-input-wrap" data-voice-recording={voiceInput.voiceMode === "recording" || undefined} data-voice-transcribing={voiceInput.voiceMode === "transcribing" || undefined}>
+        <AiComposerInlineMentions message={message} />
+        {voiceInput.voiceMode === "recording" && (
+          <div className="ai-composer-voice-indicator">
+            <span className="ai-voice-live-dot" />
+            <span className="ai-composer-voice-label">{t("aiChat.voiceInput.recording")}</span>
+            <div className="ai-voice-live-meter" aria-hidden="true">
+              <span /><span /><span /><span />
+            </div>
+          </div>
+        )}
+        {voiceInput.voiceMode === "transcribing" && (
+          <div className="ai-composer-voice-indicator">
+            <span className="ai-voice-transcribing-icon" />
+            <span className="ai-composer-voice-label">{t("aiChat.voiceInput.transcribing")}</span>
+          </div>
+        )}
+        {voiceInput.voiceError && (
+          <div className="ai-composer-voice-error">{voiceInput.voiceError}</div>
+        )}
+        <textarea
+          ref={textareaRef}
+          value={message}
+          onChange={handleMessageChange}
+          onKeyDown={handleComposerKeyDown}
+          onPaste={handleComposerPaste}
+          placeholder={compacting ? t("aiChat.composer.compacting") : t("aiChat.composer.placeholder")}
+          disabled={disabled || compacting}
+          rows={1}
+        />
+      </div>
+      <AiComposerAttachments
+        attachments={attachments}
+        draggingFiles={draggingFiles}
+        removeAttachment={removeAttachment}
+        t={t}
       />
-      {attachments.length > 0 && <AiAttachmentList attachments={attachments} removeAttachment={removeAttachment} t={t} />}
       <div className="ai-composer-actions">
         <div className="ai-composer-left-actions">
           <input
@@ -137,6 +224,16 @@ export function AiChatComposer({
           <button className="icon-button compact" type="button" aria-label={t("aiChat.attachFiles")} title={t("aiChat.attachFiles")} disabled={disabled} onClick={() => fileInputRef.current?.click()}>
             <Paperclip size={15} />
           </button>
+          {providerOptions.length > 1 && (
+            <CompactDropdown
+              className="ai-composer-select ai-composer-select-provider"
+              icon={<Server size={13} />}
+              label={t("aiChat.provider.label")}
+              value={selectedProviderId}
+              options={providerOptions}
+              onChange={updateProvider}
+            />
+          )}
           <CompactDropdown
             className="ai-composer-select"
             icon={<Bot size={13} />}
@@ -166,11 +263,16 @@ export function AiChatComposer({
           {attachments.length > 0 && <span className="ai-attachment-count">{attachments.length}</span>}
         </div>
         <div className="ai-composer-right-actions">
-          <button className="ai-context-square" type="button" aria-label={t("aiChat.context.label")} title={contextTitle} data-active={contextOpen} style={{ "--context-percent": contextUsage.percent } as CSSProperties} onClick={() => setContextOpen((open) => !open)}>
-            <span className="ai-context-square-fill" aria-hidden="true" />
-            <span className="ai-context-square-value">{contextUsage.percent}</span>
-            <span className="ai-context-square-unit">%</span>
-          </button>
+          <AiContextIndicator
+            contextOpen={contextOpen}
+            contextTitle={contextTitle}
+            contextUsage={contextUsage}
+            contextDrops={contextDrops}
+            onCompact={onContextCompact}
+            onOpenSettings={onOpenSettings}
+            setContextOpen={setContextOpen}
+            t={t}
+          />
           <button
             className="ai-voice-button"
             type="button"
@@ -199,71 +301,4 @@ export function AiChatComposer({
   );
 }
 
-function AiContextPopover({ contextUsage, setContextOpen, t }: {
-  contextUsage: AiChatContextUsageSummary;
-  setContextOpen: (open: boolean | ((open: boolean) => boolean)) => void;
-  t: TranslateFn;
-}) {
-  return (
-    <div className="ai-context-popover">
-      <div className="ai-context-popover-head">
-        <div>
-          <span>{t("aiChat.context.label")}</span>
-          <strong>{t("aiChat.context.full", { percent: contextUsage.percent })}</strong>
-          <small>{t("aiChat.context.distribution")}</small>
-        </div>
-        <button type="button" aria-label={t("aiChat.context.closeAria")} title={t("common.close")} onClick={() => setContextOpen(false)}>
-          <X size={13} />
-        </button>
-      </div>
-      <div className="ai-context-token-row">
-        <span>{t("aiChat.context.estimatedUsage")}</span>
-        <strong>{t("aiChat.context.tokenUsage", { totalTokens: formatCompactTokens(contextUsage.totalTokens), tokenBudget: formatCompactTokens(contextUsage.tokenBudget) })}</strong>
-      </div>
-      <div className="ai-context-meter" aria-hidden="true">
-        {contextUsage.rows.map((row) => (
-          <span key={row.id} style={{ width: `${row.percent}%`, background: row.color }} />
-        ))}
-      </div>
-      <dl className="ai-context-breakdown">
-        {contextUsage.rows.map((row) => (
-          <div key={row.id}>
-            <dt><span style={{ background: row.color }} />{row.label}</dt>
-            <dd title={row.detail || undefined}>{formatAiChatContextValue(row)}</dd>
-          </div>
-        ))}
-      </dl>
-    </div>
-  );
-}
 
-function AiAttachmentList({ attachments, removeAttachment, t }: {
-  attachments: AiComposerAttachment[];
-  removeAttachment: (id: string) => void;
-  t: TranslateFn;
-}) {
-  return (
-    <div className="ai-attachment-list" aria-label={t("aiChat.attachments.aria")}>
-      {attachments.map((attachment) => {
-        const size = formatBytes(attachment.size, t);
-        return (
-          <span className="ai-attachment-chip" key={attachment.id} title={t("aiChat.attachment.tooltip", { name: attachment.name, size })}>
-            <span>{attachment.name}</span>
-            <small>{size}</small>
-            <button type="button" aria-label={t("aiChat.attachment.removeAria", { name: attachment.name })} title={t("common.remove")} onClick={() => removeAttachment(attachment.id)}>
-              <X size={12} />
-            </button>
-          </span>
-        );
-      })}
-    </div>
-  );
-}
-
-function formatBytes(bytes: number, t: TranslateFn) {
-  if (bytes < 1024) return t("common.fileSize.bytes", { bytes });
-  const kilobytes = bytes / 1024;
-  if (kilobytes < 1024) return t("common.fileSize.kilobytes", { kilobytes: kilobytes.toFixed(kilobytes >= 10 ? 0 : 1) });
-  const megabytes = kilobytes / 1024;
-  return t("common.fileSize.megabytes", { megabytes: megabytes.toFixed(megabytes >= 10 ? 0 : 1) });
-}

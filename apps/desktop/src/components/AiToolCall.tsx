@@ -12,13 +12,16 @@ import {
   FileText,
   FolderTree,
   GitBranch,
+  Globe,
   Layers,
   Loader2,
   Minus,
+  MapPin,
   Network,
   Pencil,
   Search,
   Shield,
+  Target,
   Terminal,
   Trash2,
   Wrench,
@@ -26,6 +29,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { AiToolApprovalDecision, AiToolApprovalState } from "../lib/aiChatTypes";
+import { extractReviewPathFromToolInput, requestFileReviewFocus } from "../lib/aiFileReviewBridge";
 import type { TranslateFn } from "../lib/i18n/useTranslation";
 
 export type ToolCallStatus = "approval" | "running" | "success" | "skipped" | "error";
@@ -65,7 +69,22 @@ const toolIcons: Record<string, LucideIcon> = {
   TerminalWrite: Terminal,
   ReadLints: AlertTriangle,
   TodoWrite: Layers,
+  Goal: Target,
+  Task: Network,
+  AgentMessage: Network,
   WebFetch: Network,
+  BrowserStatus: Globe,
+  BrowserOpen: Globe,
+  BrowserSnapshot: Eye,
+  BrowserAct: Globe,
+  BrowserInvoke: Terminal,
+  BrowserScreenshot: Eye,
+  BrowserClose: Globe,
+  BrowserChat: Globe,
+  BrowserDashboard: Network,
+  BrowserInstall: Wrench,
+  BrowserHelp: BookOpen,
+  BrowserDoctor: AlertTriangle,
   FastContext: Zap,
   RepoMap: FolderTree,
   WorkspaceIndex: FolderTree,
@@ -92,6 +111,10 @@ type AiToolCallProps = {
   toolCall: ToolCall;
 };
 
+function isFileEditTool(tool: string) {
+  return tool === "Write" || tool === "StrReplace" || tool === "PatchEngine";
+}
+
 function StatusGlyph({ status, Icon }: { status: ToolCallStatus; Icon: LucideIcon }) {
   if (status === "running") return <Loader2 size={13} className="spin-icon" />;
   if (status === "approval") return <Shield size={13} />;
@@ -112,6 +135,8 @@ export function AiToolCall({ onApprovalDecision, t, toolCall }: AiToolCallProps)
 
   const stats = toolCall.stats;
   const hasStats = Boolean(stats && (stats.linesAdded || stats.linesRemoved || stats.filesChanged || stats.filesCreated || stats.filesDeleted));
+  const reviewPath = isFileEditTool(toolCall.tool) ? extractReviewPathFromToolInput(toolCall.tool, toolCall.input) : null;
+  const canJumpToReview = Boolean(reviewPath && (toolCall.status === "success" || toolCall.status === "running"));
 
   return (
     <motion.div
@@ -143,6 +168,19 @@ export function AiToolCall({ onApprovalDecision, t, toolCall }: AiToolCallProps)
             {stats.filesChanged ? <span className="ai-tool-stat" data-type="changed">{stats.filesChanged} changed</span> : null}
             {stats.filesDeleted ? <span className="ai-tool-stat" data-type="deleted">{stats.filesDeleted} deleted</span> : null}
           </span>
+        )}
+        {canJumpToReview && reviewPath && (
+          <button
+            type="button"
+            className="ai-tool-call-jump"
+            title={t("aiChat.review.jumpToChange")}
+            onClick={(event) => {
+              event.stopPropagation();
+              requestFileReviewFocus({ path: reviewPath, toolCallId: toolCall.id });
+            }}
+          >
+            <MapPin size={12} />
+          </button>
         )}
         {!isApproval && toolCall.status !== "running" && <span className="ai-tool-call-duration">{durationText}</span>}
         {collapsible && <ChevronRight className="ai-tool-call-caret" data-expanded={expanded} size={13} />}

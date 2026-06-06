@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Cpu, Database, Eye, FileText, Globe, Plus, RotateCcw, Search, Settings, Sparkles, Trash2, Wifi, X } from "lucide-react";
+import { Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Plus, RotateCcw, Search, Settings, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
@@ -19,6 +19,7 @@ import {
   getAiProjectInstructions,
   getAiProvider,
   isDefaultAiAgentProfile,
+  AI_AGENT_MODE_ORDER,
   mergeAiPreferences,
   normalizeAiPreferences,
   workspaceInstructionsKey,
@@ -29,8 +30,11 @@ import {
   type AiProviderConfig,
   type AiProviderPresetId,
   type AiProviderProtocol,
+  type AiFileEditTrustMode,
   type AiToolApprovalMode,
 } from "../lib/aiPreferences";
+import { formatCompactTokens } from "../lib/aiChatContextUsage";
+import { resolveModelContextTokens } from "../lib/aiModelContext";
 import {
   defaultEditorPreferences,
   EDITOR_PREFERENCES_KEY,
@@ -45,14 +49,14 @@ import { LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from "../lib/i18
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
 import { useLuxStore } from "../lib/store";
-import { luxCommands, type AiProviderDiagnosticResponse } from "../lib/tauri";
+import { luxCommands, type AgentBrowserStatusResponse, type AiProviderDiagnosticResponse } from "../lib/tauri";
 import type { FsEntry, WorkspaceInfo } from "../lib/types";
 
 const scope = "user" as const;
 
 // AI configuration is split into focused sections so runtime, instructions,
 // providers, and indexing do not compete in one mixed settings list.
-type SettingsSectionId = "general" | "editor" | "ai-runtime" | "ai-instructions" | "ai-providers" | "ai-indexing";
+type SettingsSectionId = "general" | "editor" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-providers" | "ai-indexing";
 
 type SettingsSection = {
   id: SettingsSectionId;
@@ -81,27 +85,40 @@ const PROVIDER_PRESET_DESCRIPTION_KEYS: Record<string, MessageKey> = {
   custom: "settings.providerPreset.custom.description",
 };
 
+const settingsNavGroups: Array<{ labelKey: MessageKey; sectionIds: SettingsSectionId[] }> = [
+  { labelKey: "settings.group.workspace", sectionIds: ["general"] },
+  { labelKey: "settings.group.editor", sectionIds: ["editor"] },
+  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-providers", "ai-indexing"] },
+];
+
 const settingsSections: SettingsSection[] = [
   {
     id: "general",
     titleKey: "settings.general.title",
     descriptionKey: "settings.general.description",
-    icon: <Globe size={16} />,
+    icon: <Languages size={16} />,
     keywords: ["language", "locale", "russian", "english", "язык", "general", "язык", "общие"],
   },
   {
     id: "editor",
     titleKey: "settings.group.editor",
     descriptionKey: "settings.editor.description",
-    icon: <Eye size={16} />,
+    icon: <Code2 size={16} />,
     keywords: ["font", "line", "tab", "whitespace", "unicode", "minimap", "word wrap", "mouse", "zoom", "smooth", "ligatures", "appearance", "behavior", "редактор", "шрифт"],
   },
   {
     id: "ai-runtime",
     titleKey: "settings.aiRuntime.title",
     descriptionKey: "settings.aiRuntime.description",
-    icon: <Sparkles size={16} />,
-    keywords: ["ai", "agent", "mode", "model", "effort", "reasoning", "tools", "tool rounds", "runtime"],
+    icon: <Bot size={16} />,
+    keywords: ["ai", "agent", "mode", "model", "effort", "reasoning", "tools", "tool rounds", "runtime", "compact", "context"],
+  },
+  {
+    id: "ai-browser",
+    titleKey: "settings.agentBrowser.nav.title",
+    descriptionKey: "settings.agentBrowser.nav.description",
+    icon: <Globe size={16} />,
+    keywords: ["browser", "agent-browser", "chromium", "chrome", "automation", "stream", "preview", "браузер"],
   },
   {
     id: "ai-instructions",
@@ -143,6 +160,7 @@ export function SettingsDialog() {
   const locale = useLuxStore((state) => state.locale);
   const setLocale = useLuxStore((state) => state.setLocale);
   const workspace = useLuxStore((state) => state.workspace);
+  const settingsInitialSection = useLuxStore((state) => state.settingsInitialSection);
   const [activeSectionId, setActiveSectionId] = useState<SettingsSectionId>("general");
   const [query, setQuery] = useState("");
   const [saveState, setSaveState] = useState<SaveState>("idle");
@@ -157,6 +175,13 @@ export function SettingsDialog() {
     },
     [setLocale],
   );
+
+  useEffect(() => {
+    if (!open || !settingsInitialSection) return;
+    if (sectionById.has(settingsInitialSection as SettingsSectionId)) {
+      setActiveSectionId(settingsInitialSection as SettingsSectionId);
+    }
+  }, [open, settingsInitialSection]);
 
   useEffect(() => {
     if (!open) return;
@@ -273,7 +298,12 @@ export function SettingsDialog() {
                     <EditorBehaviorSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
                   </div>
                 )}
-                {activeSectionId === "ai-runtime" && <AiActiveCard preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+                {activeSectionId === "ai-runtime" && (
+                  <AiActiveCard preferences={aiPreferences} onChange={updateAiPreference} t={t} />
+                )}
+                {activeSectionId === "ai-browser" && (
+                  <AgentBrowserSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />
+                )}
                 {activeSectionId === "ai-instructions" && <AiInstructionsSection fileEntries={fileEntries} preferences={aiPreferences} workspace={workspace} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-providers" && <AiProvidersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-indexing" && <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
@@ -287,19 +317,36 @@ export function SettingsDialog() {
 }
 
 function SettingsSectionNav({ activeSectionId, onSelect, sections, t }: { activeSectionId: SettingsSectionId; onSelect: (sectionId: SettingsSectionId) => void; sections: SettingsSection[]; t: TranslateFn }) {
+  const visibleIds = new Set(sections.map((section) => section.id));
   return (
     <div className="settings-nav-groups">
-      <section className="settings-nav-group">
-        {sections.map((section) => (
-          <button className="settings-nav-item" type="button" key={section.id} data-active={section.id === activeSectionId} onClick={() => onSelect(section.id)}>
-            <span className="settings-nav-icon">{section.icon}</span>
-            <span>
-              <strong>{t(section.titleKey)}</strong>
-              <small>{t(section.descriptionKey)}</small>
-            </span>
-          </button>
-        ))}
-      </section>
+      {settingsNavGroups.map((group) => {
+        const groupSections = group.sectionIds
+          .map((id) => sectionById.get(id))
+          .filter((section): section is SettingsSection => Boolean(section && visibleIds.has(section.id)));
+        if (groupSections.length === 0) return null;
+        return (
+          <section className="settings-nav-group" key={group.labelKey}>
+            <h3 className="settings-nav-group-label">{t(group.labelKey)}</h3>
+            {groupSections.map((section) => (
+              <button
+                className="settings-nav-item"
+                type="button"
+                key={section.id}
+                data-active={section.id === activeSectionId}
+                title={t(section.descriptionKey)}
+                onClick={() => onSelect(section.id)}
+              >
+                <span className="settings-nav-icon">{section.icon}</span>
+                <span>
+                  <strong>{t(section.titleKey)}</strong>
+                  <small>{t(section.descriptionKey)}</small>
+                </span>
+              </button>
+            ))}
+          </section>
+        );
+      })}
     </div>
   );
 }
@@ -358,8 +405,205 @@ function EditorBehaviorSection({ onChange, preferences, t }: { onChange: (patch:
 // A single focused "active model" card: the thing a user changes often (model + effort +
 // mode) shown at a glance, with the selected agent's behavior editable inline. Provider/model
 // management itself lives in the Providers section, so nothing is configured in two places.
-const AI_AGENT_MODES: AiAgentMode[] = ["agent", "plan", "ask"];
 const AI_TOOL_APPROVAL_MODES: AiToolApprovalMode[] = ["default", "full-access"];
+const AI_FILE_EDIT_TRUST_MODES: AiFileEditTrustMode[] = ["preview-before-apply", "apply-immediately"];
+
+function AgentBrowserSection({ onChange, preferences, t }: { onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
+  const [status, setStatus] = useState<AgentBrowserStatusResponse | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  const refreshStatus = useCallback(async (options: { full?: boolean } = {}) => {
+    setChecking(true);
+    try {
+      const response = await luxCommands.agentBrowserStatus({
+        commandPath: preferences.agentBrowserCommand.trim() || undefined,
+        skipAutoUpdate: true,
+        lightweight: options.full ? false : true,
+      });
+      if (response.updatePerformed) {
+        void import("../lib/agentBrowserSkillsCache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
+      }
+      setStatus(response);
+    } catch (error) {
+      setStatus({
+        available: false,
+        commandPath: null,
+        version: null,
+        latestVersion: null,
+        updatePerformed: false,
+        updateDetail: null,
+        detail: error instanceof Error ? error.message : String(error),
+        sessions: [],
+        doctor: null,
+      });
+    } finally {
+      setChecking(false);
+    }
+  }, [preferences.agentBrowserCommand]);
+
+  const diagnosticState = checking
+    ? "checking"
+    : status?.available
+      ? "ok"
+      : status
+        ? "error"
+        : "idle";
+  const statusLabel = checking
+    ? t("settings.agentBrowser.status.checking")
+    : status?.available
+      ? t("settings.agentBrowser.status.ready", { version: status.version ?? "agent-browser" })
+      : status
+        ? t("settings.agentBrowser.status.issue")
+        : t("settings.agentBrowser.status.unavailable");
+
+  return (
+    <SettingsPanel title={t("settings.agentBrowser.title")} description={t("settings.agentBrowser.description")}>
+      <section className="settings-banner agent-browser-status-card" data-state={diagnosticState}>
+        <div className="settings-banner-main">
+          <strong>{statusLabel}</strong>
+          {status && <span>{t("settings.agentBrowser.status.detail", { detail: status.detail })}</span>}
+          {status && status.sessions.length > 0 && (
+            <span>{t("settings.agentBrowser.status.sessions", { count: status.sessions.length })}</span>
+          )}
+          <span className="agent-browser-install-hint">{t("settings.agentBrowser.install.hint")}</span>
+        </div>
+        <div className="settings-banner-actions">
+          <button type="button" disabled={checking} onClick={() => void refreshStatus()}>
+            {t("settings.agentBrowser.status.refresh")}
+          </button>
+          <button type="button" disabled={checking} onClick={() => void refreshStatus({ full: true })}>
+            {t("settings.agentBrowser.status.fullCheck")}
+          </button>
+          <button
+            type="button"
+            disabled={checking}
+            onClick={() => {
+              void luxCommands.agentBrowserInstall({
+                commandPath: preferences.agentBrowserCommand.trim() || null,
+                withDeps: false,
+              }).then(() => {
+                void import("../lib/agentBrowserSkillsCache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
+                return refreshStatus();
+              });
+            }}
+          >
+            {t("settings.agentBrowser.install.action")}
+          </button>
+        </div>
+      </section>
+      <SettingsGrid>
+        <ToggleSetting
+          label={t("settings.agentBrowser.enabled.label")}
+          detail={t("settings.agentBrowser.enabled.detail")}
+          checked={preferences.agentBrowserEnabled}
+          onChange={(agentBrowserEnabled) => onChange({ agentBrowserEnabled })}
+        />
+        <ToggleSetting
+          label={t("settings.agentBrowser.headed.label")}
+          detail={t("settings.agentBrowser.headed.detail")}
+          checked={preferences.agentBrowserHeaded}
+          onChange={(agentBrowserHeaded) => onChange({ agentBrowserHeaded })}
+        />
+        <ToggleSetting
+          label={t("settings.agentBrowser.autoStream.label")}
+          detail={t("settings.agentBrowser.autoStream.detail")}
+          checked={preferences.agentBrowserAutoStreamPreview}
+          onChange={(agentBrowserAutoStreamPreview) => onChange({ agentBrowserAutoStreamPreview })}
+        />
+        <ToggleSetting
+          label={t("settings.agentBrowser.persistSession.label")}
+          detail={t("settings.agentBrowser.persistSession.detail")}
+          checked={preferences.agentBrowserPersistSession}
+          onChange={(agentBrowserPersistSession) => onChange({ agentBrowserPersistSession })}
+        />
+        <ToggleSetting
+          label={t("settings.agentBrowser.contentBoundaries.label")}
+          detail={t("settings.agentBrowser.contentBoundaries.detail")}
+          checked={preferences.agentBrowserContentBoundaries}
+          onChange={(agentBrowserContentBoundaries) => onChange({ agentBrowserContentBoundaries })}
+        />
+        <ToggleSetting
+          label={t("settings.agentBrowser.allowFileAccess.label")}
+          detail={t("settings.agentBrowser.allowFileAccess.detail")}
+          checked={preferences.agentBrowserAllowFileAccess}
+          onChange={(agentBrowserAllowFileAccess) => onChange({ agentBrowserAllowFileAccess })}
+        />
+        <ToggleSetting
+          label={t("settings.agentBrowser.ignoreHttps.label")}
+          detail={t("settings.agentBrowser.ignoreHttps.detail")}
+          checked={preferences.agentBrowserIgnoreHttpsErrors}
+          onChange={(agentBrowserIgnoreHttpsErrors) => onChange({ agentBrowserIgnoreHttpsErrors })}
+        />
+        <NumberSetting
+          label={t("settings.agentBrowser.dashboardPort.label")}
+          detail={t("settings.agentBrowser.dashboardPort.detail")}
+          value={preferences.agentBrowserDashboardPort}
+          min={1024}
+          max={65_535}
+          step={1}
+          onChange={(agentBrowserDashboardPort) => onChange({ agentBrowserDashboardPort })}
+        />
+        <TextSetting
+          label={t("settings.agentBrowser.command.label")}
+          detail={t("settings.agentBrowser.command.detail")}
+          value={preferences.agentBrowserCommand}
+          placeholder={t("settings.agentBrowser.command.placeholder")}
+          onChange={(agentBrowserCommand) => onChange({ agentBrowserCommand })}
+          wide
+        />
+        <TextSetting
+          label={t("settings.agentBrowser.allowedDomains.label")}
+          detail={t("settings.agentBrowser.allowedDomains.detail")}
+          value={preferences.agentBrowserAllowedDomains}
+          placeholder={t("settings.agentBrowser.allowedDomains.placeholder")}
+          onChange={(agentBrowserAllowedDomains) => onChange({ agentBrowserAllowedDomains })}
+          wide
+        />
+        <NumberSetting
+          label={t("settings.agentBrowser.maxOutput.label")}
+          detail={t("settings.agentBrowser.maxOutput.detail")}
+          value={preferences.agentBrowserMaxOutput}
+          min={4_000}
+          max={120_000}
+          step={1_000}
+          onChange={(agentBrowserMaxOutput) => onChange({ agentBrowserMaxOutput })}
+        />
+        <TextSetting
+          label={t("settings.agentBrowser.profile.label")}
+          detail={t("settings.agentBrowser.profile.detail")}
+          value={preferences.agentBrowserProfile}
+          placeholder={t("settings.agentBrowser.profile.placeholder")}
+          onChange={(agentBrowserProfile) => onChange({ agentBrowserProfile })}
+          wide
+        />
+        <TextSetting
+          label={t("settings.agentBrowser.statePath.label")}
+          detail={t("settings.agentBrowser.statePath.detail")}
+          value={preferences.agentBrowserStatePath}
+          placeholder={t("settings.agentBrowser.statePath.placeholder")}
+          onChange={(agentBrowserStatePath) => onChange({ agentBrowserStatePath })}
+          wide
+        />
+        <TextSetting
+          label={t("settings.agentBrowser.provider.label")}
+          detail={t("settings.agentBrowser.provider.detail")}
+          value={preferences.agentBrowserProvider}
+          placeholder={t("settings.agentBrowser.provider.placeholder")}
+          onChange={(agentBrowserProvider) => onChange({ agentBrowserProvider })}
+          wide
+        />
+        <TextSetting
+          label={t("settings.agentBrowser.proxy.label")}
+          detail={t("settings.agentBrowser.proxy.detail")}
+          value={preferences.agentBrowserProxy}
+          placeholder={t("settings.agentBrowser.proxy.placeholder")}
+          onChange={(agentBrowserProxy) => onChange({ agentBrowserProxy })}
+          wide
+        />
+      </SettingsGrid>
+    </SettingsPanel>
+  );
+}
 
 function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
   const selectedAgent = getAiAgentProfile(preferences.agentProfiles, preferences.selectedAgentId) ?? preferences.agentProfiles[0];
@@ -382,27 +626,55 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
     if (profile) onChange({ selectedAgentId: profile.id });
   };
   return (
-    <section className="ai-active-card">
-      <div className="ai-active-hero">
-        <span className="ai-active-icon"><Sparkles size={20} /></span>
-        <div className="ai-active-headline">
-          <strong>{selectedModel.name}</strong>
-          <span>{selectedProvider.name} · {modeLabel}</span>
-        </div>
-        {selectedEffort && <span className="ai-active-badge">{selectedEffort.label}</span>}
-      </div>
+    <SettingsPanel title={t("settings.aiRuntime.activeRuntime.title")} description={t("settings.aiRuntime.activeRuntime.description")}>
       <SettingsGrid>
         <SelectSetting label={t("settings.aiRuntime.provider.label")} value={selectedProvider.id} options={preferences.providers.map((provider) => ({ label: provider.name, value: provider.id }))} onChange={selectProvider} />
         <SelectSetting label={t("settings.aiRuntime.model.label")} value={selectedModel.id} options={selectedProvider.models.map((model) => ({ label: model.name, value: model.id }))} onChange={selectModel} />
         {selectedModel.effortLevels.length > 0 && (
           <SegmentedSetting label={t("settings.aiRuntime.effort.label")} value={selectedEffort?.id ?? ""} options={selectedModel.effortLevels.map((effort) => ({ label: effort.label, value: effort.id }))} onChange={(selectedEffortId) => onChange({ selectedEffortId })} />
         )}
-        <SegmentedSetting<AiAgentMode> label={t("settings.aiRuntime.mode.label")} value={selectedAgent.mode} options={AI_AGENT_MODES.map((mode) => ({ label: t(`settings.aiRuntime.mode.${mode}` as MessageKey), value: mode }))} onChange={selectMode} />
+        <SegmentedSetting<AiAgentMode> label={t("settings.aiRuntime.mode.label")} value={selectedAgent.mode} options={AI_AGENT_MODE_ORDER.map((mode) => ({ label: t(`settings.aiRuntime.mode.${mode}` as MessageKey), value: mode }))} onChange={selectMode} />
         <SegmentedSetting<AiToolApprovalMode> label={t("settings.aiRuntime.toolApproval.label")} detail={t("settings.aiRuntime.toolApproval.detail")} value={preferences.toolApprovalMode} options={AI_TOOL_APPROVAL_MODES.map((mode) => ({ label: t(`settings.aiRuntime.toolApproval.${mode}` as MessageKey), value: mode }))} onChange={(toolApprovalMode) => onChange({ toolApprovalMode })} />
+        <SegmentedSetting<AiFileEditTrustMode> label={t("settings.aiRuntime.fileEditTrust.label")} detail={t("settings.aiRuntime.fileEditTrust.detail")} value={preferences.fileEditTrustMode} options={AI_FILE_EDIT_TRUST_MODES.map((mode) => ({ label: t(`settings.aiRuntime.fileEditTrust.${mode}` as MessageKey), value: mode }))} onChange={(fileEditTrustMode) => onChange({ fileEditTrustMode })} />
         <ToolRoundLimitSetting label={t("settings.aiRuntime.toolRoundLimit.label")} detail={t("settings.aiRuntime.toolRoundLimit.detail")} value={preferences.toolRoundLimit} min={aiToolRoundLimitMin} max={aiToolRoundLimitMax} step={1} fallbackLimitedValue={defaultLimitedAiToolRoundLimit} unlimitedLabel={t("settings.aiRuntime.toolRoundLimit.unlimited")} limitedLabel={t("settings.aiRuntime.toolRoundLimit.limited")} onChange={(toolRoundLimit) => onChange({ toolRoundLimit })} />
+        <NumberSetting
+          label={t("settings.aiRuntime.maxParallelSubagents.label")}
+          detail={t("settings.aiRuntime.maxParallelSubagents.detail")}
+          value={preferences.maxParallelSubagents}
+          min={1}
+          max={16}
+          step={1}
+          onChange={(maxParallelSubagents) => onChange({ maxParallelSubagents })}
+        />
         <ToggleSetting label={t("settings.aiRuntime.responseDuration.label")} detail={t("settings.aiRuntime.responseDuration.detail")} checked={preferences.showResponseDuration} onChange={(showResponseDuration) => onChange({ showResponseDuration })} />
+        <ToggleSetting
+          label={t("settings.aiRuntime.contextAutoCompact.label")}
+          detail={t("settings.aiRuntime.contextAutoCompact.detail")}
+          checked={preferences.contextAutoCompactEnabled}
+          onChange={(contextAutoCompactEnabled) => onChange({ contextAutoCompactEnabled })}
+        />
+        <NumberSetting
+          label={t("settings.aiRuntime.contextAutoCompactThreshold.label")}
+          detail={t("settings.aiRuntime.contextAutoCompactThreshold.detail", { model: selectedModel.name })}
+          value={Math.round(preferences.contextAutoCompactThreshold * 100)}
+          min={50}
+          max={95}
+          step={5}
+          onChange={(percent) => onChange({ contextAutoCompactThreshold: percent / 100 })}
+        />
       </SettingsGrid>
-    </section>
+      <SettingsGrid>
+        <TextareaSetting
+          label={t("settings.aiRuntime.permissionRules.label")}
+          detail={t("settings.aiRuntime.permissionRules.detail")}
+          placeholder={t("settings.aiRuntime.permissionRules.placeholder")}
+          value={preferences.toolPermissionRules.join("\n")}
+          rows={5}
+          onChange={(value) => onChange({ toolPermissionRules: value.split("\n") })}
+          wide
+        />
+      </SettingsGrid>
+    </SettingsPanel>
   );
 }
 
@@ -715,15 +987,16 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
         </div>
       </div>
 
-      <section className="provider-diagnostic-card" data-state={diagnosticState}>
-        <div>
-          <span><Wifi size={15} /> {t("settings.providers.diagnostic.title")}</span>
+      <section className="settings-banner" data-state={diagnosticState}>
+        <div className="settings-banner-main">
           <strong>{diagnosticLabel}</strong>
-          <small>{providerDiagnostic?.error ?? (providerDiagnostic?.ok ? t("settings.providers.diagnostic.okDetail", { status: providerDiagnostic.status ?? "-", latency: providerDiagnostic.latencyMs }) : t("settings.providers.diagnostic.description"))}</small>
+          <span>{providerDiagnostic?.error ?? (providerDiagnostic?.ok ? t("settings.providers.diagnostic.okDetail", { status: providerDiagnostic.status ?? "-", latency: providerDiagnostic.latencyMs }) : t("settings.providers.diagnostic.description"))}</span>
         </div>
-        <button type="button" disabled={!editingModel || providerDiagnosticRunning} onClick={() => void runProviderDiagnostic()}>
-          <Wifi size={14} /> {t("settings.providers.diagnostic.check")}
-        </button>
+        <div className="settings-banner-actions">
+          <button type="button" disabled={!editingModel || providerDiagnosticRunning} onClick={() => void runProviderDiagnostic()}>
+            {t("settings.providers.diagnostic.check")}
+          </button>
+        </div>
       </section>
 
       <SettingsPanel title={t("settings.providers.connection.title")}>
@@ -781,11 +1054,13 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
                   >
                     <span className="provider-model-row-main">
                       <strong>{model.name || t("settings.providers.untitledModel")}</strong>
-                      <small>{model.alias || model.id}</small>
+                      <small className="provider-model-row-alias">{model.alias || model.id}</small>
                     </span>
                     <span className="provider-model-row-side">
-                      {activeModel && <em>{t("settings.providers.activeModel")}</em>}
-                      <small>{t("settings.providers.effortCount", { count: model.effortLevels.length })}</small>
+                      {activeModel ? <span className="provider-model-active-badge">{t("settings.providers.activeModel")}</span> : null}
+                      {model.effortLevels.length > 0 ? (
+                        <small className="provider-model-effort-meta">{t("settings.providers.effortCount", { count: model.effortLevels.length })}</small>
+                      ) : null}
                     </span>
                   </button>
                 );
@@ -795,9 +1070,9 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
 
           <div className="provider-model-detail">
             <div className="provider-model-detail-head">
-              <div>
+              <div className="provider-model-detail-title">
                 <strong>{t("settings.providers.modelDetails")}</strong>
-                <span>{editingModel.alias || editingModel.id}</span>
+                <span className="provider-model-detail-id">{editingModel.alias || editingModel.id}</span>
               </div>
               <button type="button" className="icon-action danger-button" disabled={!canRemoveModel} onClick={removeModel} aria-label={t("settings.providers.removeModel")} title={t("settings.providers.removeModel")}>
                 <Trash2 size={15} />
@@ -806,9 +1081,20 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
             <SettingsGrid>
               <TextSetting label={t("settings.providers.modelName.label")} value={editingModel.name} onChange={(name) => updateEditingModel({ name })} />
               <TextSetting label={t("settings.providers.modelAlias.label")} value={editingModel.alias} onChange={(alias) => updateEditingModel({ alias })} />
+              <NumberSetting
+                label={t("settings.providers.modelContextTokens.label")}
+                detail={t("settings.providers.modelContextTokens.detail", {
+                  effective: formatCompactTokens(resolveModelContextTokens(editingModel)),
+                })}
+                value={editingModel.contextTokens ?? 0}
+                min={0}
+                max={2_000_000}
+                step={1_000}
+                onChange={(contextTokens) => updateEditingModel({ contextTokens: contextTokens > 0 ? contextTokens : null })}
+              />
             </SettingsGrid>
             <div className="effort-editor">
-              <div>
+              <div className="effort-editor-head">
                 <strong>{t("settings.providers.thinkingEffort")}</strong>
                 <button type="button" onClick={() => {
                   const nextEffort = createAiEffortConfig(editingModel.effortLevels);
@@ -851,12 +1137,11 @@ function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: Ret
     <div className="settings-section-stack">
       <section className="index-status-card" data-status={aiIndex.status} data-quality={aiIndex.quality}>
         <div className="index-status-head">
-          <span className="index-status-icon"><Database size={18} /></span>
           <div>
             <strong>{statusLabel}</strong>
-            <span>{t("settings.indexing.filesIndexed", { indexed: aiIndex.indexedFiles, total: aiIndex.totalFiles })}</span>
+            <span>{t("settings.indexing.filesIndexed", { indexed: aiIndex.indexedFiles, total: aiIndex.totalFiles })} · {qualityLabel}</span>
           </div>
-          <em>{qualityLabel}</em>
+          <em>{Math.round(aiIndex.progress)}%</em>
         </div>
         <div className="index-progress"><span style={{ width: `${aiIndex.progress}%` }} /></div>
         <p className="index-summary-line">{t("settings.indexing.summary", { docs: aiIndex.docsFiles, memory: aiIndex.memoryFiles, rules: aiIndex.rulesFiles, source: aiIndex.sourceFiles, tests: aiIndex.testFiles })}</p>
@@ -967,7 +1252,28 @@ function resetSection(sectionId: SettingsSectionId, resetEditor: (preferences: E
       selectedEffortId: defaultAiPreferences.selectedEffortId,
       toolApprovalMode: defaultAiPreferences.toolApprovalMode,
       toolRoundLimit: defaultAiPreferences.toolRoundLimit,
+      maxParallelSubagents: defaultAiPreferences.maxParallelSubagents,
       showResponseDuration: defaultAiPreferences.showResponseDuration,
+      contextAutoCompactEnabled: defaultAiPreferences.contextAutoCompactEnabled,
+      contextAutoCompactThreshold: defaultAiPreferences.contextAutoCompactThreshold,
+    }));
+  } else if (sectionId === "ai-browser") {
+    resetAi(mergeAiPreferences(currentAiPreferences, {
+      agentBrowserEnabled: defaultAiPreferences.agentBrowserEnabled,
+      agentBrowserCommand: defaultAiPreferences.agentBrowserCommand,
+      agentBrowserHeaded: defaultAiPreferences.agentBrowserHeaded,
+      agentBrowserAllowedDomains: defaultAiPreferences.agentBrowserAllowedDomains,
+      agentBrowserMaxOutput: defaultAiPreferences.agentBrowserMaxOutput,
+      agentBrowserPersistSession: defaultAiPreferences.agentBrowserPersistSession,
+      agentBrowserProfile: defaultAiPreferences.agentBrowserProfile,
+      agentBrowserStatePath: defaultAiPreferences.agentBrowserStatePath,
+      agentBrowserContentBoundaries: defaultAiPreferences.agentBrowserContentBoundaries,
+      agentBrowserIgnoreHttpsErrors: defaultAiPreferences.agentBrowserIgnoreHttpsErrors,
+      agentBrowserAutoStreamPreview: defaultAiPreferences.agentBrowserAutoStreamPreview,
+      agentBrowserDashboardPort: defaultAiPreferences.agentBrowserDashboardPort,
+      agentBrowserAllowFileAccess: defaultAiPreferences.agentBrowserAllowFileAccess,
+      agentBrowserProvider: defaultAiPreferences.agentBrowserProvider,
+      agentBrowserProxy: defaultAiPreferences.agentBrowserProxy,
     }));
   } else if (sectionId === "ai-instructions") {
     resetAi(mergeAiPreferences(currentAiPreferences, {

@@ -1,0 +1,479 @@
+---
+pid: 32916
+cwd: "E:\Projects\!Lux IDE"
+command: "Set-Location -LiteralPath 'E:\\Projects\\!Lux IDE'; pnpm dev"
+started_at: 2026-06-04T21:24:01.744Z
+running_for_ms: 21070000 
+---
+
+> lux-ide@1.0.0 dev E:\Projects\!Lux IDE
+> pnpm --filter @lux/desktop tauri dev
+
+
+> @lux/desktop@1.0.0 tauri E:\Projects\!Lux IDE\apps\desktop
+> tauri "dev"
+
+     Running BeforeDevCommand (`pnpm dev`)
+
+> @lux/desktop@1.0.0 dev E:\Projects\!Lux IDE\apps\desktop
+> node ./scripts/kill-dev-port.mjs 5173 && node ./scripts/start-browser-preview.mjs
+
+(node:22940) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+  VITE v8.0.14  ready in 559 ms
+
+     Running  ➜  Local:   http://127.0.0.1:5173/
+ DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching E:\Projects\!Lux IDE\apps\desktop\src-tauri for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-core for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-dap for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-editor for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-extensions for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-file-intel for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-fs for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-git for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-lsp for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-search for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-settings for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-terminal for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-workspace for changes...
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 41.53s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-04][21:51:30][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][21:51:30][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+00:52:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:52:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:52:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:52:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:52:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:52:33 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatComposer.tsx
+00:52:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:52:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:52:59 [vite] (client) hmr update /src/components/EditorCloseGuard.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/SpreadsheetEditorPane.tsx, /src/components/FilePreviewPane.tsx
+00:52:59 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+00:52:59 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+00:52:59 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+00:52:59 [vite] (client) page reload src/main.tsx
+[2026-06-04][21:53:00][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][21:53:00][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-04][21:53:00][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][21:53:00][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-04][21:53:00][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][21:53:00][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-04][21:53:00][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][21:53:00][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+        Info File E:\Projects\!Lux IDE\crates\lux-core\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 652/666: lux-core                                                               Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+00:53:06 [vite] (client) hmr update /src/components/EditorArea.tsx
+   Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+   Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+   Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+   Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+   Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+   Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+   Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+   Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+    Building [=======================> ] 652/666: lux-dap…    Building [=======================> ] 653/666: lux-dap…    Building [=======================> ] 654/666: lux-dap…    Building [=======================> ] 655/666: lux-dap…    Building [=======================> ] 656/666: lux-dap…    Building [=======================> ] 657/666: lux-dap…    Building [=======================> ] 658/666: lux-dap…    Building [=======================> ] 659/666: lux-dap…    Building [=======================> ] 660/666: lux-dap…    Building [=======================> ] 661/666: lux-dap…    Building [=======================> ] 662/666: lux-dap…    Building [=======================> ] 663/666: lux-dap                                                                Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…00:53:13 [vite] (client) hmr update /src/components/ai-chat/AiChatComposer.tsx
+00:53:13 [vite] (client) hmr update /src/components/EditorArea.tsx
+00:53:13 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:53:22 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx and 4 more
+00:53:22 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+00:53:22 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx and 4 more
+00:53:22 [vite] (client) hmr update /src/styles/app.css
+    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 48.13s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File E:\Projects\!Lux IDE\crates\lux-core\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 652/666: lux-core                                                               Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+   Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+   Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+   Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+   Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+   Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+   Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+   Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+   Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+    Building [=======================> ] 652/666: lux-ter…    Building [=======================> ] 653/666: lux-ter…    Building [=======================> ] 654/666: lux-ter…    Building [=======================> ] 655/666: lux-dap…    Building [=======================> ] 657/666: lux-dap…    Building [=======================> ] 658/666: lux-dap…    Building [=======================> ] 659/666: lux-dap…    Building [=======================> ] 660/666: lux-cor…    Building [=======================> ] 661/666: lux-lsp…    Building [=======================> ] 662/666: lux-fil…    Building [=======================> ] 663/666: lux-ext…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 30.42s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-04][21:54:52][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][21:54:52][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+00:55:40 [vite] (client) hmr update /src/components/EditorArea.tsx
+00:55:40 [vite] (client) hmr update /src/components/EditorCloseGuard.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/SpreadsheetEditorPane.tsx, /src/components/FilePreviewPane.tsx, /src/components/ImageEditorPane.tsx
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…00:55:50 [vite] (client) hmr update /src/styles/app.css
+00:55:50 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx and 7 more
+00:55:50 [vite] (client) hmr update /src/components/FilePreviewPane.tsx
+00:55:50 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx and 7 more
+    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 56.69s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.61s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-04][21:58:28][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][21:58:28][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                            error[E0277]: the `?` operator can only be used in a closure that returns `Result` or `Option` (or another type that implements `FromResidual`)
+  --> crates\lux-file-intel\src\lib.rs:63:81
+   |
+63 |                 .unwrap_or_else(|| fallback_preview(&path, &descriptor, options)?)
+   |                                 --                                              ^ cannot use the `?` operator in a closure that returns `FilePreview`
+   |                                 |
+   |                                 this function should return `Result` or `Option` to accept `?`
+
+    Building [=======================> ] 663/666: lux-fil…                                                            For more information about this error, try `rustc --explain E0277`.
+    Building [=======================> ] 663/666: lux-fil…                                                            error: could not compile `lux-file-intel` (lib) due to 1 previous error
+00:59:19 [vite] (client) hmr update /src/components/FilePreviewPane.tsx
+00:59:19 [vite] (client) hmr update /src/components/FilePreviewPane.tsx
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…00:59:29 [vite] (client) hmr update /src/components/EditorArea.tsx
+00:59:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx and 7 more
+00:59:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx and 7 more
+00:59:38 [vite] (client) hmr update /src/components/EditorArea.tsx
+00:59:44 [vite] (client) hmr update /src/styles/app.css
+00:59:52 [vite] (client) hmr update /src/styles/app.css
+        Info File E:\Projects\!Lux IDE\crates\lux-core\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Blocking waiting for file lock on build directory
+00:59:56 [vite] (client) hmr update /src/styles/app.css
+        Info File E:\Projects\!Lux IDE\crates\lux-core\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Blocking waiting for file lock on build directory
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 652/666: lux-core                                                               Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+   Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+   Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+   Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+   Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+   Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+   Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+   Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+   Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+    Building [=======================> ] 652/666: lux-fs,…    Building [=======================> ] 653/666: lux-fs,…    Building [=======================> ] 654/666: lux-ext…    Building [=======================> ] 655/666: lux-ext…    Building [=======================> ] 656/666: lux-ext…    Building [=======================> ] 657/666: lux-ext…    Building [=======================> ] 658/666: lux-ext…    Building [=======================> ] 659/666: lux-ext…    Building [=======================> ] 660/666: lux-ext…    Building [=======================> ] 661/666: lux-ext…    Building [=======================> ] 662/666: lux-ext…    Building [=======================> ] 663/666: lux-ext…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…01:00:25 [vite] (client) hmr update /src/components/FilePreviewPane.tsx
+    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 09s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+01:04:40 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:04:45 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:04:45 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:04:45 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:04:52 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:04:57 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:05:03 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:05:03 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:05:03 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…01:05:17 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 06s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File E:\Projects\!Lux IDE\crates\lux-core\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Blocking waiting for file lock on build directory
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 652/666: lux-core                                                               Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+   Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+   Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+   Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+   Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+   Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+   Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+   Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+   Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+    Building [=======================> ] 652/666: lux-edi…    Building [=======================> ] 653/666: lux-edi…    Building [=======================> ] 654/666: lux-edi…    Building [=======================> ] 655/666: lux-edi…    Building [=======================> ] 656/666: lux-sea…    Building [=======================> ] 657/666: lux-sea…    Building [=======================> ] 658/666: lux-sea…    Building [=======================> ] 659/666: lux-lsp…    Building [=======================> ] 660/666: lux-lsp…    Building [=======================> ] 661/666: lux-lsp…    Building [=======================> ] 662/666: lux-lsp…    Building [=======================> ] 663/666: lux-ext…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 48.96s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 22.06s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\spreadsheet_edit.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.09s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\spreadsheet_edit.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                            error[E0425]: cannot find value `names` in this scope
+  --> crates\lux-file-intel\src\spreadsheet_edit.rs:68:64
+   |
+68 |             height > MAX_EDIT_ROWS || width > MAX_EDIT_COLS || names.len() > MAX_EDIT_SHEETS;
+   |                                                                ^^^^^
+   |
+help: a local variable with a similar name exists
+   |
+68 -             height > MAX_EDIT_ROWS || width > MAX_EDIT_COLS || names.len() > MAX_EDIT_SHEETS;
+68 +             height > MAX_EDIT_ROWS || width > MAX_EDIT_COLS || name.len() > MAX_EDIT_SHEETS;
+   |
+
+    Building [=======================> ] 663/666: lux-fil…                                                            error[E0425]: cannot find value `names` in this scope
+  --> crates\lux-file-intel\src\spreadsheet_edit.rs:75:18
+   |
+75 |     truncated |= names.len() > sheets.len();
+   |                  ^^^^^ not found in this scope
+
+    Building [=======================> ] 663/666: lux-fil…                                                            For more information about this error, try `rustc --explain E0425`.
+    Building [=======================> ] 663/666: lux-fil…                                                            error: could not compile `lux-file-intel` (lib) due to 2 previous errors
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\spreadsheet_edit.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 26.64s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 663/666: lux-fil…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 664/666: lux-des…    Building [=======================> ] 665/666: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 25.99s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-04][22:14:01][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][22:14:01][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+01:15:36 [vite] (client) hmr update /src/components/EditorCloseGuard.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/SpreadsheetEditorPane.tsx, /src/components/FilePreviewPane.tsx, /src/components/ImageEditorPane.tsx, /src/components/PdfEditorPane.tsx, /src/components/MediaEditorPane.tsx
+01:15:36 [vite] (client) hmr update /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx
+01:15:36 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+01:15:36 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+01:15:36 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+01:15:36 [vite] (client) page reload src/main.tsx
+[2026-06-04][22:15:37][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][22:15:37][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+01:15:49 [vite] (client) hmr update /src/components/EditorCloseGuard.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/SpreadsheetEditorPane.tsx, /src/components/FilePreviewPane.tsx, /src/components/ImageEditorPane.tsx, /src/components/PdfEditorPane.tsx, /src/components/MediaEditorPane.tsx
+01:15:49 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+01:15:49 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+01:15:49 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+01:15:49 [vite] (client) page reload src/main.tsx
+01:16:07 [vite] (client) hmr update /src/components/EditorArea.tsx
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\office_extract.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.54s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\Cargo.toml changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Updating crates.io index
+       Fetch 41 complete; 32 pending                             Fetch 41 complete; 6 pending                              Fetch 41 complete; 5 pending                              Fetch 41 complete; 1 pending                              Fetch 239 complete; 197 pending                           Fetch 239 complete; 99 pending                            Fetch 239 complete; 61 pending                            Fetch 239 complete; 28 pending                            Fetch 239 complete; 20 pending                            Fetch 239 complete; 1 pending                             Fetch 442 complete; 203 pending                           Fetch 442 complete; 103 pending                           Fetch 442 complete; 40 pending                            Fetch 442 complete; 34 pending                            Fetch 442 complete; 18 pending                            Fetch 442 complete; 1 pending                             Fetch 570 complete; 127 pending                           Fetch 570 complete; 51 pending                            Fetch 570 complete; 17 pending                            Fetch 570 complete; 15 pending                            Fetch 570 complete; 13 pending                            Fetch 570 complete; 1 pending                             Fetch 618 complete; 45 pending                            Fetch 618 complete; 6 pending                             Fetch 618 complete; 3 pending                             Fetch 618 complete; 1 pending                             Fetch 641 complete; 11 pending                            Fetch 641 complete; 6 pending                             Fetch 652 complete; 10 pending                            Fetch 652 complete; 1 pending                             Fetch 656 complete; 3 pending                                                                                       Locking 24 packages to latest compatible versions
+      Adding angle v0.5.0
+      Adding attribute-derive v0.10.5
+      Adding attribute-derive-macro v0.10.5
+      Adding collection_literals v1.0.3
+      Adding color-rs2 v0.9.0
+      Adding crunchy v0.2.4
+      Adding derive-where v1.6.1
+      Adding get-size-derive2 v0.7.4
+      Adding get-size2 v0.7.4
+      Adding half v2.7.1
+      Adding interpolator v0.5.0
+      Adding kparse v3.0.5
+      Adding manyhow v0.11.4
+      Adding manyhow-macros v0.11.4
+      Adding minimal-lexical v0.2.1
+      Adding nom v7.1.3
+      Adding nom_locate v4.2.0
+      Adding proc-macro-utils v0.10.0
+      Adding quick-xml v0.38.4
+      Adding quote-use v0.8.4
+      Adding quote-use-macros v0.8.4
+      Adding rust_decimal_macros v1.40.0
+      Adding spreadsheet-ods v1.0.4
+      Adding zip v6.0.0
+ Downloading 1 crate                                       Downloading 2 crates                                      Downloading 3 crates                                      Downloading 4 crates                                      Downloading 5 crates                                      Downloading 6 crates                                      Downloading 7 crates                                      Downloading 8 crates                                      Downloading 9 crates                                      Downloading 10 crates                                     Downloading 11 crates                                     Downloading 12 crates                                     Downloading 13 crates                                     Downloading 14 crates                                     Downloading 15 crates                                     Downloading 16 crates                                     Downloading 17 crates                                     Downloading 18 crates                                     Downloading 19 crates                                     Downloading 20 crates                                                                                                  Downloaded angle v0.5.0
+ Downloading 19 crates, remaining bytes: 3.4KiB                                                                         Downloaded collection_literals v1.0.3
+ Downloading 18 crates, remaining bytes: 19.6KiB                                                                        Downloaded manyhow-macros v0.11.4
+ Downloading 17 crates, remaining bytes: 268.8KiB                                                                       Downloaded quote-use-macros v0.8.4
+ Downloading 16 crates, remaining bytes: 265.0KiB                                                                       Downloaded get-size-derive2 v0.7.4
+ Downloading 15 crates, remaining bytes: 179.9KiB                                                                       Downloaded quote-use v0.8.4
+ Downloading 14 crates, remaining bytes: 163.9KiB                                                                       Downloaded manyhow v0.11.4
+ Downloading 13 crates, remaining bytes: 132.0KiB                                                                       Downloaded interpolator v0.5.0
+ Downloading 12 crates, remaining bytes: 84.0KiB                                                                        Downloaded proc-macro-utils v0.10.0
+ Downloading 11 crates, remaining bytes: 28.3KiB                                                                        Downloaded kparse v3.0.5
+ Downloading 10 crates, remaining bytes: 565.0KiB                                                                       Downloaded zerocopy-derive v0.8.49
+ Downloading 9 crates, remaining bytes: 485.7KiB                                                                        Downloaded rust_decimal_macros v1.40.0
+ Downloading 8 crates, remaining bytes: 421.8KiB                                                                        Downloaded zip v6.0.0
+ Downloading 7 crates, remaining bytes: 360.1KiB                                                                        Downloaded derive-where v1.6.1
+ Downloading 6 crates, remaining bytes: 312.2KiB                                                                        Downloaded nom_locate v4.2.0
+ Downloading 5 crates, remaining bytes: 260.1KiB                                                                        Downloaded color-rs2 v0.9.0
+ Downloading 4 crates, remaining bytes: 212.2KiB                                                                        Downloaded get-size2 v0.7.4
+ Downloading 3 crates, remaining bytes: 160.1KiB                                                                        Downloaded spreadsheet-ods v1.0.4
+ Downloading 2 crates, extracting spreadsheet-ods ...      Downloading 2 crates, remaining bytes: 23.0KiB                                                                         Downloaded attribute-derive v0.10.5
+ Downloading 1 crate, remaining bytes: 9.8KiB                                                                           Downloaded attribute-derive-macro v0.10.5
+ Downloading 0 crates                                                                                                   Downloaded 20 crates (977.2KiB) in 1.24s
+   Compiling phf_shared v0.13.1
+   Compiling new_debug_unreachable v1.0.6
+   Compiling precomputed-hash v0.1.1
+   Compiling num-traits v0.2.19
+   Compiling zerocopy v0.8.49
+   Compiling zerocopy-derive v0.8.49
+   Compiling proc-macro-utils v0.10.0
+   Compiling collection_literals v1.0.3
+   Compiling interpolator v0.5.0
+   Compiling rust_decimal v1.42.0
+   Compiling derive-where v1.6.1
+   Compiling minimal-lexical v0.2.1
+    Building [===============>         ] 453/689: precomp…                                                               Compiling tendril v0.5.0
+   Compiling zip v6.0.0
+   Compiling quick-xml v0.38.4
+    Building [==================>      ] 541/689: derive-…                                                               Compiling phf_generator v0.13.1
+    Building [==================>      ] 542/689: phf_gen…                                                               Compiling string_cache v0.9.0
+    Building [==================>      ] 543/689: phf_gen…                                                               Compiling nom v7.1.3
+    Building [==================>      ] 544/689: phf_gen…        Info File src-tauri\src\editor.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling phf_generator v0.13.1
+   Compiling string_cache v0.9.0
+   Compiling tendril v0.5.0
+   Compiling num-traits v0.2.19
+   Compiling zerocopy v0.8.49
+   Compiling zerocopy-derive v0.8.49
+   Compiling proc-macro-utils v0.10.0
+   Compiling rust_decimal v1.42.0
+   Compiling derive-where v1.6.1
+   Compiling nom v7.1.3
+   Compiling zip v6.0.0
+    Building [==================>      ] 541/689: string_…                                                               Compiling phf_codegen v0.13.1
+   Compiling phf_macros v0.13.1
+    Building [==================>      ] 543/689: string_…                                                               Compiling string_cache_codegen v0.6.1
+    Building [==================>      ] 544/689: string_…                                                               Compiling quick-xml v0.38.4
+    Building [==================>      ] 547/689: string_…                                                               Compiling selectors v0.36.1
+    Building [==================>      ] 548/689: string_…    Building [==================>      ] 549/689: string_…    Building [==================>      ] 550/689: string_…    Building [==================>      ] 551/689: string_…                                                               Compiling rust_decimal_macros v1.40.0
+    Building [===================>     ] 558/689: string_…                                                               Compiling manyhow-macros v0.11.4
+    Building [===================>     ] 559/689: manyhow…                                                               Compiling quote-use-macros v0.8.4
+    Building [===================>     ] 560/689: manyhow…    Building [===================>     ] 561/689: manyhow…    Building [===================>     ] 562/689: manyhow…                                                               Compiling web_atoms v0.2.4
+    Building [===================>     ] 563/689: manyhow…    Building [====================>    ] 597/689: manyhow…    Building [====================>    ] 598/689: manyhow…                                                               Compiling quote-use v0.8.4
+    Building [====================>    ] 599/689: manyhow…                                                               Compiling phf v0.13.1
+    Building [====================>    ] 600/689: manyhow…                                                               Compiling manyhow v0.11.4
+    Building [====================>    ] 601/689: manyhow…                                                               Compiling nom_locate v4.2.0
+    Building [====================>    ] 602/689: manyhow…                                                               Compiling chrono v0.4.44
+    Building [====================>    ] 602/689: manyhow…    Building [====================>    ] 603/689: manyhow…                                                               Compiling angle v0.5.0
+    Building [====================>    ] 603/689: manyhow…                                                               Compiling euclid v0.20.14
+    Building [====================>    ] 604/689: manyhow…    Building [====================>    ] 605/689: manyhow…                                                               Compiling kparse v3.0.5
+    Building [====================>    ] 605/689: manyhow…                                                               Compiling cssparser v0.36.0
+   Compiling tauri-utils v2.9.2
+    Building [=====================>   ] 607/689: manyhow…    Building [=====================>   ] 608/689: manyhow…    Building [=====================>   ] 609/689: manyhow…    Building [=====================>   ] 610/689: manyhow…    Building [=====================>   ] 611/689: manyhow…    Building [=====================>   ] 612/689: manyhow…                                                               Compiling attribute-derive-macro v0.10.5
+    Building [=====================>   ] 613/689: web_ato…                                                               Compiling byte-unit v5.2.0
+    Building [=====================>   ] 613/689: web_ato…    Building [=====================>   ] 614/689: euclid,…    Building [=====================>   ] 615/689: euclid,…    Building [=====================>   ] 616/689: euclid,…    Building [=====================>   ] 617/689: euclid,…    Building [=====================>   ] 618/689: tauri-u…    Building [=====================>   ] 619/689: tauri-u…                                                               Compiling ts-rs v10.1.0
+    Building [=====================>   ] 619/689: tauri-u…                                                               Compiling attribute-derive v0.10.5
+    Building [=====================>   ] 620/689: attribu…    Building [=====================>   ] 621/689: attribu…                                                               Compiling markup5ever v0.38.0
+    Building [=====================>   ] 621/689: attribu…    Building [=====================>   ] 622/689: attribu…                                                               Compiling html5ever v0.38.0
+    Building [=====================>   ] 622/689: attribu…                                                               Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=====================>   ] 622/689: attribu…    Building [=====================>   ] 623/689: attribu…    Building [=====================>   ] 624/689: attribu…                                                               Compiling get-size-derive2 v0.7.4
+    Building [=====================>   ] 625/689: get-siz…    Building [=====================>   ] 626/689: get-siz…                                                               Compiling dom_query v0.27.0
+    Building [=====================>   ] 626/689: get-siz…    Building [=====================>   ] 627/689: get-siz…                                                               Compiling get-size2 v0.7.4
+    Building [=====================>   ] 628/689: dom_que…    Building [=====================>   ] 629/689: dom_que…    Building [=====================>   ] 630/689: tauri-u…                                                               Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling ahash v0.8.12
+    Building [=====================>   ] 630/689: half, p…    Building [=====================>   ] 631/689: half, p…                                                               Compiling umya-spreadsheet v2.3.3
+    Building [=====================>   ] 631/689: half, p…    Building [=====================>   ] 632/689: half, p…                                                               Compiling color-rs2 v0.9.0
+    Building [=====================>   ] 632/689: half, p…                                                               Compiling rand_chacha v0.9.0
+    Building [=====================>   ] 632/689: half, p…    Building [=====================>   ] 633/689: half, t…    Building [======================>  ] 634/689: tauri-u…                                                               Compiling rand v0.9.4
+    Building [======================>  ] 634/689: tauri-u…                                                               Compiling spreadsheet-ods v1.0.4
+    Building [======================>  ] 634/689: tauri-u…    Building [======================>  ] 635/689: tauri-u…    Building [======================>  ] 636/689: tauri-u…                                                               Compiling lopdf v0.38.0
+    Building [======================>  ] 636/689: lopdf, …    Building [======================>  ] 637/689: lopdf, …                                                               Compiling tauri-runtime v2.11.2
+    Building [======================>  ] 637/689: lopdf, …                                                               Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+   Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+    Building [======================>  ] 637/689: lopdf, …                                                               Compiling tauri-runtime-wry v2.11.2
+    Building [======================>  ] 638/689: lopdf, …                                                               Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+    Building [======================>  ] 639/689: lopdf, …                                                               Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+    Building [======================>  ] 639/689: lopdf, …                                                               Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+    Building [======================>  ] 639/689: lux-git…                                                               Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+    Building [======================>  ] 640/689: lux-git…                                                               Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+    Building [======================>  ] 641/689: lux-git…                                                               Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+    Building [======================>  ] 642/689: lux-git…                                                               Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+    Building [======================>  ] 643/689: lux-fs,…                                                               Compiling pdf-extract v0.10.0
+    Building [======================>  ] 644/689: lopdf, …    Building [======================>  ] 645/689: lopdf, …    Building [======================>  ] 646/689: lopdf, …        Info File src-tauri\src\media_intel.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling tauri-utils v2.9.2
+   Compiling lopdf v0.38.0
+   Compiling umya-spreadsheet v2.3.3
+   Compiling spreadsheet-ods v1.0.4
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+   Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+   Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+   Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+    Building [======================>  ] 644/689: tauri-u…    Building [======================>  ] 645/689: tauri-u…                                                               Compiling pdf-extract v0.10.0
+    Building [======================>  ] 645/689: tauri-u…    Building [======================>  ] 646/689: tauri-u…    Building [======================>  ] 647/689: tauri-u…    Building [======================>  ] 648/689: tauri-u…        Info File src-tauri\src\voice_input.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info File src-tauri\src\voice_input.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling tauri-utils v2.9.2
+   Compiling lopdf v0.38.0
+   Compiling umya-spreadsheet v2.3.3
+   Compiling spreadsheet-ods v1.0.4
+    Building [======================>  ] 648/689: spreads…                                                               Compiling pdf-extract v0.10.0
+    Building [======================>  ] 648/689: pdf-ext…        Info File src-tauri\src\voice_input.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling tauri-utils v2.9.2
+   Compiling lopdf v0.38.0
+   Compiling umya-spreadsheet v2.3.3
+   Compiling spreadsheet-ods v1.0.4
+    Building [======================>  ] 648/689: tauri-u…        Info File src-tauri\src\media_intel.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling tauri-utils v2.9.2
+   Compiling lopdf v0.38.0
+   Compiling umya-spreadsheet v2.3.3
+   Compiling spreadsheet-ods v1.0.4
+    Building [======================>  ] 648/689: umya-sp…                                                               Compiling pdf-extract v0.10.0
+    Building [======================>  ] 648/689: umya-sp…    Building [======================>  ] 649/689: umya-sp…    Building [======================>  ] 650/689: umya-sp…                                                               Compiling tauri-runtime v2.11.2
+    Building [======================>  ] 650/689: umya-sp…                                                               Compiling tauri-runtime-wry v2.11.2
+    Building [======================>  ] 650/689: umya-sp…    Building [======================>  ] 651/689: umya-sp…    Building [======================>  ] 652/689: umya-sp…                                                               Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [======================>  ] 652/689: umya-sp…                                                            error[E0599]: no method named `read_stream` found for struct `CompoundFile<F>` in the current scope
+   --> crates\lux-file-intel\src\office_extract.rs:125:13
+    |
+125 |     if comp.read_stream(stream_name, &mut buffer).is_err() {
+    |             ^^^^^^^^^^^
+    |
+help: there is a method `create_stream` with a similar name, but with different arguments
+   --> C:\Users\GofMan3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\cfb-0.10.0\src\lib.rs:829:5
+    |
+829 | /     pub fn create_stream<P: AsRef<Path>>(
+830 | |         &mut self,
+831 | |         path: P,
+832 | |     ) -> io::Result<Stream<F>> {
+    | |______________________________^
+
+    Building [======================>  ] 652/689: umya-sp…                                                            For more information about this error, try `rustc --explain E0599`.
+    Building [======================>  ] 652/689: umya-sp…                                                            error: could not compile `lux-file-intel` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+    Building [======================>  ] 653/689: umya-sp…    Building [======================>  ] 654/689: umya-sp…    Building [======================>  ] 655/689: umya-sp…01:17:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:17:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:17:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:17:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:17:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:17:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:17:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+    Building [======================>  ] 656/689: tauri-u…                                                            E:\Projects\!Lux IDE\apps\desktop:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @lux/desktop@1.0.0 tauri: `tauri "dev"`
+Exit status 101
+ ELIFECYCLE  Command failed with exit code 101.

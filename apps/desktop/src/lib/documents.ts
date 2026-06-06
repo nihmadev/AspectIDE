@@ -1,4 +1,4 @@
-import type { DocumentSnapshot } from "./types";
+import type { DocumentSnapshot, FileOpenMode } from "./types";
 import { displayPath, normalizePath } from "./fileTree";
 
 export function documentTitle(document: DocumentSnapshot) {
@@ -24,4 +24,57 @@ export function documentRelativePath(document: DocumentSnapshot, root: string | 
   return normalizePath(normalizedPath).startsWith(`${normalizePath(normalizedRoot)}/`)
     ? normalizedPath.slice(normalizedRoot.length + 1)
     : normalizedPath;
+}
+
+export function isEditorTextMode(mode: FileOpenMode) {
+  return mode === "editableText" || mode === "readOnlyText";
+}
+
+export function isEditorTextDocument(document: Pick<DocumentSnapshot, "view">) {
+  return isEditorTextMode(document.view.mode);
+}
+
+/** Monaco-backed text editor (excludes spreadsheet workbooks and markdown split view). */
+export function isMonacoTextDocument(document: Pick<DocumentSnapshot, "view">) {
+  return isEditorTextMode(document.view.mode)
+    && document.view.strategy !== "spreadsheetEditor"
+    && document.view.strategy !== "tableEditor"
+    && document.view.strategy !== "markdownPreview"
+    && document.view.strategy !== "diagramPreview";
+}
+
+export function isSpreadsheetEditorDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.strategy === "spreadsheetEditor";
+}
+
+export function isTableEditorDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.strategy === "tableEditor";
+}
+
+export function isDatabaseEditorDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.strategy === "databaseEditor";
+}
+
+export function isDiagramPreviewDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.strategy === "diagramPreview";
+}
+
+export function isEditableTextDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.mode === "editableText";
+}
+
+export function isImagePreviewDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.strategy === "imagePreview";
+}
+
+export function isPdfPreviewDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.strategy === "pdfPreview";
+}
+
+export function isMarkdownPreviewDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.strategy === "markdownPreview";
+}
+
+export function isPreviewDocument(document: Pick<DocumentSnapshot, "view">) {
+  return document.view.mode === "preview" || document.view.mode === "external";
 }

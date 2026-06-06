@@ -1,10 +1,21 @@
-import { Circle, FileCode2, Minus, Plus, RotateCcw, Save, SaveAll, SquareSplitHorizontal, X } from "lucide-react";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { Circle, FileCode2, Globe, Minus, Plus, RotateCcw, Save, SaveAll, SquareSplitHorizontal, X } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { Panel, Group, Separator } from "react-resizable-panels";
 import { useMutation } from "@tanstack/react-query";
 import type { editor } from "monaco-editor";
 import { useEditorCloseGuard } from "./EditorCloseGuard";
 import { FilePreviewPane } from "./FilePreviewPane";
+import { ImageEditorPane } from "./ImageEditorPane";
+import { MediaEditorPane } from "./MediaEditorPane";
+import { PdfEditorPane } from "./PdfEditorPane";
+import { MarkdownEditorPane } from "./MarkdownEditorPane";
+import { DatabaseEditorPane } from "./DatabaseEditorPane";
+import { DiagramEditorPane } from "./DiagramEditorPane";
+import { SpreadsheetEditorPane } from "./SpreadsheetEditorPane";
+import { TableEditorPane } from "./TableEditorPane";
+import { isAgentBrowserPreviewDocument } from "../lib/agentBrowserPreviewDocument";
+import { resolveEditorPaneKind } from "../lib/documentViewRouting";
+import { AgentBrowserPreviewEditorPane } from "./AgentBrowserPreviewEditorPane";
 import { useTranslation } from "../lib/i18n/useTranslation";
 import { resetEditorFontZoom, updateEditorFontSize, zoomEditorFontIn, zoomEditorFontOut } from "../lib/editorPreferenceCommands";
 import {
@@ -15,8 +26,26 @@ import {
   closedDocumentIdsForOtherDocuments,
   closedDocumentIdsForOtherDocumentsInGroup,
 } from "../lib/editorCloseTargets";
-import { documentDisplayPath, documentRelativePath, documentTitle } from "../lib/documents";
+import {
+  documentDisplayPath,
+  documentRelativePath,
+  documentTitle,
+  isEditableTextDocument,
+} from "../lib/documents";
+import { setEditorTabDragData } from "../lib/editorChatBridge";
 import { normalizePath, parentPath } from "../lib/fileTree";
+import { AiFileReviewBar } from "./ai-chat/AiFileReviewBar";
+import {
+  getPendingFileReviewsSnapshot,
+  listPendingFileReviewsForPath,
+  subscribePendingFileReviews,
+} from "../lib/aiPendingFileReview";
+import {
+  applyAiEditDecorations,
+  createEmptyAiEditDecorationState,
+  type AiEditDecorationState,
+} from "../lib/monacoAiEditDecorations";
+import { setEditorSelectionSnapshot } from "../lib/editorSelectionBridge";
 import { applyDebugBreakpointDecorations, registerDebugBreakpointGutter } from "../lib/monacoDebugAdapters";
 import {
   applyDiagnosticsMarkers,
@@ -67,6 +96,7 @@ export function EditorArea() {
   const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
   const setSidebarVisible = useLuxStore((state) => state.setSidebarVisible);
   const editorPreferences = useLuxStore((state) => state.editorPreferences);
+  const aiPreferences = useLuxStore((state) => state.aiPreferences);
   const diagnosticsByPath = useLuxStore((state) => state.diagnosticsByPath);
   const debugSourceBreakpointsByPath = useLuxStore((state) => state.debugSourceBreakpointsByPath);
   const debugResolvedBreakpointsByPath = useLuxStore((state) => state.debugResolvedBreakpointsByPath);
@@ -121,6 +151,13 @@ export function EditorArea() {
     editorOperationQueues.current.set(documentId, next);
     void next.finally(() => {
       if (editorOperationQueues.current.get(documentId) === next) editorOperationQueues.current.delete(documentId);
+    });
+  };
+
+  const applySpreadsheetChanges = (id: string, text: string) => {
+    enqueueEditorOperation(id, async () => {
+      const document = await luxCommands.editorUpdateText(id, text);
+      upsertDocument(document);
     });
   };
 
@@ -215,6 +252,7 @@ export function EditorArea() {
               debugResolvedBreakpointsByPath={debugResolvedBreakpointsByPath}
               debugSourceBreakpointsByPath={debugSourceBreakpointsByPath}
               editorPreferences={editorPreferences}
+              aiPreferences={aiPreferences}
               pendingEditorReveal={pendingEditorReveal}
               setPendingEditorReveal={setPendingEditorReveal}
               consumePendingEditorReveal={consumePendingEditorReveal}
@@ -234,6 +272,7 @@ export function EditorArea() {
               splitDocumentInGroup={splitDocumentInGroup}
               toggleDebugSourceBreakpoint={toggleDebugSourceBreakpoint}
               applyEditorChanges={applyEditorChanges}
+              applySpreadsheetChanges={applySpreadsheetChanges}
               updateOpenDocuments={updateOpenDocuments}
               upsertDocument={upsertDocument}
               workspaceRoot={workspace?.root ?? null}
@@ -260,6 +299,7 @@ function EditorGroupPane({
   debugResolvedBreakpointsByPath,
   debugSourceBreakpointsByPath,
   editorPreferences,
+  aiPreferences,
   pendingEditorReveal,
   setPendingEditorReveal,
   consumePendingEditorReveal,
@@ -278,6 +318,7 @@ function EditorGroupPane({
   splitDocumentInGroup,
   toggleDebugSourceBreakpoint,
   applyEditorChanges,
+  applySpreadsheetChanges,
   updateOpenDocuments,
   upsertDocument,
   workspaceRoot,
@@ -296,6 +337,7 @@ function EditorGroupPane({
   debugResolvedBreakpointsByPath: ReturnType<typeof useLuxStore.getState>["debugResolvedBreakpointsByPath"];
   debugSourceBreakpointsByPath: ReturnType<typeof useLuxStore.getState>["debugSourceBreakpointsByPath"];
   editorPreferences: typeof useLuxStore.getState extends () => infer T ? T extends { editorPreferences: infer P } ? P : never : never;
+  aiPreferences: typeof useLuxStore.getState extends () => infer T ? T extends { aiPreferences: infer P } ? P : never : never;
   pendingEditorReveal: ReturnType<typeof useLuxStore.getState>["pendingEditorReveal"];
   setPendingEditorReveal: ReturnType<typeof useLuxStore.getState>["setPendingEditorReveal"];
   consumePendingEditorReveal: ReturnType<typeof useLuxStore.getState>["consumePendingEditorReveal"];
@@ -314,29 +356,50 @@ function EditorGroupPane({
   splitDocumentInGroup: (groupId: string, documentId: string, side: "left" | "right") => void;
   toggleDebugSourceBreakpoint: (path: string, line: number) => void;
   applyEditorChanges: (id: string, event: editor.IModelContentChangedEvent, value: string | undefined) => void;
+  applySpreadsheetChanges: (id: string, text: string) => void;
   updateOpenDocuments: ReturnType<typeof useLuxStore.getState>["updateOpenDocuments"];
   upsertDocument: ReturnType<typeof useLuxStore.getState>["upsertDocument"];
   workspaceRoot: string | null;
 }) {
   const { t } = useTranslation();
+  const activeAiChatSessionId = useLuxStore((state) => state.activeAiChatSessionId);
   const isActiveGroup = activeEditorGroupId === group.id;
   const editorRef = useRef<MonacoEditorInstance | null>(null);
   const monacoRef = useRef<MonacoInstance | null>(null);
   const lspProviderDisposablesRef = useRef<MonacoDisposable[]>([]);
   const breakpointGutterDisposableRef = useRef<MonacoDisposable | null>(null);
   const breakpointDecorationsRef = useRef<string[]>([]);
+  const aiEditDecorationsRef = useRef<AiEditDecorationState>(createEmptyAiEditDecorationState());
+  const pendingReviews = useSyncExternalStore(
+    subscribePendingFileReviews,
+    getPendingFileReviewsSnapshot,
+    getPendingFileReviewsSnapshot,
+  );
+  const activeFileReview = useMemo(() => {
+    if (!activeDocument.path) return null;
+    return listPendingFileReviewsForPath(activeDocument.path)[0] ?? null;
+  }, [activeDocument.path, pendingReviews]);
   const diagnostics = activeDocument.path ? diagnosticsByPath[normalizePath(activeDocument.path)] ?? noDiagnostics : noDiagnostics;
   const activeDocumentPath = activeDocument.path ? normalizePath(activeDocument.path) : null;
   const sourceBreakpoints = activeDocumentPath ? debugSourceBreakpointsByPath[activeDocumentPath] ?? [] : [];
   const resolvedBreakpoints = activeDocumentPath ? debugResolvedBreakpointsByPath[activeDocumentPath] ?? [] : [];
-  const isMonacoDocument = activeDocument.view.strategy === "monacoText" || activeDocument.view.strategy === "diagramPreview";
-  const isEditableDocument = activeDocument.view.mode === "editableText";
+  const editorPaneKind = resolveEditorPaneKind(activeDocument);
+  const isMonacoDocument = editorPaneKind === "monaco" || editorPaneKind === "markdown" || editorPaneKind === "diagram";
+  const isEditableDocument = isEditableTextDocument(activeDocument);
 
   useEffect(() => () => {
     disposeLspProviders(lspProviderDisposablesRef.current);
     lspProviderDisposablesRef.current = [];
     breakpointGutterDisposableRef.current?.dispose();
     breakpointGutterDisposableRef.current = null;
+    if (editorRef.current && monacoRef.current) {
+      aiEditDecorationsRef.current = applyAiEditDecorations(
+        editorRef.current,
+        monacoRef.current,
+        aiEditDecorationsRef.current,
+        null,
+      );
+    }
   }, []);
 
   useEffect(() => {
@@ -360,6 +423,16 @@ function EditorGroupPane({
     if (pendingEditorReveal?.documentId !== activeDocument.id) return;
     revealEditorTarget(editorRef.current, consumePendingEditorReveal(activeDocument.id));
   }, [activeDocument.id, consumePendingEditorReveal, pendingEditorReveal]);
+
+  useEffect(() => {
+    if (!isMonacoDocument) return;
+    aiEditDecorationsRef.current = applyAiEditDecorations(
+      editorRef.current,
+      monacoRef.current,
+      aiEditDecorationsRef.current,
+      activeFileReview,
+    );
+  }, [activeFileReview, activeDocument.text, isMonacoDocument]);
 
   useEffect(() => {
     if (!isMonacoDocument) return;
@@ -396,6 +469,7 @@ function EditorGroupPane({
               {documents.map((document) => (
                 <EditorTab
                   active={document.id === activeDocument.id}
+                  aiPendingReview={Boolean(document.path && listPendingFileReviewsForPath(document.path).length > 0)}
                   document={document}
                   groupId={group.id}
                   key={document.id}
@@ -502,8 +576,60 @@ function EditorGroupPane({
               <Save size={15} />
             </button>
           </div>
-          {isMonacoDocument ? (
-            <Suspense fallback={<div className="editor-loading">{t("editor.status.loading")}</div>}>
+          {editorPaneKind === "browserPreview" ? (
+            <AgentBrowserPreviewEditorPane document={activeDocument} preferences={aiPreferences} />
+          ) : editorPaneKind === "database" ? (
+            <DatabaseEditorPane document={activeDocument} />
+          ) : editorPaneKind === "spreadsheet" ? (
+            <SpreadsheetEditorPane
+              document={activeDocument}
+              onChange={(text) => applySpreadsheetChanges(activeDocument.id, text)}
+            />
+          ) : editorPaneKind === "table" ? (
+            <TableEditorPane
+              document={activeDocument}
+              onChange={(text) => applySpreadsheetChanges(activeDocument.id, text)}
+            />
+          ) : editorPaneKind === "diagram" ? (
+            <DiagramEditorPane
+              document={activeDocument}
+              fontFamily="JetBrains Mono, Cascadia Code, Consolas, monospace"
+              fontLigatures={editorPreferences.fontLigatures}
+              fontSize={editorPreferences.fontSize}
+              lineHeight={editorPreferences.lineHeight}
+              minimap={editorPreferences.minimap}
+              onChange={(text) => applySpreadsheetChanges(activeDocument.id, text)}
+              readOnly={!isEditableDocument}
+              renderWhitespace={editorPreferences.renderWhitespace}
+              smoothScrolling={editorPreferences.smoothScrolling}
+              tabSize={editorPreferences.tabSize}
+              wordWrap={editorPreferences.wordWrap}
+            />
+          ) : editorPaneKind === "image" ? (
+            <ImageEditorPane document={activeDocument} />
+          ) : editorPaneKind === "pdf" ? (
+            <PdfEditorPane document={activeDocument} />
+          ) : editorPaneKind === "media" ? (
+            <MediaEditorPane document={activeDocument} />
+          ) : editorPaneKind === "markdown" ? (
+            <MarkdownEditorPane
+              document={activeDocument}
+              fontFamily="JetBrains Mono, Cascadia Code, Consolas, monospace"
+              fontLigatures={editorPreferences.fontLigatures}
+              fontSize={editorPreferences.fontSize}
+              lineHeight={editorPreferences.lineHeight}
+              minimap={editorPreferences.minimap}
+              onChange={(text) => applySpreadsheetChanges(activeDocument.id, text)}
+              readOnly={!isEditableDocument}
+              renderWhitespace={editorPreferences.renderWhitespace}
+              smoothScrolling={editorPreferences.smoothScrolling}
+              tabSize={editorPreferences.tabSize}
+              wordWrap={editorPreferences.wordWrap}
+            />
+          ) : editorPaneKind === "monaco" ? (
+            <>
+              <AiFileReviewBar documentPath={activeDocument.path} sessionId={activeAiChatSessionId} />
+              <Suspense fallback={<div className="editor-loading">{t("editor.status.loading")}</div>}>
               <MonacoEditor
                 height="100%"
                 theme="vs-dark"
@@ -519,7 +645,7 @@ function EditorGroupPane({
                   minimap: { enabled: editorPreferences.minimap, scale: 0.75 },
                   mouseWheelZoom: false,
                   padding: { top: 18, bottom: 18 },
-                  readOnly: activeDocument.view.mode === "readOnlyText",
+                  readOnly: !isEditableDocument,
                   renderWhitespace: editorPreferences.renderWhitespace,
                   smoothScrolling: editorPreferences.smoothScrolling,
                   scrollBeyondLastLine: false,
@@ -536,8 +662,31 @@ function EditorGroupPane({
                 onMount={(editor, monaco) => {
                   editorRef.current = editor;
                   monacoRef.current = monaco;
+                  editor.onDidChangeCursorSelection(() => {
+                    const selection = editor.getSelection();
+                    const model = editor.getModel();
+                    if (!selection || !model || !activeDocument.path) {
+                      setEditorSelectionSnapshot(null);
+                      return;
+                    }
+                    const selectedText = model.getValueInRange(selection);
+                    if (!selectedText.trim()) {
+                      setEditorSelectionSnapshot(null);
+                      return;
+                    }
+                    setEditorSelectionSnapshot({
+                      documentId: activeDocument.id,
+                      path: activeDocument.path,
+                      languageId: activeDocument.language_id,
+                      startLine: selection.startLineNumber,
+                      endLine: selection.endLineNumber,
+                      startColumn: selection.startColumn,
+                      endColumn: selection.endColumn,
+                      text: selectedText,
+                    });
+                  });
                   disposeLspProviders(lspProviderDisposablesRef.current);
-                  lspProviderDisposablesRef.current = activeDocument.view.mode === "editableText" ? registerLspProviders({
+                  lspProviderDisposablesRef.current = isEditableDocument ? registerLspProviders({
                     document: activeDocument,
                     editor,
                     monaco,
@@ -547,14 +696,21 @@ function EditorGroupPane({
                     t,
                   }) : [];
                   breakpointGutterDisposableRef.current?.dispose();
-                  breakpointGutterDisposableRef.current = activeDocument.view.mode === "editableText" ? registerDebugBreakpointGutter(editor, monaco, activeDocument, toggleDebugSourceBreakpoint) : null;
+                  breakpointGutterDisposableRef.current = isEditableDocument ? registerDebugBreakpointGutter(editor, monaco, activeDocument, toggleDebugSourceBreakpoint) : null;
                   applyDiagnosticsMarkers(editor, monaco, group.id, diagnostics);
                   breakpointDecorationsRef.current = applyDebugBreakpointDecorations(editor, monaco, breakpointDecorationsRef.current, activeDocument, sourceBreakpoints, resolvedBreakpoints);
                   revealEditorTarget(editor, consumePendingEditorReveal(activeDocument.id));
+                  aiEditDecorationsRef.current = applyAiEditDecorations(
+                    editor,
+                    monaco,
+                    aiEditDecorationsRef.current,
+                    activeFileReview,
+                  );
                 }}
               />
             </Suspense>
-          ) : <FilePreviewPane document={activeDocument} />}
+            </>
+          ) : <FilePreviewPane document={activeDocument} variant="editor" />}
         </div>
       </Panel>
     </>
@@ -563,6 +719,7 @@ function EditorGroupPane({
 
 function EditorTab({
   active,
+  aiPendingReview = false,
   closeAllDocuments,
   closeDocumentsToRightInGroup,
   closeDocumentInGroup,
@@ -581,6 +738,7 @@ function EditorTab({
   workspaceRoot,
 }: {
   active: boolean;
+  aiPendingReview?: boolean;
   closeAllDocuments: () => void;
   closeDocumentsToRightInGroup: (groupId: string, documentId: string) => void;
   closeDocumentInGroup: (groupId: string, documentId: string) => void;
@@ -644,6 +802,7 @@ function EditorTab({
     <div
       className="editor-tab"
       data-active={active}
+      data-ai-pending={aiPendingReview || undefined}
       key={document.id}
       title={documentDisplayPath(document)}
       onContextMenu={(event) => {
@@ -664,9 +823,14 @@ function EditorTab({
         type="button"
         role="tab"
         aria-selected={active}
+        draggable
+        title={t("editor.tab.dragToChatHint", { name })}
+        onDragStart={(event) => {
+          setEditorTabDragData(event.dataTransfer, document.id);
+        }}
         onClick={() => setActiveDocumentInGroup(groupId, document.id)}
       >
-        <FileCode2 size={15} />
+        {isAgentBrowserPreviewDocument(document) ? <Globe size={15} /> : <FileCode2 size={15} />}
         <span>{name}</span>
         {document.is_dirty && <Circle className="dirty-dot" size={8} fill="currentColor" />}
       </button>

@@ -58,6 +58,16 @@ export type { FilePreview } from "../../../../crates/lux-core/bindings/FilePrevi
 export type { FileViewCategory } from "../../../../crates/lux-core/bindings/FileViewCategory";
 export type { FileViewDescriptor } from "../../../../crates/lux-core/bindings/FileViewDescriptor";
 export type { FileViewStrategy } from "../../../../crates/lux-core/bindings/FileViewStrategy";
+export type { DatabaseTablePreview } from "../../../../crates/lux-core/bindings/DatabaseTablePreview";
+
+export type TableEditDocument = {
+  format: string;
+  delimiter: string;
+  fileType: string;
+  truncated: boolean;
+  headers: string[];
+  rows: string[][];
+};
 export type { GitDiff } from "../../../../crates/lux-core/bindings/GitDiff";
 export type { GitDiffFile } from "../../../../crates/lux-core/bindings/GitDiffFile";
 export type { GitFileStatus } from "../../../../crates/lux-core/bindings/GitFileStatus";

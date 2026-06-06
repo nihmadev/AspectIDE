@@ -1,0 +1,184 @@
+---
+pid: 23508
+cwd: "E:\Projects\!Lux IDE"
+command: "Set-Location -LiteralPath 'E:\\Projects\\!Lux IDE'; pnpm dev"
+started_at: 2026-06-04T20:56:07.641Z
+running_for_ms: 22745010 
+---
+
+> lux-ide@1.0.0 dev E:\Projects\!Lux IDE
+> pnpm --filter @lux/desktop tauri dev
+
+
+> @lux/desktop@1.0.0 tauri E:\Projects\!Lux IDE\apps\desktop
+> tauri "dev"
+
+     Running BeforeDevCommand (`pnpm dev`)
+
+> @lux/desktop@1.0.0 dev E:\Projects\!Lux IDE\apps\desktop
+> node ./scripts/kill-dev-port.mjs 5173 && node ./scripts/start-browser-preview.mjs
+
+(node:34108) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+  VITE v8.0.14  ready in 325 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching E:\Projects\!Lux IDE\apps\desktop\src-tauri for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-core for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-dap for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-editor for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-extensions for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-file-intel for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-fs for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-git for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-lsp for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-search for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-settings for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-terminal for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-workspace for changes...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.98s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-04][21:10:06][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][21:10:06][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-04][21:10:38][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-04][21:10:38][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\Cargo.toml changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info File E:\Projects\!Lux IDE\crates\lux-core\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Updating crates.io index
+       Fetch 38 complete; 30 pending                             Fetch 38 complete; 11 pending                             Fetch 225 complete; 187 pending                           Fetch 225 complete; 89 pending                            Fetch 225 complete; 48 pending                            Fetch 225 complete; 42 pending                            Fetch 225 complete; 23 pending                            Fetch 225 complete; 14 pending                            Fetch 420 complete; 195 pending                           Fetch 420 complete; 30 pending                            Fetch 420 complete; 13 pending                            Fetch 420 complete; 12 pending                            Fetch 543 complete; 123 pending                           Fetch 543 complete; 23 pending                            Fetch 543 complete; 8 pending                             Fetch 592 complete; 49 pending                            Fetch 592 complete; 37 pending                            Fetch 592 complete; 3 pending                             Fetch 592 complete; 2 pending                             Fetch 618 complete; 26 pending                            Fetch 632 complete; 14 pending                            Fetch 636 complete; 4 pending                             Fetch 637 complete; 1 pending                                                                                       Locking 17 packages to latest compatible versions
+      Adding ahash v0.8.12
+      Adding cfb v0.10.0
+      Adding doc-comment v0.3.4
+      Adding fancy-regex v0.14.0
+      Adding hmac v0.12.1
+      Adding html_parser v0.7.0
+      Adding imagesize v0.14.0
+      Adding pest v2.8.6
+      Adding pest_derive v2.8.6
+      Adding pest_generator v2.8.6
+      Adding pest_meta v2.8.6
+      Adding quick-xml v0.37.5
+      Adding thin-vec v0.2.18
+      Adding thousands v0.2.0
+      Adding ucd-trie v0.1.7
+      Adding umya-spreadsheet v2.3.3 (available: v3.0.0)
+      Adding zip v2.4.2
+ Downloading 1 crate                                       Downloading 2 crates                                      Downloading 3 crates                                      Downloading 4 crates                                      Downloading 5 crates                                      Downloading 6 crates                                      Downloading 7 crates                                      Downloading 8 crates                                      Downloading 9 crates                                      Downloading 10 crates                                     Downloading 11 crates                                     Downloading 12 crates                                     Downloading 13 crates                                     Downloading 14 crates                                     Downloading 14 crates, remaining bytes: 122.0KiB                                                                       Downloaded doc-comment v0.3.4
+ Downloading 13 crates, remaining bytes: 10.5MiB                                                                        Downloaded thousands v0.2.0
+ Downloading 12 crates, remaining bytes: 10.4MiB                                                                        Downloaded imagesize v0.14.0
+ Downloading 11 crates, remaining bytes: 10.2MiB                                                                        Downloaded thin-vec v0.2.18
+ Downloading 10 crates, remaining bytes: 10.1MiB                                                                        Downloaded pest_derive v2.8.6
+ Downloading 9 crates, remaining bytes: 10.0MiB                                                                         Downloaded pest_generator v2.8.6
+ Downloading 8 crates, remaining bytes: 9.9MiB                                                                          Downloaded pest_meta v2.8.6
+ Downloading 7 crates, remaining bytes: 9.8MiB                                                                          Downloaded quick-xml v0.37.5
+ Downloading 6 crates, remaining bytes: 9.7MiB                                                                          Downloaded zip v2.4.2
+ Downloading 5 crates, remaining bytes: 9.7MiB                                                                          Downloaded fancy-regex v0.14.0
+ Downloading 4 crates, remaining bytes: 9.6MiB                                                                          Downloaded pest v2.8.6
+ Downloading 3 crates, remaining bytes: 9.6MiB                                                                          Downloaded html_parser v0.7.0
+ Downloading 2 crates, remaining bytes: 9.6MiB                                                                          Downloaded cfb v0.10.0
+ Downloading 1 crate, remaining bytes: 9.6MiB              Downloading 1 crate, remaining bytes: 7.2MiB              Downloading 1 crate, remaining bytes: 5.0MiB              Downloading 1 crate, remaining bytes: 2.9MiB              Downloading 1 crate, remaining bytes: 551.2KiB                                                                         Downloaded umya-spreadsheet v2.3.3
+ Downloading 0 crates, extracting umya-spreadsheet ...                                                                  Downloaded 14 crates (10.6MiB) in 1.94s (largest was `umya-spreadsheet` at 9.8MiB)
+   Compiling bit-vec v0.8.0
+   Compiling regex-automata v0.4.14
+   Compiling digest v0.10.7
+   Compiling ucd-trie v0.1.7
+   Compiling doc-comment v0.3.4
+   Compiling ahash v0.8.12
+   Compiling zip v2.4.2
+   Compiling cfb v0.10.0
+   Compiling quick-xml v0.37.5
+   Compiling thousands v0.2.0
+   Compiling thin-vec v0.2.18
+    Building [===================>     ] 552/666: ahash(b…                                                               Compiling sha2 v0.10.9
+    Building [===================>     ] 553/666: ahash(b…                                                               Compiling bit-set v0.8.0
+    Building [===================>     ] 554/666: ahash(b…    Building [===================>     ] 555/666: ahash(b…                                                               Compiling pest v2.8.6
+    Building [===================>     ] 556/666: ahash(b…                                                               Compiling md-5 v0.10.6
+    Building [===================>     ] 557/666: ahash(b…                                                               Compiling dom_query v0.27.0
+    Building [===================>     ] 558/666: ahash(b…    Building [===================>     ] 559/666: ahash(b…    Building [====================>    ] 560/666: ahash(b…    Building [====================>    ] 561/666: quick-x…                                                               Compiling wasmtime-environ v45.0.0
+    Building [====================>    ] 562/666: quick-x…    Building [====================>    ] 563/666: doc-com…    Building [====================>    ] 564/666: doc-com…        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\spreadsheet_edit.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling dom_query v0.27.0
+   Compiling regex-automata v0.4.14
+   Compiling sha2 v0.10.9
+   Compiling pest v2.8.6
+   Compiling doc-comment v0.3.4
+   Compiling zip v2.4.2
+   Compiling ahash v0.8.12
+   Compiling hmac v0.12.1
+   Compiling cfb v0.10.0
+   Compiling quick-xml v0.37.5
+    Building [===================>     ] 553/666: ahash(b…    Building [===================>     ] 554/666: ahash(b…    Building [===================>     ] 555/666: ahash(b…                                                               Compiling wasmtime-environ v45.0.0
+    Building [===================>     ] 556/666: pest, q…    Building [===================>     ] 557/666: pest, q…                                                               Compiling lopdf v0.38.0
+    Building [===================>     ] 558/666: pest, q…                                                               Compiling imagesize v0.14.0
+    Building [====================>    ] 570/666: pest, q…    Building [=====================>   ] 593/666: pest, q…    Building [=====================>   ] 594/666: pest, q…                                                               Compiling tauri-utils v2.9.2
+    Building [=====================>   ] 594/666: pest, q…    Building [=====================>   ] 595/666: pest, q…    Building [=====================>   ] 596/666: pest, q…                                                               Compiling pest_meta v2.8.6
+    Building [=====================>   ] 596/666: pest, q…    Building [=====================>   ] 597/666: pest, q…    Building [=====================>   ] 598/666: pest, q…    Building [=====================>   ] 599/666: quick-x…    Building [=====================>   ] 600/666: quick-x…    Building [=====================>   ] 601/666: tauri-u…                                                               Compiling pest_generator v2.8.6
+    Building [=====================>   ] 601/666: tauri-u…    Building [=====================>   ] 602/666: tauri-u…                                                               Compiling regex v1.12.3
+   Compiling globset v0.4.18
+   Compiling fancy-regex v0.14.0
+    Building [=====================>   ] 602/666: fancy-r…                                                               Compiling pest_derive v2.8.6
+    Building [=====================>   ] 603/666: fancy-r…                                                               Compiling urlpattern v0.3.0
+    Building [=====================>   ] 603/666: fancy-r…                                                               Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=====================>   ] 603/666: fancy-r…                                                               Compiling ignore v0.4.25
+    Building [=====================>   ] 604/666: fancy-r…                                                               Compiling html_parser v0.7.0
+    Building [=====================>   ] 605/666: html_pa…    Building [=====================>   ] 606/666: html_pa…                                                               Compiling pdf-extract v0.10.0
+    Building [=====================>   ] 606/666: html_pa…    Building [=====================>   ] 607/666: html_pa…                                                               Compiling umya-spreadsheet v2.3.3
+    Building [=====================>   ] 607/666: html_pa…    Building [=====================>   ] 608/666: html_pa…    Building [=====================>   ] 609/666: html_pa…    Building [=====================>   ] 610/666: html_pa…    Building [=====================>   ] 611/666: html_pa…    Building [=====================>   ] 612/666: tauri-u…                                                               Compiling wasmtime-internal-unwinder v45.0.0
+    Building [=====================>   ] 612/666: tauri-u…    Building [======================>  ] 613/666: tauri-u…                                                               Compiling wasmtime-internal-cranelift v45.0.0
+    Building [======================>  ] 613/666: tauri-u…    Building [======================>  ] 614/666: tauri-u…                                                               Compiling tauri-plugin v2.6.2
+   Compiling tauri-build v2.6.2
+   Compiling tauri-codegen v2.6.2
+    Building [======================>  ] 614/666: tauri-u…    Building [======================>  ] 615/666: tauri-u…    Building [======================>  ] 616/666: tauri-u…                                                               Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+    Building [======================>  ] 616/666: tauri-u…                                                               Compiling tauri-runtime v2.11.2
+    Building [======================>  ] 617/666: tauri-u…                                                               Compiling tauri-runtime-wry v2.11.2
+    Building [======================>  ] 617/666: tauri-u…                                                               Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+    Building [======================>  ] 618/666: tauri-u…                                                               Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+    Building [======================>  ] 619/666: tauri-u…                                                               Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+    Building [======================>  ] 619/666: tauri-u…                                                               Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+    Building [======================>  ] 619/666: tauri-u…                                                               Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+    Building [======================>  ] 620/666: tauri-u…                                                               Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+    Building [======================>  ] 621/666: tauri-u…                                                               Compiling tauri v2.11.2
+    Building [======================>  ] 622/666: tauri-u…                                                               Compiling tauri-macros v2.6.2
+    Building [======================>  ] 623/666: tauri-u…                                                               Compiling tauri-plugin-fs v2.5.1
+    Building [======================>  ] 624/666: tauri-u…                                                               Compiling tauri-plugin-dialog v2.7.1
+    Building [======================>  ] 625/666: tauri-u…                                                               Compiling tauri-plugin-shell v2.3.5
+    Building [======================>  ] 626/666: tauri-p…                                                               Compiling tauri-plugin-process v2.3.1
+    Building [======================>  ] 627/666: tauri-p…                                                               Compiling tauri-plugin-log v2.8.0
+    Building [======================>  ] 627/666: tauri-p…                                                               Compiling tauri-plugin-opener v2.5.4
+    Building [======================>  ] 628/666: tauri-p…                                                               Compiling tauri-plugin-updater v2.10.1
+    Building [======================>  ] 629/666: tauri-p…                                                               Compiling wasmtime v45.0.0
+    Building [======================>  ] 630/666: tauri-u…    Building [======================>  ] 631/666: tauri-u…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [======================>  ] 632/666: tauri-u…                                                               Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [======================>  ] 633/666: tauri-u…                                                               Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+    Building [======================>  ] 634/666: tauri-u…    Building [======================>  ] 635/666: tauri-u…    Building [======================>  ] 636/666: tauri-u…    Building [======================>  ] 637/666: tauri-p…    Building [======================>  ] 638/666: tauri-p…                                                            error[E0004]: non-exhaustive patterns: `FileViewStrategy::SpreadsheetEditor` not covered
+   --> crates\lux-file-intel\src\lib.rs:85:11
+    |
+ 85 |     match descriptor.strategy {
+    |           ^^^^^^^^^^^^^^^^^^^ pattern `FileViewStrategy::SpreadsheetEditor` not covered
+    |
+note: `FileViewStrategy` defined here
+   --> crates\lux-core\src\lib.rs:198:1
+    |
+198 | pub enum FileViewStrategy {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+203 |     SpreadsheetEditor,
+    |     ----------------- not covered
+    = note: the matched value is of type `FileViewStrategy`
+help: ensure that all possible cases are being handled by adding a match arm with a wildcard pattern or an explicit pattern as shown
+    |
+108 ~         }),
+109 ~         FileViewStrategy::SpreadsheetEditor => todo!(),
+    |
+
+    Building [======================>  ] 638/666: tauri-p…    Building [======================>  ] 639/666: tauri-p…                                                            For more information about this error, try `rustc --explain E0004`.
+    Building [======================>  ] 639/666: tauri-p…                                                            error: could not compile `lux-file-intel` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+    Building [=======================> ] 640/666: tauri-p…    Building [=======================> ] 641/666: tauri-u…    Building [=======================> ] 642/666: tauri-u…    Building [=======================> ] 643/666: tauri-u…    Building [=======================> ] 644/666: tauri-u…    Building [=======================> ] 645/666: tauri-u…    Building [=======================> ] 646/666: tauri-u…    Building [=======================> ] 647/666: wasmtim…    Building [=======================> ] 648/666: wasmtim…    Building [=======================> ] 649/666: wasmtim…    Building [=======================> ] 650/666: wasmtime                                                            E:\Projects\!Lux IDE\apps\desktop:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @lux/desktop@1.0.0 tauri: `tauri "dev"`
+Exit status 101
+ ELIFECYCLE  Command failed with exit code 101.

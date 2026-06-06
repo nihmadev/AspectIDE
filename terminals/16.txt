@@ -1,0 +1,1151 @@
+---
+pid: 36300
+cwd: "E:\Projects\!Lux IDE"
+command: "cmd.exe /c C:\\Users\\GofMan3\\start-lux-dev.bat"
+started_at: 2026-06-05T16:40:13.278Z
+running_for_ms: 17590013 
+---
+
+> lux-ide@1.0.0 dev E:\Projects\!Lux IDE
+> pnpm --filter @lux/desktop tauri dev
+
+
+> @lux/desktop@1.0.0 tauri E:\Projects\!Lux IDE\apps\desktop
+> tauri "dev"
+
+     Running BeforeDevCommand (`pnpm dev`)
+
+> @lux/desktop@1.0.0 dev E:\Projects\!Lux IDE\apps\desktop
+> node ./scripts/kill-dev-port.mjs 5173 && node ./scripts/start-browser-preview.mjs
+
+(node:23308) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+
+  VITE v8.0.14  ready in 326 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching E:\Projects\!Lux IDE\apps\desktop\src-tauri for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-core for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-dap for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-editor for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-extensions for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-file-intel for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-fs for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-git for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-lsp for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-search for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-settings for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-terminal for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-workspace for changes...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.65s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-05][16:40:25][reqwest::connect][DEBUG] starting new connection: https://registry.npmjs.org/
+19:46:19 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx
+19:46:19 [vite] (client) hmr update /src/App.tsx
+19:46:19 [vite] (client) hmr update /src/App.tsx
+19:46:19 [vite] (client) hmr update /src/App.tsx
+19:46:19 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:46:19 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx
+19:46:19 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:46:19 [vite] (client) page reload src/main.tsx
+19:46:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx
+19:46:40 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:46:40 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx
+19:46:40 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:46:40 [vite] (client) page reload src/main.tsx
+19:46:53 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx
+19:46:53 [vite] (client) hmr update /src/styles/ai-chat.css
+19:46:53 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:46:53 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx
+19:46:53 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:46:53 [vite] (client) page reload src/main.tsx
+19:49:31 [vite] (client) hmr update /src/App.tsx
+19:52:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx
+19:52:40 [vite] (client) hmr update /src/styles/ai-chat.css
+19:52:40 [vite] (client) hmr update /src/App.tsx
+19:52:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx
+19:52:41 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:52:41 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx
+19:52:41 [vite] (client) hmr update /src/App.tsx
+19:52:41 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:52:41 [vite] (client) page reload src/main.tsx
+[2026-06-05][16:54:25][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][16:54:25][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+19:58:26 [vite] (client) hmr update /src/App.tsx, /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+19:58:26 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AgentBrowserPreview.tsx, /src/components/ai-chat/AiAgentNowBar.tsx
+19:58:26 [vite] (client) hmr update /src/App.tsx, /src/components/EditorArea.tsx, /src/components/ai-chat/AiFileReviewBar.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/AiChatPanel.tsx
+19:58:35 [vite] (client) hmr update /src/App.tsx, /src/components/EditorArea.tsx, /src/components/ai-chat/AiFileReviewBar.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/AiChatPanel.tsx
+19:58:35 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AgentBrowserPreview.tsx
+19:58:42 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+19:58:42 [vite] (client) hmr update /src/components/ai-chat/AiSubagentPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/ai-chat/AiAgentNowBar.tsx, /src/components/AiChatPanel.tsx
+19:58:42 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:58:42 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:58:42 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx
+19:58:42 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+19:58:42 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:58:42 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+19:58:42 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:58:42 [vite] (client) page reload src/main.tsx
+19:58:55 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:59:04 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:59:12 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:59:12 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:59:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:59:30 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:59:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:59:47 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+19:59:47 [vite] (client) hmr update /src/styles/ai-chat.css
+19:59:47 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+19:59:47 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+19:59:47 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:59:47 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+19:59:47 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+19:59:47 [vite] (client) page reload src/main.tsx
+20:00:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:01:12 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:01:12 [vite] (client) hmr update /src/components/ai-chat/AiSubagentPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/ai-chat/AiAgentNowBar.tsx, /src/components/AiChatPanel.tsx
+20:01:12 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:01:13 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:01:13 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:01:13 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:01:13 [vite] (client) page reload src/main.tsx
+20:01:22 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:01:22 [vite] (client) hmr update /src/App.tsx, /src/components/EditorArea.tsx, /src/components/ai-chat/AiFileReviewBar.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAutomaticChecklist.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx
+20:01:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:01:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:01:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorArea.tsx, /src/components/ai-chat/AiFileReviewBar.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAutomaticChecklist.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx
+20:01:37 [vite] (client) hmr update /src/components/ai-chat/AiChatSlashMenu.tsx
+20:01:37 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:01:37 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:01:37 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+20:01:56 [vite] (client) hmr update /src/styles/ai-chat.css
+20:01:56 [vite] (client) hmr update /src/components/ai-chat/AiSubagentPanel.tsx
+20:01:56 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:01:56 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:01:56 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:01:56 [vite] (client) hmr update /src/styles/ai-chat.css
+20:01:56 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:01:56 [vite] (client) hmr update /src/components/ai-chat/AiSubagentPanel.tsx
+20:01:56 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:01:56 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:01:56 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:01:56 [vite] (client) hmr update /src/components/ai-chat/AiSubagentPanel.tsx
+20:01:56 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:01:56 [vite] (client) page reload src/main.tsx
+20:03:19 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:03:19 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:03:19 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:03:19 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:03:19 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:03:19 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:03:19 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:03:19 [vite] (client) page reload src/main.tsx
+20:03:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:03:29 [vite] (client) hmr update /src/styles/ai-chat.css
+20:03:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:03:29 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:03:29 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:03:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:03:29 [vite] (client) hmr update /src/styles/ai-chat.css
+20:03:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:03:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:03:29 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:03:29 [vite] (client) page reload src/main.tsx
+20:03:29 [vite] (client) hmr update /src/styles/ai-chat.css
+20:03:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 18 more
+20:03:29 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:03:29 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:03:29 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:03:29 [vite] (client) page reload src/main.tsx
+20:03:29 [vite] (client) hmr update /src/styles/ai-chat.css
+20:03:29 [vite] (client) hmr update /src/styles/ai-chat.css
+20:03:29 [vite] (client) hmr update /src/styles/ai-chat.css
+20:03:29 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][17:05:08][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][17:05:08][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][17:05:08][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][17:05:08][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+20:05:21 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:05:21 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:05:21 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:05:21 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:05:21 [vite] (client) page reload src/main.tsx
+20:05:34 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:07:08 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:07:08 [vite] (client) hmr update /src/components/AgentWorkspace.tsx
+20:07:08 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:07:08 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:07:08 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:07:08 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:07:08 [vite] (client) page reload src/main.tsx
+20:07:30 [vite] (client) hmr update /src/components/AgentWorkspace.tsx
+20:07:30 [vite] (client) hmr update /src/styles/app.css
+20:07:32 [vite] (client) hmr update /src/components/AgentWorkspace.tsx
+20:07:32 [vite] (client) hmr update /src/styles/app.css
+20:07:43 [vite] (client) hmr update /src/styles/app.css
+20:07:43 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:07:43 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:07:43 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:07:43 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:07:43 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:07:43 [vite] (client) page reload src/main.tsx
+20:08:43 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:08:43 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:08:43 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+20:08:43 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:08:43 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:08:52 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:08:52 [vite] (client) hmr update /src/styles/ai-chat.css
+20:08:52 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:08:52 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:08:52 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:08:52 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:08:52 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:08:53 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:08:53 [vite] (client) page reload src/main.tsx
+[2026-06-05][17:09:04][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][17:09:04][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+20:09:07 [vite] (client) hmr update /src/components/ai-chat/AiChatSlashMenu.tsx
+20:14:04 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:14:11 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:14:11 [vite] Internal server error: Transform failed with 2 errors:
+
+[PARSE_ERROR] Expected corresponding JSX closing tag for 'div'.
+     ╭─[ src/components/ai-chat/AiAgentOrchestrationRail.tsx:179:7 ]
+     │
+  84 │       <div className="ai-agent-rail-scroll">
+     │        ─┬─  
+     │         ╰─── Opened here
+     │ 
+ 179 │     </aside>
+     │       ──┬──  
+     │         ╰──── Expected `</div>`
+─────╯
+
+[PARSE_ERROR] Unexpected token. Did you mean `{'}'}` or `&rbrace;`?
+     ╭─[ src/components/ai-chat/AiAgentOrchestrationRail.tsx:181:1 ]
+     │
+ 181 │ }
+     │ │ 
+     │ ╰─ 
+─────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/components/ai-chat/AiAgentOrchestrationRail.tsx
+      at transformWithOxc (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3338:19)
+      at TransformPluginContext.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3409:26)
+      at EnvironmentPluginContainer.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:30273:51)
+      at async loadAndTransform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24532:26)
+      at async viteTransformMiddleware (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24326:20)
+20:14:15 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:14:24 [vite] (client) hmr update /src/styles/ai-chat.css
+20:14:27 [vite] (client) hmr update /src/styles/ai-chat.css
+20:14:30 [vite] (client) hmr update /src/styles/ai-chat.css
+20:14:34 [vite] (client) hmr update /src/styles/ai-chat.css
+20:14:37 [vite] (client) hmr update /src/styles/ai-chat.css
+20:14:40 [vite] (client) hmr update /src/styles/ai-chat.css
+20:14:43 [vite] (client) hmr update /src/styles/ai-chat.css
+20:14:47 [vite] (client) hmr update /src/styles/ai-chat.css
+20:14:51 [vite] (client) hmr update /src/styles/ai-chat.css
+20:15:14 [vite] (client) hmr update /src/styles/ai-chat.css
+20:15:19 [vite] (client) hmr update /src/styles/ai-chat.css
+20:15:22 [vite] (client) hmr update /src/styles/ai-chat.css
+20:15:26 [vite] (client) hmr update /src/styles/ai-chat.css
+20:16:09 [vite] (client) page reload temp-dist-check/index.html
+20:16:14 [vite] (client) page reload temp-dist-check/index.html
+[2026-06-05][17:16:22][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+20:16:54 [vite] (client) page reload temp-dist-check/index.html
+20:16:54 [vite] (client) page reload temp-dist-check/index.html
+20:17:07 [vite] (client) hmr update /src/styles/ai-chat.css
+20:17:14 [vite] (client) page reload temp-dist-check/index.html
+20:17:14 [vite] (client) page reload temp-dist-check/index.html
+20:20:39 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:20:39 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:20:39 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:20:39 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:20:39 [vite] (client) page reload src/main.tsx
+20:20:47 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:20:48 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:20:48 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:20:48 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:20:48 [vite] (client) page reload src/main.tsx
+20:20:52 [vite] (client) hmr update /src/components/ai-chat/AiTurnSummaryCard.tsx
+20:20:55 [vite] (client) hmr update /src/components/ai-chat/AiTurnSummaryCard.tsx
+20:20:58 [vite] (client) hmr update /src/components/ai-chat/AiTurnSummaryCard.tsx
+20:21:01 [vite] (client) hmr update /src/components/ai-chat/AiTurnSummaryCard.tsx
+20:21:03 [vite] (client) hmr update /src/components/ai-chat/AiTurnSummaryCard.tsx
+20:21:06 [vite] (client) hmr update /src/components/ai-chat/AiTurnSummaryCard.tsx
+20:21:10 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+20:21:13 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+20:21:18 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+20:21:23 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+20:21:28 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+[2026-06-05][17:21:30][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][17:21:30][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+20:21:33 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+20:21:44 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:21:46 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:21:52 [vite] (client) hmr update /src/styles/ai-chat.css
+20:21:54 [vite] (client) hmr update /src/styles/ai-chat.css
+20:22:29 [vite] (client) page reload temp-dist-check/index.html
+20:22:30 [vite] (client) page reload temp-dist-check/index.html
+[2026-06-05][17:23:28][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][17:23:41][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][17:23:44][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+20:23:59 [vite] (client) hmr update /src/components/ai-chat/AiIndexStatusBanner.tsx
+[2026-06-05][17:24:05][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+20:24:06 [vite] (client) hmr update /src/components/ai-chat/AiIndexStatusBanner.tsx
+20:24:10 [vite] (client) hmr update /src/components/ai-chat/AiIndexStatusBanner.tsx
+20:24:14 [vite] (client) hmr update /src/styles/ai-chat.css
+20:24:18 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:24:22 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+[2026-06-05][17:24:26][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][17:24:26][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][17:24:26][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+20:24:27 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:24:34 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:24:38 [vite] (client) hmr update /src/styles/ai-chat.css
+20:24:43 [vite] (client) hmr update /src/styles/ai-chat.css
+20:24:49 [vite] (client) hmr update /src/styles/ai-chat.css
+20:24:57 [vite] (client) hmr update /src/styles/ai-chat.css
+20:25:03 [vite] (client) hmr update /src/styles/ai-chat.css
+20:25:08 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:25:15 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:25:19 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:25:23 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:25:26 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:25:45 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:25:48 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:25:51 [vite] (client) hmr update /src/styles/ai-chat.css
+20:25:57 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:26:21 [vite] (client) page reload temp-dist-check/index.html
+20:26:21 [vite] (client) page reload temp-dist-check/index.html
+20:27:14 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:27:17 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:27:20 [vite] (client) hmr update /src/styles/ai-chat.css
+20:27:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiIndexStatusBanner.tsx
+20:27:43 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:27:47 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiIndexStatusBanner.tsx
+20:28:16 [vite] (client) page reload temp-dist-check/index.html
+20:28:17 [vite] (client) page reload temp-dist-check/index.html
+20:30:55 [vite] (client) hmr update /src/styles/ai-chat.css
+20:32:38 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:33:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:33:34 [vite] (client) hmr update /src/components/AiToolCall.tsx
+20:33:37 [vite] (client) hmr update /src/components/AiToolCall.tsx
+[2026-06-05][17:34:53][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][17:34:53][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+20:37:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:37:50 [vite] (client) hmr update /src/App.tsx, /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:37:54 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/App.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:37:54 [vite] (client) hmr update /src/App.tsx, /src/components/EditorArea.tsx, /src/components/ai-chat/AiFileReviewBar.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAutomaticChecklist.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx
+20:38:09 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:38:09 [vite] (client) hmr update /src/styles/ai-chat.css
+20:38:09 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:38:09 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:38:09 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:38:09 [vite] (client) hmr update /src/styles/ai-chat.css
+20:38:09 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:38:09 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:38:09 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:38:09 [vite] (client) page reload src/main.tsx
+20:38:17 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/App.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/EditorArea.tsx, /src/components/ai-chat/AiFileReviewBar.tsx, /src/components/ai-chat/AiAutomaticChecklist.tsx
+20:43:01 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+20:43:01 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:43:01 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:43:01 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:43:18 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:43:42 [vite] (client) hmr update /src/styles/ai-chat.css
+20:43:42 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:43:42 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+20:43:42 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:43:42 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:43:42 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:43:42 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:43:42 [vite] (client) page reload src/main.tsx
+20:43:42 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+[2026-06-05][17:43:42][reqwest::connect][DEBUG] starting new connection: https://registry.npmjs.org/
+20:44:05 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][17:45:32][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][17:45:32][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][17:45:44][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][17:46:07][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][17:46:07][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][17:46:08][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+20:46:15 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:46:15 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+[2026-06-05][17:46:27][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+20:46:30 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][17:46:57][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][17:47:11][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][17:47:14][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+20:47:57 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:47:57 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:48:06 [vite] (client) hmr update /src/App.tsx, /src/components/EditorArea.tsx, /src/components/ai-chat/AiFileReviewBar.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAutomaticChecklist.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx
+20:50:29 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+20:50:35 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+20:50:35 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:50:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:50:41 [vite] (client) hmr update /src/styles/ai-chat.css
+20:50:41 [vite] (client) hmr update /src/styles/ai-chat.css
+20:50:41 [vite] (client) hmr update /src/styles/ai-chat.css
+20:50:41 [vite] (client) hmr update /src/styles/ai-chat.css
+20:50:50 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:51:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:51:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:51:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:51:48 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:54:04 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:54:04 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:54:09 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:54:09 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:58:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:58:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+20:58:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+20:58:06 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:58:06 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+20:58:06 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:58:06 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+20:58:06 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+20:58:06 [vite] (client) page reload src/main.tsx
+20:58:11 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][17:58:32][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][17:58:32][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+21:00:26 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:00:26 [vite] Internal server error: Transform failed with 1 error:
+
+[PARSE_ERROR] Unexpected token
+ -  in src/components/AiChatPanel.tsx at 45969..45970
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/components/AiChatPanel.tsx
+      at transformWithOxc (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3338:19)
+      at TransformPluginContext.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3409:26)
+      at EnvironmentPluginContainer.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:30273:51)
+      at async loadAndTransform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24532:26)
+      at async viteTransformMiddleware (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24326:20)
+21:00:26 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+21:00:26 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:00:26 [vite] Internal server error: Transform failed with 1 error:
+
+[PARSE_ERROR] Unexpected token
+ -  in src/components/AiChatPanel.tsx at 45969..45970
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/components/AiChatPanel.tsx
+      at transformWithOxc (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3338:19)
+      at TransformPluginContext.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3409:26)
+      at EnvironmentPluginContainer.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:30273:51)
+      at async loadAndTransform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24532:26)
+      at async viteTransformMiddleware (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24326:20)
+21:02:39 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+21:02:39 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:02:39 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:02:39 [vite] Internal server error: Transform failed with 1 error:
+
+[PARSE_ERROR] Unexpected token
+ -  in src/components/AiChatPanel.tsx at 46019..46020
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/components/AiChatPanel.tsx
+      at transformWithOxc (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3338:19)
+      at TransformPluginContext.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3409:26)
+      at EnvironmentPluginContainer.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:30273:51)
+      at async loadAndTransform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24532:26)
+      at async viteTransformMiddleware (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24326:20)
+21:02:39 [vite] Internal server error: Transform failed with 1 error:
+
+[PARSE_ERROR] Unexpected token
+ -  in src/components/AiChatPanel.tsx at 46028..46029
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/components/AiChatPanel.tsx
+      at transformWithOxc (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3338:19)
+      at TransformPluginContext.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3409:26)
+      at EnvironmentPluginContainer.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:30273:51)
+      at async loadAndTransform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24532:26)
+      at async viteTransformMiddleware (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24326:20)
+21:02:39 [vite] Internal server error: Transform failed with 1 error:
+
+[PARSE_ERROR] Unexpected token
+ -  in src/components/AiChatPanel.tsx at 46028..46029
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/components/AiChatPanel.tsx
+      at transformWithOxc (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3338:19)
+      at TransformPluginContext.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3409:26)
+      at EnvironmentPluginContainer.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:30273:51)
+      at async loadAndTransform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24532:26)
+      at async viteTransformMiddleware (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24326:20)
+21:02:46 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][18:16:04][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:16:43][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][18:16:43][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][18:16:51][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:17:09][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:17:20][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:17:20][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:17:20][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:17:35][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:17:40][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+21:18:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:18:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:18:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][18:18:04][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:18:04][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:18:04][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:18:12][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:18:27][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:18:59][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:19:00][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:19:00][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:19:04][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:19:09][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:19:20][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:19:24][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:19:26][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:19:29][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+21:20:32 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:20:32 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:20:38 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:20:38 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:20:43 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:21:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:21:17 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:21:42 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:23:50 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatHistoryPopover.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx
+21:24:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:24:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:24:37 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:24:37 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:24:47 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:24:48 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:24:48 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:24:48 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:24:56 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:24:56 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:25:13 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+21:25:13 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+21:25:13 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:25:13 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+21:25:13 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:25:13 [vite] (client) page reload src/main.tsx
+21:25:22 [vite] (client) hmr update /src/styles/ai-chat.css
+21:31:33 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:31:54 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:32:05 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+21:32:05 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:32:05 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 19 more
+21:32:05 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:32:05 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+21:32:05 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:32:05 [vite] (client) page reload src/main.tsx
+21:32:53 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:35:04 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:35:04 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+[2026-06-05][18:35:43][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:35:43][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:35:49][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:35:53][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:35:55][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][18:35:57][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+21:37:06 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:37:14 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:37:27 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:37:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:37:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+21:37:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:37:41 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:37:41 [vite] Internal server error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `stopGoalRun` has already been declared
+    ╭─[ src/components/AiChatPanel.tsx:54:3 ]
+    │
+ 54 │   stopGoalRun,
+    │   ─────┬─────  
+    │        ╰─────── `stopGoalRun` has already been declared here
+ 55 │   stopGoalRun,
+    │   ─────┬─────  
+    │        ╰─────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/components/AiChatPanel.tsx
+      at transformWithOxc (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3338:19)
+      at TransformPluginContext.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3409:26)
+      at EnvironmentPluginContainer.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:30273:51)
+      at async loadAndTransform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24532:26)
+      at async viteTransformMiddleware (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24326:20)
+21:37:48 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:37:48 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:37:55 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:38:02 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+[2026-06-05][18:38:08][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+21:38:10 [vite] (client) hmr update /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:38:10 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+[2026-06-05][18:38:13][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:38:13][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:38:13][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:38:18][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+21:38:18 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:38:18 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:38:18 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+21:38:18 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:38:18 [vite] (client) page reload src/main.tsx
+21:38:26 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:38:26 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:38:26 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+21:38:26 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:38:26 [vite] (client) page reload src/main.tsx
+[2026-06-05][18:38:32][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:38:32][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:40:16][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:40:22][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:40:22][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:40:22][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:40:22][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:40:22][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:40:28][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:40:28][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:40:28][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:40:28][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:40:28][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:40:36][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+21:42:12 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+[2026-06-05][18:42:52][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:43:02][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:43:02][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:43:02][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:43:02][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:43:03][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:43:07][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:43:11][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:43:18][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+21:45:13 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:45:13 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/SettingsDialog.tsx
+21:45:13 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:45:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:45:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:45:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][18:46:08][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:46:15][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:46:15][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:46:15][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:46:15][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:46:15][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:46:22][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:46:22][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:46:22][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:46:22][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:46:22][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:46:26][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:46:33][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:46:33][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][18:46:33][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][18:46:43][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+21:49:29 [vite] (client) hmr update /src/components/ai-chat/AiTurnSummaryCard.tsx
+21:49:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:49:29 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+21:49:29 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:49:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:49:30 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:49:30 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+21:49:30 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:49:30 [vite] (client) page reload src/main.tsx
+[2026-06-05][18:49:30][reqwest::connect][DEBUG] starting new connection: https://registry.npmjs.org/
+21:49:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:49:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx
+21:49:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:53:21 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:53:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:53:21 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:53:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:53:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:53:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+21:53:21 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:53:21 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+21:53:21 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:53:21 [vite] (client) page reload src/main.tsx
+21:53:27 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:54:20 [vite] (client) hmr update /src/components/ai-chat/AiChatSlashMenu.tsx
+21:54:20 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:55:19 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/SettingsDialog.tsx
+[2026-06-05][18:55:22][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][18:55:22][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+21:55:25 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:55:25 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/SettingsDialog.tsx
+21:55:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatMessages.tsx, /src/components/ai-chat/AiTurnSummaryCard.tsx, /src/components/ai-chat/AiContextIndicator.tsx, /src/components/ai-chat/AiAgentOrchestrationRail.tsx, /src/components/SettingsDialog.tsx
+21:56:29 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:57:48 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:57:48 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+21:57:48 [vite] (client) hmr update /src/styles/ai-chat.css
+21:57:48 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:57:48 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+21:57:49 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:57:49 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+21:57:49 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:57:49 [vite] (client) page reload src/main.tsx
+21:58:11 [vite] (client) hmr update /src/components/ai-chat/AiPathEvidenceNotice.tsx
+21:59:51 [vite] (client) hmr update /src/components/ai-chat/AiChatSlashMenu.tsx
+21:59:51 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:59:51 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatSlashMenu.tsx
+21:59:59 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:59:59 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:59:59 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+21:59:59 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+21:59:59 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:59:59 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+21:59:59 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+21:59:59 [vite] (client) page reload src/main.tsx
+22:00:21 [vite] Internal server error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `SlashCommandMatch` has already been declared
+    ╭─[ src/components/AiChatPanel.tsx:29:8 ]
+    │
+ 29 │   type SlashCommandMatch,
+    │        ────────┬────────  
+    │                ╰────────── `SlashCommandMatch` has already been declared here
+    │ 
+ 33 │   type SlashCommandMatch,
+    │        ────────┬────────  
+    │                ╰────────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/components/AiChatPanel.tsx
+      at transformWithOxc (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3338:19)
+      at TransformPluginContext.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:3409:26)
+      at EnvironmentPluginContainer.transform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:30273:51)
+      at async loadAndTransform (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24532:26)
+      at async viteTransformMiddleware (file:///E:/Projects/!Lux%20IDE/node_modules/.pnpm/vite@8.0.14_@types+node@25.9.1_esbuild@0.28.0/node_modules/vite/dist/node/chunks/node.js:24326:20)
+22:00:26 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+22:11:45 [vite] (client) hmr update /src/styles/tokens.css
+22:12:33 [vite] (client) hmr update /src/styles/app.css
+22:13:02 [vite] (client) hmr update /src/styles/app.css
+22:13:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+22:13:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+22:13:21 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+22:13:28 [vite] (client) hmr update /src/styles/app.css
+22:13:59 [vite] (client) hmr update /src/styles/app.css
+22:14:31 [vite] (client) hmr update /src/styles/app.css
+[2026-06-05][19:14:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:14:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:14:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:14:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:14:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:14:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:14:52][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:14:52][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:14:52][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:14:52][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+22:16:58 [vite] (client) hmr update /src/styles/app.css
+22:17:09 [vite] (client) hmr update /src/styles/app.css
+22:17:27 [vite] (client) hmr update /src/styles/app.css
+[2026-06-05][19:17:41][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:17:41][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:17:41][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:17:41][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+22:17:47 [vite] (client) hmr update /src/styles/app.css
+[2026-06-05][19:17:49][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:17:49][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:17:49][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:17:49][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:17:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:17:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:17:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:17:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:17:51][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:17:51][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:17:51][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:17:51][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+22:18:14 [vite] (client) hmr update /src/styles/app.css
+22:18:29 [vite] (client) hmr update /src/styles/app.css
+22:18:39 [vite] (client) hmr update /src/styles/app.css
+22:18:52 [vite] (client) hmr update /src/styles/app.css
+22:19:05 [vite] (client) hmr update /src/styles/app.css
+22:19:18 [vite] (client) hmr update /src/styles/app.css
+22:19:40 [vite] (client) hmr update /src/styles/app.css
+22:20:10 [vite] (client) hmr update /src/styles/app.css
+[2026-06-05][19:20:14][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][19:20:14][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][19:20:18][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][19:20:18][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][19:20:21][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][19:20:21][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][19:20:32][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][19:20:32][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+22:20:32 [vite] (client) hmr update /src/styles/app.css
+22:20:54 [vite] (client) hmr update /src/styles/app.css
+22:21:20 [vite] (client) hmr update /src/styles/ai-chat.css
+22:21:31 [vite] (client) hmr update /src/styles/ai-chat.css
+22:21:44 [vite] (client) hmr update /src/styles/ai-chat.css
+22:21:59 [vite] (client) hmr update /src/styles/ai-chat.css
+22:22:09 [vite] (client) hmr update /src/styles/ai-chat.css
+22:22:27 [vite] (client) hmr update /src/styles/ai-chat.css
+22:24:20 [vite] (client) hmr update /src/styles/ai-chat.css
+22:24:30 [vite] (client) hmr update /src/styles/ai-chat.css
+22:24:42 [vite] (client) hmr update /src/styles/ai-chat.css
+22:24:52 [vite] (client) hmr update /src/styles/ai-chat.css
+22:25:14 [vite] (client) hmr update /src/styles/ai-chat.css
+22:25:27 [vite] (client) hmr update /src/styles/ai-chat.css
+22:25:48 [vite] (client) hmr update /src/styles/ai-chat.css
+22:26:15 [vite] (client) hmr update /src/styles/ai-chat.css
+22:27:25 [vite] (client) hmr update /src/styles/app.css
+22:27:46 [vite] (client) hmr update /src/styles/app.css
+22:28:19 [vite] (client) hmr update /src/styles/app.css
+22:28:29 [vite] (client) hmr update /src/styles/app.css
+22:28:40 [vite] (client) hmr update /src/styles/app.css
+22:28:51 [vite] (client) hmr update /src/styles/app.css
+[2026-06-05][19:28:57][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][19:28:57][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][19:29:22][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][19:29:22][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+22:29:24 [vite] (client) hmr update /src/styles/app.css
+[2026-06-05][19:29:46][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][19:29:46][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][19:33:26][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][19:33:26][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][19:37:16][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][19:37:16][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+22:38:00 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+22:38:18 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+22:38:37 [vite] (client) hmr update /src/styles/ai-chat.css
+22:39:02 [vite] (client) hmr update /src/styles/ai-chat.css
+22:39:21 [vite] (client) hmr update /src/styles/ai-chat.css
+22:39:47 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+22:39:47 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+22:39:47 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+22:39:47 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+22:39:47 [vite] (client) page reload src/main.tsx
+22:40:13 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+22:40:13 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+22:40:13 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+22:40:13 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+22:40:13 [vite] (client) page reload src/main.tsx
+22:40:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][19:46:57][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][19:46:57][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][19:46:58][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:46:58][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:46:59][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:46:59][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:46:59][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:46:59][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:47:05][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:47:05][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:47:05][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:47:05][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:47:26][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][19:47:26][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][19:47:28][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:47:28][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:47:28][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:47:28][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:47:29][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:47:29][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:47:29][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][19:47:29][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][19:49:05][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][19:49:05][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+23:03:20 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+23:04:04 [vite] (client) hmr update /src/components/AgentWorkspace.tsx
+[2026-06-05][20:04:04][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:04:04][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:04:04][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:04:04][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:04:21 [vite] (client) hmr update /src/components/AgentWorkspace.tsx
+[2026-06-05][20:04:21][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:04:21][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:04:35 [vite] (client) hmr update /src/components/AgentWorkspace.tsx
+23:05:11 [vite] (client) hmr update /src/components/AgentWorkspace.tsx
+23:06:26 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:06:56][reqwest::connect][DEBUG] starting new connection: https://registry.npmjs.org/
+[2026-06-05][20:06:58][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:06:58][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:06:58][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:06:58][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:06:58][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:06:58][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:07:05 [vite] (client) hmr update /src/styles/ai-chat.css
+23:07:26 [vite] (client) hmr update /src/styles/ai-chat.css
+23:08:00 [vite] (client) hmr update /src/styles/ai-chat.css
+23:08:19 [vite] (client) hmr update /src/styles/ai-chat.css
+23:08:40 [vite] (client) hmr update /src/styles/ai-chat.css
+23:09:05 [vite] (client) hmr update /src/styles/ai-chat.css
+23:09:41 [vite] (client) hmr update /src/styles/ai-chat.css
+23:09:56 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:10:13][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:10:13][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:10:13][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:10:13][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:10:13 [vite] (client) hmr update /src/styles/ai-chat.css
+23:10:53 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:11:24][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][20:11:24][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+23:11:46 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:11:48][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:11:48][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:12:09][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][20:12:09][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+23:12:23 [vite] (client) hmr update /src/styles/ai-chat.css
+23:12:40 [vite] (client) hmr update /src/styles/ai-chat.css
+23:13:25 [vite] (client) hmr update /src/styles/ai-chat.css
+23:14:15 [vite] (client) hmr update /src/styles/ai-chat.css
+23:14:56 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:16:11][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:16:11][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:16:20][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:16:20][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:16:21][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:16:21][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:16:21][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:16:21][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:17:51][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:17:51][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:17:51][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:17:51][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:02][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:02][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:02][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:02][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:07][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:07][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:07][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:07][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:10][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:10][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:10][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:10][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:12][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:12][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:12][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:12][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:13][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:13][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:13][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:13][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:18:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:18:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:20:44 [vite] (client) hmr update /src/styles/ai-chat.css
+23:21:21 [vite] (client) hmr update /src/styles/ai-chat.css
+23:21:55 [vite] (client) hmr update /src/styles/ai-chat.css
+23:22:27 [vite] (client) hmr update /src/styles/ai-chat.css
+23:22:43 [vite] (client) hmr update /src/styles/ai-chat.css
+23:23:28 [vite] (client) hmr update /src/styles/app.css
+[2026-06-05][20:23:58][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:23:58][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:23:58][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:23:58][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:23:58][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:23:58][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:24:09][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:24:09][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:24:10][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:24:10][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:24:10][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:24:10][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:24:15 [vite] (client) hmr update /src/styles/app.css
+[2026-06-05][20:24:15][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][20:24:15][reqwest::connect][DEBUG] starting new connection: http://127.0.0.1:8799/
+[2026-06-05][20:24:31][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:24:32][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:25:10][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:25:10][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:26:41][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:26:41][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:26:52][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:26:52][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:26:57][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:26:57][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:26:57][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:26:57][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:26:57][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:26:57][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:27:00][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:27:00][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:27:00][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:27:00][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:27:35][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:27:35][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:27:38][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:27:38][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:27:38][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:27:38][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:27:54][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:27:54][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:27:54][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:27:54][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:28:33][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:28:33][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:28:48 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][20:28:48][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:28:48][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:28:48][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:28:48][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:28:48][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:28:48][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:29:05 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+23:29:30 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+23:29:47 [vite] (client) hmr update /src/components/ai-chat/AiChatComposer.tsx
+23:30:16 [vite] (client) hmr update /src/components/ai-chat/AiChatComposer.tsx
+23:30:32 [vite] (client) hmr update /src/components/ai-chat/AiChatComposer.tsx
+23:30:56 [vite] (client) hmr update /src/components/ai-chat/AiChatComposer.tsx
+23:31:34 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+23:31:34 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+23:31:34 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+23:31:34 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+23:31:34 [vite] (client) page reload src/main.tsx
+23:31:44 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/StatusBar.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 20 more
+23:31:44 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+23:31:44 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+23:31:44 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+23:31:44 [vite] (client) page reload src/main.tsx
+[2026-06-05][20:32:11][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:32:11][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:32:11][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:32:11][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:32:11][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:32:11][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:32:13][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:32:13][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:32:13][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:32:13][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:32:34][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:32:34][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:32:39 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:32:56][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:32:56][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:33:01 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:33:02][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][20:33:02][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][20:33:04][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][20:33:05][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][20:33:06][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+[2026-06-05][20:33:07][reqwest::connect][DEBUG] starting new connection: https://openrouter.ai/
+23:33:21 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:34:33][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:34:33][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:35:16 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:35:21][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:35:21][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:35:45 [vite] (client) hmr update /src/styles/ai-chat.css
+23:36:00 [vite] (client) hmr update /src/styles/ai-chat.css
+23:36:27 [vite] (client) hmr update /src/styles/ai-chat.css
+23:37:34 [vite] (client) hmr update /src/styles/ai-tool-calls.css
+23:38:07 [vite] (client) hmr update /src/styles/ai-tool-calls.css
+23:38:35 [vite] (client) hmr update /src/styles/ai-tool-calls.css
+23:38:55 [vite] (client) hmr update /src/styles/ai-tool-calls.css
+23:39:27 [vite] (client) hmr update /src/styles/ai-tool-calls.css
+[2026-06-05][20:39:37][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:39:37][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:39:50][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:39:50][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:39:59 [vite] (client) hmr update /src/styles/ai-tool-calls.css
+23:40:52 [vite] (client) hmr update /src/styles/ai-chat.css
+23:41:06 [vite] (client) hmr update /src/styles/ai-chat.css
+23:41:37 [vite] (client) hmr update /src/styles/ai-chat.css
+23:42:27 [vite] (client) hmr update /src/styles/ai-chat.css
+23:43:01 [vite] (client) hmr update /src/styles/ai-chat.css
+23:43:41 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:43:44][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:43:44][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:44:12 [vite] (client) hmr update /src/styles/ai-chat.css
+23:45:49 [vite] (client) hmr update /src/styles/ai-chat.css
+23:46:01 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:46:27][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:46:27][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:46:30][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:46:30][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:46:41][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:46:41][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:46:48 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:46:51][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:46:51][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:47:04 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:47:06][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:47:06][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:47:12][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:47:12][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:47:31][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:47:31][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:47:34][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:47:34][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:47:53][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:47:53][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:48:11][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:48:11][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:48:36][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:48:36][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:48:41][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:48:41][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:48:41][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:48:41][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:49:08][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:49:08][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:49:08][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:49:08][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:51:13][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:51:13][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:52:01 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][20:52:17][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:52:17][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][20:52:28][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:52:28][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:52:33 [vite] (client) hmr update /src/components/ai-chat/AiChatMessageActions.tsx
+23:54:00 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+23:54:11 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+23:54:39 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+23:54:58 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+23:55:40 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+[2026-06-05][20:55:40][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:55:40][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:56:37 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+23:57:05 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][20:57:05][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:57:05][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:57:05][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:57:05][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:57:05][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:57:05][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:57:20][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][20:57:20][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+23:57:25 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-05][20:57:25][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:57:25][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:57:25][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:57:25][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][20:57:25][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][20:57:25][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+23:58:41 [vite] (client) hmr update /src/styles/ai-chat.css
+23:59:32 [vite] (client) hmr update /src/styles/ai-chat.css
+00:00:41 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][21:00:47][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][21:00:47][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][21:00:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][21:00:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][21:00:50][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][21:00:50][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][21:01:04][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][21:01:04][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+00:01:24 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][21:01:42][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][21:01:42][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+[2026-06-05][21:01:44][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][21:01:44][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][21:01:44][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][21:01:44][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][21:01:56][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-05][21:01:56][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+00:02:02 [vite] (client) hmr update /src/components/ai-chat/AiChatComposer.tsx
+00:02:54 [vite] (client) hmr update /src/styles/ai-chat.css
+[2026-06-05][21:08:10][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][21:08:10][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][21:08:10][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][21:08:10][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][21:08:11][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][21:08:11][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-05][21:08:11][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-05][21:08:11][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes

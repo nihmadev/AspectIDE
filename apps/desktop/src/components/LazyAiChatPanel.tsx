@@ -41,6 +41,10 @@ class AiChatErrorBoundaryBase extends Component<AiChatErrorBoundaryProps & { fal
     return { error };
   }
 
+  componentDidCatch(error: Error, info: { componentStack?: string }) {
+    console.error("[ai-chat] render error", error, info.componentStack);
+  }
+
   render() {
     if (this.state.error) return this.props.fallback(() => this.setState({ error: null }));
     return this.props.children;

@@ -22,6 +22,7 @@ import type {
   ExtensionContributionRegistry,
   ExtensionInfo,
   FileFormatSupport,
+  DatabaseTablePreview,
   FileInspection,
   FileInspectionOptions,
   FsEntry,
@@ -77,6 +78,142 @@ export type VoiceTranscriptionRequest = {
 
 export type VoiceTranscriptionResult = {
   text: string;
+};
+
+export type DatabaseExecuteRequest = {
+  sql: string;
+};
+
+export type DatabaseExecuteResult = {
+  rowsAffected: number;
+  lastInsertRowid: number;
+  columns: string[];
+  rows: string[][];
+  message: string;
+};
+
+export type DatabaseCellUpdate = {
+  table: string;
+  rowid: number;
+  column: string;
+  value: string;
+};
+
+export type AgentBrowserStatusRequest = {
+  commandPath?: string | null;
+  /** Skip npm check and auto-upgrade (faster probe). Default false for bundled CLI. */
+  skipAutoUpdate?: boolean | null;
+  /** Version-only probe: no doctor, no session list, no Chromium. */
+  lightweight?: boolean | null;
+};
+
+export type AgentBrowserStatusResponse = {
+  available: boolean;
+  commandPath: string | null;
+  version: string | null;
+  latestVersion: string | null;
+  updatePerformed: boolean;
+  updateDetail: string | null;
+  detail: string;
+  sessions: string[];
+  doctor: unknown;
+};
+
+export type AgentBrowserInvokeRequest = {
+  session: string;
+  args: string[];
+  headed?: boolean | null;
+  allowedDomains?: string | null;
+  maxOutput?: number | null;
+  timeoutSecs?: number | null;
+  commandPath?: string | null;
+  sessionName?: string | null;
+  profile?: string | null;
+  statePath?: string | null;
+  contentBoundaries?: boolean | null;
+  ignoreHttpsErrors?: boolean | null;
+  allowFileAccess?: boolean | null;
+  provider?: string | null;
+  proxy?: string | null;
+};
+
+export type AgentBrowserInvokeResponse = {
+  session: string;
+  command: string;
+  success: boolean;
+  data: unknown;
+  text: string;
+  elapsedMs: number;
+  truncated: boolean;
+  exitCode: number | null;
+};
+
+export type AgentBrowserInstallRequest = {
+  commandPath?: string | null;
+  withDeps?: boolean | null;
+};
+
+export type AgentBrowserInstallStep = {
+  name: string;
+  success: boolean;
+  output: string;
+  elapsedMs: number;
+};
+
+export type AgentBrowserInstallResponse = {
+  success: boolean;
+  commandPath: string | null;
+  steps: AgentBrowserInstallStep[];
+  detail: string;
+};
+
+export type AgentBrowserReadImageResponse = {
+  path: string;
+  dataUrl: string;
+  bytes: number;
+  mimeType: string;
+};
+
+export type AgentBrowserStreamStatusRequest = {
+  session: string;
+  commandPath?: string | null;
+  enable?: boolean | null;
+  port?: number | null;
+};
+
+export type AgentBrowserStreamStatusResponse = {
+  session: string;
+  enabled: boolean;
+  port: number | null;
+  websocketUrl: string | null;
+  data: unknown;
+};
+
+export type AgentBrowserDashboardRequest = {
+  action: string;
+  port?: number | null;
+  commandPath?: string | null;
+};
+
+export type AgentBrowserDashboardResponse = {
+  action: string;
+  success: boolean;
+  port: number | null;
+  url: string | null;
+  detail: string;
+  data: unknown;
+};
+
+export type AgentBrowserSkillsRequest = {
+  name?: string | null;
+  all?: boolean | null;
+  commandPath?: string | null;
+};
+
+export type AgentBrowserSkillsResponse = {
+  success: boolean;
+  content: string;
+  data: unknown;
 };
 
 export type AiChatCompletionRequest = {
@@ -228,6 +365,52 @@ export type AiShellResponse = {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  warnings?: string[];
+  readOnly?: boolean;
+};
+
+export type AiShellClassification = {
+  blocked: string | null;
+  warnings: string[];
+  readOnly: boolean;
+};
+
+export type AiBlackboardEntry = {
+  id: string;
+  author: string;
+  topic: string;
+  content: string;
+  timestampMs: number;
+};
+
+export type AiPermissionDecision = "allow" | "deny" | "ask" | "default";
+
+export type AiPermissionEvaluation = {
+  decision: AiPermissionDecision;
+  matchedRule: string | null;
+};
+
+export type AiSemanticResult = {
+  type: "symbol" | "text" | "file";
+  source: string;
+  score: number;
+  path: string;
+  relativePath: string;
+  line?: number;
+  column?: number;
+  name?: string;
+  kind?: string;
+  containerName?: string;
+  preview?: string;
+  matchText?: string;
+};
+
+export type AiSemanticSearchResponse = {
+  workspaceRoot: string;
+  query: string;
+  pathFilter: string | null;
+  count: number;
+  results: AiSemanticResult[];
 };
 
 export type AiSymbolContextResponse = {
@@ -297,8 +480,39 @@ export const luxCommands = {
   fsRevealInFileExplorer: (path: string) => invokeRequired<void>("fs_reveal_in_file_explorer", { path }),
   fileSupportedFormats: () => invokeRequired<FileFormatSupport[]>("file_supported_formats"),
   fileInspect: (path: string, options?: Partial<FileInspectionOptions>) => invokeRequired<FileInspection>("file_inspect", { path, options: options ?? null }),
+  fileMediaAiContext: (request: {
+    path: string;
+    sttCommand?: string | null;
+    sttModelPath?: string | null;
+    language?: string | null;
+    maxFrames?: number;
+  }) => invokeRequired<{
+    transcript: string | null;
+    frameDataUrls: string[];
+    notes: string[];
+  }>("file_media_ai_context", { request }),
   fileAssetData: (path: string) => invokeRequired<FileAssetResponse>("file_asset_data", { path }),
   fileOpenExternal: (path: string) => invokeRequired<void>("file_open_external", { path }),
+  databaseListTables: (path: string, options?: Partial<FileInspectionOptions>) =>
+    invokeRequired<DatabaseTablePreview[]>("database_list_tables", { path, options: options ?? null }),
+  databaseExecuteSql: (path: string, request: DatabaseExecuteRequest) =>
+    invokeRequired<DatabaseExecuteResult>("database_execute_sql", { path, request }),
+  databaseUpdateCell: (path: string, update: DatabaseCellUpdate) =>
+    invokeRequired<void>("database_update_cell", { path, update }),
+  agentBrowserStatus: (request?: AgentBrowserStatusRequest) =>
+    invokeRequired<AgentBrowserStatusResponse>("agent_browser_status", { request: request ?? null }),
+  agentBrowserInvoke: (request: AgentBrowserInvokeRequest) =>
+    invokeRequired<AgentBrowserInvokeResponse>("agent_browser_invoke", { request }),
+  agentBrowserInstall: (request?: AgentBrowserInstallRequest) =>
+    invokeRequired<AgentBrowserInstallResponse>("agent_browser_install", { request: request ?? null }),
+  agentBrowserReadImage: (path: string) =>
+    invokeRequired<AgentBrowserReadImageResponse>("agent_browser_read_image", { request: { path } }),
+  agentBrowserStreamStatus: (request: AgentBrowserStreamStatusRequest) =>
+    invokeRequired<AgentBrowserStreamStatusResponse>("agent_browser_stream_status", { request }),
+  agentBrowserDashboard: (request: AgentBrowserDashboardRequest) =>
+    invokeRequired<AgentBrowserDashboardResponse>("agent_browser_dashboard", { request }),
+  agentBrowserSkills: (request?: AgentBrowserSkillsRequest) =>
+    invokeRequired<AgentBrowserSkillsResponse>("agent_browser_skills", { request: request ?? null }),
   clipboardWriteText: (text: string) => navigator.clipboard.writeText(text),
   editorNewFile: () => invokeOptional<DocumentSnapshot>("editor_new_file", undefined, createBrowserUntitledDocument),
   editorOpenFile: (path: string) => invokeRequired<DocumentSnapshot>("editor_open_file", { path }),
@@ -331,6 +545,18 @@ export const luxCommands = {
   aiFileDelete: (path: string) => invokeRequired<AiFileOperationResult>("ai_file_delete", { path }),
   aiShell: (command: string, cwd?: string | null, timeoutSecs?: number | null) =>
     invokeRequired<AiShellResponse>("ai_shell", { command, cwd: cwd ?? null, timeoutSecs: timeoutSecs ?? null }),
+  aiShellClassify: (command: string) =>
+    invokeRequired<AiShellClassification>("ai_shell_classify", { command }),
+  aiBlackboardPost: (sessionId: string, author: string, topic: string, content: string) =>
+    invokeRequired<AiBlackboardEntry>("ai_blackboard_post", { sessionId, author, topic, content }),
+  aiBlackboardRead: (sessionId: string, topic?: string | null, limit?: number | null) =>
+    invokeRequired<AiBlackboardEntry[]>("ai_blackboard_read", { sessionId, topic: topic ?? null, limit: limit ?? null }),
+  aiBlackboardClear: (sessionId: string) =>
+    invokeRequired<null>("ai_blackboard_clear", { sessionId }),
+  aiPermissionDecide: (tool: string, input: string, rules: string[]) =>
+    invokeRequired<AiPermissionEvaluation>("ai_permission_decide", { tool, input, rules }),
+  aiSemanticSearch: (query: string, path?: string | null, maxResults?: number | null, maxFiles?: number | null) =>
+    invokeRequired<AiSemanticSearchResponse>("ai_semantic_search", { query, path: path ?? null, maxResults: maxResults ?? null, maxFiles: maxFiles ?? null }),
   aiSymbolContext: (query?: string | null, path?: string | null, line?: number | null, column?: number | null, maxResults?: number | null) =>
     invokeRequired<AiSymbolContextResponse>("ai_symbol_context", { query: query ?? null, path: path ?? null, line: line ?? null, column: column ?? null, maxResults: maxResults ?? null }),
   voiceInputStatus: (provider: string, command?: string | null, modelPath?: string | null) =>

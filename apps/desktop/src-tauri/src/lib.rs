@@ -18,10 +18,13 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+mod agent_browser;
+mod database;
 mod debug;
 mod editor;
 mod extensions;
 mod file_intel;
+mod media_intel;
 mod git;
 mod lsp;
 mod search;
@@ -32,7 +35,11 @@ mod voice_input;
 mod web_fetch;
 mod workspace_watcher;
 
+mod ai_a2a;
 mod ai_chat_backend;
+mod ai_permissions;
+mod ai_semantic;
+mod ai_shell_safety;
 mod ai_tools;
 
 use lux_core::{
@@ -48,7 +55,8 @@ use tauri_plugin_log::{log::LevelFilter, Target, TargetKind};
 use tokio::sync::oneshot;
 
 use ai_tools::{
-    ai_file_delete, ai_file_patch, ai_file_str_replace, ai_file_write, ai_shell, ai_symbol_context,
+    ai_file_delete, ai_file_patch, ai_file_str_replace, ai_file_write, ai_shell, ai_shell_classify,
+    ai_symbol_context,
 };
 use debug::{
     debug_evaluate, debug_execute, debug_scopes, debug_sessions, debug_set_breakpoints,
@@ -62,7 +70,14 @@ use extensions::{
     extensions_activate, extensions_activation_plan, extensions_command_routes,
     extensions_contribution_registry, extensions_execute_command, extensions_list,
 };
-use file_intel::{file_asset_data, file_inspect, file_open_external, file_supported_formats};
+use agent_browser::{
+    agent_browser_dashboard, agent_browser_install, agent_browser_invoke, agent_browser_read_image,
+    agent_browser_skills, agent_browser_status, agent_browser_stream_status,
+};
+use database::{database_execute_sql, database_list_tables, database_update_cell};
+use file_intel::{
+    file_asset_data, file_inspect, file_media_ai_context, file_open_external, file_supported_formats,
+};
 use git::{git_diff, git_status};
 use lsp::{
     diagnostics_snapshot, lsp_code_actions, lsp_completion, lsp_definition, lsp_document_symbols,
@@ -487,8 +502,19 @@ pub fn run() {
             fs_reveal_in_file_explorer,
             file_supported_formats,
             file_inspect,
+            file_media_ai_context,
             file_asset_data,
             file_open_external,
+            database_list_tables,
+            database_execute_sql,
+            database_update_cell,
+            agent_browser_status,
+            agent_browser_invoke,
+            agent_browser_install,
+            agent_browser_read_image,
+            agent_browser_stream_status,
+            agent_browser_dashboard,
+            agent_browser_skills,
             editor_open_file,
             editor_new_file,
             editor_update_text,
@@ -510,6 +536,12 @@ pub fn run() {
             ai_file_patch,
             ai_file_delete,
             ai_shell,
+            ai_shell_classify,
+            ai_a2a::ai_blackboard_post,
+            ai_a2a::ai_blackboard_read,
+            ai_a2a::ai_blackboard_clear,
+            ai_permissions::ai_permission_decide,
+            ai_semantic::ai_semantic_search,
             ai_symbol_context,
             voice_input_status,
             voice_transcribe_local,

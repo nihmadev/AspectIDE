@@ -1,6 +1,7 @@
 use std::{
     env,
     path::{Path, PathBuf},
+    process::Command,
     time::Duration,
 };
 
@@ -26,12 +27,12 @@ pub struct VoiceInputProviderStatus {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceTranscriptionRequest {
-    provider: String,
-    audio_base64: String,
-    mime_type: String,
-    language: Option<String>,
-    command: Option<String>,
-    model_path: Option<PathBuf>,
+    pub provider: String,
+    pub audio_base64: String,
+    pub mime_type: String,
+    pub language: Option<String>,
+    pub command: Option<String>,
+    pub model_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -65,6 +66,32 @@ pub fn status(
     }
 }
 
+pub fn transcribe_local_blocking(request: VoiceTranscriptionRequest) -> Result<String, String> {
+    if request.provider != "local" {
+        return Err("only local voice transcription is supported by this command".to_string());
+    }
+    let status = local_status(request.command.clone(), request.model_path.clone());
+    if !status.available {
+        return Err(status.detail);
+    }
+    let command = status
+        .command
+        .ok_or_else(|| "Local STT command is not configured".to_string())?;
+    let audio = base64::engine::general_purpose::STANDARD
+        .decode(request.audio_base64.as_bytes())
+        .map_err(|error| format!("Invalid recorded audio: {error}"))?;
+    if audio.is_empty() {
+        return Err("Recorded audio is empty".to_string());
+    }
+    run_local_stt_command_blocking(
+        &command,
+        &audio,
+        &request.mime_type,
+        request.language.as_deref(),
+        status.model_path.as_deref(),
+    )
+}
+
 pub async fn transcribe_local(
     request: VoiceTranscriptionRequest,
 ) -> Result<VoiceTranscriptionResult, String> {
@@ -87,15 +114,15 @@ pub async fn transcribe_local(
         return Err("Recorded audio is empty".to_string());
     }
 
-    run_local_stt_command(
+    let text = run_local_stt_command(
         &command,
         &audio,
         &request.mime_type,
         request.language.as_deref(),
         status.model_path.as_deref(),
     )
-    .await
-    .map(|text| VoiceTranscriptionResult { text })
+    .await?;
+    Ok(VoiceTranscriptionResult { text })
 }
 
 fn local_status(command: Option<String>, model_path: Option<PathBuf>) -> VoiceInputProviderStatus {
@@ -177,9 +204,34 @@ async fn run_local_stt_command(
         .await
         .map_err(|_| "Local STT command timed out after 120 seconds".to_string());
     let _ = std::fs::remove_file(&audio_path);
-    let output =
-        output_result?.map_err(|error| format!("Local STT command failed to start: {error}"))?;
+    let output = output_result?.map_err(|error| format!("Local STT command failed to start: {error}"))?;
+    parse_stt_output(Ok(output))
+}
 
+fn run_local_stt_command_blocking(
+    command_template: &str,
+    audio: &[u8],
+    mime_type: &str,
+    language: Option<&str>,
+    model_path: Option<&Path>,
+) -> Result<String, String> {
+    let audio_path = write_temp_audio(audio, mime_type)?;
+    let command_line = render_stt_command(
+        command_template,
+        &audio_path,
+        mime_type,
+        language,
+        model_path,
+    );
+    let output = local_stt_shell_command_blocking(&command_line)
+        .output()
+        .map_err(|error| format!("Local STT command failed to start: {error}"))?;
+    let _ = std::fs::remove_file(&audio_path);
+    parse_stt_output(Ok(output))
+}
+
+fn parse_stt_output(output: Result<std::process::Output, String>) -> Result<String, String> {
+    let output = output?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if stderr.is_empty() {
@@ -188,12 +240,28 @@ async fn run_local_stt_command(
             stderr
         });
     }
-
     let transcript = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if transcript.is_empty() {
         return Err("Local STT command returned no transcript".to_string());
     }
     Ok(transcript)
+}
+
+fn local_stt_shell_command_blocking(command_line: &str) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(command_line);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("sh");
+        command.arg("-lc").arg(command_line);
+        command
+    }
 }
 
 fn render_stt_command(

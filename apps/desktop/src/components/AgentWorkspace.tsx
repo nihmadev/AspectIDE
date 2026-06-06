@@ -1,7 +1,8 @@
-import { Archive, Edit3, FolderOpen, History, MessageSquare, MessageSquarePlus, Plus, Search, Settings, Trash2 } from "lucide-react";
+import { Archive, Edit3, FolderOpen, Globe, History, MessageSquare, MessageSquarePlus, Plus, Settings, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { LazyAiChatPanel } from "./LazyAiChatPanel";
+import { openAgentBrowserPreviewTab } from "../lib/agentBrowserPreviewDocument";
 import { aiChatSessionTitle, aiChatStatusLabel } from "../lib/aiChatPresentation";
 import { useTranslation } from "../lib/i18n/useTranslation";
 import { useLuxStore, type AiChatSession } from "../lib/store";
@@ -31,6 +32,7 @@ export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspacePro
   const setActiveChatSession = useLuxStore((state) => state.setActiveAiChatSession);
   const setSettingsOpen = useLuxStore((state) => state.setSettingsOpen);
   const workspace = useLuxStore((state) => state.workspace);
+  const agentBrowserEnabled = useLuxStore((state) => state.aiPreferences.agentBrowserEnabled);
   const sortedChatSessions = [...chatSessions].sort(compareAgentChatSessions);
   const openChatSessions = sortedChatSessions.filter((session) => !session.closedAt);
   const archivedChatSessions = sortedChatSessions.filter((session) => session.closedAt);
@@ -39,16 +41,15 @@ export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspacePro
     const result = ensureChatSession(workspace?.root ?? null);
     if (result.reused) window.alert(t("agent.chat.emptyExists"));
   };
+  const openBrowserPreview = () => {
+    if (!activeSessionId) return;
+    const session = chatSessions.find((entry) => entry.id === activeSessionId);
+    openAgentBrowserPreviewTab(activeSessionId, aiChatSessionTitle(session?.title ?? "New chat", t));
+  };
 
   return (
     <main className="agent-workspace" aria-label={t("agent.workspace.label")}>
       <aside className="agent-rail">
-        <nav className="agent-nav" aria-label={t("agent.navigation.label")}>
-          <AgentNavButton icon={<Plus size={15} />} label={t("agent.newChat")} onClick={startNewChat} />
-          <AgentNavButton icon={<History size={15} />} label={t("aiChat.history.aria")} active={historyOpen} onClick={() => setHistoryOpen((open) => !open)} />
-          <AgentNavButton icon={<Search size={15} />} label={t("agent.search")} />
-        </nav>
-
         <div className="agent-scroll-list">
           <AgentSidebarSection title={t("agent.sidebar.currentProject")}>
             {workspace ? (
@@ -58,7 +59,31 @@ export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspacePro
             )}
           </AgentSidebarSection>
 
-          <AgentSidebarSection title={t("agent.sidebar.chats")}>
+          <AgentSidebarSection
+            title={t("agent.sidebar.chats")}
+            actions={(
+              <>
+                <AgentSidebarAction
+                  icon={<Plus size={14} />}
+                  label={t("agent.newChat")}
+                  onClick={startNewChat}
+                />
+                <AgentSidebarAction
+                  active={historyOpen}
+                  icon={<History size={14} />}
+                  label={t("aiChat.history.aria")}
+                  onClick={() => setHistoryOpen((open) => !open)}
+                />
+                {agentBrowserEnabled && activeSessionId && (
+                  <AgentSidebarAction
+                    icon={<Globe size={14} />}
+                    label={t("aiChat.browserPreview.openTab")}
+                    onClick={openBrowserPreview}
+                  />
+                )}
+              </>
+            )}
+          >
             {openChatSessions.map((session) => (
               <AgentChatRow
                 key={session.id}
@@ -109,19 +134,28 @@ export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspacePro
   );
 }
 
-function AgentNavButton({ active = false, icon, label, onClick }: { active?: boolean; icon: ReactNode; label: string; onClick?: () => void }) {
+function AgentSidebarAction({ active = false, icon, label, onClick }: { active?: boolean; icon: ReactNode; label: string; onClick: () => void }) {
   return (
-    <button className="agent-nav-button" type="button" data-active={active || undefined} onClick={onClick}>
+    <button
+      className="agent-sidebar-action"
+      type="button"
+      data-active={active || undefined}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+    >
       {icon}
-      <span>{label}</span>
     </button>
   );
 }
 
-function AgentSidebarSection({ children, title }: { children: ReactNode; title: string }) {
+function AgentSidebarSection({ actions, children, title }: { actions?: ReactNode; children: ReactNode; title: string }) {
   return (
     <section className="agent-sidebar-section">
-      <h2>{title}</h2>
+      <div className="agent-sidebar-section-head">
+        <h2>{title}</h2>
+        {actions && <div className="agent-sidebar-section-actions">{actions}</div>}
+      </div>
       {children}
     </section>
   );

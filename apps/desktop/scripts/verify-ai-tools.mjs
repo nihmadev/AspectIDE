@@ -1,15 +1,20 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { build } from "esbuild";
 
 const runtimePath = resolve("src/lib/aiChatRuntime.ts");
+const toolDispatchPath = resolve("src/lib/aiRuntimeToolDispatch.ts");
+const shellToolsPath = resolve("src/lib/aiRuntimeShellTools.ts");
 const approvalsRuntimePath = resolve("src/lib/aiRuntimeApprovals.ts");
 const checkpointRuntimePath = resolve("src/lib/aiRuntimeCheckpoints.ts");
 const runtimeToolsPath = resolve("src/lib/aiRuntimeTools.ts");
 const toolCallPath = resolve("src/components/AiToolCall.tsx");
 const toolsPanelPath = resolve("src/components/AiToolsPanel.tsx");
 
-const [runtimeSource, approvalsRuntimeSource, checkpointRuntimeSource, runtimeToolsSource, toolCallSource, toolsPanelSource] = await Promise.all([
+const [runtimeSource, toolDispatchSource, shellToolsSource, approvalsRuntimeSource, checkpointRuntimeSource, runtimeToolsSource, toolCallSource, toolsPanelSource] = await Promise.all([
   readFile(runtimePath, "utf8"),
+  readFile(toolDispatchPath, "utf8"),
+  readFile(shellToolsPath, "utf8"),
   readFile(approvalsRuntimePath, "utf8"),
   readFile(checkpointRuntimePath, "utf8"),
   readFile(runtimeToolsPath, "utf8"),
@@ -20,7 +25,7 @@ const approvalSources = [runtimeSource, approvalsRuntimeSource, checkpointRuntim
 
 const runtimeUnion = parseRuntimeToolUnion(runtimeToolsSource);
 const runtimeDefinitions = parseRuntimeToolDefinitions(runtimeToolsSource);
-const switchCases = parseSwitchCases(runtimeSource);
+const switchCases = parseSwitchCases(toolDispatchSource);
 const toolCallIcons = parseRecordKeys(toolCallSource, "toolIcons");
 const panelTools = parseUiToolNames(toolsPanelSource);
 
@@ -38,8 +43,51 @@ for (const dangerous of ["Write", "StrReplace", "PatchEngine", "Checkpoint", "De
   if (!approvalSources.some((source) => source.includes(`tool: "${dangerous}"`))) errors.push(`Approval request union is missing dangerous tool ${dangerous}.`);
 }
 
-if (!runtimeSource.includes("compactTerminalContext") || !runtimeSource.includes("terminalContext")) {
+if (!shellToolsSource.includes("compactTerminalContext") || !shellToolsSource.includes("terminalContextTool")) {
   errors.push("Terminal tools must be wired to structured terminal context, not only UI labels.");
+}
+
+if (!runtimeToolsSource.includes("isRuntimeToolAllowed") || !runtimeToolsSource.includes("terminalToolNames")) {
+  errors.push("Plan/Ask terminal gating must use isRuntimeToolAllowed and terminalToolNames.");
+}
+
+if (!toolDispatchSource.includes("isRuntimeToolAllowed")) {
+  errors.push("runRuntimeTool must guard disallowed tools via isRuntimeToolAllowed.");
+}
+
+const runtimeToolsBundle = await build({
+  entryPoints: [runtimeToolsPath],
+  bundle: true,
+  write: false,
+  format: "esm",
+  platform: "node",
+  target: "es2022",
+});
+const runtimeToolsModuleUrl = `data:text/javascript;base64,${Buffer.from(runtimeToolsBundle.outputFiles[0].text).toString("base64")}`;
+const { resolveRuntimeTools, isRuntimeToolAllowed } = await import(runtimeToolsModuleUrl);
+
+const terminalTools = ["Shell", "TerminalContext", "TerminalWrite"];
+const agentTools = resolveRuntimeTools({ agentBrowserEnabled: true, agentMode: "agent" }).map((tool) => tool.function.name);
+const automaticTools = resolveRuntimeTools({ agentBrowserEnabled: true, agentMode: "automatic" }).map((tool) => tool.function.name);
+const planTools = resolveRuntimeTools({ agentBrowserEnabled: true, agentMode: "plan" }).map((tool) => tool.function.name);
+const askTools = resolveRuntimeTools({ agentBrowserEnabled: true, agentMode: "ask" }).map((tool) => tool.function.name);
+
+for (const terminalTool of terminalTools) {
+  if (!agentTools.includes(terminalTool)) errors.push(`Agent mode must expose terminal tool ${terminalTool}.`);
+  if (!automaticTools.includes(terminalTool)) errors.push(`Automatic mode must expose terminal tool ${terminalTool}.`);
+  if (planTools.includes(terminalTool)) errors.push(`Plan mode must not expose terminal tool ${terminalTool}.`);
+  if (askTools.includes(terminalTool)) errors.push(`Ask mode must not expose terminal tool ${terminalTool}.`);
+  if (isRuntimeToolAllowed(terminalTool, { agentBrowserEnabled: true, agentMode: "plan" })) {
+    errors.push(`isRuntimeToolAllowed must reject ${terminalTool} in Plan mode.`);
+  }
+}
+
+const writeBrowserTools = ["BrowserOpen", "BrowserAct", "BrowserInvoke"];
+for (const browserTool of writeBrowserTools) {
+  if (!agentTools.includes(browserTool)) errors.push(`Agent mode must expose browser tool ${browserTool}.`);
+  if (!automaticTools.includes(browserTool)) errors.push(`Automatic mode must expose browser tool ${browserTool}.`);
+  if (planTools.includes(browserTool)) errors.push(`Plan mode must not expose browser tool ${browserTool}.`);
+  if (askTools.includes(browserTool)) errors.push(`Ask mode must not expose browser tool ${browserTool}.`);
 }
 
 if (errors.length > 0) {

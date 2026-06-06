@@ -4,6 +4,14 @@
 
 Эти правила применяются пропорционально задаче и текущей архитектуре Lux IDE. Не запускай большой рефакторинг ради мелкого фикса, но не добавляй новый долг, если можно аккуратно вынести ответственность сразу.
 
+## Language Policy — Rust-first core (ОБЯЗАТЕЛЬНО)
+
+- **Вся основа проекта — на Rust.** Бизнес-логика, AI-рантайм, оркестрация, тулы, сборка промпта, контекст/поиск, сессии/состояние, безопасность, транспорт — нативный Rust (`apps/desktop/src-tauri` + `crates/*`).
+- **TypeScript/React/Tauri — только визуальный слой:** компоненты (`apps/desktop/src/components/**/*.tsx`), рендеринг, view-routing, Monaco/редактор-glue, визуальное состояние, i18n. Никакой бизнес-логики во фронте.
+- **Цель — full-project на Rust** кроме фронта/визуала, ради скорости, корректности и экономии. Новую не-визуальную логику пиши сразу в Rust, не в TS.
+- Существующий TS-рантайм (`apps/desktop/src/lib/ai*.ts`) **мигрируется в Rust** поэтапно с сохранением поведения и golden-тестами на паритет — см. `docs/architecture/rust-migration-roadmap.md`. Не добавляй новую логику в TS-рантайм; делегируй в нативные команды.
+- Мост фронт↔ядро: события (`lux://*`) Rust→UI + Tauri-команды UI→Rust. Approval/Monaco-diff/стриминг рендерятся во фронте, но решения и вычисления — в Rust.
+
 ## Architecture Model
 
 - Держи layered + domain-first направление: domain/pure logic, application/use-cases, infrastructure/IO/Tauri/network/files/AI providers, UI/React presentation.

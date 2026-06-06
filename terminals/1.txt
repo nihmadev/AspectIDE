@@ -1,0 +1,18 @@
+---
+pid: 3592
+cwd: "E:\Projects\!Lux IDE"
+command: "pnpm dev"
+started_at: 2026-06-04T20:42:32.277Z
+running_for_ms: 23560003 
+---
+At line:1 char:31
++ (cd "E:\\Projects\\"'!Lux IDE' ; pnpm dev)
++                               ~
+Missing closing ')' in expression.
+At line:1 char:42
++ (cd "E:\\Projects\\"'!Lux IDE' ; pnpm dev)
++                                          ~
+Unexpected token ')' in expression or statement.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : MissingEndParenthesisInExpression
+ 

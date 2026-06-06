@@ -1,5 +1,10 @@
 import { create } from "zustand";
 import { defaultAiPreferences, mergeAiPreferences, type AiPreferences } from "./aiPreferences";
+import type { AiChatContextBudgetReport } from "./aiChatContextReport";
+import type { ContextCompactionState } from "./aiChatContextCompaction";
+import type { PersistedPendingFileReview } from "./aiPendingFileReview";
+import type { AiSessionTodo } from "./aiSessionTodos";
+import { disposeAiChatSessionSideState } from "./aiChatSessionLifecycle";
 import { normalizeAiMessageReasoning } from "./aiChatReasoning";
 import type { AiChatMessage, AiMessageSegment } from "./aiChatTypes";
 import type { AiProjectIndexBucket, AiProjectIndexFile, AiProjectIndexQuality, AiProjectIndexSource } from "./aiProjectIndex";
@@ -70,6 +75,12 @@ export type AiChatSession = {
   title: string;
   workspaceRoot: string | null;
   messages: AiChatMessage[];
+  contextCompaction?: ContextCompactionState | null;
+  contextBudgetReport?: AiChatContextBudgetReport | null;
+  sessionTodos?: AiSessionTodo[];
+  sessionGoal?: string;
+  pendingFileReviews?: PersistedPendingFileReview[];
+  pinned?: boolean;
   status: AiChatSessionStatus;
   lastError: string | null;
   closedAt: number | null;
@@ -143,9 +154,11 @@ type LuxState = {
   sidebarVisible: boolean;
   aiChatOpen: boolean;
   settingsOpen: boolean;
+  settingsInitialSection: string | null;
   locale: Locale;
   aiPreferences: AiPreferences;
   aiIndex: AiIndexState;
+  aiIndexRefreshNonce: number;
   aiChatSessions: AiChatSession[];
   activeAiChatSessionId: string;
   editorPreferences: EditorPreferences;
@@ -184,10 +197,13 @@ type LuxState = {
   setAiChatOpen: (open: boolean) => void;
   toggleAiChat: () => void;
   setSettingsOpen: (open: boolean) => void;
+  openSettingsSection: (sectionId: string) => void;
   setLocale: (locale: Locale) => void;
   updateAiPreferences: (preferences: Partial<AiPreferences>) => void;
   setAiPreferences: (preferences: AiPreferences) => void;
   setAiIndex: (index: Partial<AiIndexState>) => void;
+  requestAiIndexRefresh: () => void;
+  setAiChatSessionContextBudgetReport: (sessionId: string, report: AiChatContextBudgetReport | null) => void;
   setAiChatSessions: (state: AiChatSessionState) => void;
   createAiChatSession: (workspaceRoot?: string | null) => string;
   ensureAiChatSession: (workspaceRoot?: string | null) => CreateAiChatSessionResult;
@@ -195,10 +211,11 @@ type LuxState = {
   closeAiChatSession: (sessionId: string) => void;
   restoreAiChatSession: (sessionId: string) => void;
   renameAiChatSession: (sessionId: string, title: string) => void;
+  pinAiChatSession: (sessionId: string, pinned: boolean) => void;
   deleteAiChatSession: (sessionId: string) => void;
   appendAiChatMessage: (sessionId: string, message: AiChatMessage) => void;
   updateAiChatMessage: (sessionId: string, messageId: string, patch: Partial<AiChatMessage>) => void;
-  replaceAiChatMessages: (sessionId: string, messages: AiChatMessage[]) => void;
+  replaceAiChatMessages: (sessionId: string, messages: AiChatMessage[], options?: { contextCompaction?: ContextCompactionState | null }) => void;
   setAiChatSessionStatus: (sessionId: string, status: AiChatSessionStatus, lastError?: string | null) => void;
   updateEditorPreferences: (preferences: Partial<EditorPreferences>) => void;
   setEditorPreferences: (preferences: EditorPreferences) => void;
@@ -266,9 +283,11 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   sidebarVisible: true,
   aiChatOpen: false,
   settingsOpen: false,
+  settingsInitialSection: null,
   locale: DEFAULT_LOCALE,
   aiPreferences: defaultAiPreferences,
   aiIndex: createEmptyAiIndexState(),
+  aiIndexRefreshNonce: 0,
   ...createInitialAiChatState(),
   editorPreferences: defaultEditorPreferences,
   keybindingProfile: defaultKeybindingProfile(),
@@ -305,11 +324,19 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   toggleSidebar: () => set((state) => ({ sidebarVisible: !state.sidebarVisible })),
   setAiChatOpen: (aiChatOpen) => set({ aiChatOpen }),
   toggleAiChat: () => set((state) => ({ aiChatOpen: !state.aiChatOpen })),
-  setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  setSettingsOpen: (settingsOpen) => set({ settingsOpen, ...(settingsOpen ? {} : { settingsInitialSection: null }) }),
+  openSettingsSection: (sectionId) => set({ settingsOpen: true, settingsInitialSection: sectionId }),
   setLocale: (locale) => set({ locale }),
   updateAiPreferences: (preferences) => set((state) => ({ aiPreferences: mergeAiPreferences(state.aiPreferences, preferences) })),
   setAiPreferences: (aiPreferences) => set({ aiPreferences }),
   setAiIndex: (index) => set((state) => ({ aiIndex: { ...state.aiIndex, ...index } })),
+  requestAiIndexRefresh: () => set((state) => ({ aiIndexRefreshNonce: state.aiIndexRefreshNonce + 1 })),
+  setAiChatSessionContextBudgetReport: (sessionId, report) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
+        ? { ...session, contextBudgetReport: report, updatedAt: Date.now() }
+        : session),
+    })),
   setAiChatSessions: (chatState) => set((state) => mergeAiChatSessionState(state, chatState)),
   createAiChatSession: (workspaceRoot = get().workspace?.root ?? null) => {
     const session = createAiChatSession(workspaceRoot);
@@ -376,9 +403,14 @@ export const useLuxStore = create<LuxState>((set, get) => ({
     set((state) => ({
       aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId ? { ...session, title: normalizeChatTitle(title), updatedAt: Date.now() } : session),
     })),
+  pinAiChatSession: (sessionId, pinned) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId ? { ...session, pinned, updatedAt: Date.now() } : session),
+    })),
   deleteAiChatSession: (sessionId) =>
     set((state) => {
       if (!state.aiChatSessions.some((session) => session.id === sessionId)) return {};
+      disposeAiChatSessionSideState(sessionId);
       const aiChatSessions = state.aiChatSessions.filter((session) => session.id !== sessionId);
       if (aiChatSessions.length === 0) {
         const fallback = createAiChatSession(state.workspace?.root ?? null);
@@ -408,10 +440,16 @@ export const useLuxStore = create<LuxState>((set, get) => ({
           }
         : session),
     })),
-  replaceAiChatMessages: (sessionId, messages) =>
+  replaceAiChatMessages: (sessionId, messages, options) =>
     set((state) => ({
       aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
-        ? { ...session, messages, title: titleFromMessages(messages) ?? session.title, updatedAt: Date.now() }
+        ? {
+          ...session,
+          messages,
+          contextCompaction: options && "contextCompaction" in options ? options.contextCompaction ?? null : session.contextCompaction,
+          title: titleFromMessages(messages) ?? session.title,
+          updatedAt: Date.now(),
+        }
         : session),
     })),
   setAiChatSessionStatus: (sessionId, status, lastError = null) =>
@@ -876,6 +914,7 @@ function createAiChatSession(workspaceRoot: string | null): AiChatSession {
     title: "New chat",
     workspaceRoot,
     messages: [],
+    contextCompaction: null,
     status: "idle",
     lastError: null,
     closedAt: null,
@@ -920,7 +959,12 @@ function mergeAiChatSessionState(state: LuxState, chatState: AiChatSessionState)
 }
 
 function chooseHydratedAiChatSession(current: AiChatSession, persisted: AiChatSession): AiChatSession {
-  if (isAiChatSessionBusyStatus(current.status)) return current;
+  if (isAiChatSessionBusyStatus(current.status)) {
+    if (persisted.messages.length > current.messages.length) {
+      return { ...current, ...persisted, status: current.status, lastError: current.lastError };
+    }
+    return current;
+  }
   if (current.updatedAt > persisted.updatedAt) return current;
   if (current.messages.length > persisted.messages.length) return current;
   if (current.updatedAt === persisted.updatedAt && sessionSegmentScore(current) >= sessionSegmentScore(persisted)) return current;
@@ -940,6 +984,7 @@ function normalizeAiChatSession(session: AiChatSession, options: { preserveRunti
     lastError: session.lastError ?? null,
     closedAt: Number.isFinite(session.closedAt) ? session.closedAt : null,
     messages: Array.isArray(session.messages) ? session.messages.map(normalizeAiChatMessage) : [],
+    contextCompaction: session.contextCompaction ?? null,
     createdAt: Number.isFinite(session.createdAt) ? session.createdAt : Date.now(),
     updatedAt: Number.isFinite(session.updatedAt) ? session.updatedAt : Date.now(),
   };

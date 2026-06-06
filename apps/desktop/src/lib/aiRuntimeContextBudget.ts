@@ -53,7 +53,7 @@ export function addDirectContextBudgetItems(items: ContextBudgetItem[], input: A
     ].join("\n"),
   });
 
-  if (input.activeDocument) {
+  if (includeActiveText && input.activeDocument) {
     const path = input.activeDocument.path ?? input.activeDocument.title;
     items.push({
       id: `active:${input.activeDocument.id}:metadata`,
@@ -61,7 +61,7 @@ export function addDirectContextBudgetItems(items: ContextBudgetItem[], input: A
       source: path,
       path,
       score: 112 + scoreContextTokens(`${path}\n${input.activeDocument.language_id}`, queryTokens),
-      reason: "The active editor is the strongest local signal for the user's current focus.",
+      reason: "Active editor tab metadata was explicitly requested.",
       content: [
         `path=${path}`,
         `language=${input.activeDocument.language_id}`,
@@ -69,14 +69,14 @@ export function addDirectContextBudgetItems(items: ContextBudgetItem[], input: A
         `lines=${countLines(input.activeDocument.text)}`,
       ].join("\n"),
     });
-    if (includeActiveText && input.activeDocument.text.trim()) {
+    if (input.activeDocument.text.trim() && !input.activeDocument.view.binary) {
       items.push({
         id: `active:${input.activeDocument.id}:excerpt`,
         kind: "file-excerpt",
         source: path,
         path,
         score: 104 + scoreContextTokens(`${path}\n${input.activeDocument.text.slice(0, 3_000)}`, queryTokens),
-        reason: "Active document excerpt provides immediate code context.",
+        reason: "Active document excerpt was explicitly requested.",
         content: truncateContextAroundTokens(input.activeDocument.text, queryTokens, 2_800),
       });
     }
@@ -85,6 +85,7 @@ export function addDirectContextBudgetItems(items: ContextBudgetItem[], input: A
   if (includeOpenDocuments) {
     for (const document of input.openDocuments.slice(0, 24)) {
       if (input.activeDocument?.id === document.id) continue;
+      if (document.view.binary || document.view.mode === "preview") continue;
       const path = document.path ?? document.title;
       const score = (document.is_dirty ? 88 : 58) + scoreContextTokens(`${path}\n${document.text.slice(0, 2_000)}`, queryTokens);
       items.push({

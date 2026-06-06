@@ -11,14 +11,25 @@ use std::{
 use calamine::{open_workbook_auto, Data, Reader};
 use chrono::{DateTime, Utc};
 use lux_core::{
-    file_view_descriptor_for_path, supported_file_formats, AppError, AppResult,
-    ArchiveEntryPreview, DatabaseColumnPreview, DatabaseTablePreview, FileFormatSupport,
-    FileInspection, FileInspectionOptions, FileMetadata, FilePreview, FileViewCategory,
+    file_view_descriptor_for_path, monaco_language_id_for_path, supported_file_formats, AppError,
+    AppResult, ArchiveEntryPreview,
+    FileFormatSupport, FileInspection, FileInspectionOptions, FileMetadata, FilePreview,
     FileViewStrategy, NotebookCellPreview, SpreadsheetSheetPreview,
 };
 use quick_xml::{events::Event, Reader as XmlReader};
-use rusqlite::{types::ValueRef, Connection, OpenFlags};
+
 use zip::ZipArchive;
+
+mod archive_list;
+mod database_edit;
+mod delimited_edit;
+mod office_extract;
+
+pub use database_edit::{
+    database_execute, database_tables, database_update_cell, DatabaseCellUpdate,
+    DatabaseExecuteRequest, DatabaseExecuteResult,
+};
+pub use delimited_edit::{table_edit_text, table_write_from_text, TableEditDocument, TABLE_EDIT_FORMAT};
 
 const BINARY_SAMPLE_BYTES: usize = 512;
 const OFFICE_TEXT_LIMIT: usize = 80_000;
@@ -59,7 +70,11 @@ pub fn inspect_file(
         Ok(preview) => preview,
         Err(error) => {
             warnings.push(error.to_string());
-            fallback_preview(&path, &descriptor, options)?
+            if let Some(preview) = preview_for_inspect_error(&path, descriptor.strategy) {
+                preview
+            } else {
+                fallback_preview(&path, &descriptor, options)?
+            }
         }
     };
     let truncated = preview_truncated(&preview);
@@ -82,30 +97,80 @@ fn preview_for_file(
     descriptor: &lux_core::FileViewDescriptor,
     options: &FileInspectionOptions,
 ) -> AppResult<FilePreview> {
+    match extension(path).as_str() {
+        "ipynb" => return notebook_preview(path, options),
+        "csv" | "tsv" | "psv" => return table_preview(path, options),
+        _ => {}
+    }
+
     match descriptor.strategy {
         FileViewStrategy::MonacoText
         | FileViewStrategy::MarkdownPreview
         | FileViewStrategy::DiagramPreview => text_preview(path, descriptor, options),
-        FileViewStrategy::TablePreview => table_preview(path, options),
-        FileViewStrategy::SpreadsheetPreview => spreadsheet_preview(path, options),
-        FileViewStrategy::DatabasePreview => database_preview(path, options),
-        FileViewStrategy::PdfPreview => pdf_preview(path),
+        FileViewStrategy::TablePreview | FileViewStrategy::TableEditor => table_preview(path, options),
+        FileViewStrategy::SpreadsheetPreview | FileViewStrategy::SpreadsheetEditor => {
+            spreadsheet_preview(path, options)
+        }
+        FileViewStrategy::DatabasePreview | FileViewStrategy::DatabaseEditor => {
+            database_preview(path, options)
+        }
+        FileViewStrategy::PdfPreview => Ok(pdf_preview(path)),
         FileViewStrategy::OfficePreview => office_preview(path, options),
         FileViewStrategy::ArchivePreview => archive_preview(path, options),
         FileViewStrategy::NotebookPreview => notebook_preview(path, options),
-        FileViewStrategy::ImagePreview => Ok(FilePreview::Image {
+        FileViewStrategy::ImagePreview => Ok(image_preview(path, descriptor)),
+        FileViewStrategy::AudioPreview => Ok(audio_preview(path, descriptor)),
+        FileViewStrategy::VideoPreview => Ok(video_preview(path, descriptor)),
+        FileViewStrategy::BinaryPreview => binary_preview(path),
+        FileViewStrategy::ExternalOnly => Ok(external_preview(path, descriptor)),
+    }
+}
+
+fn preview_for_inspect_error(path: &Path, strategy: FileViewStrategy) -> Option<FilePreview> {
+    match strategy {
+        FileViewStrategy::PdfPreview => Some(FilePreview::Pdf {
+            text: String::new(),
+            page_count: None,
+            truncated: false,
+        }),
+        FileViewStrategy::ImagePreview => Some(FilePreview::Image {
             note: "Image preview is rendered directly by the IDE from the file asset.".to_string(),
         }),
-        FileViewStrategy::AudioPreview => Ok(FilePreview::Audio {
+        FileViewStrategy::AudioPreview => Some(FilePreview::Audio {
             note: "Audio preview is rendered directly by the IDE from the file asset.".to_string(),
         }),
-        FileViewStrategy::VideoPreview => Ok(FilePreview::Video {
+        FileViewStrategy::VideoPreview => Some(FilePreview::Video {
             note: "Video preview is rendered directly by the IDE from the file asset.".to_string(),
         }),
-        FileViewStrategy::BinaryPreview => binary_preview(path),
-        FileViewStrategy::ExternalOnly => Ok(FilePreview::External {
-            reason: "This format is routed to the system application.".to_string(),
+        FileViewStrategy::OfficePreview => Some(FilePreview::Office {
+            text: String::new(),
+            parts: Vec::new(),
+            truncated: false,
         }),
+        FileViewStrategy::ArchivePreview => Some(FilePreview::Archive {
+            entries: Vec::new(),
+            total_entries: 0,
+            truncated: false,
+        }),
+        FileViewStrategy::DatabasePreview | FileViewStrategy::DatabaseEditor => {
+            Some(FilePreview::Database {
+                tables: Vec::new(),
+                truncated: false,
+            })
+        }
+        FileViewStrategy::SpreadsheetPreview | FileViewStrategy::SpreadsheetEditor => {
+            Some(FilePreview::Spreadsheet {
+                sheets: Vec::new(),
+                workbook_type: extension(path),
+                truncated: false,
+            })
+        }
+        FileViewStrategy::NotebookPreview => Some(FilePreview::Notebook {
+            cells: Vec::new(),
+            cell_count: 0,
+            truncated: false,
+        }),
+        _ => None,
     }
 }
 
@@ -123,7 +188,7 @@ fn fallback_preview(
 
 fn text_preview(
     path: &Path,
-    descriptor: &lux_core::FileViewDescriptor,
+    _descriptor: &lux_core::FileViewDescriptor,
     options: &FileInspectionOptions,
 ) -> AppResult<FilePreview> {
     let metadata = fs::metadata(path)?;
@@ -134,7 +199,7 @@ fn text_preview(
     buffer.truncate(read);
     let text = String::from_utf8_lossy(&buffer).into_owned();
     Ok(FilePreview::Text {
-        language_id: language_id_for_path(path, descriptor),
+        language_id: monaco_language_id_for_path(path),
         line_count: text.lines().count(),
         truncated: metadata.len() > options.max_text_bytes,
         text,
@@ -243,52 +308,31 @@ fn database_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<F
         });
     }
 
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|error| AppError::Service(error.to_string()))?;
-    let mut statement = connection
-        .prepare(
-            "SELECT name, type FROM sqlite_schema \
-             WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' \
-             ORDER BY type, name",
-        )
-        .map_err(|error| AppError::Service(error.to_string()))?;
-    let schema_rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|error| AppError::Service(error.to_string()))?;
-
-    let mut tables = Vec::new();
-    let mut truncated = false;
-    for schema_row in schema_rows.take(40) {
-        let (name, kind) = schema_row.map_err(|error| AppError::Service(error.to_string()))?;
-        let columns = table_columns(&connection, &name)?;
-        let (rows, row_count, rows_truncated) = table_rows(&connection, &name, options)?;
-        truncated |= rows_truncated;
-        tables.push(DatabaseTablePreview {
-            name,
-            kind,
-            columns,
-            rows,
-            row_count,
-            truncated: rows_truncated,
-        });
+    match database_edit::database_tables(path, options) {
+        Ok(tables) => {
+            let truncated = tables.iter().any(|table| table.truncated);
+            Ok(FilePreview::Database { tables, truncated })
+        }
+        Err(error) => Ok(FilePreview::External {
+            reason: format!("Cannot open SQLite database: {error}"),
+        }),
     }
-
-    Ok(FilePreview::Database { tables, truncated })
 }
 
-fn pdf_preview(path: &Path) -> AppResult<FilePreview> {
-    let text =
-        pdf_extract::extract_text(path).map_err(|error| AppError::Service(error.to_string()))?;
-    let truncated = text.len() > PDF_TEXT_LIMIT;
-    let text = truncate_chars(&text, PDF_TEXT_LIMIT);
-    let page_count = text.matches('\x0C').count().checked_add(1);
-    Ok(FilePreview::Pdf {
+fn pdf_preview(path: &Path) -> FilePreview {
+    let extracted = pdf_extract::extract_text(path).unwrap_or_default();
+    let truncated = extracted.len() > PDF_TEXT_LIMIT;
+    let text = truncate_chars(&extracted, PDF_TEXT_LIMIT);
+    let page_count = if extracted.is_empty() {
+        None
+    } else {
+        extracted.matches('\x0C').count().checked_add(1)
+    };
+    FilePreview::Pdf {
         text,
         page_count,
         truncated,
-    })
+    }
 }
 
 fn office_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
@@ -297,9 +341,7 @@ fn office_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<Fil
         ext.as_str(),
         "docx" | "docm" | "dotx" | "pptx" | "pptm" | "potx" | "ppsx"
     ) {
-        return Ok(FilePreview::External {
-            reason: "Legacy Office/OpenDocument rendering is routed to the system application; metadata remains available in Lux.".to_string(),
-        });
+        return office_extract::office_preview_for_path(path, options);
     }
 
     let file = fs::File::open(path)?;
@@ -346,35 +388,83 @@ fn office_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<Fil
 }
 
 fn archive_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
-    if !matches!(
-        extension(path).as_str(),
-        "zip" | "jar" | "war" | "ear" | "vsix" | "nupkg" | "whl" | "crate" | "apk" | "aab"
-    ) {
-        return Ok(FilePreview::External {
-            reason: "Archive format is identified; direct listing is currently bundled for ZIP-compatible archives.".to_string(),
-        });
+    match archive_list::list_archive_entries(path, options.max_archive_entries) {
+        Ok(listing) => Ok(FilePreview::Archive {
+            entries: listing.entries,
+            total_entries: listing.total_entries,
+            truncated: listing.truncated,
+        }),
+        Err(_) => Ok(FilePreview::External {
+            reason: format!(
+                "Archive .{} is identified; listing is bundled for zip, tar, tar.gz, tgz, gz, bz2, and xz containers.",
+                extension(path)
+            ),
+        }),
     }
-    let file = fs::File::open(path)?;
-    let mut archive =
-        ZipArchive::new(file).map_err(|error| AppError::Service(error.to_string()))?;
-    let total_entries = archive.len();
-    let mut entries = Vec::new();
-    for index in 0..total_entries.min(options.max_archive_entries) {
-        let entry = archive
-            .by_index(index)
-            .map_err(|error| AppError::Service(error.to_string()))?;
-        entries.push(ArchiveEntryPreview {
-            path: entry.name().to_string(),
-            compressed_size: entry.compressed_size(),
-            uncompressed_size: entry.size(),
-            is_dir: entry.is_dir(),
-        });
+}
+
+fn image_preview(path: &Path, descriptor: &lux_core::FileViewDescriptor) -> FilePreview {
+    let ext = extension(path);
+    let mime = descriptor
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let mut lines = vec![
+        format!("Raster or vector image (.{ext})."),
+        format!("MIME type: {mime}"),
+        "The IDE renders this file visually in the image editor pane.".to_string(),
+    ];
+    if ext == "svg" {
+        if let Ok(markup) = fs::read_to_string(path) {
+            lines.push("SVG markup excerpt:".to_string());
+            lines.push(truncate_chars(markup.trim(), 12_000));
+        }
+    } else {
+        lines.push(
+            "For pixel-level understanding, use chat vision attachment or InspectFile from a vision-capable model."
+                .to_string(),
+        );
     }
-    Ok(FilePreview::Archive {
-        entries,
-        total_entries,
-        truncated: total_entries > options.max_archive_entries,
-    })
+    FilePreview::Image {
+        note: lines.join("\n"),
+    }
+}
+
+fn audio_preview(path: &Path, descriptor: &lux_core::FileViewDescriptor) -> FilePreview {
+    let ext = extension(path);
+    let mime = descriptor
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    FilePreview::Audio {
+        note: format!(
+            "Audio file (.{ext}, {mime}). Playback is handled by the IDE media viewer; there is no transcript unless you provide one or run speech-to-text separately."
+        ),
+    }
+}
+
+fn video_preview(path: &Path, descriptor: &lux_core::FileViewDescriptor) -> FilePreview {
+    let ext = extension(path);
+    let mime = descriptor
+        .mime_type
+        .clone()
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    FilePreview::Video {
+        note: format!(
+            "Video file (.{ext}, {mime}). Playback is handled by the IDE media viewer; frame content is not auto-transcribed."
+        ),
+    }
+}
+
+fn external_preview(path: &Path, descriptor: &lux_core::FileViewDescriptor) -> FilePreview {
+    FilePreview::External {
+        reason: format!(
+            "{} (.{}) is opened via the system default application. Extensions: {}.",
+            descriptor.display_name,
+            extension(path),
+            descriptor.extensions.join(", ")
+        ),
+    }
 }
 
 fn notebook_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
@@ -448,68 +538,6 @@ fn binary_preview(path: &Path) -> AppResult<FilePreview> {
         ascii,
         truncated: fs::metadata(path)?.len() > BINARY_SAMPLE_BYTES as u64,
     })
-}
-
-fn table_columns(connection: &Connection, table: &str) -> AppResult<Vec<DatabaseColumnPreview>> {
-    let quoted = quote_sqlite_ident(table);
-    let mut statement = connection
-        .prepare(&format!("PRAGMA table_info({quoted})"))
-        .map_err(|error| AppError::Service(error.to_string()))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok(DatabaseColumnPreview {
-                name: row.get::<_, String>(1)?,
-                type_name: row.get::<_, String>(2)?,
-                nullable: row.get::<_, i64>(3)? == 0,
-                primary_key: row.get::<_, i64>(5)? > 0,
-            })
-        })
-        .map_err(|error| AppError::Service(error.to_string()))?;
-    rows.map(|row| row.map_err(|error| AppError::Service(error.to_string())))
-        .collect()
-}
-
-fn table_rows(
-    connection: &Connection,
-    table: &str,
-    options: &FileInspectionOptions,
-) -> AppResult<(Vec<Vec<String>>, Option<usize>, bool)> {
-    let quoted = quote_sqlite_ident(table);
-    let count = connection
-        .query_row(&format!("SELECT COUNT(*) FROM {quoted}"), [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .ok()
-        .and_then(|value| usize::try_from(value).ok());
-    let mut statement = connection
-        .prepare(&format!(
-            "SELECT * FROM {quoted} LIMIT {}",
-            options.max_rows.saturating_add(1)
-        ))
-        .map_err(|error| AppError::Service(error.to_string()))?;
-    let column_count = statement.column_count().min(options.max_columns);
-    let mut rows_cursor = statement
-        .query([])
-        .map_err(|error| AppError::Service(error.to_string()))?;
-    let mut rows = Vec::new();
-    while let Some(row) = rows_cursor
-        .next()
-        .map_err(|error| AppError::Service(error.to_string()))?
-    {
-        if rows.len() >= options.max_rows {
-            break;
-        }
-        let mut values = Vec::with_capacity(column_count);
-        for index in 0..column_count {
-            values.push(sqlite_value_to_string(
-                row.get_ref(index)
-                    .map_err(|error| AppError::Service(error.to_string()))?,
-            ));
-        }
-        rows.push(values);
-    }
-    let truncated = count.is_some_and(|value| value > rows.len());
-    Ok((rows, count, truncated))
 }
 
 fn build_ai_context(
@@ -595,9 +623,11 @@ fn build_ai_context(
             format!("Hex sample:\n{hex}\nASCII sample:\n{ascii}")
         }
         FilePreview::Image { note } | FilePreview::Audio { note } | FilePreview::Video { note } => {
-            note.clone()
+            format!("{note}\n\nUse InspectFile again after the file changes on disk.")
         }
-        FilePreview::External { reason } => reason.clone(),
+        FilePreview::External { reason } => {
+            format!("{reason}\n\nUse InspectFile after exporting or converting to a previewable format when possible.")
+        }
     });
     truncate_chars(&parts.join("\n\n"), 24_000)
 }
@@ -629,28 +659,6 @@ const fn preview_truncated(preview: &FilePreview) -> bool {
     }
 }
 
-fn language_id_for_path(path: &Path, descriptor: &lux_core::FileViewDescriptor) -> String {
-    if descriptor.category == FileViewCategory::Markdown {
-        return "markdown".to_string();
-    }
-    match extension(path).as_str() {
-        "rs" => "rust",
-        "ts" | "tsx" | "mts" | "cts" => "typescript",
-        "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        "json" | "jsonc" | "json5" => "json",
-        "toml" => "toml",
-        "yaml" | "yml" => "yaml",
-        "css" | "scss" | "sass" | "less" => "css",
-        "html" | "htm" => "html",
-        "sql" => "sql",
-        "xml" | "svg" => "xml",
-        "py" | "pyw" => "python",
-        other if !other.is_empty() => other,
-        _ => "plaintext",
-    }
-    .to_string()
-}
-
 fn cell_to_string(cell: &Data) -> String {
     match cell {
         Data::Empty => String::new(),
@@ -661,20 +669,6 @@ fn cell_to_string(cell: &Data) -> String {
         Data::Error(value) => format!("{value:?}"),
         Data::DateTime(value) => value.to_string(),
     }
-}
-
-fn sqlite_value_to_string(value: ValueRef<'_>) -> String {
-    match value {
-        ValueRef::Null => String::new(),
-        ValueRef::Integer(value) => value.to_string(),
-        ValueRef::Real(value) => value.to_string(),
-        ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned(),
-        ValueRef::Blob(value) => format!("<blob {} bytes>", value.len()),
-    }
-}
-
-fn quote_sqlite_ident(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\"\""))
 }
 
 fn office_xml_is_content_part(path: &str) -> bool {
@@ -746,6 +740,10 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect::<String>()
 }
 
+mod spreadsheet_edit;
+
+pub use spreadsheet_edit::{spreadsheet_edit_text, spreadsheet_write_from_text};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +751,16 @@ mod tests {
     #[test]
     fn supported_formats_has_more_than_one_hundred_extensions() {
         assert!(supported_formats().len() > 100);
+    }
+
+    #[test]
+    fn pdf_inspection_stays_pdf_preview_not_binary() {
+        let root = std::env::temp_dir().join("lux-file-intel-sample.pdf");
+        fs::write(&root, b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n").unwrap();
+        let inspection = inspect_file(&root, &FileInspectionOptions::default()).unwrap();
+        let _ = fs::remove_file(&root);
+
+        assert!(matches!(inspection.preview, FilePreview::Pdf { .. }));
     }
 
     #[test]

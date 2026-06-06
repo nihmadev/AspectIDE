@@ -1,0 +1,26 @@
+---
+pid: 32780
+cwd: "E:\Projects\!Lux IDE"
+command: "cd /d \"E:\\Projects\\!Lux IDE\" && node apps\\desktop\\scripts\\kill-dev-port.mjs 5173 && pnpm dev"
+started_at: 2026-06-05T03:18:53.972Z
+running_for_ms: 780012   
+---
+At line:1 char:31
++ (cd "E:\\Projects\\"'!Lux IDE' ; cd /d "E:\Projects\!Lux IDE" && node ...
++                               ~
+Missing closing ')' in expression.
+At line:1 char:63
++ ...  "E:\\Projects\\"'!Lux IDE' ; cd /d "E:\Projects\!Lux IDE" && node ap ...
++                                                                ~~
+The token '&&' is not a valid statement separator in this version.
+At line:1 char:115
++ ... x IDE" && node apps\desktop\scripts\kill-dev-port.mjs 5173 && pnpm de ...
++                                                                ~~
+The token '&&' is not a valid statement separator in this version.
+At line:1 char:126
++ ... IDE" && node apps\desktop\scripts\kill-dev-port.mjs 5173 && pnpm dev)
++                                                                         ~
+Unexpected token ')' in expression or statement.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : MissingEndParenthesisInExpression
+ 

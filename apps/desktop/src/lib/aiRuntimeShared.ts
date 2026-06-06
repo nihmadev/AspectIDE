@@ -4,17 +4,20 @@ export type ToolResult = {
   title: string;
   content: string;
   stats?: AiChatToolCall["stats"];
+  visionImageUrls?: string[];
+  browserStreamPort?: number | null;
 };
 
 export type UnknownRecord = Record<string, unknown>;
 
 export const maxToolOutputChars = 24_000;
 
-export function toolJson(title: string, value: unknown): ToolResult {
+export function toolJson(title: string, value: unknown, extras?: Partial<Pick<ToolResult, "visionImageUrls" | "browserStreamPort">>): ToolResult {
   const content = JSON.stringify(value, null, 2);
   return {
     title,
     content: truncateText(content, maxToolOutputChars),
+    ...extras,
   };
 }
 

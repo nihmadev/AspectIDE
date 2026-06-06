@@ -1,11 +1,16 @@
-import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { transform } from "esbuild";
+import { build } from "esbuild";
 
 const promptPath = resolve("src/lib/aiSystemPrompt.ts");
-const source = await readFile(promptPath, "utf8");
-const { code } = await transform(source, { loader: "ts", format: "esm", target: "es2022" });
-const moduleUrl = `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
+const bundle = await build({
+  entryPoints: [promptPath],
+  bundle: true,
+  write: false,
+  format: "esm",
+  platform: "node",
+  target: "es2022",
+});
+const moduleUrl = `data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString("base64")}`;
 const { buildLuxIdeSystemPrompt } = await import(moduleUrl);
 
 const baseContext = {
@@ -62,11 +67,12 @@ const requiredPhrases = [
   "Tool round limit",
   "Full Access mode",
   "Agent mode",
+  "Automatic mode",
   "Plan mode",
   "Ask mode",
   "Review behavior",
   "Review requests are read-only by default",
-  "do not change files or run shell/test commands unless explicitly requested",
+  "Do not run test/build/shell commands unless the user explicitly asks for verification",
   "Verification protocol",
   "Failure recovery",
   "GitHub-flavored Markdown",
@@ -83,12 +89,61 @@ if (missing.length > 0) {
   throw new Error(`AI system prompt is missing required phrase(s): ${missing.join(", ")}`);
 }
 
+const automaticPrompt = buildLuxIdeSystemPrompt({
+  ...baseContext,
+  agentBrowserEnabled: true,
+  preferences: { ...baseContext.preferences, agentMode: "automatic" },
+});
+const planPrompt = buildLuxIdeSystemPrompt({ ...baseContext, preferences: { ...baseContext.preferences, agentMode: "plan" } });
+const askPrompt = buildLuxIdeSystemPrompt({ ...baseContext, preferences: { ...baseContext.preferences, agentMode: "ask" } });
+const planWithAgents = buildLuxIdeSystemPrompt({
+  ...baseContext,
+  preferences: { ...baseContext.preferences, agentMode: "plan" },
+  projectAgentsSnip: "Project AGENTS guidance (auto-loaded, read-only)\n### . — AGENTS.md\nDo quality work.",
+});
+if (!automaticPrompt.includes("Vercel agent-browser is fully enabled")) {
+  throw new Error("Automatic mode must expose full browser tools like Agent mode.");
+}
+for (const phrase of [
+  "Automatic mode enforcement",
+  "NEVER reply with only clarifying questions",
+  "first model turn MUST include tool calls",
+  "self-contained index.html",
+]) {
+  if (!automaticPrompt.includes(phrase)) {
+    throw new Error(`Automatic mode prompt missing: ${phrase}`);
+  }
+}
+if (automaticPrompt.includes("Shell, TerminalContext, and TerminalWrite are not available in Plan/Ask")) {
+  throw new Error("Automatic mode must not disable terminal tools.");
+}
+for (const modePrompt of [planPrompt, askPrompt]) {
+  if (!modePrompt.includes("Shell, TerminalContext, and TerminalWrite are not available in Plan/Ask")) {
+    throw new Error("Plan/Ask runtime tool section must state terminal tools are unavailable.");
+  }
+  if (!modePrompt.includes("read-only Plan or Ask mode")) {
+    throw new Error("Plan/Ask must use the compact read-only system prompt.");
+  }
+  if (modePrompt.includes("Use StrReplace for small exact edits")) {
+    throw new Error("Plan/Ask compact prompt must not include full editing tool guidance.");
+  }
+}
+if (!planWithAgents.includes("Project AGENTS guidance (auto-loaded, read-only)")) {
+  throw new Error("Inlined project AGENTS snip must appear in the system prompt when provided.");
+}
+if (planPrompt.length >= prompt.length) {
+  throw new Error(`Plan prompt (${planPrompt.length}) should be shorter than Agent prompt (${prompt.length}).`);
+}
+
 if (!webPrompt.includes("Runtime tools are not attached")) {
   throw new Error("AI system prompt must clearly explain web/dev chat requests without runtime tools.");
 }
 
-if (prompt.length < 6_000 || prompt.length > 12_500) {
-  throw new Error(`AI system prompt length ${prompt.length} is outside the expected 6000-12500 character range.`);
+if (prompt.length < 6_000 || prompt.length > 15_000) {
+  throw new Error(`AI system prompt length ${prompt.length} is outside the expected 6000-15000 character range.`);
+}
+if (automaticPrompt.length > 16_000) {
+  throw new Error(`Automatic mode prompt length ${automaticPrompt.length} exceeds 16000 characters.`);
 }
 
 console.log(`AI prompt verification passed (${prompt.length} chars).`);

@@ -48,3 +48,4 @@ futures-util = "0.3"
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+which = "7.0"

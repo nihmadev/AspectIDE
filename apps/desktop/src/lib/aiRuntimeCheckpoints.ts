@@ -1,3 +1,5 @@
+import type { PersistedFileCheckpoint } from "./aiChatCheckpointStore";
+import { getFileCheckpoint, listFileCheckpoints, upsertFileCheckpoint, workspaceCheckpointKey } from "./aiChatCheckpointStore";
 import type { AiChatSendInput, AiToolApprovalRequest } from "./aiChatTypes";
 import { createCheckpointRestoreApproval } from "./aiRuntimeApprovals";
 import { mergeDiffAndStatusFiles } from "./aiRuntimeDiagnostics";
@@ -70,6 +72,13 @@ const defaultCheckpointMaxBytesPerFile = 500_000;
 const checkpointMaxBytesPerFileLimit = 1_000_000;
 const checkpointStoreByWorkspace = new Map<string, RuntimeCheckpoint[]>();
 
+export type FileCheckpointCreateResult = {
+  id: string;
+  label: string;
+  fileCount: number;
+  restorableFileCount: number;
+};
+
 export async function checkpointTool(args: UnknownRecord, input: AiChatSendInput, ui: CheckpointToolUi): Promise<ToolResult> {
   const action = normalizeCheckpointAction(stringArg(args, "action", "list"));
   switch (action) {
@@ -110,6 +119,7 @@ async function createCheckpoint(args: UnknownRecord, input: AiChatSendInput): Pr
   const store = checkpointStore(workspaceRoot);
   store.unshift(checkpoint);
   store.splice(maxCheckpointsPerWorkspace);
+  persistRuntimeCheckpoint(checkpoint);
 
   return toolJson("Checkpoint", {
     status: "created",
@@ -308,13 +318,143 @@ async function snapshotCheckpointFile(path: string, workspaceRoot: string, openB
   }
 }
 
+export async function createFileCheckpointForTurn(
+  input: AiChatSendInput,
+  label: string,
+): Promise<FileCheckpointCreateResult> {
+  const workspaceRoot = requireWorkspaceRoot(input);
+  const maxFiles = defaultCheckpointMaxFiles;
+  const maxBytesPerFile = defaultCheckpointMaxBytesPerFile;
+  const hasOpenEditorTabs = input.openDocuments.some((document) => Boolean(document.path?.trim()));
+  const paths = await checkpointTargetPaths({
+    includeOpenDocuments: hasOpenEditorTabs,
+    includeGitChanges: true,
+  }, input, maxFiles);
+  const openByPath = openDocumentByAbsolutePath(input, workspaceRoot);
+  const files = await Promise.all(paths.map((path) => snapshotCheckpointFile(path, workspaceRoot, openByPath, maxBytesPerFile)));
+  const checkpoint: RuntimeCheckpoint = {
+    id: `cp-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
+    label: truncateText(label.trim() || `Turn ${new Date().toLocaleString()}`, 120),
+    workspaceRoot,
+    createdAt: new Date().toISOString(),
+    files,
+    maxBytesPerFile,
+  };
+  const store = checkpointStore(workspaceRoot);
+  store.unshift(checkpoint);
+  store.splice(maxCheckpointsPerWorkspace);
+  persistRuntimeCheckpoint(checkpoint);
+  return {
+    id: checkpoint.id,
+    label: checkpoint.label,
+    fileCount: files.length,
+    restorableFileCount: files.filter((file) => !file.truncated && !file.error).length,
+  };
+}
+
+export async function ensurePathsInFileCheckpoint(
+  workspaceRoot: string,
+  checkpointId: string,
+  paths: string[],
+  input: AiChatSendInput,
+) {
+  if (paths.length === 0) return;
+  const checkpoint = selectCheckpointById(workspaceRoot, checkpointId);
+  const existing = new Set(checkpoint.files.map((file) => normalizePathSlashes(file.path).toLowerCase()));
+  const missing = paths
+    .map((path) => resolveWorkspacePath(path, workspaceRoot))
+    .filter((path) => isPathInsideWorkspace(path, workspaceRoot))
+    .map((path) => normalizePathSlashes(path))
+    .filter((path) => !existing.has(path.toLowerCase()));
+  if (missing.length === 0) return;
+  const openByPath = openDocumentByAbsolutePath(input, workspaceRoot);
+  const snapshots = await Promise.all(
+    missing.map((path) => snapshotCheckpointFile(path, workspaceRoot, openByPath, checkpoint.maxBytesPerFile)),
+  );
+  checkpoint.files.push(...snapshots);
+  const store = checkpointStore(workspaceRoot);
+  const index = store.findIndex((candidate) => candidate.id === checkpoint.id);
+  if (index >= 0) store[index] = checkpoint;
+  else store.unshift(checkpoint);
+  persistRuntimeCheckpoint(checkpoint);
+}
+
+export async function restoreFileCheckpointById(
+  workspaceRoot: string,
+  checkpointId: string,
+  input: AiChatSendInput,
+  applyPatch: CheckpointToolUi["applyPatch"],
+) {
+  const checkpoint = selectCheckpointById(workspaceRoot, checkpointId);
+  const openByPath = openDocumentByAbsolutePath(input, workspaceRoot);
+  const files = checkpoint.files;
+  const blocked = files.filter((file) => file.truncated || file.error);
+  if (blocked.length > 0) {
+    throw new Error("Restore blocked: one or more snapshot files were truncated or unreadable.");
+  }
+  const current = await Promise.all(files.map((file) => diffCheckpointFile(file, workspaceRoot, openByPath, checkpoint.maxBytesPerFile)));
+  const operations = checkpointRestoreOperations(files, current);
+  if (operations.length === 0) return { restoredPaths: [] as string[], operations: 0 };
+  const result = await applyPatch(operations, true, false);
+  const restoredPaths = operations.map((operation) => operation.path);
+  return { restoredPaths, operations: operations.length, result };
+}
+
 function checkpointStore(workspaceRoot: string) {
-  const key = normalizePathSlashes(workspaceRoot).replace(/\/+$/, "").toLowerCase();
+  const key = workspaceCheckpointKey(workspaceRoot);
   const existing = checkpointStoreByWorkspace.get(key);
   if (existing) return existing;
-  const next: RuntimeCheckpoint[] = [];
+  const persisted = listFileCheckpoints(workspaceRoot).map(runtimeCheckpointFromPersisted);
+  const next = persisted.length > 0 ? persisted : [];
   checkpointStoreByWorkspace.set(key, next);
   return next;
+}
+
+function selectCheckpointById(workspaceRoot: string, id: string) {
+  const store = checkpointStore(workspaceRoot);
+  const checkpoint = store.find((candidate) => candidate.id === id);
+  if (!checkpoint) throw new Error(`Checkpoint not found: ${id}`);
+  return checkpoint;
+}
+
+function persistRuntimeCheckpoint(checkpoint: RuntimeCheckpoint) {
+  upsertFileCheckpoint(checkpoint.workspaceRoot, runtimeCheckpointToPersisted(checkpoint));
+}
+
+function runtimeCheckpointToPersisted(checkpoint: RuntimeCheckpoint): PersistedFileCheckpoint {
+  return {
+    id: checkpoint.id,
+    label: checkpoint.label,
+    workspaceRoot: checkpoint.workspaceRoot,
+    createdAt: checkpoint.createdAt,
+    maxBytesPerFile: checkpoint.maxBytesPerFile,
+    files: checkpoint.files.map((file) => ({ ...file })),
+  };
+}
+
+function runtimeCheckpointFromPersisted(checkpoint: PersistedFileCheckpoint): RuntimeCheckpoint {
+  return {
+    id: checkpoint.id,
+    label: checkpoint.label,
+    workspaceRoot: checkpoint.workspaceRoot,
+    createdAt: checkpoint.createdAt,
+    maxBytesPerFile: checkpoint.maxBytesPerFile,
+    files: checkpoint.files.map((file) => ({ ...file })),
+  };
+}
+
+function selectCheckpoint(args: UnknownRecord, workspaceRoot: string) {
+  const store = checkpointStore(workspaceRoot);
+  if (store.length === 0) {
+    const persisted = getFileCheckpoint(workspaceRoot, stringArg(args, "id", "").trim());
+    if (persisted) return runtimeCheckpointFromPersisted(persisted);
+    throw new Error("No checkpoints exist for this workspace.");
+  }
+  const id = stringArg(args, "id", "").trim();
+  if (!id) return store[0];
+  const checkpoint = store.find((candidate) => candidate.id === id);
+  if (!checkpoint) throw new Error(`Checkpoint not found: ${id}`);
+  return checkpoint;
 }
 
 function checkpointSummary(checkpoint: RuntimeCheckpoint) {
@@ -354,16 +494,6 @@ function checkpointWarnings(files: CheckpointFileSnapshot[]) {
   if (errors.length > 0) warnings.push(`${errors.length} file${errors.length === 1 ? "" : "s"} could not be read.`);
   if (missing.length > 0) warnings.push(`${missing.length} missing path${missing.length === 1 ? "" : "s"} recorded so restore can delete newly created files if needed.`);
   return warnings;
-}
-
-function selectCheckpoint(args: UnknownRecord, workspaceRoot: string) {
-  const store = checkpointStore(workspaceRoot);
-  if (store.length === 0) throw new Error("No checkpoints exist for this workspace.");
-  const id = stringArg(args, "id", "").trim();
-  if (!id) return store[0];
-  const checkpoint = store.find((candidate) => candidate.id === id);
-  if (!checkpoint) throw new Error(`Checkpoint not found: ${id}`);
-  return checkpoint;
 }
 
 function checkpointPathFilter(args: UnknownRecord, workspaceRoot: string) {

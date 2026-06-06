@@ -91,6 +91,12 @@ pub struct AiShellResponse {
     stdout: String,
     stderr: String,
     timed_out: bool,
+    /// Non-fatal safety notices from `ai_shell_safety` (e.g. force-push, sudo).
+    #[serde(default)]
+    warnings: Vec<String>,
+    /// True when the command is a known read-only inspection command.
+    #[serde(default)]
+    read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -473,6 +479,30 @@ pub async fn ai_file_delete(
     })
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiShellClassification {
+    /// Catastrophic reason when the command would be refused by `ai_shell`.
+    blocked: Option<String>,
+    /// Non-fatal risk notices.
+    warnings: Vec<String>,
+    /// True when the command is a known read-only inspection command.
+    read_only: bool,
+}
+
+/// Classify a shell command's safety without executing it. Lets the TypeScript
+/// approval gate auto-approve read-only inspections and reject catastrophic
+/// commands before prompting, while the authoritative checks stay in Rust.
+#[tauri::command]
+pub fn ai_shell_classify(command: String) -> AiShellClassification {
+    let report = crate::ai_shell_safety::classify_shell_command(command.trim());
+    AiShellClassification {
+        blocked: report.blocked,
+        warnings: report.warnings,
+        read_only: report.read_only,
+    }
+}
+
 #[tauri::command]
 pub async fn ai_shell(
     state: State<'_, SharedState>,
@@ -492,6 +522,15 @@ pub async fn ai_shell(
     if command.is_empty() {
         return Err("shell command must not be empty".to_string());
     }
+
+    // Safety boundary: refuse catastrophic commands outright; surface risk notices.
+    let safety = crate::ai_shell_safety::classify_shell_command(&command);
+    if let Some(reason) = safety.blocked {
+        return Err(format!(
+            "Lux blocked this command for safety ({reason}). If this is genuinely intended, run it manually in the integrated terminal."
+        ));
+    }
+
     let timeout_secs = timeout_secs
         .unwrap_or(AI_SHELL_DEFAULT_TIMEOUT_SECS)
         .clamp(1, AI_SHELL_MAX_TIMEOUT_SECS);
@@ -512,6 +551,8 @@ pub async fn ai_shell(
             stdout: truncate_shell_output(&String::from_utf8_lossy(&output.stdout)),
             stderr: truncate_shell_output(&String::from_utf8_lossy(&output.stderr)),
             timed_out: false,
+            warnings: safety.warnings,
+            read_only: safety.read_only,
         }),
         Ok(Err(error)) => Err(format!("Failed to start shell command: {error}")),
         Err(_) => Ok(AiShellResponse {
@@ -523,6 +564,8 @@ pub async fn ai_shell(
             stdout: String::new(),
             stderr: format!("Shell command timed out after {timeout_secs} seconds"),
             timed_out: true,
+            warnings: safety.warnings,
+            read_only: safety.read_only,
         }),
     }
 }

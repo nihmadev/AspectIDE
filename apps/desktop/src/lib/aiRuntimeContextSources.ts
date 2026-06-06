@@ -283,7 +283,7 @@ function classifyMemoryLine(line: string): MemorySignal["kind"] | null {
 }
 
 function classifyChatMemory(content: string, role: AiChatMessage["role"]): MemorySignal["kind"] | null {
-  if (role === "user") return /\b(need|ÃÂ½Ã‘Æ’ÃÂ¶ÃÂ½ÃÂ¾|Ã‘ÂÃÂ´ÃÂµÃÂ»ÃÂ°ÃÂ¹|ÃÂ´ÃÂ¾ÃÂ±ÃÂ°ÃÂ²Ã‘Å’|ÃÂ½ÃÂµ ÃÂ·ÃÂ°ÃÂ±Ã‘Æ’ÃÂ´Ã‘Å’|default|full access|proxy|model|reasoning|tools?)\b/i.test(content) ? "preference" : null;
+  if (role === "user") return /\b(need|нужно|сделай|добавь|не забудь|default|full access|proxy|model|reasoning|tools?)\b/i.test(content) ? "preference" : null;
   return /\b(done|implemented|changed|verified|remaining|blocked|todo|next)\b/i.test(content) ? "planning" : null;
 }
 

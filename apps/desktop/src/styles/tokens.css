@@ -32,13 +32,16 @@
   --border-focus: var(--accent);
 
   /* Neutral text (no blue tint) */
-  --text-0: #e9e9e9;          /* headings / strong */
-  --text-1: #cccccc;          /* body */
-  --text-2: #8a8a8a;          /* muted */
-  --text-3: #6b6b6b;          /* dim / placeholder */
+  --text-0: #ececec;          /* headings / strong */
+  --text-1: #c9c9c9;          /* body */
+  --text-2: #8d8d8d;          /* muted */
+  --text-3: #6a6a6a;          /* dim / placeholder */
 
   /* ----------------------------------------------------------------
-     Accent: Cursor blue (replaces the previous teal/mint accent).
+     Accent: Cursor blue. Reserved for *functional* signals only —
+     focus rings, links, drag targets, primary submit. UI selection
+     and hover states use the neutral interaction tokens below so the
+     chrome reads monochrome (Codex lineage), never tinted.
      ---------------------------------------------------------------- */
   --accent: #3b9eff;
   --accent-strong: #2f8ae0;
@@ -46,22 +49,52 @@
   --accent-softer: rgba(59, 158, 255, 0.08);
   --accent-fg: #ffffff;
 
-  /* Selection / list blues (VS Code / Cursor lineage) */
-  --list-hover: #2a2a2a;
-  --list-active: #04395e;       /* focused menu / command item */
-  --list-active-soft: #2a2d2e;  /* inactive selection (neutral) */
+  /* ----------------------------------------------------------------
+     Neutral interaction layer (Codex-style, monochrome).
+     Translucent white over dark surfaces so they compose on any
+     background and never introduce a cold blue-grey cast.
+     ---------------------------------------------------------------- */
+  --hover-soft: rgba(255, 255, 255, 0.045);   /* faint row/icon hover */
+  --hover: rgba(255, 255, 255, 0.07);         /* standard hover */
+  --hover-strong: rgba(255, 255, 255, 0.10);  /* pressed / emphasised hover */
+  --selected: rgba(255, 255, 255, 0.08);      /* active list row fill */
+  --selected-strong: rgba(255, 255, 255, 0.11);
+  --on-surface-faint: rgba(255, 255, 255, 0.06); /* hairline dividers on fills */
+
+  /* Composer (agent home + chat) — the focal input surface */
+  --composer-bg: #232323;
+  --composer-border: #353535;
+  --composer-border-focus: #4a4a4a;
+  --composer-placeholder: #7c7c7c;
+
+  /* Light "send" affordance (monochrome primary, Codex submit button) */
+  --send-bg: #e6e6e6;
+  --send-bg-hover: #ffffff;
+  --send-fg: #1a1a1a;
+
+  /* Icon tones */
+  --icon: #b0b0b0;            /* resting icon */
+  --icon-strong: #e4e4e4;     /* hovered / active icon */
+  --icon-muted: #7e7e7e;      /* secondary icon */
+
+  /* Selection / list (neutral; menu focus keeps the functional accent) */
+  --list-hover: var(--hover);
+  --list-active: #094468;       /* keyboard-focused command item */
+  --list-active-soft: var(--selected);  /* inactive selection (neutral) */
 
   --blue: #4aa5ff;
   --violet: #b49dff;
   --gold: #e2b341;
-  --danger: #f14c4c;
+  --danger: #f06a6a;
   --danger-strong: #c4383f;
-  --success: #4ec98a;
+  --danger-soft: rgba(240, 106, 106, 0.13);
+  --success: #5bc98a;
 
   /* Elevation */
   --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.32);
   --shadow-md: 0 10px 28px rgba(0, 0, 0, 0.44);
   --shadow-lg: 0 18px 52px rgba(0, 0, 0, 0.55);
+  --shadow-composer: 0 12px 34px rgba(0, 0, 0, 0.34);
 
   /* Spacing scale */
   --space-1: 4px;
@@ -74,8 +107,10 @@
   --radius-sm: 6px;
   --radius-md: 8px;
   --radius-lg: 12px;
+  --radius-xl: 16px;
 
   --ring: 0 0 0 1px var(--accent-strong);
+  --focus-ring: 0 0 0 1px var(--bg-0), 0 0 0 3px var(--accent-soft);
 }
 
 * {

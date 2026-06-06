@@ -8,7 +8,9 @@ import { ProjectLoadingStatus } from "./components/ProjectLoadingStatus";
 import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
 import { WelcomeScreen } from "./components/WelcomeScreen";
+import { saveChatCheckpointStore } from "./lib/aiChatCheckpointStore";
 import { loadAiChatHistory, saveAiChatHistory } from "./lib/aiChatHistory";
+import { ensureBundledAgentBrowserLatest } from "./lib/agentBrowserAutoUpdate";
 import { AI_PREFERENCES_KEY, normalizeAiPreferences } from "./lib/aiPreferences";
 import { buildAiProjectIndexSnapshot } from "./lib/aiProjectIndex";
 import { closedDocumentIdsForAllDocuments, closedDocumentIdsForDocumentInGroup } from "./lib/editorCloseTargets";
@@ -93,7 +95,38 @@ export function App() {
   const aiChatHistoryLoadedRef = useRef(false);
   const skipNextAiChatPersistRef = useRef(true);
   const aiChatPersistTimerRef = useRef<number | null>(null);
-  const projectLoadSummary = useMemo(() => buildProjectLoadSummary({ aiIndexStatus: aiIndex.status, fileTreeLoading, languageServersLoading, projectIndexingEnabled: aiPreferences.projectIndexingEnabled, projectLoad }), [aiIndex.status, aiPreferences.projectIndexingEnabled, fileTreeLoading, languageServersLoading, projectLoad]);
+  const fileEntryCount = useLuxStore((state) => state.fileEntries.length);
+  const languageServerCount = useLuxStore((state) => state.languageServers.length);
+  const projectLoadSummary = useMemo(
+    () =>
+      buildProjectLoadSummary({
+        aiIndex: {
+          indexedFiles: aiIndex.indexedFiles,
+          progress: aiIndex.progress,
+          status: aiIndex.status,
+          totalFiles: aiIndex.totalFiles,
+        },
+        aiIndexStatus: aiIndex.status,
+        fileEntryCount,
+        fileTreeLoading,
+        languageServerCount,
+        languageServersLoading,
+        projectIndexingEnabled: aiPreferences.projectIndexingEnabled,
+        projectLoad,
+      }),
+    [
+      aiIndex.indexedFiles,
+      aiIndex.progress,
+      aiIndex.status,
+      aiIndex.totalFiles,
+      aiPreferences.projectIndexingEnabled,
+      fileEntryCount,
+      fileTreeLoading,
+      languageServerCount,
+      languageServersLoading,
+      projectLoad,
+    ],
+  );
   const dismissProjectLoadError = () => setProjectLoad(createIdleProjectLoadState());
 
   const openProject = () => {
@@ -145,6 +178,15 @@ export function App() {
     refreshRecentWorkspaces(setRecentWorkspaces);
   }, []);
 
+  const agentBrowserAutoUpdateKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!aiPreferences.agentBrowserEnabled) return;
+    const key = aiPreferences.agentBrowserCommand.trim();
+    if (agentBrowserAutoUpdateKeyRef.current === key) return;
+    agentBrowserAutoUpdateKeyRef.current = key;
+    void ensureBundledAgentBrowserLatest(aiPreferences);
+  }, [aiPreferences.agentBrowserEnabled, aiPreferences.agentBrowserCommand]);
+
   useEffect(() => {
     if (aiChatHistoryLoadedRef.current) return;
     aiChatHistoryLoadedRef.current = true;
@@ -176,7 +218,7 @@ export function App() {
       void saveAiChatHistory({
         activeSessionId: activeAiChatSessionId,
         sessions: aiChatSessions,
-      }).catch(reportAiChatHistoryError);
+      }).then(() => saveChatCheckpointStore()).catch(reportAiChatHistoryError);
     }, 450);
 
     return () => {
@@ -263,6 +305,19 @@ export function App() {
   }, [aiIndexRefreshToken, aiPreferences.includeImages, aiPreferences.maxIndexedFiles, aiPreferences.projectIndexingEnabled, setAiIndex, setProjectLoad, workspace]);
 
   useEffect(() => {
+    if (!workspace || projectLoad.stage !== "indexing") return;
+    if (aiIndex.status === "ready") {
+      setProjectLoad({
+        active: false,
+        progress: 100,
+        root: workspace.root,
+        stage: "ready",
+        workspaceName: workspace.name,
+      });
+    }
+  }, [aiIndex.status, projectLoad.stage, setProjectLoad, workspace]);
+
+  useEffect(() => {
     void luxCommands.keybindingsGet()
       .then((profile) => {
         setKeybindingProfile(profile);
@@ -306,7 +361,17 @@ export function App() {
       .finally(() => {
         if (!cancelled) {
           setLanguageServersLoading(false);
-          if (useLuxStore.getState().projectLoad.stage !== "error") setProjectLoad({ active: false, progress: 100, root: workspace.root, stage: "ready", workspaceName: workspace.name });
+          if (useLuxStore.getState().projectLoad.stage !== "error") {
+            const indexingEnabled = useLuxStore.getState().aiPreferences.projectIndexingEnabled;
+            const indexBusy = useLuxStore.getState().aiIndex.status === "indexing";
+            setProjectLoad({
+              active: indexingEnabled && indexBusy,
+              progress: indexingEnabled && indexBusy ? 78 : 100,
+              root: workspace.root,
+              stage: indexingEnabled && indexBusy ? "indexing" : "ready",
+              workspaceName: workspace.name,
+            });
+          }
         }
       });
     luxCommands.diagnosticsSnapshot()

@@ -15,6 +15,7 @@
   "packageManager": "pnpm@10.0.0",
   "scripts": {
     "dev": "pnpm --filter @lux/desktop tauri dev",
+    "dev:windows": "scripts\\dev-windows.cmd",
     "dev:web": "pnpm --filter @lux/desktop dev",
     "build": "pnpm --filter @lux/desktop build",
     "typecheck": "pnpm --filter @lux/desktop typecheck",
@@ -25,6 +26,6 @@
     "benchmark:core": "cargo run -p lux-bench -- --assert"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": ["agent-browser", "esbuild"]
   }
 }

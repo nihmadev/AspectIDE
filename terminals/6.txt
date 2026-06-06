@@ -1,0 +1,832 @@
+---
+pid: 34056
+cwd: "E:\Projects\!Lux IDE"
+command: "Set-Location -LiteralPath 'E:\\Projects\\!Lux IDE'; pnpm dev"
+started_at: 2026-06-04T22:33:42.622Z
+running_for_ms: 16890003 
+---
+
+> lux-ide@1.0.0 dev E:\Projects\!Lux IDE
+> pnpm --filter @lux/desktop tauri dev
+
+
+> @lux/desktop@1.0.0 tauri E:\Projects\!Lux IDE\apps\desktop
+> tauri "dev"
+
+     Running BeforeDevCommand (`pnpm dev`)
+
+> @lux/desktop@1.0.0 dev E:\Projects\!Lux IDE\apps\desktop
+> node ./scripts/kill-dev-port.mjs 5173 && node ./scripts/start-browser-preview.mjs
+
+(node:32876) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+01:33:47 [vite] (client) Re-optimizing dependencies because lockfile has changed
+
+  VITE v8.0.14  ready in 422 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching E:\Projects\!Lux IDE\apps\desktop\src-tauri for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-core for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-dap for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-editor for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-extensions for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-file-intel for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-fs for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-git for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-lsp for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-search for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-settings for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-terminal for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-workspace for changes...
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.88s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-04][22:33:53][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][22:33:53][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.94s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.88s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File src-tauri\Cargo.toml changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Updating crates.io index
+       Fetch 46 complete; 44 pending                             Fetch 46 complete; 8 pending                              Fetch 250 complete; 204 pending                           Fetch 250 complete; 89 pending                            Fetch 250 complete; 52 pending                            Fetch 250 complete; 22 pending                            Fetch 250 complete; 14 pending                            Fetch 250 complete; 2 pending                             Fetch 250 complete; 1 pending                             Fetch 450 complete; 200 pending                           Fetch 450 complete; 27 pending                            Fetch 450 complete; 12 pending                            Fetch 450 complete; 3 pending                             Fetch 450 complete; 1 pending                              Info File src-tauri\src\agent_browser_commands.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Updating crates.io index
+       Fetch 46 complete; 1 pending                              Fetch 250 complete; 165 pending                           Fetch 250 complete; 42 pending                            Fetch 250 complete; 1 pending                             Fetch 450 complete; 200 pending                           Fetch 450 complete; 7 pending                             Fetch 450 complete; 5 pending                             Fetch 577 complete; 58 pending                            Fetch 577 complete; 11 pending                            Fetch 577 complete; 10 pending                            Fetch 577 complete; 4 pending                             Fetch 625 complete; 40 pending                            Fetch 625 complete; 3 pending                              Info File src-tauri\src\agent_browser_commands.rs changed. Rebuilding application...
+       Fetch 648 complete; 23 pending                          Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Updating crates.io index
+       Fetch 46 complete; 2 pending                              Fetch 46 complete; 1 pending                              Fetch 250 complete; 203 pending                           Fetch 250 complete; 109 pending                           Fetch 250 complete; 34 pending                            Fetch 250 complete; 12 pending                            Fetch 250 complete; 6 pending                             Fetch 250 complete; 3 pending                             Fetch 450 complete; 200 pending                           Fetch 450 complete; 6 pending                             Fetch 450 complete; 5 pending                             Fetch 577 complete; 127 pending                           Fetch 577 complete; 59 pending                            Fetch 577 complete; 5 pending                             Fetch 577 complete; 1 pending                             Fetch 625 complete; 35 pending                            Fetch 648 complete; 23 pending                            Fetch 648 complete; 14 pending                            Fetch 659 complete; 10 pending                            Fetch 663 complete; 3 pending                             Fetch 663 complete; 2 pending                             Fetch 664 complete; 1 pending                                                                                       Locking 3 packages to latest compatible versions
+      Adding env_home v0.1.0
+      Adding which v7.0.3 (available: v8.0.2)
+      Adding winsafe v0.0.19
+ Downloading 1 crate                                       Downloading 2 crates                                      Downloading 3 crates                                                                                                   Downloaded env_home v0.1.0
+ Downloading 2 crates, remaining bytes: 17.4KiB                                                                         Downloaded which v7.0.3
+ Downloading 1 crate                                                                                                    Downloaded winsafe v0.0.19
+ Downloading 0 crates, extracting winsafe ...                                                                           Downloaded 3 crates (508.5KiB) in 0.93s
+   Compiling either v1.16.0
+   Compiling winsafe v0.0.19
+   Compiling env_home v0.1.0
+    Building [=======================> ] 688/700: env_hom…    Building [=======================> ] 689/700: winsafe…                                                               Compiling itertools v0.14.0
+   Compiling rayon v1.12.0
+    Building [=======================> ] 689/700: rayon, …    Building [=======================> ] 690/700: rayon, …                                                               Compiling wasmtime-internal-cranelift v45.0.0
+    Building [=======================> ] 690/700: rayon, …    Building [=======================> ] 691/700: rayon, …01:36:41 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+                                                               Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+    Building [=======================> ] 691/700: rayon, …    Building [=======================> ] 692/700: winsafe…                                                               Compiling which v7.0.3
+    Building [=======================> ] 692/700: which, …    Building [=======================> ] 693/700: which, …    Building [=======================> ] 694/700: winsafe…    Building [=======================> ] 695/700: wasmtim…                                                               Compiling wasmtime v45.0.0
+    Building [=======================> ] 695/700: wasmtim…    Building [=======================> ] 696/700: wasmtime01:36:49 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+                                                               Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+    Building [=======================> ] 696/700: wasmtim…    Building [=======================> ] 697/700: wasmtime                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…01:36:56 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/RunDebugPanel.tsx, /src/components/sidebar/ExplorerPanel.tsx, /src/components/ImageEditorPane.tsx, /src/components/FilePreviewPane.tsx and 4 more
+01:36:56 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:36:56 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+                                                            error[E0308]: mismatched types
+  --> apps\desktop\src-tauri\src\agent_browser.rs:81:30
+   |
+81 |         .and_then(|response| response.data);
+   |                              ^^^^^^^^^^^^^ expected `Option<_>`, found `Value`
+   |
+   = note: expected enum `std::option::Option<_>`
+              found enum `serde_json::Value`
+help: try wrapping the expression in `Some`
+   |
+81 |         .and_then(|response| Some(response.data));
+   |                              +++++             +
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0308]: mismatched types
+   --> apps\desktop\src-tauri\src\agent_browser.rs:132:9
+    |
+124 |     let response = run_json(
+    |                    -------- arguments to this function are incorrect
+...
+132 |         &request.args,
+    |         ^^^^^^^^^^^^^ expected `&[&str]`, found `&Vec<String>`
+    |
+    = note: expected reference `&[&str]`
+               found reference `&Vec<std::string::String>`
+note: function defined here
+   --> apps\desktop\src-tauri\src\agent_browser.rs:165:10
+    |
+165 | async fn run_json(
+    |          ^^^^^^^^
+...
+168 |     args: &[&str],
+    |     -------------
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0277]: `Result<tokio::process::Child, std::io::Error>` is not a future
+   --> apps\desktop\src-tauri\src\agent_browser.rs:197:9
+    |
+195 |     let mut child = tokio::time::timeout(
+    |                     -------------------- required by a bound introduced by this call
+196 |         std::time::Duration::from_secs(timeout_secs.saturating_add(5)),
+197 |         command.spawn(),
+    |         ^^^^^^^^^^^^^^^ `Result<tokio::process::Child, std::io::Error>` is not a future
+    |
+    = help: the trait `futures_util::Future` is not implemented for `Result<tokio::process::Child, std::io::Error>`
+    = note: Result<tokio::process::Child, std::io::Error> must be a future or must implement `IntoFuture` to be awaited
+    = note: required for `Result<tokio::process::Child, std::io::Error>` to implement `std::future::IntoFuture`
+note: required by a bound in `timeout`
+   --> C:\Users\GofMan3\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\tokio-1.52.3\src\time\timeout.rs:88:8
+    |
+ 86 | pub fn timeout<F>(duration: Duration, future: F) -> Timeout<F::IntoFuture>
+    |        ------- required by a bound in this function
+ 87 | where
+ 88 |     F: IntoFuture,
+    |        ^^^^^^^^^^ required by this bound in `timeout`
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0277]: `Result<tokio::process::Child, std::io::Error>` is not a future
+   --> apps\desktop\src-tauri\src\agent_browser.rs:199:6
+    |
+195 |       let mut child = tokio::time::timeout(
+    |  _____________________-
+196 | |         std::time::Duration::from_secs(timeout_secs.saturating_add(5)),
+197 | |         command.spawn(),
+198 | |     )
+    | |_____- this call returns `Result<tokio::process::Child, std::io::Error>`
+199 |       .await
+    |        ^^^^^ `Result<tokio::process::Child, std::io::Error>` is not a future
+    |
+    = help: the trait `futures_util::Future` is not implemented for `Result<tokio::process::Child, std::io::Error>`
+    = note: required for `tokio::time::Timeout<Result<tokio::process::Child, std::io::Error>>` to implement `futures_util::Future`
+    = note: required for `tokio::time::Timeout<Result<tokio::process::Child, std::io::Error>>` to implement `std::future::IntoFuture`
+help: remove the `.await`
+    |
+199 -     .await
+    |
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0277]: `Result<tokio::process::Child, std::io::Error>` is not a future
+   --> apps\desktop\src-tauri\src\agent_browser.rs:195:21
+    |
+195 |       let mut child = tokio::time::timeout(
+    |  _____________________^
+196 | |         std::time::Duration::from_secs(timeout_secs.saturating_add(5)),
+197 | |         command.spawn(),
+198 | |     )
+    | |_____^ `Result<tokio::process::Child, std::io::Error>` is not a future
+    |
+    = help: the trait `futures_util::Future` is not implemented for `Result<tokio::process::Child, std::io::Error>`
+    = note: required for `Result<tokio::process::Child, std::io::Error>` to implement `std::future::IntoFuture`
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: unused import: `io::AsyncReadExt`
+  --> apps\desktop\src-tauri\src\agent_browser.rs:12:13
+   |
+12 | use tokio::{io::AsyncReadExt, process::Command};
+   |             ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 698/700: lux-des…                                                            Some errors have detailed explanations: E0277, E0308.
+For more information about an error, try `rustc --explain E0277`.
+    Building [=======================> ] 698/700: lux-des…                                                            warning: `lux-desktop` (lib) generated 1 warning
+error: could not compile `lux-desktop` (lib) due to 5 previous errors; 1 warning emitted
+01:39:22 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:39:22 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:39:22 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:39:22 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:39:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:39:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:39:43 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+01:39:52 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+01:39:58 [vite] (client) hmr update /src/components/AiToolCall.tsx
+01:40:09 [vite] (client) hmr update /src/styles/app.css
+01:40:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            warning: variable does not need to be mutable
+   --> apps\desktop\src-tauri\src\agent_browser.rs:196:9
+    |
+196 |     let mut child = command
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0382]: borrow of partially moved value: `options`
+   --> apps\desktop\src-tauri\src\agent_browser.rs:226:22
+    |
+180 |     if let Some(options) = options {
+    |                 ------- value partially moved here
+...
+226 |     let max_output = options.as_ref().map_or(DEFAULT_MAX_OUTPUT, |value| value.max_output);
+    |                      ^^^^^^^ value borrowed here after partial move
+    |
+    = note: partial move occurs because value has type `InvokeOptions`, which does not implement the `Copy` trait
+help: borrow this binding in the pattern to avoid moving the value
+    |
+180 |     if let Some(ref options) = options {
+    |                 +++
+
+    Building [=======================> ] 698/700: lux-des…                                                            For more information about this error, try `rustc --explain E0382`.
+    Building [=======================> ] 698/700: lux-des…                                                            warning: `lux-desktop` (lib) generated 1 warning
+error: could not compile `lux-desktop` (lib) due to 1 previous error; 1 warning emitted
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Blocking waiting for file lock on build directory
+warning: variable does not need to be mutable
+   --> apps\desktop\src-tauri\src\agent_browser.rs:197:9
+    |
+197 |     let mut child = command
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: `lux-desktop` (lib) generated 1 warning (run `cargo fix --lib -p lux-desktop` to apply 1 suggestion)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 35s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…    Building [=======================> ] 699/700: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.18s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            warning: unused import: `Path`
+ --> apps\desktop\src-tauri\src\agent_browser.rs:6:12
+  |
+6 |     path::{Path, PathBuf},
+  |            ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: unused imports: `Engine as _` and `engine::general_purpose::STANDARD as BASE64_STANDARD`
+  --> apps\desktop\src-tauri\src\agent_browser.rs:11:14
+   |
+11 | use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: constant `MAX_IMAGE_BYTES` is never used
+  --> apps\desktop\src-tauri\src\agent_browser.rs:19:7
+   |
+19 | const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+   |       ^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `INSTALL_TIMEOUT_SECS` is never used
+  --> apps\desktop\src-tauri\src\agent_browser.rs:20:7
+   |
+20 | const INSTALL_TIMEOUT_SECS: u64 = 600;
+   |       ^^^^^^^^^^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: struct `AgentBrowserInstallRequest` is never constructed
+  --> apps\desktop\src-tauri\src\agent_browser.rs:66:12
+   |
+66 | pub struct AgentBrowserInstallRequest {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AgentBrowserInstallStep` is never constructed
+  --> apps\desktop\src-tauri\src\agent_browser.rs:73:12
+   |
+73 | pub struct AgentBrowserInstallStep {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: struct `AgentBrowserInstallResponse` is never constructed
+  --> apps\desktop\src-tauri\src\agent_browser.rs:82:12
+   |
+82 | pub struct AgentBrowserInstallResponse {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: struct `AgentBrowserReadImageRequest` is never constructed
+  --> apps\desktop\src-tauri\src\agent_browser.rs:91:12
+   |
+91 | pub struct AgentBrowserReadImageRequest {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AgentBrowserReadImageResponse` is never constructed
+  --> apps\desktop\src-tauri\src\agent_browser.rs:97:12
+   |
+97 | pub struct AgentBrowserReadImageResponse {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: struct `AgentBrowserStreamStatusRequest` is never constructed
+   --> apps\desktop\src-tauri\src\agent_browser.rs:106:12
+    |
+106 | pub struct AgentBrowserStreamStatusRequest {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: struct `AgentBrowserStreamStatusResponse` is never constructed
+   --> apps\desktop\src-tauri\src\agent_browser.rs:115:12
+    |
+115 | pub struct AgentBrowserStreamStatusResponse {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AgentBrowserDashboardRequest` is never constructed
+   --> apps\desktop\src-tauri\src\agent_browser.rs:125:12
+    |
+125 | pub struct AgentBrowserDashboardRequest {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: struct `AgentBrowserDashboardResponse` is never constructed
+   --> apps\desktop\src-tauri\src\agent_browser.rs:133:12
+    |
+133 | pub struct AgentBrowserDashboardResponse {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `AgentBrowserSkillsRequest` is never constructed
+   --> apps\desktop\src-tauri\src\agent_browser.rs:144:12
+    |
+144 | pub struct AgentBrowserSkillsRequest {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…                                                            warning: struct `AgentBrowserSkillsResponse` is never constructed
+   --> apps\desktop\src-tauri\src\agent_browser.rs:152:12
+    |
+152 | pub struct AgentBrowserSkillsResponse {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Building [=======================> ] 698/700: lux-des…        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0716]: temporary value dropped while borrowed
+   --> apps\desktop\src-tauri\src\agent_browser.rs:597:31
+    |
+597 |             enable_args.push(&port.to_string());
+    |                               ^^^^^^^^^^^^^^^^ - temporary value is freed at the end of this statement
+    |                               |
+    |                               creates a temporary value which is freed while still in use
+...
+607 |             &enable_args,
+    |             ------------ borrow later used here
+    |
+    = note: consider using a `let` binding to create a longer lived value
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0597]: `port_arg` does not live long enough
+   --> apps\desktop\src-tauri\src\agent_browser.rs:644:54
+    |
+640 |     let (args, url): (Vec<&str>, Option<String>) = match action.as_str() {
+    |          ---- variable `args` declared here
+641 |         "start" => {
+642 |             let port_arg = port.to_string();
+    |                 -------- binding `port_arg` declared here
+643 |             (
+644 |                 vec!["dashboard", "start", "--port", port_arg.as_str()],
+    |                                                      ^^^^^^^^ borrowed value does not live long enough
+...
+647 |         }
+    |         - `port_arg` dropped here while still borrowed
+    |
+    = note: `args` is a collection that stores borrowed references, but `port_arg` does not live long enough to be stored in it
+    = help: buffer reuse with borrowed references requires unsafe code or restructuring
+
+    Building [=======================> ] 698/700: lux-des…        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0597]: `port_arg` does not live long enough
+   --> apps\desktop\src-tauri\src\agent_browser.rs:655:54
+    |
+651 |     let (args, url): (Vec<&str>, Option<String>) = match action.as_str() {
+    |          ---- variable `args` declared here
+652 |         "start" => {
+653 |             let port_arg = port.to_string();
+    |                 -------- binding `port_arg` declared here
+654 |             (
+655 |                 vec!["dashboard", "start", "--port", port_arg.as_str()],
+    |                                                      ^^^^^^^^ borrowed value does not live long enough
+...
+658 |         }
+    |         - `port_arg` dropped here while still borrowed
+    |
+    = note: `args` is a collection that stores borrowed references, but `port_arg` does not live long enough to be stored in it
+    = help: buffer reuse with borrowed references requires unsafe code or restructuring
+
+    Building [=======================> ] 698/700: lux-des…                                                            For more information about this error, try `rustc --explain E0597`.
+    Building [=======================> ] 698/700: lux-des…                                                            error: could not compile `lux-desktop` (lib) due to 1 previous error
+01:46:36 [vite] (client) hmr update /src/App.tsx, /src/components/AiChatPanel.tsx
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0597]: `port_arg` does not live long enough
+   --> apps\desktop\src-tauri\src\agent_browser.rs:656:54
+    |
+652 |     let (args, url): (Vec<&str>, Option<String>) = match action.as_str() {
+    |          ---- variable `args` declared here
+653 |         "start" => {
+654 |             let port_arg = port.to_string();
+    |                 -------- binding `port_arg` declared here
+655 |             (
+656 |                 vec!["dashboard", "start", "--port", port_arg.as_str()],
+    |                                                      ^^^^^^^^ borrowed value does not live long enough
+...
+659 |         }
+    |         - `port_arg` dropped here while still borrowed
+    |
+    = note: `args` is a collection that stores borrowed references, but `port_arg` does not live long enough to be stored in it
+    = help: buffer reuse with borrowed references requires unsafe code or restructuring
+
+    Building [=======================> ] 698/700: lux-des…                                                            For more information about this error, try `rustc --explain E0597`.
+    Building [=======================> ] 698/700: lux-des…                                                            error: could not compile `lux-desktop` (lib) due to 1 previous error
+01:46:46 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/RunDebugPanel.tsx, /src/components/sidebar/ExplorerPanel.tsx, /src/components/ImageEditorPane.tsx, /src/components/FilePreviewPane.tsx and 4 more
+01:47:11 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:47:11 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:47:11 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:47:16 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:47:22 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:47:22 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:47:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:47:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:47:45 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+01:47:45 [vite] (client) hmr update /src/components/AiToolCall.tsx
+01:47:45 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+01:48:05 [vite] (client) hmr update /src/styles/ai-chat.css
+01:48:05 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Blocking waiting for file lock on build directory
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 54.89s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0063]: missing fields `content_boundaries`, `ignore_https_errors`, `profile` and 2 other fields in initializer of `InvokeOptions`
+   --> apps\desktop\src-tauri\src\agent_browser.rs:662:18
+    |
+662 |             Some(InvokeOptions {
+    |                  ^^^^^^^^^^^^^ missing `content_boundaries`, `ignore_https_errors`, `profile` and 2 other fields
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0063]: missing fields `content_boundaries`, `ignore_https_errors`, `profile` and 2 other fields in initializer of `InvokeOptions`
+   --> apps\desktop\src-tauri\src\agent_browser.rs:675:14
+    |
+675 |         Some(InvokeOptions {
+    |              ^^^^^^^^^^^^^ missing `content_boundaries`, `ignore_https_errors`, `profile` and 2 other fields
+
+    Building [=======================> ] 698/700: lux-des…                                                            For more information about this error, try `rustc --explain E0063`.
+    Building [=======================> ] 698/700: lux-des…                                                            error: could not compile `lux-desktop` (lib) due to 2 previous errors
+01:50:25 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…01:50:35 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:50:35 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/RunDebugPanel.tsx, /src/components/sidebar/ExplorerPanel.tsx, /src/components/ImageEditorPane.tsx, /src/components/FilePreviewPane.tsx and 4 more
+01:50:35 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:50:35 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:50:35 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+    Building [=======================> ] 699/700: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 46.28s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            warning: function `run_install_step_legacy_body` is never used
+   --> apps\desktop\src-tauri\src\agent_browser.rs:852:10
+    |
+852 | async fn run_install_step_legacy_body(
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 698/700: lux-des…01:52:58 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:52:58 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:52:58 [vite] (client) hmr update /src/components/AiToolCall.tsx
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…01:53:05 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+01:53:05 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+    Building [=======================> ] 699/700: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 52.32s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+01:57:11 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:57:11 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+01:57:26 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+01:57:26 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/RunDebugPanel.tsx, /src/components/sidebar/ExplorerPanel.tsx, /src/components/ImageEditorPane.tsx, /src/components/FilePreviewPane.tsx and 4 more
+01:57:27 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+01:57:27 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+01:57:27 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+01:57:27 [vite] (client) page reload src/main.tsx
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…01:57:46 [vite] (client) hmr update /src/styles/ai-chat.css
+01:57:55 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+01:57:55 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+01:58:02 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+    Building [=======================> ] 699/700: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 07s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+02:03:12 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+02:03:12 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/RunDebugPanel.tsx, /src/components/sidebar/ExplorerPanel.tsx, /src/components/ImageEditorPane.tsx, /src/components/FilePreviewPane.tsx and 4 more
+02:03:12 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:03:12 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:03:12 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:03:12 [vite] (client) page reload src/main.tsx
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…02:03:32 [vite] (client) hmr update /src/components/AiToolCall.tsx
+02:03:32 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:03:32 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:03:32 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:03:32 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:03:32 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:03:45 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+02:03:45 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+02:03:45 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+    Building [=======================> ] 699/700: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 44.47s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0599]: no method named `unwrap_or` found for reference `&str` in the current scope
+   --> apps\desktop\src-tauri\src\agent_browser.rs:962:31
+    |
+962 |     let minor = parts.next()?.unwrap_or("0").parse().ok()?;
+    |                               ^^^^^^^^^ method not found in `&str`
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0599]: no method named `unwrap_or` found for reference `&str` in the current scope
+   --> apps\desktop\src-tauri\src\agent_browser.rs:963:31
+    |
+963 |     let patch = parts.next()?.unwrap_or("0").parse().ok()?;
+    |                               ^^^^^^^^^ method not found in `&str`
+
+    Building [=======================> ] 698/700: lux-des…                                                            For more information about this error, try `rustc --explain E0599`.
+    Building [=======================> ] 698/700: lux-des…                                                            error: could not compile `lux-desktop` (lib) due to 2 previous errors
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0599]: no method named `unwrap_or` found for reference `&str` in the current scope
+   --> apps\desktop\src-tauri\src\agent_browser.rs:957:31
+    |
+957 |     let minor = parts.next()?.unwrap_or("0").parse().ok()?;
+    |                               ^^^^^^^^^ method not found in `&str`
+
+    Building [=======================> ] 698/700: lux-des…                                                            error[E0599]: no method named `unwrap_or` found for reference `&str` in the current scope
+   --> apps\desktop\src-tauri\src\agent_browser.rs:958:31
+    |
+958 |     let patch = parts.next()?.unwrap_or("0").parse().ok()?;
+    |                               ^^^^^^^^^ method not found in `&str`
+
+    Building [=======================> ] 698/700: lux-des…02:08:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+02:08:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 12 more
+02:08:40 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx, /src/components/sidebar/RunDebugPanel.tsx, /src/components/sidebar/ExplorerPanel.tsx, /src/components/ImageEditorPane.tsx, /src/components/FilePreviewPane.tsx and 4 more
+                                                            For more information about this error, try `rustc --explain E0599`.
+    Building [=======================> ] 698/700: lux-des…                                                            error: could not compile `lux-desktop` (lib) due to 2 previous errors
+02:09:01 [vite] (client) hmr update /src/App.tsx
+        Info File src-tauri\src\agent_browser.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+    Blocking waiting for file lock on build directory
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 13s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-04][23:10:32][reqwest::connect][DEBUG] starting new connection: https://registry.npmjs.org/
+[2026-06-04][23:10:32][reqwest::connect][DEBUG] starting new connection: https://registry.npmjs.org/
+02:11:55 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:11:55 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+[2026-06-04][23:18:29][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][23:18:29][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+02:20:29 [vite] (client) hmr update /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx
+02:20:29 [vite] (client) hmr update /src/components/EditorArea.tsx
+02:20:36 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:20:40 [vite] (client) hmr update /src/components/ai-chat/AiChatHistoryPopover.tsx
+02:20:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 15 more
+02:20:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 15 more
+02:20:40 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:20:40 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:20:40 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:20:40 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:20:40 [vite] (client) page reload src/main.tsx
+02:20:49 [vite] (client) hmr update /src/styles/ai-chat.css
+02:20:49 [vite] (client) hmr update /src/styles/ai-chat.css
+02:20:53 [vite] (client) hmr update /src/styles/app.css
+02:20:53 [vite] (client) hmr update /src/components/EditorCloseGuard.tsx, /src/components/AiChatPanel.tsx, /src/components/EditorArea.tsx, /src/components/ImageEditorPane.tsx, /src/components/FilePreviewPane.tsx, /src/components/DatabaseEditorPane.tsx, /src/components/TableEditorPane.tsx, /src/components/SpreadsheetEditorPane.tsx, /src/components/MediaEditorPane.tsx, /src/components/PdfEditorPane.tsx
+02:20:53 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:20:53 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:20:53 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:20:53 [vite] (client) page reload src/main.tsx
+02:20:57 [vite] (client) hmr update /src/components/EditorCloseGuard.tsx, /src/components/AiChatPanel.tsx, /src/components/EditorArea.tsx, /src/components/ImageEditorPane.tsx, /src/components/FilePreviewPane.tsx, /src/components/DatabaseEditorPane.tsx, /src/components/TableEditorPane.tsx, /src/components/SpreadsheetEditorPane.tsx, /src/components/MediaEditorPane.tsx, /src/components/PdfEditorPane.tsx
+02:20:57 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:20:57 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:20:57 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:20:57 [vite] (client) page reload src/main.tsx
+[2026-06-04][23:21:16][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][23:21:16][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+02:22:47 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 15 more
+02:22:47 [vite] (client) hmr update /src/components/AgentBrowserPreviewEditorPane.tsx
+02:22:47 [vite] (client) hmr update /src/components/ai-chat/AgentBrowserPreview.tsx
+02:22:47 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 15 more
+02:22:47 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:22:47 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:22:47 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:22:47 [vite] (client) page reload src/main.tsx
+02:23:04 [vite] (client) hmr update /src/components/ai-chat/AgentBrowserPreview.tsx
+02:23:04 [vite] (client) hmr update /src/styles/app.css
+02:23:04 [vite] (client) hmr update /src/styles/ai-chat.css
+02:23:04 [vite] (client) hmr update /src/styles/app.css
+02:23:10 [vite] (client) hmr update /src/styles/ai-chat.css
+02:23:10 [vite] (client) hmr update /src/components/ProjectLoadingStatus.tsx
+02:23:10 [vite] (client) hmr update /src/styles/app.css
+02:25:34 [vite] (client) hmr update /src/components/ai-chat/AgentBrowserPreview.tsx
+02:25:34 [vite] (client) hmr update /src/components/ai-chat/AgentBrowserPreview.tsx, /src/components/AiChatPanel.tsx
+02:25:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:25:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:25:40 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:25:40 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:25:40 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:25:40 [vite] (client) page reload src/main.tsx
+02:25:46 [vite] (client) hmr update /src/components/ai-chat/AgentBrowserPreview.tsx
+[2026-06-04][23:26:52][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][23:26:52][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+02:27:56 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:27:56 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:27:56 [vite] (client) hmr update /src/styles/app.css
+02:27:56 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:27:56 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:27:56 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:27:56 [vite] (client) page reload src/main.tsx
+02:28:18 [vite] (client) hmr update /src/main.tsx
+02:28:18 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:28:18 [vite] (client) page reload src/main.tsx
+02:28:27 [vite] (client) hmr update /src/components/SettingsDialog.tsx
+02:28:35 [vite] (client) hmr update /src/components/SettingsDialog.tsx
+02:28:41 [vite] (client) hmr update /src/styles/settings.css
+02:28:41 [vite] (client) hmr update /src/components/SettingsDialog.tsx
+[2026-06-04][23:29:05][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][23:29:05][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+[2026-06-04][23:29:21][tao::platform_impl::platform::event_loop::runner][DEBUG] NewEvents emitted without explicit RedrawEventsCleared
+[2026-06-04][23:29:21][tao::platform_impl::platform::event_loop::runner][DEBUG] RedrawEventsCleared emitted without explicit MainEventsCleared
+02:30:15 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:30:15 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:15 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:30:15 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:15 [vite] (client) page reload src/main.tsx
+02:30:25 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:30:25 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:25 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:30:25 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:25 [vite] (client) page reload src/main.tsx
+02:30:44 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:30:44 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:30:44 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:44 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:30:44 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:44 [vite] (client) page reload src/main.tsx
+02:30:52 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:30:52 [vite] (client) Pre-transform error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `ContextCompactionState` has already been declared
+    ╭─[ src/lib/store.ts:3:15 ]
+    │
+  3 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── `ContextCompactionState` has already been declared here
+    │ 
+ 69 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/lib/store.ts
+02:30:52 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:52 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:30:52 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:52 [vite] (client) page reload src/main.tsx
+02:30:52 [vite] (client) Pre-transform error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `ContextCompactionState` has already been declared
+    ╭─[ src/lib/store.ts:3:15 ]
+    │
+  3 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── `ContextCompactionState` has already been declared here
+    │ 
+ 69 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/lib/store.ts
+02:30:52 [vite] (client) Pre-transform error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `ContextCompactionState` has already been declared
+    ╭─[ src/lib/store.ts:3:15 ]
+    │
+  3 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── `ContextCompactionState` has already been declared here
+    │ 
+ 69 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/lib/store.ts
+02:30:52 [vite] (client) Pre-transform error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `ContextCompactionState` has already been declared
+    ╭─[ src/lib/store.ts:3:15 ]
+    │
+  3 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── `ContextCompactionState` has already been declared here
+    │ 
+ 69 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ──────────┬──────────  
+    │                          ╰──────────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/lib/store.ts
+02:30:52 [vite] (client) Pre-transform error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `ContextCompactionState` has already been declared
+    ╭─[ src/lib/store.ts:3:15 ]
+    │
+  3 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── `ContextCompactionState` has already been declared here
+    │ 
+ 69 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/lib/store.ts
+02:30:52 [vite] (client) Pre-transform error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `ContextCompactionState` has already been declared
+    ╭─[ src/lib/store.ts:3:15 ]
+    │
+  3 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── `ContextCompactionState` has already been declared here
+    │ 
+ 69 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/lib/store.ts
+02:30:52 [vite] (client) Pre-transform error: Transform failed with 1 error:
+
+[PARSE_ERROR] Identifier `ContextCompactionState` has already been declared
+    ╭─[ src/lib/store.ts:3:15 ]
+    │
+  3 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── `ContextCompactionState` has already been declared here
+    │ 
+ 69 │ import type { ContextCompactionState } from "./aiChatContextCompaction";
+    │               ───────────┬──────────  
+    │                          ╰──────────── It can not be redeclared here
+────╯
+
+  Plugin: vite:oxc
+  File: E:/Projects/!Lux IDE/apps/desktop/src/lib/store.ts
+02:30:57 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:30:57 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:30:57 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:57 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:30:57 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:30:57 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:57 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:30:57 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:30:57 [vite] (client) page reload src/main.tsx
+02:31:08 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatComposer.tsx
+02:31:19 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatComposer.tsx
+02:31:24 [vite] (client) hmr update /src/components/AiChatPanel.tsx, /src/components/ai-chat/AiChatComposer.tsx
+02:31:24 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:31:28 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:31:33 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:31:50 [vite] (client) hmr update /src/components/AiChatPanel.tsx
+02:31:56 [vite] (client) hmr update /src/components/ai-chat/AiChatComposer.tsx
+02:32:03 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+02:32:06 [vite] (client) hmr update /src/components/ai-chat/AiChatMessages.tsx
+02:32:22 [vite] (client) hmr update /src/components/SettingsDialog.tsx
+02:32:27 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/StatusBar.tsx, /src/components/EditorArea.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/WelcomeScreen.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:32:27 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:32:27 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:32:27 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:32:27 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:32:27 [vite] (client) page reload src/main.tsx
+02:32:32 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:32:32 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:32:32 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:32:32 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:32:32 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:32:32 [vite] (client) page reload src/main.tsx
+02:32:36 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:32:36 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:32:36 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:32:36 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:32:36 [vite] (client) page reload src/main.tsx
+02:32:40 [vite] (client) hmr update /src/App.tsx, /src/components/EditorCloseGuard.tsx, /src/components/LazyAiChatPanel.tsx, /src/components/ProjectLoadingStatus.tsx, /src/components/AgentWorkspace.tsx, /src/components/TitleBar.tsx, /src/components/WelcomeScreen.tsx, /src/components/StatusBar.tsx, /src/components/Sidebar.tsx, /src/components/AiChatPanel.tsx, /src/components/sidebar/ExtensionsPanel.tsx, /src/components/sidebar/GitPanel.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/SearchPanel.tsx and 16 more
+02:32:40 [vite] (client) hmr invalidate /src/components/EditorCloseGuard.tsx Could not Fast Refresh ("useEditorCloseGuard" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:32:40 [vite] (client) hmr update /src/main.tsx, /src/App.tsx, /src/components/TitleBar.tsx, /src/components/EditorArea.tsx, /src/components/sidebar/ExplorerPanel.tsx
+02:32:40 [vite] (client) hmr invalidate /src/main.tsx Could not Fast Refresh ("true" export is incompatible). Learn more at https://github.com/vitejs/vite-plugin-react/tree/main/packages/plugin-react#consistent-components-exports
+02:32:40 [vite] (client) page reload src/main.tsx
+02:32:46 [vite] (client) hmr update /src/styles/ai-chat.css
+02:33:08 [vite] (client) hmr update /src/components/ai-chat/AiChatComposer.tsx

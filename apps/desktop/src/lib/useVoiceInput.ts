@@ -93,6 +93,12 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
     const text = transcript.trim();
     if (!text) return;
     const current = latestMessageRef.current;
+    const mentionTail = /(^|\s)@[^\s]*$/.exec(current);
+    const slashTail = /(^|\s)\/[^\s]*$/.exec(current);
+    if (mentionTail || slashTail) {
+      updateMessage(`${current}${current.endsWith(" ") ? "" : " "}${text}`);
+      return;
+    }
     updateMessage(`${current}${current.trim() ? " " : ""}${text}`);
   }, [updateMessage]);
 
@@ -189,6 +195,13 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
       setVoiceAvailable(false);
       setVoiceError(t("voice.error.nativeUnavailable"));
       return;
+    }
+
+    // Warm-up mic so the permission dialog appears before SpeechRecognition fails silently.
+    if (navigator.mediaDevices?.getUserMedia) {
+      navigator.mediaDevices.getUserMedia({ audio: true })
+        .then((stream) => stream.getTracks().forEach((track) => track.stop()))
+        .catch(() => undefined);
     }
 
     setVoiceError(null);

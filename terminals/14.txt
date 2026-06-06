@@ -1,0 +1,18 @@
+---
+pid: 6756
+cwd: "E:\Projects\!Lux IDE"
+command: "node apps/desktop/scripts/kill-dev-port.mjs 5173; pnpm dev"
+started_at: 2026-06-05T16:38:00.286Z
+running_for_ms: 17720002 
+---
+At line:1 char:31
++ (cd "E:\\Projects\\"'!Lux IDE' ; node apps/desktop/scripts/kill-dev-p ...
++                               ~
+Missing closing ')' in expression.
+At line:1 char:92
++ ... ux IDE' ; node apps/desktop/scripts/kill-dev-port.mjs 5173; pnpm dev)
++                                                                         ~
+Unexpected token ')' in expression or statement.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : MissingEndParenthesisInExpression
+ 

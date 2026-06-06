@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use lux_core::{
     file_view_descriptor_for_path, BufferId, DocumentEditResult, DocumentSnapshot, FileOpenMode,
-    LspWorkspaceEdit, LuxEvent, TextEdit, WorkspaceEditResult,
+    FileViewStrategy, LspWorkspaceEdit, LuxEvent, TextEdit, WorkspaceEditResult,
 };
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
@@ -48,7 +48,8 @@ pub async fn editor_open_file(
         FileOpenMode::EditableText | FileOpenMode::ReadOnlyText
     ) {
         let read_path = canonical.clone();
-        tokio::task::spawn_blocking(move || std::fs::read_to_string(read_path))
+        let strategy = view.strategy;
+        tokio::task::spawn_blocking(move || load_editor_text(&read_path, strategy))
             .await
             .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())?
@@ -277,7 +278,16 @@ async fn save_document_to_path(
     };
 
     let write_path = save_path.clone();
-    tokio::task::spawn_blocking(move || std::fs::write(write_path, payload.text))
+    let save_text = payload.text;
+    let strategy = {
+        let documents = state.documents.lock().map_err(lock_error)?;
+        documents
+            .snapshot(buffer_id)
+            .map_err(String::from)?
+            .view
+            .strategy
+    };
+    let migrated_path = tokio::task::spawn_blocking(move || write_editor_text(&write_path, strategy, &save_text))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
@@ -287,6 +297,13 @@ async fn save_document_to_path(
         Some(
             documents
                 .attach_path_with_previous(buffer_id, save_path.clone())
+                .map_err(String::from)?,
+        )
+    } else if let Some(migrated_save_path) = migrated_path.clone() {
+        let mut documents = state.documents.lock().map_err(lock_error)?;
+        Some(
+            documents
+                .attach_path_with_previous(buffer_id, migrated_save_path)
                 .map_err(String::from)?,
         )
     } else {
@@ -323,10 +340,11 @@ async fn save_document_to_path(
                 },
             )?;
         }
+        let published_path = migrated_path.clone().unwrap_or(save_path);
         emit_event(
             &app,
             LuxEvent::FsChanged {
-                path: save_path.clone(),
+                path: published_path,
             },
         )?;
     }
@@ -337,6 +355,39 @@ async fn save_document_to_path(
         lsp::forward_document_save(&app, &state, &document).await?;
     }
     Ok(document)
+}
+
+fn load_editor_text(path: &std::path::Path, strategy: FileViewStrategy) -> lux_core::AppResult<String> {
+    match strategy {
+        FileViewStrategy::SpreadsheetEditor => lux_file_intel::spreadsheet_edit_text(path),
+        FileViewStrategy::TableEditor => lux_file_intel::table_edit_text(path),
+        _ => std::fs::read_to_string(path).map_err(lux_core::AppError::Io),
+    }
+}
+
+fn write_editor_text(
+    path: &std::path::Path,
+    strategy: FileViewStrategy,
+    text: &str,
+) -> lux_core::AppResult<Option<std::path::PathBuf>> {
+    match strategy {
+        FileViewStrategy::SpreadsheetEditor => {
+            let saved_path = lux_file_intel::spreadsheet_write_from_text(path, text)?;
+            if saved_path == path {
+                Ok(None)
+            } else {
+                Ok(Some(saved_path))
+            }
+        }
+        FileViewStrategy::TableEditor => {
+            lux_file_intel::table_write_from_text(path, text)?;
+            Ok(None)
+        }
+        _ => {
+            std::fs::write(path, text).map_err(lux_core::AppError::Io)?;
+            Ok(None)
+        }
+    }
 }
 
 async fn pick_save_path(app: &AppHandle, suggested_name: &str) -> Result<Option<PathBuf>, String> {

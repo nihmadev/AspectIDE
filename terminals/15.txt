@@ -1,0 +1,18 @@
+---
+pid: 1592
+cwd: "C:\Users\GofMan3"
+command: "C:\\Users\\GofMan3\\start-lux-dev.bat"
+started_at: 2026-06-05T16:39:01.320Z
+running_for_ms: 17660009 
+---
+At line:1 char:25
++ (cd "C:\\Users\\GofMan3" ; C:\Users\GofMan3\start-lux-dev.bat)
++                         ~
+Missing closing ')' in expression.
+At line:1 char:62
++ (cd "C:\\Users\\GofMan3" ; C:\Users\GofMan3\start-lux-dev.bat)
++                                                              ~
+Unexpected token ')' in expression or statement.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : MissingEndParenthesisInExpression
+ 

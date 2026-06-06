@@ -109,6 +109,78 @@ export function createShellApproval(locale: Locale, command: string, cwd: string
   };
 }
 
+export function createBrowserOpenApproval(locale: Locale, url: string, session: string, headed: boolean): AiToolApprovalRequest {
+  return {
+    id: crypto.randomUUID(),
+    tool: "BrowserOpen",
+    title: approvalText(locale, "aiApproval.browserOpen.title"),
+    path: url || "about:blank",
+    summary: approvalText(locale, "aiApproval.browserOpen.summary", { session, headed: headed ? "yes" : "no" }),
+    preview: url || approvalText(locale, "aiApproval.browserOpen.emptyUrl"),
+    risk: "execute",
+    approveLabel: approvalText(locale, "aiApproval.browserOpen.approve"),
+    rejectLabel: approvalText(locale, "aiApproval.reject"),
+  };
+}
+
+export function createBrowserActApproval(locale: Locale, command: string, session: string): AiToolApprovalRequest {
+  return {
+    id: crypto.randomUUID(),
+    tool: "BrowserAct",
+    title: approvalText(locale, "aiApproval.browserAct.title"),
+    path: session,
+    summary: approvalText(locale, "aiApproval.browserAct.summary", { session }),
+    preview: command,
+    risk: "execute",
+    approveLabel: approvalText(locale, "aiApproval.browserAct.approve"),
+    rejectLabel: approvalText(locale, "aiApproval.reject"),
+  };
+}
+
+export function createBrowserChatApproval(locale: Locale, instruction: string, session: string): AiToolApprovalRequest {
+  return {
+    id: crypto.randomUUID(),
+    tool: "BrowserChat",
+    title: approvalText(locale, "aiApproval.browserChat.title"),
+    path: session,
+    summary: approvalText(locale, "aiApproval.browserChat.summary", { session }),
+    preview: instruction,
+    risk: "execute",
+    approveLabel: approvalText(locale, "aiApproval.browserChat.approve"),
+    rejectLabel: approvalText(locale, "aiApproval.reject"),
+  };
+}
+
+export function createBrowserInstallApproval(locale: Locale, withDeps: boolean): AiToolApprovalRequest {
+  return {
+    id: crypto.randomUUID(),
+    tool: "BrowserInstall",
+    title: approvalText(locale, "aiApproval.browserInstall.title"),
+    path: "agent-browser",
+    summary: approvalText(locale, withDeps ? "aiApproval.browserInstall.summaryDeps" : "aiApproval.browserInstall.summary"),
+    preview: approvalText(locale, "aiApproval.browserInstall.preview"),
+    risk: "execute",
+    approveLabel: approvalText(locale, "aiApproval.browserInstall.approve"),
+    rejectLabel: approvalText(locale, "aiApproval.reject"),
+  };
+}
+
+export function createBrowserCloseApproval(locale: Locale, all: boolean, session: string): AiToolApprovalRequest {
+  return {
+    id: crypto.randomUUID(),
+    tool: "BrowserAct",
+    title: approvalText(locale, "aiApproval.browserClose.title"),
+    path: session,
+    summary: all
+      ? approvalText(locale, "aiApproval.browserClose.allSummary")
+      : approvalText(locale, "aiApproval.browserClose.summary", { session }),
+    preview: all ? approvalText(locale, "aiApproval.browserClose.allPreview") : approvalText(locale, "aiApproval.browserClose.preview"),
+    risk: "execute",
+    approveLabel: approvalText(locale, "aiApproval.browserClose.approve"),
+    rejectLabel: approvalText(locale, "aiApproval.reject"),
+  };
+}
+
 export function createTerminalWriteApproval(locale: Locale, session: TerminalSessionInfo, data: string): AiToolApprovalRequest {
   return {
     id: crypto.randomUUID(),

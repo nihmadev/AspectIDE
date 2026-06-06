@@ -1,0 +1,144 @@
+---
+pid: 35040
+cwd: "E:\Projects\!Lux IDE"
+command: "Set-Location -LiteralPath 'E:\\Projects\\!Lux IDE'; pnpm dev"
+started_at: 2026-06-04T20:42:40.499Z
+running_for_ms: 23550000 
+---
+
+> lux-ide@1.0.0 dev E:\Projects\!Lux IDE
+> pnpm --filter @lux/desktop tauri dev
+
+
+> @lux/desktop@1.0.0 tauri E:\Projects\!Lux IDE\apps\desktop
+> tauri "dev"
+
+     Running BeforeDevCommand (`pnpm dev`)
+
+> @lux/desktop@1.0.0 dev E:\Projects\!Lux IDE\apps\desktop
+> node ./scripts/kill-dev-port.mjs 5173 && node ./scripts/start-browser-preview.mjs
+
+(node:35036) [DEP0190] DeprecationWarning: Passing args to a child process with shell option true can lead to security vulnerabilities, as the arguments are not escaped, only concatenated.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+23:42:46 [vite] (client) Re-optimizing dependencies because vite config has changed
+
+  VITE v8.0.14  ready in 551 ms
+
+  ➜  Local:   http://127.0.0.1:5173/
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+        Info Watching E:\Projects\!Lux IDE\apps\desktop\src-tauri for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-core for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-dap for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-editor for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-extensions for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-file-intel for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-fs for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-git for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-lsp for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-search for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-settings for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-terminal for changes...
+        Info Watching E:\Projects\!Lux IDE\crates\lux-workspace for changes...
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 625/639: lux-core                                                               Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+   Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+   Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+   Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+   Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+   Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+   Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+   Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+   Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 625/639: lux-set…    Building [=======================> ] 626/639: lux-set…    Building [=======================> ] 627/639: lux-set…    Building [=======================> ] 628/639: lux-set…    Building [=======================> ] 629/639: lux-set…    Building [=======================> ] 630/639: lux-set…    Building [=======================> ] 631/639: lux-set…    Building [=======================> ] 632/639: lux-cor…    Building [=======================> ] 633/639: lux-cor…    Building [=======================> ] 634/639: lux-ext…    Building [=======================> ] 635/639: lux-ext…    Building [=======================> ] 636/639: lux-ext…                                                               Compiling lux-desktop v1.0.0 (E:\Projects\!Lux IDE\apps\desktop\src-tauri)
+    Building [=======================> ] 637/639: lux-des…    Building [=======================> ] 638/639: lux-des…                                                                Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 09s
+     Running `E:\Projects\!Lux IDE\target\debug\lux-desktop.exe`
+[2026-06-04][20:44:44][ignore::gitignore][DEBUG] opened gitignore file: \\?\E:\test-ide\configs\.gitignore
+[2026-06-04][20:44:44][globset][DEBUG] built glob set; 2 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes
+        Info File E:\Projects\!Lux IDE\crates\lux-core\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 625/639: lux-core        Info File E:\Projects\!Lux IDE\crates\lux-editor\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 625/639: lux-core        Info File E:\Projects\!Lux IDE\crates\lux-file-intel\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 625/639: lux-core                                                               Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+   Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+   Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+   Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+   Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+   Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+   Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+   Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+   Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+    Building [=======================> ] 625/639: lux-fs,…    Building [=======================> ] 626/639: lux-fs,…23:50:57 [vite] (client) hmr update /src/components/EditorCloseGuard.tsx, /src/components/EditorArea.tsx, /src/components/AiChatPanel.tsx, /src/components/FilePreviewPane.tsx
+                                                            warning: unused import: `FileViewCategory`
+  --> crates\lux-file-intel\src\lib.rs:17:5
+   |
+17 |     FileViewCategory, FileViewStrategy, NotebookCellPreview, SpreadsheetSheetPreview,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 626/639: lux-fs,…    Building [=======================> ] 627/639: lux-ter…                                                            warning: unused variable: `descriptor`
+   --> crates\lux-file-intel\src\lib.rs:126:5
+    |
+126 |     descriptor: &lux_core::FileViewDescriptor,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_descriptor`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 627/639: lux-ter…    Building [=======================> ] 628/639: lux-ter…    Building [=======================> ] 629/639: lux-ter…    Building [=======================> ] 630/639: lux-cor…    Building [=======================> ] 631/639: lux-cor…        Info File E:\Projects\!Lux IDE\crates\lux-extensions\src\lib.rs changed. Rebuilding application...
+     Running DevCommand (`cargo  run --no-default-features --color always --`)
+   Compiling lux-core v0.1.0 (E:\Projects\!Lux IDE\crates\lux-core)
+    Building [=======================> ] 625/639: lux-core                                                               Compiling lux-dap v0.1.0 (E:\Projects\!Lux IDE\crates\lux-dap)
+   Compiling lux-workspace v0.1.0 (E:\Projects\!Lux IDE\crates\lux-workspace)
+   Compiling lux-settings v0.1.0 (E:\Projects\!Lux IDE\crates\lux-settings)
+   Compiling lux-search v0.1.0 (E:\Projects\!Lux IDE\crates\lux-search)
+   Compiling lux-fs v0.1.0 (E:\Projects\!Lux IDE\crates\lux-fs)
+   Compiling lux-editor v0.1.0 (E:\Projects\!Lux IDE\crates\lux-editor)
+   Compiling lux-terminal v0.1.0 (E:\Projects\!Lux IDE\crates\lux-terminal)
+   Compiling lux-git v0.1.0 (E:\Projects\!Lux IDE\crates\lux-git)
+   Compiling lux-extensions v0.1.0 (E:\Projects\!Lux IDE\crates\lux-extensions)
+   Compiling lux-lsp v0.1.0 (E:\Projects\!Lux IDE\crates\lux-lsp)
+   Compiling lux-file-intel v0.1.0 (E:\Projects\!Lux IDE\crates\lux-file-intel)
+    Building [=======================> ] 625/639: lux-ter…    Building [=======================> ] 626/639: lux-ter…    Building [=======================> ] 627/639: lux-ter…                                                            warning: unused import: `FileViewCategory`
+  --> crates\lux-file-intel\src\lib.rs:17:5
+   |
+17 |     FileViewCategory, FileViewStrategy, NotebookCellPreview, SpreadsheetSheetPreview,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 627/639: lux-ter…                                                            warning: unused variable: `descriptor`
+   --> crates\lux-file-intel\src\lib.rs:126:5
+    |
+126 |     descriptor: &lux_core::FileViewDescriptor,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_descriptor`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+    Building [=======================> ] 627/639: lux-ter…    Building [=======================> ] 628/639: lux-ter…                                                            error[E0433]: cannot find type `HashSet` in this scope
+   --> crates\lux-extensions\src\lib.rs:184:24
+    |
+184 |     let mut seen_ids = HashSet::new();
+    |                        ^^^^^^^ use of undeclared type `HashSet`
+    |
+help: consider importing this struct
+    |
+  5 + use std::collections::HashSet;
+    |
+
+    Building [=======================> ] 628/639: lux-ter…    Building [=======================> ] 629/639: lux-ter…    Building [=======================> ] 630/639: lux-dap…    Building [=======================> ] 631/639: lux-dap…                                                            For more information about this error, try `rustc --explain E0433`.
+    Building [=======================> ] 631/639: lux-dap…                                                            error: could not compile `lux-extensions` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+    Building [=======================> ] 632/639: lux-dap…    Building [=======================> ] 633/639: lux-dap…    Building [=======================> ] 634/639: lux-dap…    Building [=======================> ] 635/639: lux-dap…                                                            warning: `lux-file-intel` (lib) generated 2 warnings (run `cargo fix --lib -p lux-file-intel` to apply 2 suggestions)
+    Building [=======================> ] 636/639: lux-dap                                                             E:\Projects\!Lux IDE\apps\desktop:
+ ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL  @lux/desktop@1.0.0 tauri: `tauri "dev"`
+Exit status 101
+ ELIFECYCLE  Command failed with exit code 101.

@@ -1,0 +1,8 @@
+---
+pid: 17976
+cwd: "E:\Projects\!Lux IDE"
+command: "cmd /c \"subst L: \\\"E:\\Projects\\!Lux IDE\\\" && cd /d L:\\ && node apps\\desktop\\scripts\\kill-dev-port.mjs 5173 && pnpm dev\""
+started_at: 2026-06-05T16:37:21.146Z
+running_for_ms: 17760004 
+---
+Path not found - \ E:\Projects\!Lux IDE\

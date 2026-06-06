@@ -7,6 +7,8 @@ import { EditorCloseGuardProvider } from "./components/EditorCloseGuard";
 import { desktopRuntimeRequiredMessage, isBrowserPreviewRuntime, isTauriRuntime } from "./lib/tauri";
 import "./styles/tokens.css";
 import "./styles/app.css";
+import "./styles/project-loading.css";
+import "./styles/settings.css";
 import "./styles/ai-chat.css";
 import "./styles/ai-tool-calls.css";
 

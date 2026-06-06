@@ -13,6 +13,12 @@ use tokio::{sync::oneshot, time::timeout};
 const CHAT_TIMEOUT_SECS: u64 = 180;
 const HISTORY_FILE: &str = "ai-chat-history.json";
 const HISTORY_SCHEMA_VERSION: u32 = 1;
+/// Automatic retries for transient provider failures (429 / 5xx / network).
+/// Concept ported from claw-code (MIT) recovery recipes: one bounded automatic
+/// recovery before surfacing the error. Streaming only retries the connection
+/// phase (before any token is emitted) so partial output is never replayed.
+const MAX_TRANSIENT_RETRIES: u32 = 2;
+const MAX_RETRY_DELAY_SECS: u64 = 20;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -114,37 +120,63 @@ pub async fn completion(
         .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
         .build()
         .map_err(|error| error.to_string())?;
-
-    let mut builder = client
-        .post(endpoint)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(reqwest::header::ACCEPT, "application/json")
-        .json(&request.payload);
-
-    if let Some(api_key) = request
+    let api_key = request
         .api_key
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
-    {
-        builder = builder.bearer_auth(api_key);
+        .map(ToString::to_string);
+
+    let mut attempt: u32 = 0;
+    loop {
+        let mut builder = client
+            .post(endpoint.as_str())
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(reqwest::header::ACCEPT, "application/json")
+            .json(&request.payload);
+        if let Some(key) = &api_key {
+            builder = builder.bearer_auth(key);
+        }
+
+        let send_result = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()).await;
+        let response = match send_result {
+            Err(_) => {
+                if attempt < MAX_TRANSIENT_RETRIES {
+                    sleep_backoff(attempt).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err("AI request timed out".to_string());
+            }
+            Ok(Err(error)) => {
+                if attempt < MAX_TRANSIENT_RETRIES && is_transient_reqwest_error(&error) {
+                    sleep_backoff(attempt).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(error.to_string());
+            }
+            Ok(Ok(response)) => response,
+        };
+
+        let status = response.status().as_u16();
+        if status >= 400 {
+            if attempt < MAX_TRANSIENT_RETRIES && is_transient_status(status) {
+                let delay = retry_after_delay(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+                continue;
+            }
+            let body = response.json::<Value>().await.unwrap_or(Value::Null);
+            return Err(response_error(status, &body));
+        }
+
+        let body = response
+            .json::<Value>()
+            .await
+            .map_err(|error| error.to_string())?;
+        return Ok(AiChatCompletionResponse { status, body });
     }
-
-    let response = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send())
-        .await
-        .map_err(|_| "AI request timed out".to_string())?
-        .map_err(|error| error.to_string())?;
-    let status = response.status().as_u16();
-    let body = response
-        .json::<Value>()
-        .await
-        .map_err(|error| error.to_string())?;
-
-    if status >= 400 {
-        return Err(response_error(status, &body));
-    }
-
-    Ok(AiChatCompletionResponse { status, body })
 }
 
 pub fn history_load(app: &AppHandle) -> Result<AiChatHistoryResponse, String> {
@@ -359,6 +391,38 @@ fn completion_endpoint(base_url: &str) -> Result<String, String> {
     }
 }
 
+/// Transient HTTP statuses worth one bounded automatic retry.
+fn is_transient_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+}
+
+/// Network-level reqwest errors that are safe to retry (connect/timeout/request).
+fn is_transient_reqwest_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request()
+}
+
+/// Exponential backoff: 0.5s, 1s, 2s … capped at the retry ceiling.
+fn backoff_delay(attempt: u32) -> Duration {
+    let secs = (1u64 << attempt).saturating_mul(500).min(MAX_RETRY_DELAY_SECS * 1000);
+    Duration::from_millis(secs)
+}
+
+async fn sleep_backoff(attempt: u32) {
+    tokio::time::sleep(backoff_delay(attempt)).await;
+}
+
+/// Honor a numeric `Retry-After` header (seconds), capped to a sane maximum.
+fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let seconds = headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?;
+    Some(Duration::from_secs(seconds.min(MAX_RETRY_DELAY_SECS)))
+}
+
 fn response_error(status: u16, body: &Value) -> String {
     let message = body
         .get("error")
@@ -390,36 +454,66 @@ async fn stream_completion(
         .build()
         .map_err(|error| error.to_string())?;
     let payload = stream_payload(request.payload);
-
-    let mut builder = client
-        .post(endpoint)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(reqwest::header::ACCEPT, "text/event-stream")
-        .json(&payload);
-
-    if let Some(api_key) = request
+    let api_key = request
         .api_key
         .as_deref()
         .map(str::trim)
         .filter(|key| !key.is_empty())
-    {
-        builder = builder.bearer_auth(api_key);
-    }
+        .map(ToString::to_string);
 
-    let response = tokio::select! {
-        _ = &mut cancel_rx => return Ok(StreamCompletion::Cancelled),
-        response = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()) => {
-            response
-                .map_err(|_| "AI stream request timed out".to_string())?
-                .map_err(|error| error.to_string())?
+    // Retry only the connection phase: once the first byte streams we can never
+    // safely replay the request, so the loop only re-runs before `bytes_stream()`.
+    let response = {
+        let mut attempt: u32 = 0;
+        loop {
+            let mut builder = client
+                .post(endpoint.as_str())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .json(&payload);
+            if let Some(key) = &api_key {
+                builder = builder.bearer_auth(key);
+            }
+
+            let send = tokio::select! {
+                _ = &mut cancel_rx => return Ok(StreamCompletion::Cancelled),
+                send = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()) => send,
+            };
+
+            let response = match send {
+                Err(_) => {
+                    if attempt < MAX_TRANSIENT_RETRIES {
+                        sleep_backoff(attempt).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err("AI stream request timed out".to_string());
+                }
+                Ok(Err(error)) => {
+                    if attempt < MAX_TRANSIENT_RETRIES && is_transient_reqwest_error(&error) {
+                        sleep_backoff(attempt).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(error.to_string());
+                }
+                Ok(Ok(response)) => response,
+            };
+
+            let status = response.status().as_u16();
+            if status >= 400 {
+                if attempt < MAX_TRANSIENT_RETRIES && is_transient_status(status) {
+                    let delay = retry_after_delay(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                let text = response.text().await.unwrap_or_default();
+                return Err(stream_response_error(status, &text));
+            }
+            break response;
         }
     };
-
-    let status = response.status().as_u16();
-    if status >= 400 {
-        let text = response.text().await.unwrap_or_default();
-        return Err(stream_response_error(status, &text));
-    }
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -573,5 +667,38 @@ mod tests {
         let payload = stream_payload(payload);
 
         assert_eq!(payload.get("stream").and_then(Value::as_bool), Some(true));
+    }
+
+    #[test]
+    fn transient_status_classification() {
+        for status in [408, 425, 429, 500, 502, 503, 504] {
+            assert!(is_transient_status(status), "{status} should be transient");
+        }
+        for status in [400, 401, 403, 404, 422] {
+            assert!(!is_transient_status(status), "{status} should not be transient");
+        }
+    }
+
+    #[test]
+    fn backoff_grows_and_caps() {
+        assert_eq!(backoff_delay(0), Duration::from_millis(500));
+        assert_eq!(backoff_delay(1), Duration::from_millis(1000));
+        assert_eq!(backoff_delay(2), Duration::from_millis(2000));
+        // Large attempt is clamped to the ceiling, never overflows.
+        assert!(backoff_delay(40) <= Duration::from_secs(MAX_RETRY_DELAY_SECS));
+    }
+
+    #[test]
+    fn retry_after_header_parsed_and_capped() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "3".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(3)));
+
+        headers.insert(reqwest::header::RETRY_AFTER, "9999".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), Some(Duration::from_secs(MAX_RETRY_DELAY_SECS)));
+
+        // Non-numeric (HTTP-date form) is ignored → falls back to backoff.
+        headers.insert(reqwest::header::RETRY_AFTER, "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap());
+        assert_eq!(retry_after_delay(&headers), None);
     }
 }

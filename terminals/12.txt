@@ -1,0 +1,18 @@
+---
+pid: 26816
+cwd: "C:\Users\GofMan3"
+command: "subst L: \"E:\\Projects\\!Lux IDE\" 2>$null; Set-Location L:; node apps/desktop/scripts/kill-dev-port.mjs 5173; pnpm dev"
+started_at: 2026-06-05T03:29:09.841Z
+running_for_ms: 165011   
+---
+At line:1 char:25
++ (cd "C:\\Users\\GofMan3" ; subst L: "E:\Projects\!Lux IDE" 2>$null; S ...
++                         ~
+Missing closing ')' in expression.
+At line:1 char:144
++ ... ation L:; node apps/desktop/scripts/kill-dev-port.mjs 5173; pnpm dev)
++                                                                         ~
+Unexpected token ')' in expression or statement.
+    + CategoryInfo          : ParserError: (:) [], ParentContainsErrorRecordException
+    + FullyQualifiedErrorId : MissingEndParenthesisInExpression
+ 

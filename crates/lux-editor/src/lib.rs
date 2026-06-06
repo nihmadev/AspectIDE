@@ -10,7 +10,8 @@ use std::{
 
 use chrono::Utc;
 use lux_core::{
-    file_view_descriptor_for_path, AppError, AppResult, BufferId, DocumentSnapshot, TextEdit,
+    file_view_descriptor_for_path, monaco_language_id_for_path, AppError, AppResult, BufferId,
+    DocumentSnapshot, TextEdit,
 };
 
 #[derive(Default)]
@@ -83,7 +84,7 @@ impl DocumentStore {
 
         let document = DocumentSnapshot {
             id: BufferId::new(),
-            language_id: language_id_for_path(&indexed_path),
+            language_id: monaco_language_id_for_path(&indexed_path),
             title: file_title(&indexed_path),
             path: Some(indexed_path.clone()),
             text,
@@ -223,7 +224,7 @@ impl DocumentStore {
         }
         document.path = Some(normalized_path.clone());
         document.title = file_title(&normalized_path);
-        document.language_id = language_id_for_path(&normalized_path);
+        document.language_id = monaco_language_id_for_path(&normalized_path);
         document.view = file_view_descriptor_for_path(&normalized_path);
         document.is_untitled = false;
         self.by_path.insert(normalized_path, id);
@@ -363,23 +364,7 @@ fn file_title(path: &Path) -> String {
 
 #[must_use]
 pub fn language_id_for_path(path: &Path) -> String {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-    {
-        "rs" => "rust",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" => "javascript",
-        "json" => "json",
-        "toml" => "toml",
-        "md" => "markdown",
-        "css" => "css",
-        "html" => "html",
-        other if !other.is_empty() => other,
-        _ => "plaintext",
-    }
-    .to_string()
+    monaco_language_id_for_path(path)
 }
 
 #[cfg(test)]

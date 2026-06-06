@@ -3,37 +3,104 @@ import type { CSSProperties, ReactNode, RefObject } from "react";
 import { Fragment, memo, useEffect, useMemo, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { lexer, type Token, type Tokens } from "marked";
+import { AiChatMessageActions } from "./AiChatMessageActions";
+import { AiAssistantMessageActions } from "./AiAssistantMessageActions";
 import { AiToolCallsGroup } from "../AiToolCall";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import type { AiChatMessage, AiChatResponseTiming, AiMessageSegment, AiToolApprovalDecision } from "../../lib/aiChatTypes";
+import { isCompactionCheckpointMessage, type ContextCompactionState } from "../../lib/aiChatContextCompaction";
+import { AiPathEvidenceNotice } from "./AiPathEvidenceNotice";
+import { AiTurnSummaryCard } from "./AiTurnSummaryCard";
+import { AiThinkingIndicator, isPendingAssistantShell } from "./AiThinkingIndicator";
+import type { AiChatSessionStatus } from "../../lib/store";
+import * as chatDisplayText from "../../lib/aiChatDisplayText";
+import type { AiChatMessage, AiChatMessageAttachment, AiChatResponseTiming, AiMessageSegment, AiToolApprovalDecision } from "../../lib/aiChatTypes";
+
+const coerceChatMessageText =
+  chatDisplayText.coerceChatMessageText
+  ?? ((value: unknown) => (typeof value === "string" ? value : value == null ? "" : String(value)));
+
+const decodeChatDisplayText =
+  chatDisplayText.decodeChatDisplayText
+  ?? ((text: string | null | undefined) => (typeof text === "string" ? text : ""));
 
 type AiChatMessagesProps = {
+  canMutateHistory: boolean;
+  canRestoreUserMessage: (userMessageId: string) => boolean;
   messages: AiChatMessage[];
   onApprovalDecision: (approvalId: string, decision: AiToolApprovalDecision) => void;
+  onEditUserMessage: (messageId: string, nextContent: string) => void;
+  onStopAfterTool?: () => void;
+  canStopAfterTool?: boolean;
   parentRef: RefObject<HTMLDivElement | null>;
   showResponseDuration: boolean;
+  contextCompaction?: ContextCompactionState | null;
+  workspaceRoot: string | null;
   streamingMessageId: string | null;
+  sessionStatus: AiChatSessionStatus;
   t: TranslateFn;
+  onReviewAction?: (messageId: string) => void;
 };
 
-export function AiChatMessages({ messages, onApprovalDecision, parentRef, showResponseDuration, streamingMessageId, t }: AiChatMessagesProps) {
+export function AiChatMessages({
+  canMutateHistory,
+  canRestoreUserMessage,
+  messages,
+  onApprovalDecision,
+  onEditUserMessage,
+  onStopAfterTool,
+  canStopAfterTool = false,
+  parentRef,
+  showResponseDuration,
+  contextCompaction,
+  workspaceRoot,
+  streamingMessageId,
+  sessionStatus,
+  t,
+  onReviewAction,
+}: AiChatMessagesProps) {
   const virtualizer = useVirtualizer({
     count: messages.length,
     getScrollElement: () => parentRef.current,
+    getItemKey: (index) => messages[index]?.id ?? index,
     estimateSize: () => 180,
     overscan: 5,
   });
   const virtualItems = virtualizer.getVirtualItems();
 
-  if (messages.length < 40) {
+  useEffect(() => {
+    if (!streamingMessageId || messages.length < 40) return;
+    const index = messages.findIndex((entry) => entry.id === streamingMessageId);
+    if (index >= 0) virtualizer.measure();
+  }, [messages, streamingMessageId, virtualizer]);
+
+  const lastAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]?.role === "assistant") return messages[i].id;
+    }
+    return null;
+  }, [messages]);
+
+  const getOnReviewFor = (id: string) =>
+    onReviewAction && id === lastAssistantId ? () => onReviewAction(id) : undefined;
+
+  if (messages.length < 40 || streamingMessageId) {
     return messages.map((chatMessage) => (
       <AiChatMessageView
         key={chatMessage.id}
         message={chatMessage}
         streaming={chatMessage.id === streamingMessageId}
         showResponseDuration={showResponseDuration}
+        contextCompaction={contextCompaction}
+        workspaceRoot={workspaceRoot}
+        canMutateHistory={canMutateHistory}
+        canRestoreUserMessage={canRestoreUserMessage}
         onApprovalDecision={onApprovalDecision}
+        onEditUserMessage={onEditUserMessage}
+        onStopAfterTool={onStopAfterTool}
+        canStopAfterTool={canStopAfterTool}
+        sessionStatus={sessionStatus}
         t={t}
+        onReview={getOnReviewFor(chatMessage.id)}
       />
     ));
   }
@@ -42,6 +109,7 @@ export function AiChatMessages({ messages, onApprovalDecision, parentRef, showRe
     <div className="ai-chat-virtual-list" style={{ height: virtualizer.getTotalSize() }}>
       {virtualItems.map((item) => {
         const chatMessage = messages[item.index];
+        if (!chatMessage) return null;
         return (
           <div
             key={chatMessage.id}
@@ -51,11 +119,20 @@ export function AiChatMessages({ messages, onApprovalDecision, parentRef, showRe
             style={{ transform: `translateY(${item.start}px)` }}
           >
             <AiChatMessageView
+              canMutateHistory={canMutateHistory}
+              canRestoreUserMessage={canRestoreUserMessage}
               message={chatMessage}
               streaming={chatMessage.id === streamingMessageId}
               showResponseDuration={showResponseDuration}
+              contextCompaction={contextCompaction}
+              workspaceRoot={workspaceRoot}
               onApprovalDecision={onApprovalDecision}
+              onEditUserMessage={onEditUserMessage}
+              onStopAfterTool={onStopAfterTool}
+              canStopAfterTool={canStopAfterTool}
+              sessionStatus={sessionStatus}
               t={t}
+              onReview={getOnReviewFor(chatMessage.id)}
             />
           </div>
         );
@@ -64,26 +141,99 @@ export function AiChatMessages({ messages, onApprovalDecision, parentRef, showRe
   );
 }
 
-const AiChatMessageView = memo(function AiChatMessageView({ message, onApprovalDecision, showResponseDuration, streaming, t }: {
+const AiChatMessageView = memo(function AiChatMessageView({
+  canMutateHistory,
+  canRestoreUserMessage,
+  message,
+  onApprovalDecision,
+  onEditUserMessage,
+  onStopAfterTool,
+  canStopAfterTool,
+  showResponseDuration,
+  contextCompaction,
+  workspaceRoot,
+  streaming,
+  sessionStatus,
+  t,
+  onReview,
+}: {
+  canMutateHistory: boolean;
+  canRestoreUserMessage: (userMessageId: string) => boolean;
   message: AiChatMessage;
   onApprovalDecision: (approvalId: string, decision: AiToolApprovalDecision) => void;
+  onEditUserMessage: (messageId: string, nextContent: string) => void;
+  onStopAfterTool?: () => void;
+  canStopAfterTool?: boolean;
   showResponseDuration: boolean;
+  contextCompaction?: ContextCompactionState | null;
+  workspaceRoot: string | null;
   streaming: boolean;
+  sessionStatus: AiChatSessionStatus;
   t: TranslateFn;
+  onReview?: () => void;
 }) {
+  const pendingShell = isPendingAssistantShell(message, streaming);
+  if (isCompactionCheckpointMessage(message)) {
+    return (
+      <article className="ai-chat-message ai-chat-compaction-checkpoint" data-role="system">
+        <div className="ai-chat-message-meta">
+          <span>{t("aiChat.compact.checkpointLabel")}</span>
+          <time>{formatMessageTime(message.timestamp)}</time>
+        </div>
+        <div className="ai-chat-compaction-body">
+          <p>{t("aiChat.compact.checkpointHint")}</p>
+          <pre>{formatCompactionPreview(message.content)}</pre>
+        </div>
+      </article>
+    );
+  }
   return (
-    <article className="ai-chat-message" data-role={message.role}>
-      <div className="ai-chat-message-meta">
-        <span>{message.role === "user" ? t("aiChat.role.user") : t("aiChat.role.assistant")}</span>
-        <time>{formatMessageTime(message.timestamp)}</time>
-      </div>
-      <AiMessageBody
-        message={message}
-        streaming={streaming}
-        onApprovalDecision={onApprovalDecision}
-        t={t}
-      />
-      {message.role === "assistant" && showResponseDuration && typeof message.responseDurationMs === "number" && (
+    <article className="ai-chat-message" data-role={message.role} data-pending={pendingShell || undefined}>
+      {pendingShell ? (
+        <div className="ai-chat-message-pending-row">
+          <div className="ai-chat-message-meta">
+            <span>{t("aiChat.role.assistant")}</span>
+            <time>{formatMessageTime(message.timestamp)}</time>
+          </div>
+          <AiThinkingIndicator status={sessionStatus} t={t} compact />
+        </div>
+      ) : (
+        <>
+          <div className="ai-chat-message-meta">
+            <span>{message.role === "user" ? t("aiChat.role.user") : t("aiChat.role.assistant")}</span>
+            <time>{formatMessageTime(message.timestamp)}</time>
+          </div>
+          <AiMessageBody
+            message={message}
+            streaming={streaming}
+            onApprovalDecision={onApprovalDecision}
+            t={t}
+          />
+        </>
+      )}
+      {!pendingShell && message.role === "user" ? (
+        <AiChatMessageActions
+          canMutate={canMutateHistory}
+          canRestoreUser={canRestoreUserMessage(message.id)}
+          message={message}
+          onEditUserMessage={onEditUserMessage}
+          t={t}
+        />
+      ) : !pendingShell ? (
+        <AiAssistantMessageActions
+          canMutate={canMutateHistory}
+          canStopAfterTool={canStopAfterTool ?? false}
+          onStopAfterTool={() => onStopAfterTool?.()}
+          t={t}
+        />
+      ) : null}
+      {!pendingShell && message.role === "assistant" && !streaming && (
+        <AiPathEvidenceNotice message={message} streaming={streaming} t={t} />
+      )}
+      {!pendingShell && message.role === "assistant" && !streaming && (
+        <AiTurnSummaryCard message={message} compaction={contextCompaction} workspaceRoot={workspaceRoot} t={t} onReview={onReview} />
+      )}
+      {message.role === "assistant" && showResponseDuration && typeof message.responseDurationMs === "number" && !message.responseTiming && !message.turnUsage && (
         <div className="ai-chat-response-duration" title={formatResponseTimingTitle(message, t)}>{formatResponseDuration(message.responseDurationMs, t)}</div>
       )}
     </article>
@@ -130,15 +280,19 @@ function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
   onApprovalDecision: (approvalId: string, decision: AiToolApprovalDecision) => void;
   t: TranslateFn;
 }) {
+  const attachmentGallery = message.role === "user" ? (
+    <AiMessageAttachmentGallery attachments={message.attachments} t={t} />
+  ) : null;
   const segments = message.segments;
   if (!segments || segments.length === 0) {
     return (
       <>
+        {attachmentGallery}
         {message.reasoning && message.reasoning.trim().length > 0 && (
-          <AiReasoningBlock text={message.reasoning} streaming={streaming} hasAnswer={Boolean(message.content?.trim())} t={t} />
+          <AiReasoningBlock text={coerceChatMessageText(message.reasoning)} streaming={streaming} hasAnswer={Boolean(coerceChatMessageText(message.content).trim())} t={t} />
         )}
         {message.toolCalls && message.toolCalls.length > 0 && <AiToolCallsGroup onApprovalDecision={onApprovalDecision} t={t} toolCalls={message.toolCalls} />}
-        {message.content && <MarkdownMessage content={message.content} t={t} />}
+        {message.content ? <MarkdownMessage content={message.content} t={t} /> : null}
       </>
     );
   }
@@ -163,16 +317,65 @@ function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
       const isLast = index === segments.length - 1;
       const followedByAnswer = segments.slice(index + 1).some((entry) => entry.kind === "text" && entry.text.trim().length > 0);
       blocks.push(
-        <AiReasoningBlock key={segment.id} text={segment.text} streaming={streaming && isLast} hasAnswer={followedByAnswer} t={t} />,
+        <AiReasoningBlock key={segment.id} text={coerceChatMessageText(segment.text)} streaming={streaming && isLast} hasAnswer={followedByAnswer} t={t} />,
       );
       return;
     }
     if (segment.text.trim().length === 0) return;
-    blocks.push(<MarkdownMessage key={segment.id} content={segment.text} t={t} />);
+    blocks.push(<MarkdownMessage key={segment.id} content={coerceChatMessageText(segment.text)} t={t} />);
   });
   flushTools("tail");
 
-  return <>{blocks}</>;
+  return (
+    <>
+      {attachmentGallery}
+      {blocks}
+    </>
+  );
+}
+
+function AiMessageAttachmentGallery({ attachments, t }: {
+  attachments?: AiChatMessageAttachment[];
+  t: TranslateFn;
+}) {
+  if (!attachments || attachments.length === 0) return null;
+  const images = attachments.filter((attachment) => attachment.kind === "image" && attachment.previewUrl);
+  const files = attachments.filter((attachment) => attachment.kind !== "image" || !attachment.previewUrl);
+  if (images.length === 0 && files.length === 0) return null;
+  return (
+    <div className="ai-chat-message-attachments" aria-label={t("aiChat.attachments.aria")}>
+      {images.length > 0 && (
+        <div className="ai-chat-message-image-grid">
+          {images.map((attachment) => (
+            <figure className="ai-chat-message-image" key={attachment.id}>
+              <a href={attachment.previewUrl} target="_blank" rel="noreferrer noopener" title={attachment.name}>
+                <img src={attachment.previewUrl} alt={attachment.name} loading="lazy" decoding="async" draggable={false} />
+              </a>
+              <figcaption title={attachment.name}>{attachment.name}</figcaption>
+            </figure>
+          ))}
+        </div>
+      )}
+      {files.length > 0 && (
+        <ul className="ai-chat-message-file-list">
+          {files.map((attachment) => (
+            <li key={attachment.id} title={attachment.name}>
+              <span>{attachment.name}</span>
+              <small>{formatAttachmentSize(attachment.size, t)}</small>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function formatAttachmentSize(bytes: number, t: TranslateFn) {
+  if (bytes < 1024) return t("common.fileSize.bytes", { bytes });
+  const kilobytes = bytes / 1024;
+  if (kilobytes < 1024) return t("common.fileSize.kilobytes", { kilobytes: kilobytes >= 10 ? kilobytes.toFixed(0) : kilobytes.toFixed(1) });
+  const megabytes = kilobytes / 1024;
+  return t("common.fileSize.megabytes", { megabytes: megabytes >= 10 ? megabytes.toFixed(0) : megabytes.toFixed(1) });
 }
 
 function AiReasoningBlock({ text, streaming, hasAnswer, t }: {
@@ -205,9 +408,11 @@ function AiReasoningBlock({ text, streaming, hasAnswer, t }: {
 }
 
 function MarkdownMessage({ content, t }: { content: string; t: TranslateFn }) {
-  const [expanded, setExpanded] = useState(content.length <= 30_000);
-  const visibleContent = expanded ? content : truncateMiddleForPreview(content, 18_000, t);
-  const tokens = useMemo(() => lexer(visibleContent, { breaks: true, gfm: true }), [visibleContent]);
+  const safeContent = coerceChatMessageText(content);
+  const [expanded, setExpanded] = useState(safeContent.length <= 30_000);
+  const normalizedContent = useMemo(() => decodeChatDisplayText(safeContent), [safeContent]);
+  const visibleContent = expanded ? normalizedContent : truncateMiddleForPreview(normalizedContent, 18_000, t);
+  const tokens = useMemo(() => tokenizeChatMarkdown(visibleContent), [visibleContent]);
   return (
     <div className="ai-chat-message-content ai-chat-markdown" data-collapsed={!expanded || undefined}>
       {renderMarkdownBlocks(tokens, t)}
@@ -316,8 +521,16 @@ function copyMarkdownCode(code: string) {
   return clipboard.writeText(code).catch(() => undefined);
 }
 
+function tokenizeChatMarkdown(content: string): Token[] {
+  try {
+    return lexer(content, { breaks: true, gfm: true });
+  } catch {
+    return [{ type: "paragraph", raw: content, text: content, tokens: [{ type: "text", raw: content, text: content }] } as Tokens.Paragraph];
+  }
+}
+
 function renderMarkdownInlines(tokens: Token[] | undefined, fallback: string, keyPrefix: string): ReactNode[] {
-  if (!tokens || tokens.length === 0) return [fallback];
+  if (!tokens || tokens.length === 0) return [decodeChatDisplayText(coerceChatMessageText(fallback))];
   return tokens.map((token, index) => renderMarkdownInline(token, `${keyPrefix}-i-${index}`));
 }
 
@@ -356,7 +569,12 @@ function isTokenWithChildren(token: Token): token is Token & { tokens: Token[] }
 }
 
 function textFromToken(token: Token) {
-  return "text" in token ? String(token.text) : token.raw;
+  const raw = "text" in token && typeof token.text === "string"
+    ? token.text
+    : typeof token.raw === "string"
+      ? token.raw
+      : "";
+  return decodeChatDisplayText(raw);
 }
 
 function renderMarkdownLink(token: Tokens.Link, key: string) {
@@ -386,6 +604,13 @@ function safeMarkdownHref(href: string) {
 
 function markdownCellStyle(cell: Tokens.TableCell): CSSProperties | undefined {
   return cell.align ? { textAlign: cell.align } : undefined;
+}
+
+function formatCompactionPreview(content: string) {
+  const lines = decodeChatDisplayText(coerceChatMessageText(content)).split("\n");
+  const bodyStart = lines.findIndex((line) => line.trim() && !line.startsWith("[Lux") && !line.startsWith("covered_messages=") && !line.startsWith("Continue "));
+  const body = bodyStart >= 0 ? lines.slice(bodyStart).join("\n").trim() : content.trim();
+  return body.length > 4_000 ? `${body.slice(0, 4_000)}\n…` : body;
 }
 
 function truncateMiddleForPreview(content: string, maxChars: number, t: TranslateFn) {

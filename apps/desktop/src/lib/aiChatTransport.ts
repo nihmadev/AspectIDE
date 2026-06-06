@@ -2,9 +2,13 @@ import type { AiModelConfig, AiProviderConfig } from "./aiPreferences";
 import { readVisibleReasoningFromProviderField } from "./aiChatReasoning";
 import { createDesktopRuntimeError, isBrowserPreviewRuntime, isTauriRuntime, luxCommands, subscribeAiChatStream } from "./tauri";
 
+export type ChatContentPart =
+  | { type: "text"; text: string; cache_control?: { type: "ephemeral" } }
+  | { type: "image_url"; image_url: { url: string; detail?: "low" | "high" | "auto" } };
+
 export type ChatCompletionMessage = {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | ChatContentPart[] | null;
   name?: string;
   tool_call_id?: string;
   tool_calls?: OpenAiToolCall[];
@@ -57,6 +61,7 @@ type StreamAccumulator = {
   role: string;
   toolCalls: OpenAiToolCall[];
   finishReason: string | null;
+  usage: UnknownRecord | null;
 };
 
 export async function requestChatCompletion(
@@ -73,7 +78,7 @@ export async function requestChatCompletion(
   const toolsEnabled = options.toolsEnabled ?? true;
   const payload = {
     model: input.selectedModel.alias || input.selectedModel.id,
-    messages,
+    messages: applyPromptCacheBreakpoints(messages, input.selectedModel),
     temperature: 0.2,
     stream: false,
     ...reasoningPayload(input.selectedEffortId, input.provider),
@@ -81,7 +86,10 @@ export async function requestChatCompletion(
   };
 
   if (desktopRuntime) {
-    return requestStreamingChatCompletion(input, payload, onStreamProgress);
+    return requestChatCompletionWithRetry(
+      () => requestStreamingChatCompletion(input, payload, onStreamProgress),
+      input.abortSignal,
+    );
   }
 
   const startedAtMs = performance.now();
@@ -143,6 +151,56 @@ function parseProviderBaseUrl(value: string) {
 
 function isLocalLoopbackUrl(url: URL) {
   return url.protocol === "http:" && ["127.0.0.1", "localhost", "::1", "[::1]"].includes(url.hostname);
+}
+
+const maxProviderRetries = 2;
+
+async function requestChatCompletionWithRetry(
+  run: () => Promise<ChatCompletionResult>,
+  abortSignal: AbortSignal,
+): Promise<ChatCompletionResult> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxProviderRetries; attempt += 1) {
+    throwIfAborted(abortSignal);
+    try {
+      return await run();
+    } catch (error) {
+      lastError = error;
+      if (isAbortErrorLike(error) || attempt >= maxProviderRetries || !isRetryableProviderError(error)) {
+        throw enrichProviderRetryError(error, attempt);
+      }
+      await delay(350 * (attempt + 1));
+    }
+  }
+  throw enrichProviderRetryError(lastError, maxProviderRetries);
+}
+
+function enrichProviderRetryError(error: unknown, attempts: number) {
+  if (!(error instanceof Error) || attempts <= 0) return error;
+  const message = error.message.includes("retried")
+    ? error.message
+    : `${error.message} (retried ${attempts} time${attempts === 1 ? "" : "s"} on the same provider — no model fallback)`;
+  return new Error(message);
+}
+
+function isRetryableProviderError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const text = error.message.toLowerCase();
+  return text.includes("429")
+    || text.includes("408")
+    || text.includes("500")
+    || text.includes("502")
+    || text.includes("503")
+    || text.includes("504")
+    || text.includes("timeout")
+    || text.includes("temporarily")
+    || text.includes("overloaded");
+}
+
+function delay(ms: number) {
+  return new Promise<void>((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
 }
 
 function aiResponseError(status: number, body: unknown) {
@@ -270,10 +328,13 @@ function createStreamAccumulator(): StreamAccumulator {
     role: "assistant",
     toolCalls: [],
     finishReason: null,
+    usage: null,
   };
 }
 
 function applyStreamChunk(accumulator: StreamAccumulator, data: unknown): StreamProgress {
+  const usage = pickStreamUsageRecord(data);
+  if (usage) accumulator.usage = usage;
   const choice = firstChoice(data);
   if (!choice) return streamProgress(accumulator);
   if (typeof choice.finish_reason === "string") accumulator.finishReason = choice.finish_reason;
@@ -318,8 +379,18 @@ function applyToolCallDeltas(accumulator: StreamAccumulator, value: unknown) {
   });
 }
 
+function pickStreamUsageRecord(data: unknown): UnknownRecord | null {
+  if (!isRecord(data)) return null;
+  const candidates = [data.usage, data.usage_metadata, firstChoice(data)?.usage];
+  for (const candidate of candidates) {
+    if (isRecord(candidate)) return candidate;
+  }
+  return null;
+}
+
 function streamAccumulatorToCompletion(accumulator: StreamAccumulator) {
   return {
+    ...(accumulator.usage ? { usage: accumulator.usage } : {}),
     choices: [{
       index: 0,
       finish_reason: accumulator.finishReason,
@@ -343,8 +414,38 @@ function markStreamingStarted(error: unknown) {
   return wrapped;
 }
 
-function hasStreamingStarted(error: unknown) {
+export function hasStreamingStarted(error: unknown) {
   return error instanceof Error && Boolean((error as Error & { streamingStarted?: boolean }).streamingStarted);
+}
+
+/**
+ * Anthropic prompt caching: mark the (stable) system prompt with a `cache_control`
+ * breakpoint so Anthropic-family models cache it and re-read it cheaply on every
+ * subsequent turn. Only applied for Anthropic models (claude/anthropic) — other
+ * providers (OpenAI, DeepSeek, …) cache automatically and may reject the field,
+ * so their payload is left untouched.
+ */
+function applyPromptCacheBreakpoints(
+  messages: ChatCompletionMessage[],
+  model: AiModelConfig,
+): ChatCompletionMessage[] {
+  if (!isAnthropicCacheModel(model)) return messages;
+  let applied = false;
+  return messages.map((message) => {
+    if (applied || message.role !== "system" || typeof message.content !== "string" || !message.content.trim()) {
+      return message;
+    }
+    applied = true;
+    return {
+      ...message,
+      content: [{ type: "text", text: message.content, cache_control: { type: "ephemeral" } }],
+    };
+  });
+}
+
+function isAnthropicCacheModel(model: AiModelConfig): boolean {
+  const id = `${model.alias ?? ""} ${model.id ?? ""}`.toLowerCase();
+  return id.includes("claude") || id.includes("anthropic");
 }
 
 function reasoningPayload(effortId: string, provider: AiProviderConfig) {

@@ -1,3 +1,9 @@
+import type { AiAgentMode } from "./aiPreferences";
+
+function isReadOnlyAgentMode(agentMode?: AiAgentMode) {
+  return agentMode === "plan" || agentMode === "ask";
+}
+
 export type RuntimeToolName =
   | "FastContext"
   | "RepoMap"
@@ -15,8 +21,23 @@ export type RuntimeToolName =
   | "TerminalWrite"
   | "Grep"
   | "ReadLints"
+  | "Goal"
   | "TodoWrite"
+  | "Task"
+  | "AgentMessage"
   | "WebFetch"
+  | "BrowserStatus"
+  | "BrowserOpen"
+  | "BrowserSnapshot"
+  | "BrowserAct"
+  | "BrowserScreenshot"
+  | "BrowserClose"
+  | "BrowserChat"
+  | "BrowserDashboard"
+  | "BrowserInstall"
+  | "BrowserHelp"
+  | "BrowserDoctor"
+  | "BrowserInvoke"
   | "SymbolContext"
   | "RelatedFiles"
   | "DiagnosticsContext"
@@ -41,6 +62,86 @@ export type RuntimeToolDefinition = {
     parameters: Record<string, unknown>;
   };
 };
+
+const browserToolNames = new Set<RuntimeToolName>([
+  "BrowserStatus",
+  "BrowserOpen",
+  "BrowserSnapshot",
+  "BrowserAct",
+  "BrowserScreenshot",
+  "BrowserClose",
+  "BrowserChat",
+  "BrowserDashboard",
+  "BrowserInstall",
+  "BrowserHelp",
+  "BrowserDoctor",
+  "BrowserInvoke",
+]);
+
+const readOnlyBrowserToolNames = new Set<RuntimeToolName>([
+  "BrowserStatus",
+  "BrowserHelp",
+  "BrowserDoctor",
+  "BrowserSnapshot",
+]);
+
+const terminalToolNames = new Set<RuntimeToolName>([
+  "Shell",
+  "TerminalContext",
+  "TerminalWrite",
+]);
+
+/** Blocked in Plan/Ask — enforced like OpenCode `permission.edit` / `bash` deny, not prompt-only. */
+const readOnlyBlockedToolNames = new Set<RuntimeToolName>([
+  "Write",
+  "StrReplace",
+  "PatchEngine",
+  "Delete",
+  "Checkpoint",
+  "TodoWrite",
+  "Goal",
+  "Task",
+  ...terminalToolNames,
+]);
+
+export function readOnlyAgentModeToolDenyReason(
+  toolName: RuntimeToolName,
+  agentMode?: AiAgentMode,
+): string | null {
+  if (!isReadOnlyAgentMode(agentMode)) return null;
+  if (readOnlyBlockedToolNames.has(toolName)) {
+    return agentMode === "plan"
+      ? `Tool "${toolName}" is disabled in Plan mode. Switch to Agent or Automatic to edit files or run commands.`
+      : `Tool "${toolName}" is disabled in Ask mode. Switch to Agent or Automatic for edits and commands.`;
+  }
+  if (browserToolNames.has(toolName) && !readOnlyBrowserToolNames.has(toolName)) {
+    return `Tool "${toolName}" is disabled in ${agentMode === "plan" ? "Plan" : "Ask"} mode.`;
+  }
+  return null;
+}
+
+export function isRuntimeToolAllowed(
+  toolName: RuntimeToolName,
+  preferences: {
+    agentBrowserEnabled: boolean;
+    agentMode?: AiAgentMode;
+  },
+): boolean {
+  if (!preferences.agentBrowserEnabled && browserToolNames.has(toolName)) {
+    return false;
+  }
+  if (readOnlyAgentModeToolDenyReason(toolName, preferences.agentMode)) {
+    return false;
+  }
+  return true;
+}
+
+export function resolveRuntimeTools(preferences: {
+  agentBrowserEnabled: boolean;
+  agentMode?: AiAgentMode;
+}): RuntimeToolDefinition[] {
+  return runtimeTools.filter((tool) => isRuntimeToolAllowed(tool.function.name, preferences));
+}
 
 export const runtimeTools: RuntimeToolDefinition[] = [
   {
@@ -128,8 +229,8 @@ export const runtimeTools: RuntimeToolDefinition[] = [
       parameters: objectSchema({
         query: stringSchema("Task, topic, symbol, or change description used to score context relevance."),
         targetChars: numberSchema("Approximate maximum characters for the returned context packet, default 16000, capped below the runtime output limit."),
-        includeActiveText: booleanSchema("Include a trimmed excerpt from the active document. Default true."),
-        includeOpenDocuments: booleanSchema("Include open editor tabs and dirty file excerpts. Default true."),
+        includeActiveText: booleanSchema("Include a trimmed excerpt from the active document. Default false."),
+        includeOpenDocuments: booleanSchema("Include open editor tabs and dirty file excerpts. Default false."),
         includeToolContext: booleanSchema("Call read-only context tools such as MemoryContext, RulesContext, DocsContext, RelatedFiles, SemanticSearch, GitContext, and DiagnosticsContext. Default true."),
         maxItems: numberSchema("Maximum selected context items to return, default 28."),
       }, ["query"]),
@@ -336,8 +437,21 @@ export const runtimeTools: RuntimeToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "Goal",
+      description: "Set or update the pinned session goal and report progress during /goal autonomous runs. Never use review headings as goals. Do not call during review-only passes.",
+      parameters: objectSchema({
+        goal: stringSchema("Optional: update the pinned goal (1–2 sentences). Omit when only reporting progress."),
+        progress: numberSchema("Completion 0–100 for the pinned session goal."),
+        status: stringSchema('Set to "completed" only when progress is 100 and the goal is fully done.'),
+        summary: stringSchema("Optional short completion summary when status is completed."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "TodoWrite",
-      description: "Replace the current AI session task list with structured todo items and progress states. Use for multi-step work to make progress visible; this does not edit project files.",
+      description: "Replace the current AI session task list (max 20 actionable engineering steps). Never mirror review findings or markdown headings. Do not call during review-only passes. This does not edit project files.",
       parameters: objectSchema({
         todos: {
           type: "array",
@@ -356,6 +470,33 @@ export const runtimeTools: RuntimeToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "Task",
+      description: "Launch an isolated subagent for a focused subtask. Subagents can spawn nested Task calls up to the depth limit. Returns a summary for the parent agent — not shown directly to the user.",
+      parameters: objectSchema({
+        description: stringSchema("Short title for the subagent (3–8 words)."),
+        prompt: stringSchema("Detailed task for the subagent with all necessary context."),
+        subagent_type: stringSchema("generalPurpose, codeReviewer, testRunner, or explorer."),
+        model: stringSchema("Optional model slug override."),
+        resume: stringSchema("Optional subagent id to resume from a prior Task result."),
+      }, ["description", "prompt"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "AgentMessage",
+      description: "Agent-to-agent coordination board shared by the main agent and all subagents in this chat session. Use action=post to publish a finding, decision, contract, or partial result for other agents; use action=read to pull what other agents have posted. Prefer this over re-discovering work a sibling/parent agent already did. Does not modify workspace files.",
+      parameters: objectSchema({
+        action: stringSchema("post (publish a message) or read (fetch messages). Default post."),
+        topic: stringSchema("Short channel/tag to group related messages, e.g. 'auth', 'api-contract', 'findings'. For read, filters to that topic; omit to read all."),
+        content: stringSchema("Message body for post: the finding, decision, or hand-off note for other agents."),
+        limit: numberSchema("For read: maximum messages to return, newest first, default 30."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "WebFetch",
       description: "Fetch a specific HTTP/HTTPS URL and return cleaned text plus metadata. Use for current docs, release notes, error pages, and user-provided links. Private network hosts are blocked unless explicitly allowed.",
       parameters: objectSchema({
@@ -364,6 +505,148 @@ export const runtimeTools: RuntimeToolDefinition[] = [
         timeoutSecs: numberSchema("Request timeout in seconds, default 20, maximum 60."),
         allowPrivateHosts: booleanSchema("Allow localhost/private IP targets. Default false; use only for explicit local URLs."),
       }, ["url"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserStatus",
+      description: "Check whether Vercel agent-browser is installed and list isolated browser sessions for this chat. Use before browser automation when unsure about setup.",
+      parameters: objectSchema({}),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserOpen",
+      description: "Open or navigate an isolated agent-browser session for this chat. Each chat gets its own session so multiple AI agents do not share cookies or tabs.",
+      parameters: objectSchema({
+        url: stringSchema("Optional absolute URL to open. Omit to launch an empty browser."),
+        headed: booleanSchema("Show a visible browser window. Default follows Lux settings."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserSnapshot",
+      description: "Capture the accessibility tree with element refs (@e1, @e2, ...). Prefer -interactive snapshots before clicking or filling. Re-snapshot after navigation or major DOM changes.",
+      parameters: objectSchema({
+        interactive: booleanSchema("Only interactive elements (buttons, links, inputs). Default true."),
+        compact: booleanSchema("Remove empty structural nodes. Default true."),
+        depth: numberSchema("Maximum tree depth, default 8."),
+        selector: stringSchema("Optional CSS selector scope."),
+        includeUrls: booleanSchema("Include href URLs for links. Default false."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserAct",
+      description: "Run one agent-browser command in this chat session, e.g. `click @e2`, `fill @e3 \"email@example.com\"`, `press Enter`, `wait --load networkidle`. Use refs from BrowserSnapshot. For multiple steps you may pass batchCommands.",
+      parameters: objectSchema({
+        command: stringSchema("Single agent-browser command without the CLI name, e.g. `click @e2`."),
+        batchCommands: {
+          type: "array",
+          description: "Optional ordered list of agent-browser commands executed via batch.",
+          items: { type: "string" },
+        },
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserScreenshot",
+      description: "Capture a screenshot from the active browser session. Annotated screenshots label interactive elements with refs for multimodal reasoning.",
+      parameters: objectSchema({
+        path: stringSchema("Optional output path. If omitted, agent-browser stores it in a temp directory and returns the path."),
+        annotate: booleanSchema("Overlay numbered labels mapped to snapshot refs. Default false."),
+        fullPage: booleanSchema("Capture the full scrollable page. Default false."),
+        attachVision: booleanSchema("Attach screenshot as vision input on the next model turn when image context is enabled. Default true."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserClose",
+      description: "Close this chat's isolated agent-browser session and release browser resources.",
+      parameters: objectSchema({
+        all: booleanSchema("Close every active agent-browser session, not only this chat. Default false."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserChat",
+      description: "Run agent-browser natural-language chat for one-shot browser automation (translates instruction to CLI commands). Requires AI Gateway when using cloud chat mode inside agent-browser.",
+      parameters: objectSchema({
+        instruction: stringSchema("Natural language instruction, e.g. open example.com and click the login button."),
+        quiet: booleanSchema("Hide intermediate tool output. Default true."),
+      }, ["instruction"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserDashboard",
+      description: "Start, stop, or inspect the agent-browser observability dashboard (default http://127.0.0.1:4848).",
+      parameters: objectSchema({
+        action: stringSchema("start, stop, or status. Default status."),
+        port: numberSchema("Dashboard port, default 4848."),
+        openInBrowser: booleanSchema("Open dashboard URL in the system browser after start. Default true when action is start."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserInstall",
+      description: "Install or repair agent-browser globally via npm and download Chrome for Testing. Requires approval.",
+      parameters: objectSchema({
+        withDeps: booleanSchema("Linux only: also install system dependencies. Default false."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserInvoke",
+      description: "Run any agent-browser CLI subcommand with full parity (open, click, fill, find, wait, cookies, network, tabs, eval, batch, etc.). Pass the exact args after the CLI name.",
+      parameters: objectSchema({
+        args: {
+          type: "array",
+          description: "CLI arguments, e.g. [\"click\", \"@e2\"] or [\"find\", \"role\", \"button\", \"click\", \"--name\", \"Submit\"].",
+          items: { type: "string" },
+        },
+      }, ["args"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserHelp",
+      description: "Return agent-browser CLI help or bundled skills documentation. Use topic=skills for the core workflow skill.",
+      parameters: objectSchema({
+        topic: stringSchema("Optional subcommand for targeted help, e.g. snapshot, click, wait. Use skills for bundled AI skill docs."),
+        skill: stringSchema("Skill name when topic=skills. Default core."),
+        allSkills: booleanSchema("Return every bundled skill when topic=skills."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "BrowserDoctor",
+      description: "Run agent-browser doctor diagnostics (install, Chrome, daemon, providers). Use fix=true only when user approves repairs.",
+      parameters: objectSchema({
+        fix: booleanSchema("Run doctor --fix (destructive repairs). Default false."),
+        offline: booleanSchema("Skip network probes. Default true."),
+        quick: booleanSchema("Skip live browser launch test. Default true."),
+      }),
     },
   },
   {
