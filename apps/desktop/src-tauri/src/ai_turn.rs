@@ -528,13 +528,90 @@ async fn execute_tool(
                 serde_json::to_string(&serde_json::json!({ "action": "post", "posted": entry })).map_err(|e| e.to_string())
             }
         }
-        // ── Remaining tools: not yet ported → error with hint ──
-        other => {
+        "PatchEngine" => {
+            let operations_raw = args.get("operations").cloned().unwrap_or(serde_json::json!([]));
+            let operations: Vec<crate::ai_tools::AiFilePatchOperation> = serde_json::from_value(operations_raw).map_err(|e| format!("Invalid patch operations: {e}"))?;
+            let save = args.get("saveToDisk").and_then(|v| v.as_bool());
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool());
+            if !dry_run.unwrap_or(false) {
+                require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "PatchEngine", &format!("{} operations", operations.len()), "multi-file patch", "modify").await?;
+            }
+            let result = crate::ai_tools::ai_file_patch(app.clone(), state.clone(), operations, save, dry_run).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "InspectFile" => {
+            let path = json_str(&args, "path");
+            let mut options = lux_core::FileInspectionOptions::default();
+            if let Some(v) = args.get("maxRows").and_then(|v| v.as_u64()) { options.max_rows = v as usize; }
+            if let Some(v) = args.get("maxColumns").and_then(|v| v.as_u64()) { options.max_columns = v as usize; }
+            if let Some(v) = args.get("maxBytes").and_then(|v| v.as_u64()) { options.max_text_bytes = v; }
+            let result = crate::file_intel::file_inspect(state.clone(), std::path::PathBuf::from(path), Some(options)).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "WebFetch" => {
+            let url = json_str(&args, "url");
+            if url.is_empty() { return Err("WebFetch requires a URL.".to_string()); }
+            let max_bytes = args.get("maxBytes").and_then(|v| v.as_u64());
+            let timeout_secs = args.get("timeoutSecs").and_then(|v| v.as_u64());
+            let allow_private = args.get("allowPrivateHosts").and_then(|v| v.as_bool());
+            let result = crate::web_fetch::fetch(url, max_bytes, timeout_secs, allow_private).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "TestHealth" => {
+            let root = crate::workspace_root(state)?;
+            let result = crate::test_health::run(root).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+
+        // ── Browser tools via agent-browser invoke ──
+        "BrowserStatus" => {
+            let result = crate::agent_browser::status(crate::agent_browser::AgentBrowserStatusRequest {
+                command_path: None, skip_auto_update: Some(true), lightweight: Some(true),
+            }).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "BrowserOpen" | "BrowserAct" | "BrowserSnapshot" | "BrowserScreenshot"
+        | "BrowserClose" | "BrowserChat" | "BrowserDashboard" | "BrowserInstall"
+        | "BrowserHelp" | "BrowserDoctor" | "BrowserInvoke" => {
+            let browser_args = build_browser_args(&tc.name, &args);
+            if matches!(tc.name.as_str(), "BrowserOpen" | "BrowserAct" | "BrowserClose" | "BrowserChat" | "BrowserInstall") {
+                require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, &tc.name, &tc.name, &browser_args.join(" "), "execute").await?;
+            }
+            let result = crate::agent_browser::invoke(crate::agent_browser::AgentBrowserInvokeRequest {
+                session: input.session_id.clone(),
+                args: browser_args,
+                headed: None,
+                allowed_domains: None,
+                max_output: Some(24_000),
+                timeout_secs: Some(30),
+                command_path: None,
+                session_name: None,
+                profile: None,
+                state_path: None,
+                content_boundaries: None,
+                ignore_https_errors: None,
+                allow_file_access: None,
+                provider: None,
+                proxy: None,
+            }).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+
+        // ── Context tools that compose others (delegated to TS for now) ──
+        "FastContext" | "ActiveContext" | "RulesContext" | "DocsContext"
+        | "MemoryContext" | "ContextBudgeter" | "ImpactAnalysis" | "ReviewDiff"
+        | "FailureAnalyzer" | "SecretGuard" | "Checkpoint"
+        | "TerminalContext" | "TerminalWrite"
+        | "Goal" | "TodoWrite" | "Task" => {
             Err(format!(
-                "Tool '{other}' is not yet available in the native Rust turn loop. \
-                 Use the standard TS-based AI chat for full tool coverage while the \
-                 migration completes."
+                "Tool '{other}' requires session/orchestration state not yet in the native loop. \
+                 Routing back to the TS runtime for this call.",
+                other = tc.name
             ))
+        }
+
+        other => {
+            Err(format!("Unknown tool: {other}"))
         }
     }
 }
@@ -568,6 +645,72 @@ async fn require_tool_approval(
     match rx.await {
         Ok(ApprovalDecision::Approved) => Ok(()),
         _ => Err(format!("{tool} was rejected by the user.")),
+    }
+}
+
+/// Build agent-browser CLI args from tool name + arguments.
+fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> {
+    match tool_name {
+        "BrowserOpen" => {
+            let mut a = vec!["open".to_string()];
+            if let Some(url) = args.get("url").and_then(|v| v.as_str()) { a.push(url.to_string()); }
+            if args.get("headed").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--headed".to_string()); }
+            a
+        }
+        "BrowserAct" => {
+            if let Some(cmds) = args.get("batchCommands").and_then(|v| v.as_array()) {
+                let mut a = vec!["batch".to_string()];
+                for cmd in cmds { if let Some(s) = cmd.as_str() { a.push(s.to_string()); } }
+                a
+            } else {
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                cmd.split_whitespace().map(str::to_string).collect()
+            }
+        }
+        "BrowserSnapshot" => {
+            let mut a = vec!["snapshot".to_string()];
+            if args.get("interactive").and_then(|v| v.as_bool()).unwrap_or(true) { a.push("-i".to_string()); }
+            if args.get("compact").and_then(|v| v.as_bool()).unwrap_or(true) { a.push("--compact".to_string()); }
+            if let Some(d) = args.get("depth").and_then(|v| v.as_u64()) { a.push("--depth".to_string()); a.push(d.to_string()); }
+            a
+        }
+        "BrowserScreenshot" => {
+            let mut a = vec!["screenshot".to_string()];
+            if args.get("annotate").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--annotate".to_string()); }
+            if args.get("fullPage").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--full-page".to_string()); }
+            if let Some(p) = args.get("path").and_then(|v| v.as_str()) { a.push(p.to_string()); }
+            a
+        }
+        "BrowserClose" => {
+            let mut a = vec!["close".to_string()];
+            if args.get("all").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--all".to_string()); }
+            a
+        }
+        "BrowserChat" => {
+            let instruction = args.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+            vec!["chat".to_string(), instruction.to_string()]
+        }
+        "BrowserDashboard" => {
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+            vec!["dashboard".to_string(), action.to_string()]
+        }
+        "BrowserInstall" => vec!["install".to_string()],
+        "BrowserHelp" => {
+            let mut a = vec!["help".to_string()];
+            if let Some(t) = args.get("topic").and_then(|v| v.as_str()) { a.push(t.to_string()); }
+            a
+        }
+        "BrowserDoctor" => {
+            let mut a = vec!["doctor".to_string()];
+            if args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--fix".to_string()); }
+            a
+        }
+        "BrowserInvoke" => {
+            args.get("args").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                .unwrap_or_default()
+        }
+        _ => vec![],
     }
 }
 
