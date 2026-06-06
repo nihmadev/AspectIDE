@@ -159,3 +159,18 @@ Delete migrated `ai*.ts`; keep only view-model adapters and the optional browser
   Only ContextBudgeter + Checkpoint remain in TS — stateful, editor-coupled, low-frequency,
   and depend on UI report callbacks / editor snapshots that stay bridged to the frontend.
   85 Rust tests passing.
+- 2026-06-06 — Stage 5 (activation). Native turn-loop WIRED as the primary desktop path:
+  AiChatPanel dispatches through runNativeChatTurn (nativeTurnLoop pref, default on);
+  aiNativeTurn.ts is the thin visual bridge mapping lux://ai-turn events → React state.
+  TurnInput accepts frontend turn_id/message_id; added TurnUsage event + ai_cancel_turn.
+  Session title generation ported to ai_session_title.rs (5 tests). TS sendAiChatMessage
+  remains only as browser/dev fallback. 90 Rust tests.
+
+  Remaining in TS by design (stateful orchestration coupled to the React store / UI
+  listeners — the "visual binding" layer, not pure logic):
+  - History compaction checkpoint management (mutates message store)
+  - Goal-run state machine + continuation evaluator (in-memory state with UI listeners)
+  - Turn checkpoints (editor file snapshots for rollback)
+  - Attachment reading (DOM File API, image preview URLs)
+  - ContextBudgeter report callback, Checkpoint diff/restore (editor snapshots)
+  Their LLM calls are thin; the bulk is store mutation / UI state, which stays bridged.

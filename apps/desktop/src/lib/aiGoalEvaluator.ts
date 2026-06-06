@@ -4,6 +4,7 @@ import { requestChatCompletion, type ChatCompletionMessage } from "./aiChatTrans
 import type { AiAgentMode, AiModelConfig, AiProviderConfig } from "./aiPreferences";
 import { truncateText } from "./aiRuntimeShared";
 import { listAiSessionTodos } from "./aiSessionTodos";
+import { isTauriRuntime, luxCommands } from "./tauri";
 import {
   applyGoalEvaluatorVerdict,
   evaluateGoalRunContinuation,
@@ -53,6 +54,25 @@ export async function requestGoalEvaluatorVerdict(input: {
   openTodoSummaries?: string[];
 }): Promise<GoalEvaluatorVerdict | null> {
   const transcript = buildGoalEvaluatorTranscript(input.messages);
+
+  // Native Rust path: verdict runs through the Rust transport.
+  if (isTauriRuntime()) {
+    try {
+      const verdict = await luxCommands.aiGoalEvalVerdict({
+        condition: input.condition,
+        transcript,
+        openTodoSummaries: input.openTodoSummaries ?? [],
+        baseUrl: input.provider.baseUrl,
+        apiKey: input.provider.apiKey || null,
+        model: input.model.alias || input.model.id,
+      });
+      if (!verdict) return null;
+      return { satisfied: verdict.satisfied, blocked: verdict.blocked, reason: verdict.reason, source: "model" };
+    } catch {
+      return null;
+    }
+  }
+
   const todoBlock = input.openTodoSummaries?.length
     ? `Open TodoWrite tasks:\n${input.openTodoSummaries.slice(0, 8).map((line) => `- ${line}`).join("\n")}`
     : "Open TodoWrite tasks: none";
