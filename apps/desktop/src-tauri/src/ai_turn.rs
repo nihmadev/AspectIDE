@@ -597,16 +597,52 @@ async fn execute_tool(
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
-        // ── Context tools that compose others (delegated to TS for now) ──
+        // ── Orchestration tools (session state in Rust) ──
+        "Goal" => {
+            let goal = json_str_opt(&args, "goal");
+            let progress = args.get("progress").and_then(|v| v.as_f64()).map(|v| v.clamp(0.0, 100.0) as u32);
+            let status = json_str_opt(&args, "status");
+            let summary = json_str_opt(&args, "summary");
+            if let Some(ref g) = goal {
+                crate::ai_session::set_goal(&input.session_id, g);
+            }
+            let current = crate::ai_session::get_goal(&input.session_id);
+            Ok(serde_json::json!({
+                "goal": if current.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(current) },
+                "progress": progress,
+                "status": status,
+                "summary": summary,
+            }).to_string())
+        }
+        "TodoWrite" => {
+            let raw_todos = args.get("todos").and_then(|v| v.as_array());
+            let items: Vec<crate::ai_session::SessionTodo> = match raw_todos {
+                Some(arr) => arr.iter().enumerate().filter_map(|(i, v)| {
+                    let content = v.get("content")?.as_str()?.trim().to_string();
+                    if content.is_empty() { return None; }
+                    Some(crate::ai_session::SessionTodo {
+                        id: v.get("id").and_then(|v| v.as_str()).map(str::to_string).unwrap_or_else(|| format!("todo-{}", i + 1)),
+                        content,
+                        status: v.get("status").and_then(|v| v.as_str()).unwrap_or("pending").to_string(),
+                        priority: v.get("priority").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
+                        notes: v.get("notes").and_then(|v| v.as_str()).map(str::to_string),
+                    })
+                }).collect(),
+                None => return Err("TodoWrite requires a todos array.".to_string()),
+            };
+            if items.is_empty() { return Err("TodoWrite requires at least one todo item.".to_string()); }
+            crate::ai_session::set_todos(&input.session_id, items.clone());
+            Ok(serde_json::json!({ "count": items.len(), "todos": items }).to_string())
+        }
+
+        // ── Context tools that compose others (remaining for Stage 4+) ──
         "FastContext" | "ActiveContext" | "RulesContext" | "DocsContext"
         | "MemoryContext" | "ContextBudgeter" | "ImpactAnalysis" | "ReviewDiff"
         | "FailureAnalyzer" | "SecretGuard" | "Checkpoint"
-        | "TerminalContext" | "TerminalWrite"
-        | "Goal" | "TodoWrite" | "Task" => {
+        | "TerminalContext" | "TerminalWrite" | "Task" => {
             Err(format!(
-                "Tool '{other}' requires session/orchestration state not yet in the native loop. \
-                 Routing back to the TS runtime for this call.",
-                other = tc.name
+                "Tool '{}' requires composite context or terminal state not yet in the native loop.",
+                tc.name
             ))
         }
 

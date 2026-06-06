@@ -40,6 +40,7 @@ mod ai_chat_backend;
 mod ai_permissions;
 mod ai_prompt;
 mod ai_related;
+mod ai_session;
 mod ai_semantic;
 mod ai_shell_safety;
 mod ai_tool_defs;
@@ -553,6 +554,10 @@ pub fn run() {
             ai_tokens::ai_estimate_tokens,
             ai_tokens::ai_estimate_tokens_batch,
             ai_tokens::ai_format_tokens,
+            ai_session::ai_session_goal_get,
+            ai_session::ai_session_goal_set,
+            ai_session::ai_session_todos_get,
+            ai_session::ai_session_todos_set,
             ai_turn::ai_run_turn,
             ai_turn::ai_resolve_turn_approval,
             ai_workspace::ai_repo_map,
