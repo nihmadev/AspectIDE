@@ -37,6 +37,7 @@ mod workspace_watcher;
 
 mod ai_a2a;
 mod ai_chat_backend;
+mod ai_context_sources;
 mod ai_permissions;
 mod ai_prompt;
 mod ai_related;
@@ -544,6 +545,9 @@ pub fn run() {
             ai_file_delete,
             ai_shell,
             ai_shell_classify,
+            ai_context_sources::ai_rules_context,
+            ai_context_sources::ai_docs_context,
+            ai_context_sources::ai_memory_context,
             ai_a2a::ai_blackboard_post,
             ai_a2a::ai_blackboard_read,
             ai_a2a::ai_blackboard_clear,

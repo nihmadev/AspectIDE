@@ -680,9 +680,27 @@ async fn execute_tool(
             }
         }
 
-        // ── Remaining composite context tools ──
-        "FastContext" | "RulesContext" | "DocsContext"
-        | "MemoryContext" | "ContextBudgeter" | "ImpactAnalysis" | "ReviewDiff"
+        "RulesContext" => {
+            let query = json_str_opt(&args, "query");
+            let max_files = args.get("maxFiles").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let result = crate::ai_context_sources::ai_rules_context(state.clone(), query, max_files, None).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "DocsContext" => {
+            let query = json_str_opt(&args, "query");
+            let max_files = args.get("maxFiles").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let result = crate::ai_context_sources::ai_docs_context(state.clone(), query, max_files, None).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "MemoryContext" => {
+            let query = json_str_opt(&args, "query");
+            let max_files = args.get("maxFiles").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let result = crate::ai_context_sources::ai_memory_context(state.clone(), query, max_files, None).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+
+        // ── Remaining: composite/terminal/subagent ──
+        "FastContext" | "ContextBudgeter" | "ImpactAnalysis" | "ReviewDiff"
         | "FailureAnalyzer" | "Checkpoint"
         | "TerminalContext" | "TerminalWrite" | "Task" => {
             Err(format!(
