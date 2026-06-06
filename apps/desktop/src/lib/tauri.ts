@@ -596,6 +596,10 @@ export const luxCommands = {
     condition: string; transcript: string; openTodoSummaries: string[];
     baseUrl: string; apiKey: string | null; model: string;
   }) => invokeRequired<{ satisfied: boolean; blocked: boolean; reason: string; source: string } | null>("ai_goal_eval_verdict", { input }),
+  aiCompactionSummary: (input: {
+    transcript: string; previousSummary: string; pinnedGoal: string; openTasks: string[];
+    baseUrl: string; apiKey: string | null; model: string;
+  }) => invokeRequired<string>("ai_compaction_summary", { input }),
   aiWorkspaceIndex: (maxFiles?: number | null, maxScan?: number | null) =>
     invokeRequired<{
       workspaceRoot: string; scanned: number; indexedFiles: number; truncated: boolean;

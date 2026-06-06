@@ -11,6 +11,7 @@ import { firstChoice, type ChatCompletionMessage } from "./aiChatTransport";
 import { getAiSessionGoal } from "./aiSessionGoal";
 import { listAiSessionTodos } from "./aiSessionTodos";
 import { truncateText } from "./aiRuntimeShared";
+import { isTauriRuntime, luxCommands } from "./tauri";
 
 export const COMPACTION_CHECKPOINT_MARKER = "[Lux · context compacted]";
 export const TOOL_OUTPUT_PRUNE_MARKER = "[Lux · tool output pruned";
@@ -419,6 +420,21 @@ async function summarizeCompactionTranscript(input: {
 
   const pinnedGoal = input.sessionId ? getAiSessionGoal(input.sessionId) : "";
   const openTasks = input.sessionId ? listAiSessionTodos(input.sessionId) : [];
+
+  // Native Rust path: summarization runs through the Rust transport.
+  if (isTauriRuntime()) {
+    const summary = await luxCommands.aiCompactionSummary({
+      transcript: input.transcript,
+      previousSummary: input.previousSummary,
+      pinnedGoal,
+      openTasks: openTasks.map((todo) => `[${todo.status}] ${todo.content}`),
+      baseUrl: input.provider.baseUrl,
+      apiKey: input.provider.apiKey || null,
+      model: input.model.alias || input.model.id,
+    });
+    return truncateText(summary, MAX_SUMMARY_CHARS);
+  }
+
   const userParts = [
     pinnedGoal ? `Pinned session goal:\n${truncateText(pinnedGoal, 2_000)}` : "",
     openTasks.length > 0 ? `Open tasks:\n${openTasks.map((todo) => `- [${todo.status}] ${todo.content}`).join("\n")}` : "",
