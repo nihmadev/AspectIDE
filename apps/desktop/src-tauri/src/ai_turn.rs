@@ -822,10 +822,26 @@ async fn execute_tool(
             Ok(serde_json::json!({ "bytesWritten": data.len(), "sessionId": session_id.to_string() }).to_string())
         }
 
-        // ── Remaining: checkpoint/budgeter/subagent ──
-        "ContextBudgeter" | "Checkpoint" | "Task" => {
+        "Task" => {
+            let description = json_str(&args, "description");
+            let prompt = json_str(&args, "prompt");
+            if description.is_empty() || prompt.is_empty() {
+                return Err("Task requires description and prompt.".to_string());
+            }
+            let subagent_type = json_str_opt(&args, "subagent_type").unwrap_or_else(|| "generalPurpose".to_string());
+            let agent_id = format!("subagent-{}", uuid::Uuid::new_v4().simple());
+            let summary = run_subagent(app, state, input, &agent_id, &description, &prompt, &subagent_type).await?;
+            Ok(serde_json::json!({
+                "agentId": agent_id,
+                "subagentType": subagent_type,
+                "summary": summary,
+            }).to_string())
+        }
+
+        // ── Remaining: checkpoint/budgeter ──
+        "ContextBudgeter" | "Checkpoint" => {
             Err(format!(
-                "Tool '{}' requires checkpoint/budgeter/subagent state not yet in the native loop.",
+                "Tool '{}' requires checkpoint/budgeter state not yet in the native loop.",
                 tc.name
             ))
         }
@@ -834,6 +850,97 @@ async fn execute_tool(
             Err(format!("Unknown tool: {other}"))
         }
     }
+}
+
+/// Run an isolated subagent turn (Task tool). The subagent gets its own model↔tool
+/// loop with a capped round limit and read-only-leaning tools, then returns a concise
+/// summary to the parent. Shares the session's A2A blackboard for coordination.
+async fn run_subagent(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, crate::SharedState>,
+    parent: &TurnInput,
+    agent_id: &str,
+    description: &str,
+    prompt: &str,
+    subagent_type: &str,
+) -> Result<String, String> {
+    const MAX_SUBAGENT_ROUNDS: usize = 16;
+    let read_only = matches!(subagent_type, "codeReviewer" | "explorer");
+
+    // Subagent system prompt: focused, returns a summary.
+    let instructions = format!(
+        "You are a Lux subagent ({subagent_type}). Task: {description}\n\
+         Work in an isolated context. Use tools to gather evidence and complete the task. \
+         Coordinate via AgentMessage (read sibling findings, post your discoveries). \
+         Return a concise final summary for the parent agent. Do not spawn further subagents."
+    );
+    let mut prompt_input = parent.prompt_input.clone();
+    prompt_input.agent_instructions = instructions.clone();
+    prompt_input.agent_name = format!("subagent:{subagent_type}");
+    if read_only {
+        prompt_input.agent_mode = "ask".to_string();
+    }
+    let system = crate::ai_prompt::build_system_prompt(&prompt_input);
+
+    let mut messages: Vec<serde_json::Value> = vec![
+        serde_json::json!({ "role": "system", "content": system }),
+        serde_json::json!({ "role": "user", "content": prompt }),
+    ];
+    let tools = crate::ai_tool_defs::runtime_tool_definitions(
+        if read_only { "ask" } else { &parent.agent_mode },
+        parent.agent_browser_enabled,
+    );
+
+    let mut final_content = String::new();
+    for _round in 0..MAX_SUBAGENT_ROUNDS {
+        let payload = serde_json::json!({
+            "model": parent.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "stream": false,
+            "tools": tools,
+            "tool_choice": "auto",
+        });
+        let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
+            parent.base_url.clone(), parent.api_key.clone(), payload,
+        );
+        let response = crate::ai_chat_backend::completion(request).await?;
+        let assistant = parse_assistant_message(&response.body);
+        if !assistant.content.is_empty() {
+            final_content = assistant.content.clone();
+        }
+        if assistant.tool_calls.is_empty() {
+            break;
+        }
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": if assistant.content.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(assistant.content.clone()) },
+            "tool_calls": assistant.tool_calls.iter().map(|tc| serde_json::json!({
+                "id": tc.id, "type": "function",
+                "function": { "name": tc.name, "arguments": tc.arguments },
+            })).collect::<Vec<_>>(),
+        }));
+        // Subagents cannot spawn nested Task (depth limit) — block it inline.
+        for child in &assistant.tool_calls {
+            let result = if child.name == "Task" {
+                Err("Nested subagents are not allowed (depth limit).".to_string())
+            } else {
+                // Subagent tool calls don't emit UI events (isolated context).
+                Box::pin(execute_tool(app, state, parent, agent_id, child)).await
+            };
+            let content = match result {
+                Ok(output) => output,
+                Err(err) => serde_json::json!({ "error": err }).to_string(),
+            };
+            messages.push(serde_json::json!({
+                "role": "tool",
+                "tool_call_id": child.id,
+                "content": content,
+            }));
+        }
+    }
+
+    Ok(if final_content.is_empty() { "Subagent finished without a summary.".to_string() } else { final_content })
 }
 
 /// Check permission rules + mode, then prompt the UI for approval if needed.
