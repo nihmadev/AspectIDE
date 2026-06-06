@@ -879,12 +879,42 @@ async fn execute_tool(
             }).to_string())
         }
 
-        // ── Remaining: checkpoint/budgeter ──
-        "ContextBudgeter" | "Checkpoint" => {
-            Err(format!(
-                "Tool '{}' requires checkpoint/budgeter state not yet in the native loop.",
-                tc.name
-            ))
+        "ContextBudgeter" => {
+            let query = json_str(&args, "query");
+            if query.is_empty() { return Err("ContextBudgeter requires a non-empty query.".to_string()); }
+            let target_chars = json_usize(&args, "targetChars", 16_000).clamp(2_000, 22_000);
+            // Compose ranked context from native tools, then budget-select by score.
+            let mut items: Vec<(String, String, i64)> = Vec::new(); // (kind, content, score)
+            if let Ok(rc) = crate::ai_context_sources::ai_rules_context(state.clone(), Some(query.clone()), Some(6), None).await {
+                for f in rc.files { items.push(("rule".into(), format!("{}: {}", f.relative_path, f.text), 60)); }
+            }
+            if let Ok(mc) = crate::ai_context_sources::ai_memory_context(state.clone(), Some(query.clone()), Some(6), None).await {
+                for f in mc.files { items.push(("memory".into(), format!("{}: {}", f.relative_path, f.text), 55)); }
+            }
+            if let Ok(rf) = crate::ai_related::ai_related_files(state.clone(), input.active_document_path.clone(), Some(query.clone()), Some(18), Some(5000)).await {
+                for f in rf.files { items.push(("related-file".into(), format!("{} (score {})", f.relative_path, f.score), 40 + f.score.min(40))); }
+            }
+            if let Ok(diag) = crate::lsp::diagnostics_snapshot(state.clone()) {
+                for d in diag.into_iter().take(20) {
+                    items.push(("diagnostic".into(), serde_json::to_string(&d).unwrap_or_default(), 50));
+                }
+            }
+            // Rank by score desc, then budget-select.
+            items.sort_by(|a, b| b.2.cmp(&a.2));
+            let mut selected = Vec::new();
+            let mut used = 0usize;
+            for (kind, content, score) in items {
+                if used >= target_chars { break; }
+                let clamped: String = content.chars().take(1800).collect();
+                used += clamped.len();
+                selected.push(serde_json::json!({ "kind": kind, "score": score, "chars": clamped.len(), "content": clamped }));
+            }
+            Ok(serde_json::json!({ "query": query, "targetChars": target_chars, "selectedChars": used, "count": selected.len(), "packet": selected }).to_string())
+        }
+
+        // ── Checkpoint: editor-snapshot store stays in TS (mutates editor state) ──
+        "Checkpoint" => {
+            Err("Checkpoint manages editor file snapshots and runs in the TS layer.".to_string())
         }
 
         other => {
