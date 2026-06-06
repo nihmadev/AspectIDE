@@ -172,6 +172,9 @@ pub struct TurnInput {
     /// Open document paths (from React state).
     #[serde(default)]
     pub open_document_paths: Vec<String>,
+    /// Terminal context snapshot (sessions + output buffer tails from React state).
+    #[serde(default)]
+    pub terminal_context: Option<serde_json::Value>,
 }
 
 /// Start a native AI turn. Runs the full model↔tool loop in Rust,
@@ -699,12 +702,130 @@ async fn execute_tool(
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
-        // ── Remaining: composite/terminal/subagent ──
-        "FastContext" | "ContextBudgeter" | "ImpactAnalysis" | "ReviewDiff"
-        | "FailureAnalyzer" | "Checkpoint"
-        | "TerminalContext" | "TerminalWrite" | "Task" => {
+        "FastContext" => {
+            let query = json_str(&args, "query");
+            // FastContext composes multiple tools — call them sequentially in Rust.
+            let mut parts = Vec::new();
+            parts.push(format!("Active document: {}", input.active_document_path.as_deref().unwrap_or("none")));
+
+            // WorkspaceIndex
+            if let Ok(wi) = crate::ai_workspace::ai_workspace_index(state.clone(), Some(24), Some(2500)).await {
+                if let Ok(json) = serde_json::to_string(&wi) { parts.push(format!("WorkspaceIndex: {json}")); }
+            }
+            // RepoMap
+            if let Ok(rm) = crate::ai_workspace::ai_repo_map(state.clone(), Some(48)).await {
+                if let Ok(json) = serde_json::to_string(&rm) { parts.push(format!("RepoMap: {json}")); }
+            }
+            // RulesContext
+            if let Ok(rc) = crate::ai_context_sources::ai_rules_context(state.clone(), Some(query.clone()), Some(8), None).await {
+                if let Ok(json) = serde_json::to_string(&rc) { parts.push(format!("RulesContext: {json}")); }
+            }
+            // MemoryContext
+            if let Ok(mc) = crate::ai_context_sources::ai_memory_context(state.clone(), Some(query.clone()), Some(8), None).await {
+                if let Ok(json) = serde_json::to_string(&mc) { parts.push(format!("MemoryContext: {json}")); }
+            }
+            // DiagnosticsContext
+            if let Ok(diag) = crate::lsp::diagnostics_snapshot(state.clone()) {
+                let count = diag.len();
+                let truncated: Vec<_> = diag.into_iter().take(40).collect();
+                parts.push(format!("DiagnosticsContext: {{\"count\":{count},\"diagnostics\":{}}}", serde_json::to_string(&truncated).unwrap_or_default()));
+            }
+            // GitContext
+            if let Ok(git) = crate::git::git_status(state.clone()).await {
+                if let Ok(json) = serde_json::to_string(&git) { parts.push(format!("GitContext: {json}")); }
+            }
+            // RelatedFiles
+            if let Ok(rf) = crate::ai_related::ai_related_files(state.clone(), input.active_document_path.clone(), Some(query.clone()), Some(24), Some(5000)).await {
+                if let Ok(json) = serde_json::to_string(&rf) { parts.push(format!("RelatedFiles: {json}")); }
+            }
+            // Grep/Glob
+            if !query.is_empty() {
+                if let Ok(search) = crate::search::search_query(state.clone(), query.clone(), lux_core::SearchOptions { max_results: 20, ..Default::default() }).await {
+                    if let Ok(json) = serde_json::to_string(&search) { parts.push(format!("Search: {json}")); }
+                }
+            }
+
+            Ok(serde_json::json!({ "query": query, "context": parts.join("\n\n") }).to_string())
+        }
+        "ReviewDiff" => {
+            // ReviewDiff: git status + diff + diagnostics → findings.
+            let git = crate::git::git_status(state.clone()).await.ok();
+            let diff = crate::git::git_diff(state.clone()).await.ok();
+            let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
+            Ok(serde_json::json!({
+                "branch": git.as_ref().map(|g| &g.branch),
+                "changedFiles": git.as_ref().map(|g| g.files.len()).unwrap_or(0),
+                "patch": diff.as_ref().map(|d| d.patch.chars().take(8000).collect::<String>()).unwrap_or_default(),
+                "diagnosticCount": diagnostics.len(),
+                "diagnostics": diagnostics.into_iter().take(24).collect::<Vec<_>>(),
+            }).to_string())
+        }
+        "FailureAnalyzer" => {
+            // FailureAnalyzer: TestHealth + diagnostics → analysis.
+            let root = crate::workspace_root(state).ok();
+            let test_result = if let Some(root) = root {
+                crate::test_health::run(root).await.ok()
+            } else { None };
+            let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
+            Ok(serde_json::json!({
+                "testHealth": test_result,
+                "diagnosticCount": diagnostics.len(),
+                "diagnostics": diagnostics.into_iter().take(40).collect::<Vec<_>>(),
+                "notes": ["Analyze failing tests and diagnostics above to identify root causes."],
+            }).to_string())
+        }
+
+        "ImpactAnalysis" => {
+            let query = json_str_opt(&args, "query").unwrap_or_default();
+            let path = json_str_opt(&args, "path").or_else(|| input.active_document_path.clone());
+            let max_results = json_usize(&args, "maxResults", 32);
+            // Compose: RelatedFiles + diagnostics + symbols.
+            let related = crate::ai_related::ai_related_files(state.clone(), path.clone(), Some(query.clone()), Some(max_results), Some(5000)).await.ok();
+            let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
+            let symbols = if !query.is_empty() {
+                crate::ai_tools::ai_symbol_context(state.clone(), Some(query.clone()), path.clone().map(std::path::PathBuf::from), None, None, Some(40)).await.ok()
+            } else { None };
+            let diag_count = diagnostics.len();
+            let risk = if diag_count > 10 { "high" } else if diag_count > 0 { "medium" } else { "low" };
+            Ok(serde_json::json!({
+                "target": path,
+                "query": query,
+                "riskLevel": risk,
+                "affectedFiles": related,
+                "symbols": symbols,
+                "diagnosticCount": diag_count,
+                "diagnostics": diagnostics.into_iter().take(24).collect::<Vec<_>>(),
+            }).to_string())
+        }
+
+        "TerminalContext" => {
+            // Terminal session + output state is buffered in React; passed through TurnInput.
+            match &input.terminal_context {
+                Some(ctx) => Ok(ctx.to_string()),
+                None => Ok(serde_json::json!({
+                    "sessionCount": 0,
+                    "sessions": [],
+                    "notes": ["No terminal context was provided for this turn."],
+                }).to_string()),
+            }
+        }
+        "TerminalWrite" => {
+            let data = json_str(&args, "data");
+            if data.is_empty() { return Err("TerminalWrite requires non-empty data.".to_string()); }
+            let session_id_str = json_str_opt(&args, "sessionId");
+            require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "TerminalWrite", "Write to terminal", &data.chars().take(120).collect::<String>(), "execute").await?;
+            let session_id = match session_id_str {
+                Some(id) => uuid::Uuid::parse_str(&id).map_err(|_| "invalid session id".to_string())?,
+                None => return Err("TerminalWrite requires a sessionId.".to_string()),
+            };
+            crate::terminal::terminal_write(state.clone(), session_id, data.clone())?;
+            Ok(serde_json::json!({ "bytesWritten": data.len(), "sessionId": session_id.to_string() }).to_string())
+        }
+
+        // ── Remaining: checkpoint/budgeter/subagent ──
+        "ContextBudgeter" | "Checkpoint" | "Task" => {
             Err(format!(
-                "Tool '{}' requires composite context or terminal state not yet in the native loop.",
+                "Tool '{}' requires checkpoint/budgeter/subagent state not yet in the native loop.",
                 tc.name
             ))
         }
