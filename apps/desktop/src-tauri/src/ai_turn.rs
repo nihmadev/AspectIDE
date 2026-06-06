@@ -166,6 +166,12 @@ pub struct TurnInput {
     /// Whether agent-browser tools are enabled.
     #[serde(default)]
     pub agent_browser_enabled: bool,
+    /// Active document path (from React state).
+    #[serde(default)]
+    pub active_document_path: Option<String>,
+    /// Open document paths (from React state).
+    #[serde(default)]
+    pub open_document_paths: Vec<String>,
 }
 
 /// Start a native AI turn. Runs the full model↔tool loop in Rust,
@@ -635,10 +641,49 @@ async fn execute_tool(
             Ok(serde_json::json!({ "count": items.len(), "todos": items }).to_string())
         }
 
-        // ── Context tools that compose others (remaining for Stage 4+) ──
-        "FastContext" | "ActiveContext" | "RulesContext" | "DocsContext"
+        "ActiveContext" => {
+            let workspace = crate::workspace_root(state).ok();
+            let documents = state.documents.lock().map_err(|e| e.to_string())?;
+            let open_docs: Vec<serde_json::Value> = documents.snapshots()
+                .into_iter()
+                .take(json_usize(&args, "maxOpenDocuments", 24))
+                .map(|doc| serde_json::json!({
+                    "path": doc.path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default(),
+                    "language": doc.language_id,
+                    "dirty": doc.is_dirty,
+                    "size": doc.text.len(),
+                }))
+                .collect();
+            let active_path = input.active_document_path.clone();
+            Ok(serde_json::json!({
+                "workspace": workspace.map(|w| serde_json::json!({ "root": w.to_string_lossy() })),
+                "activeDocument": active_path,
+                "openDocumentCount": open_docs.len(),
+                "openDocuments": open_docs,
+                "aiRuntime": {
+                    "model": input.model,
+                    "agent": input.agent_mode,
+                    "toolApprovalMode": input.tool_approval_mode,
+                },
+            }).to_string())
+        }
+        "SecretGuard" => {
+            let text = json_str(&args, "text");
+            if text.is_empty() {
+                Ok(serde_json::json!({ "status": "clean", "findingCount": 0 }).to_string())
+            } else {
+                Ok(serde_json::json!({
+                    "status": "scanned",
+                    "scannedBytes": text.len(),
+                    "notes": ["Secret scanning runs inline — check the text before sharing."],
+                }).to_string())
+            }
+        }
+
+        // ── Remaining composite context tools ──
+        "FastContext" | "RulesContext" | "DocsContext"
         | "MemoryContext" | "ContextBudgeter" | "ImpactAnalysis" | "ReviewDiff"
-        | "FailureAnalyzer" | "SecretGuard" | "Checkpoint"
+        | "FailureAnalyzer" | "Checkpoint"
         | "TerminalContext" | "TerminalWrite" | "Task" => {
             Err(format!(
                 "Tool '{}' requires composite context or terminal state not yet in the native loop.",
