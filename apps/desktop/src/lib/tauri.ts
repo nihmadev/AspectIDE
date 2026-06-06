@@ -413,6 +413,21 @@ export type AiSemanticSearchResponse = {
   results: AiSemanticResult[];
 };
 
+export type AiRelatedFilesResponse = {
+  workspaceRoot: string;
+  target: { path: string; relativePath: string; basename: string; familyStem: string } | null;
+  query: string;
+  scanned: number;
+  count: number;
+  files: {
+    path: string;
+    relativePath: string;
+    relations: string[];
+    queryHits: string[];
+    score: number;
+  }[];
+};
+
 export type AiSymbolContextResponse = {
   workspaceRoot: string;
   query: string;
@@ -557,6 +572,29 @@ export const luxCommands = {
     invokeRequired<AiPermissionEvaluation>("ai_permission_decide", { tool, input, rules }),
   aiSemanticSearch: (query: string, path?: string | null, maxResults?: number | null, maxFiles?: number | null) =>
     invokeRequired<AiSemanticSearchResponse>("ai_semantic_search", { query, path: path ?? null, maxResults: maxResults ?? null, maxFiles: maxFiles ?? null }),
+  aiRelatedFiles: (path?: string | null, query?: string | null, maxResults?: number | null, maxFiles?: number | null) =>
+    invokeRequired<AiRelatedFilesResponse>("ai_related_files", { path: path ?? null, query: query ?? null, maxResults: maxResults ?? null, maxFiles: maxFiles ?? null }),
+  aiRepoMap: (maxFiles?: number | null) =>
+    invokeRequired<{ totalListed: number; files: { path: string; size: number; modifiedAt: string | null }[] }>("ai_repo_map", { maxFiles: maxFiles ?? null }),
+  aiBuildSystemPrompt: (input: {
+    agentMode: string; agentName: string; agentInstructions: string;
+    globalInstructions: string; projectInstructions: string; projectAgentsSnip: string;
+    toolApprovalMode: string; toolRoundLimit: number | null;
+    selectedEffortId: string; selectedModelAlias: string;
+    providerName: string; providerProtocol: string;
+    workspaceRoot: string; runtimeToolsAvailable: boolean; agentBrowserEnabled: boolean;
+  }) => invokeRequired<string>("ai_build_system_prompt", { input }),
+  aiWorkspaceIndex: (maxFiles?: number | null, maxScan?: number | null) =>
+    invokeRequired<{
+      workspaceRoot: string; scanned: number; indexedFiles: number; truncated: boolean;
+      byLanguage: { key: string; count: number }[];
+      byDirectory: { key: string; count: number }[];
+      important: { path: string; relativePath: string; language: string; size: number }[];
+      tests: { path: string; relativePath: string; language: string; size: number }[];
+      source: { path: string; relativePath: string; language: string; size: number }[];
+      entrypoints: { path: string; relativePath: string; language: string; size: number }[];
+      largest: { path: string; relativePath: string; language: string; size: number }[];
+    }>("ai_workspace_index", { maxFiles: maxFiles ?? null, maxScan: maxScan ?? null }),
   aiSymbolContext: (query?: string | null, path?: string | null, line?: number | null, column?: number | null, maxResults?: number | null) =>
     invokeRequired<AiSymbolContextResponse>("ai_symbol_context", { query: query ?? null, path: path ?? null, line: line ?? null, column: column ?? null, maxResults: maxResults ?? null }),
   voiceInputStatus: (provider: string, command?: string | null, modelPath?: string | null) =>

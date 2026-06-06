@@ -570,6 +570,85 @@ pub async fn ai_shell(
     }
 }
 
+/// Read a text file — public wrapper for the turn-loop dispatcher.
+pub async fn ai_read_file(
+    state: State<'_, SharedState>,
+    path: PathBuf,
+    max_bytes: Option<u64>,
+) -> Result<AiReadFileResult, String> {
+    let max_bytes = max_bytes.unwrap_or(120_000).max(1);
+    let path = resolve_workspace_path(&state, &path)?;
+    tokio::task::spawn_blocking(move || -> Result<AiReadFileResult, String> {
+        let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            return Err("path is not a file".to_string());
+        }
+        let size = metadata.len();
+        use std::io::Read;
+        let limit = usize::try_from(max_bytes.min(size)).unwrap_or(usize::MAX);
+        let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
+        let mut buffer = vec![0; limit];
+        let read = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        buffer.truncate(read);
+        let text = String::from_utf8_lossy(&buffer).into_owned();
+        Ok(AiReadFileResult {
+            path,
+            text,
+            truncated: size > max_bytes,
+            size,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiReadFileResult {
+    pub path: PathBuf,
+    pub text: String,
+    pub truncated: bool,
+    pub size: u64,
+}
+
+/// List workspace files matching a pattern — public wrapper for the turn-loop.
+pub async fn ai_glob(
+    state: State<'_, SharedState>,
+    pattern: String,
+    max_results: Option<usize>,
+) -> Result<AiGlobResult, String> {
+    let root = workspace_root(&state)?;
+    let max = max_results.unwrap_or(80).clamp(1, 500);
+    let pattern = pattern.trim().to_lowercase();
+    let entries = tokio::task::spawn_blocking(move || lux_fs::list_files(root, 10_000))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let files: Vec<PathBuf> = entries
+        .into_iter()
+        .filter(|e| matches!(e.kind, lux_core::FsEntryKind::File))
+        .filter(|e| {
+            let path = e.path.to_string_lossy().to_lowercase().replace('\\', "/");
+            path.contains(&pattern)
+        })
+        .take(max)
+        .map(|e| e.path)
+        .collect();
+    Ok(AiGlobResult {
+        pattern: pattern.to_string(),
+        count: files.len(),
+        files,
+    })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiGlobResult {
+    pub pattern: String,
+    pub count: usize,
+    pub files: Vec<PathBuf>,
+}
+
 #[tauri::command]
 pub async fn ai_symbol_context(
     state: State<'_, SharedState>,

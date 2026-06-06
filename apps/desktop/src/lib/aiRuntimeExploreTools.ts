@@ -26,7 +26,7 @@ import {
   type ToolResult,
   type UnknownRecord,
 } from "./aiRuntimeShared";
-import { luxCommands } from "./tauri";
+import { isTauriRuntime, luxCommands } from "./tauri";
 import type { FileInspection, LspDocumentSymbol, LspLocation } from "./types";
 
 export async function globFiles(pattern: string, maxResults: number): Promise<ToolResult> {
@@ -156,6 +156,12 @@ export async function relatedFiles(args: UnknownRecord, input: AiChatSendInput):
   const query = stringArg(args, "query", input.message);
   const maxResults = clamp(numberArg(args, "maxResults", 40), 1, 120);
   const scanLimit = clamp(input.preferences.maxIndexedFiles, 500, 20_000);
+
+  if (isTauriRuntime()) {
+    const native = await luxCommands.aiRelatedFiles(path || null, query || null, maxResults, scanLimit);
+    return toolJson("RelatedFiles", native);
+  }
+
   const entries = await luxCommands.fsListFiles(scanLimit);
   const workspaceRoot = input.workspace?.root ?? "";
   const targetPath = path.trim() ? resolveWorkspacePath(path, workspaceRoot) : "";

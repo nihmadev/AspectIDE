@@ -271,6 +271,14 @@ fn normalize_slashes(value: &str) -> String {
     value.replace('\\', "/")
 }
 
+pub fn normalize_slashes_pub(value: &str) -> String { normalize_slashes(value) }
+pub fn file_extension_pub(basename_lower: &str) -> String { file_extension(basename_lower) }
+pub fn family_stem_pub(basename: &str) -> String { family_stem(basename) }
+pub fn tokenize_pub(query: &str) -> Vec<String> { tokenize(query) }
+pub fn is_low_signal_path_pub(path: &str) -> bool { is_low_signal_path(path) }
+pub fn score_path_pub(path: &str) -> i64 { score_path(path) }
+pub fn language_for_path_pub(basename_lower: &str) -> String { language_for_path(basename_lower) }
+
 fn passes_path_filter(path: &str, filter: Option<&str>) -> bool {
     match filter {
         None => true,

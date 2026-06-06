@@ -44,7 +44,7 @@ import {
   type UnknownRecord,
 } from "./aiRuntimeShared";
 import { compactTerminalContext } from "./aiRuntimeTerminal";
-import { luxCommands } from "./tauri";
+import { isTauriRuntime, luxCommands } from "./tauri";
 
 export async function fastContext(input: AiChatSendInput, query: string): Promise<ToolResult> {
   const [active, index, repo, rules, memory, diagnostics, git, related, impact, search] = await Promise.allSettled([
@@ -76,6 +76,10 @@ export async function fastContext(input: AiChatSendInput, query: string): Promis
 }
 
 export async function repoMap(maxFiles: number): Promise<ToolResult> {
+  if (isTauriRuntime()) {
+    const native = await luxCommands.aiRepoMap(clamp(maxFiles, 1, 500));
+    return toolJson("RepoMap", native);
+  }
   const files = await luxCommands.fsListFiles(clamp(maxFiles, 1, 500));
   const important = files
     .filter((entry) => entry.kind === "file")
@@ -91,6 +95,49 @@ export async function workspaceIndex(args: UnknownRecord, input: AiChatSendInput
   const startedAtMs = performance.now();
   const maxFiles = clamp(numberArg(args, "maxFiles", 60), 1, 180);
   const maxScan = clamp(numberArg(args, "maxScan", input.preferences.maxIndexedFiles), 500, 20_000);
+
+  // Native Rust path for the heavy file-scan + categorize; index-health/settings
+  // are still computed in TS from preferences (thin overlay on top of the Rust base).
+  if (isTauriRuntime()) {
+    const native = await luxCommands.aiWorkspaceIndex(maxFiles, maxScan);
+    const entries = await luxCommands.fsListFiles(maxScan);
+    const projectSnapshot = input.workspace
+      ? buildAiProjectIndexSnapshot(entries, {
+          finishedAtMs: performance.now(),
+          includeImages: input.preferences.includeImages,
+          maxIndexedFiles: input.preferences.maxIndexedFiles,
+          scanLimit: maxScan,
+          source: "workspace-scan",
+          startedAtMs,
+          workspaceRoot: input.workspace.root,
+        })
+      : null;
+    return toolJson("WorkspaceIndex", {
+      ...native,
+      indexSettings: {
+        enabled: input.preferences.projectIndexingEnabled,
+        realtime: input.preferences.realtimeIndexing,
+        maxIndexedFiles: input.preferences.maxIndexedFiles,
+        scanLimit: maxScan,
+        includeImages: input.preferences.includeImages,
+      },
+      indexHealth: projectSnapshot ? {
+        quality: projectSnapshot.quality,
+        source: projectSnapshot.source,
+        scanLimit: projectSnapshot.scanLimit,
+        scanTruncated: projectSnapshot.scanTruncated,
+        ignoredFiles: projectSnapshot.ignoredFiles,
+        truncatedFiles: projectSnapshot.truncatedFiles,
+        sourceFiles: projectSnapshot.sourceFiles,
+        testFiles: projectSnapshot.testFiles,
+        rulesFiles: projectSnapshot.rulesFiles,
+        docsFiles: projectSnapshot.docsFiles,
+        memoryFiles: projectSnapshot.memoryFiles,
+        durationMs: projectSnapshot.durationMs,
+      } : null,
+    });
+  }
+
   const entries = await luxCommands.fsListFiles(maxScan);
   const files = entries.filter((entry) => entry.kind === "file" && !isLowSignalRelatedPath(entry.path));
   const descriptors = files.map((entry) => createRelatedFileDescriptor(entry, input.workspace?.root ?? ""));

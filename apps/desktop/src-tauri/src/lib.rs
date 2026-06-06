@@ -38,8 +38,14 @@ mod workspace_watcher;
 mod ai_a2a;
 mod ai_chat_backend;
 mod ai_permissions;
+mod ai_prompt;
+mod ai_related;
 mod ai_semantic;
 mod ai_shell_safety;
+mod ai_tool_defs;
+mod ai_tokens;
+mod ai_turn;
+mod ai_workspace;
 mod ai_tools;
 
 use lux_core::{
@@ -541,7 +547,16 @@ pub fn run() {
             ai_a2a::ai_blackboard_read,
             ai_a2a::ai_blackboard_clear,
             ai_permissions::ai_permission_decide,
+            ai_prompt::ai_build_system_prompt,
+            ai_related::ai_related_files,
             ai_semantic::ai_semantic_search,
+            ai_tokens::ai_estimate_tokens,
+            ai_tokens::ai_estimate_tokens_batch,
+            ai_tokens::ai_format_tokens,
+            ai_turn::ai_run_turn,
+            ai_turn::ai_resolve_turn_approval,
+            ai_workspace::ai_repo_map,
+            ai_workspace::ai_workspace_index,
             ai_symbol_context,
             voice_input_status,
             voice_transcribe_local,

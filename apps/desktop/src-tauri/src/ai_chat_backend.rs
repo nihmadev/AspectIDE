@@ -28,11 +28,17 @@ pub struct AiChatCompletionRequest {
     payload: Value,
 }
 
+impl AiChatCompletionRequest {
+    pub fn new(base_url: String, api_key: Option<String>, payload: Value) -> Self {
+        Self { base_url, api_key, payload }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiChatCompletionResponse {
-    status: u16,
-    body: Value,
+    pub status: u16,
+    pub body: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -315,6 +321,125 @@ pub async fn provider_diagnostic(
             base_url: request.base_url,
         }),
     }
+}
+
+pub async fn stream_completion_raw<F>(
+    request: AiChatCompletionStreamRequest,
+    mut cancel_rx: oneshot::Receiver<()>,
+    on_chunk: F,
+) -> Result<(), String>
+where
+    F: Fn(&str, &str, &Value),
+{
+    let endpoint = completion_endpoint(&request.base_url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let payload = stream_payload(request.payload);
+    let api_key = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToString::to_string);
+
+    // Retry only the connection phase before bytes flow.
+    let response = {
+        let mut attempt: u32 = 0;
+        loop {
+            let mut builder = client
+                .post(endpoint.as_str())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .json(&payload);
+            if let Some(key) = &api_key {
+                builder = builder.bearer_auth(key);
+            }
+
+            let send = tokio::select! {
+                _ = &mut cancel_rx => return Ok(()),
+                send = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()) => send,
+            };
+
+            let resp = match send {
+                Err(_) => {
+                    if attempt < MAX_TRANSIENT_RETRIES {
+                        tokio::time::sleep(backoff_delay(attempt)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err("AI stream request timed out".to_string());
+                }
+                Ok(Err(error)) => {
+                    if attempt < MAX_TRANSIENT_RETRIES && is_transient_reqwest_error(&error) {
+                        tokio::time::sleep(backoff_delay(attempt)).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(error.to_string());
+                }
+                Ok(Ok(response)) => response,
+            };
+
+            let status = resp.status().as_u16();
+            if status >= 400 {
+                if attempt < MAX_TRANSIENT_RETRIES && is_transient_status(status) {
+                    let delay = retry_after_delay(resp.headers()).unwrap_or_else(|| backoff_delay(attempt));
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                let text = resp.text().await.unwrap_or_default();
+                let msg = if text.is_empty() {
+                    format!("AI provider stream error {status}")
+                } else if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    response_error(status, &value)
+                } else {
+                    format!("AI provider stream error {status}: {text}")
+                };
+                return Err(msg);
+            }
+            break resp;
+        }
+    };
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    loop {
+        let chunk = tokio::select! {
+            _ = &mut cancel_rx => return Ok(()),
+            chunk = stream.next() => chunk,
+        };
+
+        let Some(chunk) = chunk else { break };
+        let bytes = chunk.map_err(|error| error.to_string())?;
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        normalize_sse_buffer_newlines(&mut buffer);
+        while let Some(idx) = buffer.find("\n\n") {
+            let event = buffer[..idx].to_string();
+            buffer.drain(..idx + 2);
+            if let Some(data) = sse_event_data(&event) {
+                if data.trim() == "[DONE]" { continue; }
+                let value: Value = serde_json::from_str(&data).unwrap_or(Value::Null);
+                let content = value.pointer("/choices/0/delta/content").and_then(|v| v.as_str()).unwrap_or("");
+                let reasoning = value.pointer("/choices/0/delta/reasoning_content").or_else(|| value.pointer("/choices/0/delta/reasoning")).and_then(|v| v.as_str()).unwrap_or("");
+                let usage = value.get("usage").unwrap_or(&Value::Null);
+                on_chunk(content, reasoning, usage);
+            }
+        }
+    }
+    if !buffer.trim().is_empty() {
+        if let Some(data) = sse_event_data(buffer.trim()) {
+            if data.trim() != "[DONE]" {
+                if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                    let content = value.pointer("/choices/0/delta/content").and_then(|v| v.as_str()).unwrap_or("");
+                    on_chunk(content, "", &Value::Null);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 pub async fn run_completion_stream(

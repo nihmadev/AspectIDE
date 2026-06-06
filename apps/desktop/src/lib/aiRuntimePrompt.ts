@@ -11,7 +11,7 @@ import { truncateText } from "./aiRuntimeShared";
 import { compactTerminalContext } from "./aiRuntimeTerminal";
 import { isAutomaticSocialOnlyMessage } from "./aiAutomaticSocialMessage";
 import { loadProjectAgentsSnip } from "./aiProjectAgentsSnip";
-import { buildLuxIdeSystemPrompt } from "./aiSystemPrompt";
+import { buildLuxIdeSystemPromptAsync } from "./aiSystemPrompt";
 import { isTauriRuntime } from "./tauri";
 
 const contextPayloadBudgetChars = 120_000;
@@ -23,7 +23,7 @@ const maxHistoryToolOutputChars = 2_000;
 
 export async function buildInitialMessages(input: AiChatSendInput): Promise<ChatCompletionMessage[]> {
   const projectAgentsSnip = isTauriRuntime() ? await loadProjectAgentsSnip(input) : "";
-  const system = buildLuxIdeSystemPrompt({
+  const system = await buildLuxIdeSystemPromptAsync({
     preferences: input.preferences,
     provider: input.provider,
     globalInstructions: input.globalInstructions,

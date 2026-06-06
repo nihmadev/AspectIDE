@@ -106,8 +106,33 @@ Delete migrated `ai*.ts`; keep only view-model adapters and the optional browser
 
 ## Progress log
 - 2026-06-06 — Stage 0 complete (security/resilience foundation in Rust). Roadmap created.
-- 2026-06-06 — Stage 1 started: native `ai_semantic_search` (`ai_semantic.rs`) composes
-  lux-lsp + lux-search + lux-fs and ranks in Rust (1 IPC call replaces 3 + TS ranking).
-  Scoring/tokenizer ported faithfully with parity unit tests; TS `semanticSearch` now
-  delegates to the native command in the desktop runtime (TS kept only as browser fallback).
-  Also recorded the Rust-first Language Policy in `AGENTS.md`.
+- 2026-06-06 — Stage 1 complete. Ported 7 modules (~2000 LOC Rust, 37 unit tests):
+  `ai_semantic` (SemanticSearch: LSP+search+files ranked natively, 6 tests),
+  `ai_related` (RelatedFiles: relation scoring, 3 tests),
+  `ai_workspace` (RepoMap + WorkspaceIndex: categorized file snapshot, 2 tests),
+  `ai_tokens` (token estimation, compact format, batch, should-compact, 7 tests),
+  `ai_shell_safety` (catastrophic command block + read-only classification, 8 tests),
+  `ai_permissions` (declarative allow/deny/ask rules engine, 8 tests),
+  `ai_a2a` (per-session agent blackboard, 3 tests).
+  TS tools delegate to native commands in desktop runtime; browser fallback preserved.
+  Orchestrating tools (ImpactAnalysis, ContextBudgeter, ReviewDiff) deferred to Stage 2–3
+  (they compose multiple tools/state). AGENTS.md: Rust-first language policy recorded.
+- 2026-06-06 — Stage 2 complete. System prompt builder ported to `ai_prompt.rs` + `prompts/*.txt`
+  (include_str! for prompt bodies, 5 parity tests including length-budget guard). Model context
+  resolution + compact-trigger math added to `ai_tokens.rs` (10 tests total). TS
+  `buildLuxIdeSystemPromptAsync` delegates to native Rust command in desktop runtime.
+  History compaction (LLM) and `buildInitialMessages` (attachments/terminal) stay in TS until
+  Stage 3 (turn-loop port).
+- 2026-06-06 — Stage 3 started. Turn-loop event contract + approval bridge (`ai_turn.rs`):
+  `TurnEvent` enum (9 variants), approval channel registry with `tokio::oneshot` (4 tests),
+  `ai_run_turn` command — native turn-loop: prompt→LLM→parse→dispatch→loop.
+  `ai_tool_defs.rs` — 48 tool definitions generated natively in Rust (filtered by mode/browser, 4 tests).
+  Native tool dispatch: SemanticSearch, RelatedFiles, RepoMap, WorkspaceIndex, Shell, Grep, GitContext
+  execute in-process; remaining tools return a descriptive error until wired.
+  Approval bridge: tokio::oneshot channels, 4 tests.
+  15 tools dispatch natively in-process: SemanticSearch, RelatedFiles, RepoMap,
+  WorkspaceIndex, SymbolContext, Shell, Read, Write, StrReplace, Delete, Glob,
+  Grep, GitContext, DiagnosticsContext/ReadLints, AgentMessage.
+  Write/StrReplace/Delete have approval flow via TurnEvent::ApprovalRequired +
+  tokio::oneshot. Remaining: SSE streaming (non-blocking), PatchEngine, WebFetch,
+  TestHealth, FailureAnalyzer, Browser*, subagent spawning.
