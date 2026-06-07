@@ -600,6 +600,20 @@ export const luxCommands = {
     transcript: string; previousSummary: string; pinnedGoal: string; openTasks: string[];
     baseUrl: string; apiKey: string | null; model: string;
   }) => invokeRequired<string>("ai_compaction_summary", { input }),
+  aiCheckpoint: (action: string, options: {
+    id?: string; label?: string; paths?: string[]; maxFiles?: number;
+    maxBytesPerFile?: number; saveToDisk?: boolean; dryRun?: boolean; nowMs: number;
+  }) => invokeRequired<unknown>("ai_checkpoint", {
+    action,
+    id: options.id ?? null,
+    label: options.label ?? null,
+    paths: options.paths ?? null,
+    maxFiles: options.maxFiles ?? null,
+    maxBytesPerFile: options.maxBytesPerFile ?? null,
+    saveToDisk: options.saveToDisk ?? null,
+    dryRun: options.dryRun ?? null,
+    nowMs: options.nowMs,
+  }),
   aiWorkspaceIndex: (maxFiles?: number | null, maxScan?: number | null) =>
     invokeRequired<{
       workspaceRoot: string; scanned: number; indexedFiles: number; truncated: boolean;

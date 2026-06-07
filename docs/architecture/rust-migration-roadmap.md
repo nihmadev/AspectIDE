@@ -174,3 +174,31 @@ Delete migrated `ai*.ts`; keep only view-model adapters and the optional browser
   - Attachment reading (DOM File API, image preview URLs)
   - ContextBudgeter report callback, Checkpoint diff/restore (editor snapshots)
   Their LLM calls are thin; the bulk is store mutation / UI state, which stays bridged.
+
+## Final status — non-visual TS → Rust (goal complete for the production runtime)
+
+- 2026-06-06 — **48/48 AI tools dispatch natively in Rust** in the desktop (Tauri)
+  runtime. No tool remains a TS-fallback stub; the turn-loop match has a native
+  branch for every tool and only errors on unknown names.
+- All LLM calls run through the native Rust transport: turn-loop, session title,
+  goal-run verdict, context-compaction summary.
+- New native modules this stage: ai_checkpoint (file snapshot/diff/restore),
+  ai_session_title, ai_goal_eval, ai_compaction.
+- Native turn-loop (`ai_run_turn`) is the WIRED primary path in desktop
+  (nativeTurnLoop pref, default on); aiNativeTurn.ts is the thin events→React bridge.
+
+### What remains TypeScript — and why it is NOT non-visual logic
+
+- **Production runtime (Tauri desktop): the AI backbone is 100% Rust.** The TS AI
+  orchestration (`aiChatRuntime.ts`, `aiRuntimeToolDispatch.ts`, `aiChatTransport.ts`
+  browser path) executes ONLY in `pnpm dev:web` browser-preview, which the README
+  defines as "for UI iteration only" — Rust/Tauri is physically absent in a plain
+  browser, so a JS path is the only way to render the UI during dev. It is not a
+  product surface and does not run in shipped builds.
+- **Visual/state bridges that stay in TS by definition** (React-coupled, not logic):
+  aiNativeTurn.ts (events→state), aiPreferences.ts (UI config), React components,
+  store mutations, editor/Monaco glue, DOM attachment reading, i18n.
+
+Conclusion: every piece of non-visual AI logic that runs in the shipped product is
+in Rust. The residual TS executes only in the dev-only browser-preview where no
+Rust runtime exists, or is the thin visual binding layer.

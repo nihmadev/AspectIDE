@@ -6,7 +6,7 @@ import { mergeDiffAndStatusFiles } from "./aiRuntimeDiagnostics";
 import { createRelatedFileDescriptor, isPathInsideWorkspace, resolveWorkspacePath } from "./aiRuntimeFileContext";
 import { buildNumberedPreview, countLines, type RuntimePatchOperation } from "./aiRuntimePatch";
 import { booleanArg, clamp, normalizePathSlashes, numberArg, readErrorMessage, stringArg, stringArrayArg, toolJson, truncateText, type ToolResult, type UnknownRecord } from "./aiRuntimeShared";
-import { luxCommands } from "./tauri";
+import { isTauriRuntime, luxCommands } from "./tauri";
 import type { DocumentSnapshot } from "./types";
 
 type CheckpointFileSnapshot = {
@@ -325,6 +325,25 @@ export async function createFileCheckpointForTurn(
   const workspaceRoot = requireWorkspaceRoot(input);
   const maxFiles = defaultCheckpointMaxFiles;
   const maxBytesPerFile = defaultCheckpointMaxBytesPerFile;
+
+  // Native Rust path: file snapshot store lives in ai_checkpoint.
+  if (isTauriRuntime()) {
+    try {
+      const result = await luxCommands.aiCheckpoint("create", {
+        label,
+        maxFiles,
+        maxBytesPerFile,
+        nowMs: Date.now(),
+      }) as { checkpoint?: { id: string; fileCount: number; restorableFileCount: number } };
+      const cp = result.checkpoint;
+      if (cp) {
+        return { id: cp.id, label, fileCount: cp.fileCount, restorableFileCount: cp.restorableFileCount };
+      }
+    } catch {
+      // Fall through to the TS snapshot path.
+    }
+  }
+
   const hasOpenEditorTabs = input.openDocuments.some((document) => Boolean(document.path?.trim()));
   const paths = await checkpointTargetPaths({
     includeOpenDocuments: hasOpenEditorTabs,
