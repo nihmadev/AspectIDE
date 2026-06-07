@@ -298,14 +298,27 @@ pub async fn ai_run_turn(
         );
 
         // Stream tokens live: each SSE delta is forwarded as its own StreamDelta
-        // so the frontend renders text as it arrives instead of in one jump.
+        // so the frontend renders text as it arrives instead of in one jump. On
+        // the first visible token, flip the status from "thinking" to "streaming"
+        // so the indicator reflects what's actually happening.
         let stream_app = app.clone();
         let stream_turn_id = turn_id.clone();
+        let mut announced_streaming = false;
         let response = match crate::ai_chat_backend::completion_streaming(
             request,
             move |content, reasoning| {
                 if content.is_empty() && reasoning.is_empty() {
                     return;
+                }
+                if !announced_streaming {
+                    announced_streaming = true;
+                    let _ = emit_turn_event(
+                        &stream_app,
+                        &TurnEvent::StatusChange {
+                            turn_id: stream_turn_id.clone(),
+                            phase: "streaming".to_string(),
+                        },
+                    );
                 }
                 let _ = emit_turn_event(
                     &stream_app,
