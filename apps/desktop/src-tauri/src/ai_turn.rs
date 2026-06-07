@@ -268,17 +268,15 @@ pub async fn ai_run_turn(
     let mut usage_total: u64 = 0;
 
     // ── Model ↔ tool loop ──
-    for round in 0..max_rounds {
-        let phase = if round == 0 {
-            "thinking"
-        } else {
-            "running-tools"
-        };
+    for _round in 0..max_rounds {
+        // Every round starts in "thinking": the frontend uses this as the round
+        // boundary to open fresh ordered reasoning/text segments (so round 2+
+        // after tools appends in order instead of overwriting earlier blocks).
         let _ = emit_turn_event(
             &app,
             &TurnEvent::StatusChange {
                 turn_id: turn_id.clone(),
-                phase: phase.to_string(),
+                phase: "thinking".to_string(),
             },
         );
 

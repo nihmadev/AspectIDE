@@ -1,5 +1,5 @@
 import type { AiChatMessage, AiChatSendInput, AiToolApprovalRequest } from "./aiChatTypes";
-import type { AiChatToolCall } from "./aiChatTypes";
+import { createTurnTimeline } from "./aiChatTimeline";
 import { buildUserContent } from "./aiRuntimePrompt";
 import { isTauriRuntime, luxCommands, subscribeAiTurn, type AiRunTurnInput, type AiTurnEvent } from "./tauri";
 
@@ -30,13 +30,21 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
     segments: [],
     timestamp: Date.now(),
   };
-  // Track tool calls by id so completion events can update the right card.
-  const toolCallsById = new Map<string, AiChatToolCall>();
   const pendingApprovals = new Map<string, (decision: "approved" | "rejected") => void>();
-  let streamedContent = "";
-  let streamedReasoning = "";
   let resolved = false;
   const startedAt = Date.now();
+
+  // Build an ORDERED segment timeline (reasoning → text → tools → reasoning →
+  // …), the same structure the TS turn-loop produces, so the UI renders the
+  // model's thinking/tools/answer in the real order of work instead of editing
+  // flat content/reasoning fields in place.
+  const timeline = createTurnTimeline((patch) => input.onAssistantMessageUpdate(messageId, patch));
+  // Per-round accumulators: the timeline wants the full text of the *current*
+  // active segment, while the backend streams incremental deltas. beginRound()
+  // (on each new model round) resets these so a fresh reasoning/text block opens
+  // after tools run.
+  let roundContent = "";
+  let roundReasoning = "";
 
   return await new Promise<AiChatMessage>((resolve, reject) => {
     let unlisten: (() => void) | undefined;
@@ -60,17 +68,6 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
       reject(error);
     };
 
-    const flushAssistant = () => {
-      assistantMessage.content = streamedContent;
-      if (streamedReasoning) assistantMessage.reasoning = streamedReasoning;
-      assistantMessage.toolCalls = [...toolCallsById.values()];
-      input.onAssistantMessageUpdate(messageId, {
-        content: assistantMessage.content,
-        reasoning: assistantMessage.reasoning,
-        toolCalls: assistantMessage.toolCalls,
-      });
-    };
-
     const handleEvent = (event: AiTurnEvent) => {
       if (!("turnId" in event) || event.turnId !== turnId) return;
       switch (event.kind) {
@@ -78,34 +75,46 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           input.onAssistantMessage(assistantMessage);
           break;
         case "statusChange":
+          // "thinking" marks the start of a fresh model round (round 2+ after
+          // tools). Open new ordered reasoning/text segments so they append after
+          // the previous tools instead of overwriting earlier blocks. NOT done on
+          // "running-tools" — that fires before toolCallStarted, which is what
+          // commits the just-streamed text.
+          if (event.phase === "thinking") {
+            timeline.beginRound();
+            roundContent = "";
+            roundReasoning = "";
+          }
           input.onStatusChange?.(mapPhase(event.phase));
           break;
         case "streamDelta":
-          streamedContent += event.content;
-          streamedReasoning += event.reasoning;
-          flushAssistant();
+          // Accumulate this round's text/reasoning and hand the full current
+          // segment text to the timeline, which extends the right ordered block.
+          roundContent += event.content;
+          roundReasoning += event.reasoning;
+          timeline.setStreaming({ content: roundContent, reasoning: roundReasoning });
           break;
         case "toolCallStarted":
-          toolCallsById.set(event.callId, {
+          // Any streamed text/reasoning for this round is final once tools start.
+          timeline.commitRound(roundContent, roundReasoning);
+          roundContent = "";
+          roundReasoning = "";
+          timeline.addToolCalls([{
             id: event.callId,
             tool: event.tool,
             input: event.input,
             status: "running",
             startTime: Date.now(),
+          }]);
+          break;
+        case "toolCallCompleted":
+          timeline.updateToolCall(event.callId, {
+            status: event.status === "error" ? "error" : "success",
+            output: event.output,
+            ...(event.error ? { error: event.error } : {}),
+            endTime: Date.now(),
           });
-          flushAssistant();
           break;
-        case "toolCallCompleted": {
-          const existing = toolCallsById.get(event.callId);
-          if (existing) {
-            existing.status = event.status === "error" ? "error" : "success";
-            existing.output = event.output;
-            if (event.error) existing.error = event.error;
-            existing.endTime = Date.now();
-          }
-          flushAssistant();
-          break;
-        }
         case "approvalRequired": {
           const request: AiToolApprovalRequest = {
             id: event.requestId,
@@ -134,18 +143,29 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           };
           break;
         case "turnDone": {
-          streamedContent = event.content || streamedContent;
-          assistantMessage.content = streamedContent;
-          assistantMessage.toolCalls = [...toolCallsById.values()];
-          assistantMessage.responseDurationMs = event.durationMs || (Date.now() - startedAt);
-          input.onAssistantMessageUpdate(messageId, {
-            content: assistantMessage.content,
-            reasoning: assistantMessage.reasoning,
-            toolCalls: assistantMessage.toolCalls,
+          // Finalize the last streamed round, then snapshot the ordered segments.
+          timeline.commitRound(roundContent, roundReasoning);
+          roundContent = "";
+          roundReasoning = "";
+          const snapshot = timeline.snapshot();
+          const finalMessage: AiChatMessage = {
+            ...assistantMessage,
+            ...snapshot,
+            // Prefer the timeline's derived content; fall back to the final event
+            // content only if streaming produced no text segment.
+            content: snapshot.content?.trim() ? snapshot.content : (event.content || ""),
             turnUsage: assistantMessage.turnUsage,
-            responseDurationMs: assistantMessage.responseDurationMs,
+            responseDurationMs: event.durationMs || (Date.now() - startedAt),
+          };
+          input.onAssistantMessageUpdate(messageId, {
+            segments: finalMessage.segments,
+            content: finalMessage.content,
+            reasoning: finalMessage.reasoning,
+            toolCalls: finalMessage.toolCalls,
+            turnUsage: finalMessage.turnUsage,
+            responseDurationMs: finalMessage.responseDurationMs,
           });
-          settleResolve(assistantMessage);
+          settleResolve(finalMessage);
           break;
         }
         case "turnError":
