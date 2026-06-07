@@ -190,6 +190,232 @@ pub async fn completion(
     }
 }
 
+/// Streaming completion for the native turn-loop. Sends `stream: true`, invokes
+/// `on_delta(content_chunk, reasoning_chunk)` for every SSE token as it arrives
+/// (so the UI renders text in real time), accumulates content + reasoning + the
+/// incrementally-delivered tool calls, and returns a response whose
+/// `choices[0].message` matches the non-streaming shape — so the caller parses
+/// it identically. Connection-phase failures retry; once tokens flow the request
+/// is never replayed.
+pub async fn completion_streaming<F>(
+    request: AiChatCompletionRequest,
+    mut on_delta: F,
+) -> Result<AiChatCompletionResponse, String>
+where
+    F: FnMut(&str, &str),
+{
+    let endpoint = completion_endpoint(&request.base_url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let payload = stream_payload(request.payload);
+    let api_key = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(ToString::to_string);
+
+    // Connection phase (retryable until the first byte streams).
+    let response = {
+        let mut attempt: u32 = 0;
+        loop {
+            let mut builder = client
+                .post(endpoint.as_str())
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .header(reqwest::header::ACCEPT, "text/event-stream")
+                .json(&payload);
+            if let Some(key) = &api_key {
+                builder = builder.bearer_auth(key);
+            }
+            let send = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()).await;
+            let response = match send {
+                Err(_) => {
+                    if attempt < MAX_TRANSIENT_RETRIES {
+                        sleep_backoff(attempt).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err("AI stream request timed out".to_string());
+                }
+                Ok(Err(error)) => {
+                    if attempt < MAX_TRANSIENT_RETRIES && is_transient_reqwest_error(&error) {
+                        sleep_backoff(attempt).await;
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(error.to_string());
+                }
+                Ok(Ok(response)) => response,
+            };
+            let status = response.status().as_u16();
+            if status >= 400 {
+                if attempt < MAX_TRANSIENT_RETRIES && is_transient_status(status) {
+                    let delay = retry_after_delay(response.headers())
+                        .unwrap_or_else(|| backoff_delay(attempt));
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                let text = response.text().await.unwrap_or_default();
+                return Err(stream_response_error(status, &text));
+            }
+            break response;
+        }
+    };
+
+    let mut accumulator = StreamAccumulator::default();
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    'outer: while let Some(chunk) = stream.next().await {
+        let bytes = chunk.map_err(|error| error.to_string())?;
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        normalize_sse_buffer_newlines(&mut buffer);
+        while let Some(index) = buffer.find("\n\n") {
+            let event = buffer[..index].to_string();
+            buffer.drain(..index + 2);
+            let Some(data) = sse_event_data(&event) else {
+                continue;
+            };
+            if data.trim() == "[DONE]" {
+                break 'outer;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                accumulator.ingest(&value, &mut on_delta);
+            }
+        }
+    }
+
+    Ok(AiChatCompletionResponse {
+        status: 200,
+        body: accumulator.into_response_body(),
+    })
+}
+
+/// Assembles streamed SSE delta chunks into a single OpenAI-style response body.
+/// Tool calls arrive incrementally (by `index`, with `id`/`name` once and
+/// `arguments` in fragments), so they are merged per index.
+#[derive(Default)]
+struct StreamAccumulator {
+    content: String,
+    reasoning: String,
+    tool_calls: Vec<StreamToolCall>,
+    usage: Option<Value>,
+    finish_reason: Option<String>,
+}
+
+#[derive(Default)]
+struct StreamToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamAccumulator {
+    fn ingest<F: FnMut(&str, &str)>(&mut self, value: &Value, on_delta: &mut F) {
+        if let Some(usage) = value.get("usage") {
+            if !usage.is_null() {
+                self.usage = Some(usage.clone());
+            }
+        }
+        let Some(choice) = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|arr| arr.first())
+        else {
+            return;
+        };
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            self.finish_reason = Some(reason.to_string());
+        }
+        let delta = choice.get("delta").unwrap_or(choice);
+        let content = delta.get("content").and_then(Value::as_str).unwrap_or("");
+        let reasoning = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if !content.is_empty() {
+            self.content.push_str(content);
+        }
+        if !reasoning.is_empty() {
+            self.reasoning.push_str(reasoning);
+        }
+        if !content.is_empty() || !reasoning.is_empty() {
+            on_delta(content, reasoning);
+        }
+        if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                self.merge_tool_call(call);
+            }
+        }
+    }
+
+    fn merge_tool_call(&mut self, call: &Value) {
+        let index = match call.get("index").and_then(Value::as_u64) {
+            Some(value) => usize::try_from(value).unwrap_or(0),
+            // No explicit index: extend the most recent call (or start the first).
+            None => self.tool_calls.len().saturating_sub(1),
+        };
+        while self.tool_calls.len() <= index {
+            self.tool_calls.push(StreamToolCall::default());
+        }
+        let slot = &mut self.tool_calls[index];
+        if let Some(id) = call.get("id").and_then(Value::as_str) {
+            if !id.is_empty() {
+                slot.id = id.to_string();
+            }
+        }
+        if let Some(function) = call.get("function") {
+            if let Some(name) = function.get("name").and_then(Value::as_str) {
+                if !name.is_empty() {
+                    slot.name = name.to_string();
+                }
+            }
+            if let Some(args) = function.get("arguments").and_then(Value::as_str) {
+                slot.arguments.push_str(args);
+            }
+        }
+    }
+
+    fn into_response_body(self) -> Value {
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": self.content,
+        });
+        if !self.reasoning.is_empty() {
+            message["reasoning_content"] = Value::String(self.reasoning);
+        }
+        let tool_calls: Vec<Value> = self
+            .tool_calls
+            .into_iter()
+            .filter(|tc| !tc.id.is_empty() || !tc.name.is_empty())
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": { "name": tc.name, "arguments": tc.arguments },
+                })
+            })
+            .collect();
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+        let mut body = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": self.finish_reason.unwrap_or_else(|| "stop".to_string()),
+            }],
+        });
+        if let Some(usage) = self.usage {
+            body["usage"] = usage;
+        }
+        body
+    }
+}
+
 pub fn history_load(app: &AppHandle) -> Result<AiChatHistoryResponse, String> {
     let path = history_path(app)?;
     recover_history_temp_file(&path)?;
@@ -723,5 +949,56 @@ mod tests {
             "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
         );
         assert_eq!(retry_after_delay(&headers), None);
+    }
+
+    #[test]
+    fn stream_accumulator_concatenates_content_and_emits_deltas() {
+        let mut acc = StreamAccumulator::default();
+        let mut seen = String::new();
+        let mut push = |c: &str, _r: &str| seen.push_str(c);
+        for token in ["Hel", "lo ", "world"] {
+            let chunk = serde_json::json!({
+                "choices": [{ "delta": { "content": token } }]
+            });
+            acc.ingest(&chunk, &mut push);
+        }
+        assert_eq!(seen, "Hello world");
+        let body = acc.into_response_body();
+        assert_eq!(body["choices"][0]["message"]["content"], "Hello world");
+    }
+
+    #[test]
+    fn stream_accumulator_merges_fragmented_tool_calls() {
+        let mut acc = StreamAccumulator::default();
+        let mut noop = |_: &str, _: &str| {};
+        // id+name arrive first, then arguments stream in fragments (OpenAI shape).
+        let frames = [
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Read","arguments":""}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}),
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.rs\"}"}}]}}]}),
+        ];
+        for frame in frames {
+            acc.ingest(&frame, &mut noop);
+        }
+        let body = acc.into_response_body();
+        let call = &body["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["id"], "call_1");
+        assert_eq!(call["function"]["name"], "Read");
+        assert_eq!(call["function"]["arguments"], "{\"path\":\"a.rs\"}");
+    }
+
+    #[test]
+    fn stream_accumulator_captures_usage() {
+        let mut acc = StreamAccumulator::default();
+        let mut noop = |_: &str, _: &str| {};
+        acc.ingest(
+            &serde_json::json!({
+                "choices": [{ "delta": { "content": "hi" } }],
+                "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+            }),
+            &mut noop,
+        );
+        let body = acc.into_response_body();
+        assert_eq!(body["usage"]["total_tokens"], 15);
     }
 }

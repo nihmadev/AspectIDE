@@ -286,7 +286,7 @@ pub async fn ai_run_turn(
             "model": input.model,
             "messages": messages,
             "temperature": 0.2,
-            "stream": false,
+            "stream": true,
             "tools": tools,
             "tool_choice": "auto",
         });
@@ -297,7 +297,28 @@ pub async fn ai_run_turn(
             payload,
         );
 
-        let response = match crate::ai_chat_backend::completion(request).await {
+        // Stream tokens live: each SSE delta is forwarded as its own StreamDelta
+        // so the frontend renders text as it arrives instead of in one jump.
+        let stream_app = app.clone();
+        let stream_turn_id = turn_id.clone();
+        let response = match crate::ai_chat_backend::completion_streaming(
+            request,
+            move |content, reasoning| {
+                if content.is_empty() && reasoning.is_empty() {
+                    return;
+                }
+                let _ = emit_turn_event(
+                    &stream_app,
+                    &TurnEvent::StreamDelta {
+                        turn_id: stream_turn_id.clone(),
+                        content: content.to_string(),
+                        reasoning: reasoning.to_string(),
+                    },
+                );
+            },
+        )
+        .await
+        {
             Ok(r) => r,
             Err(error) => {
                 let _ = emit_turn_event(
@@ -331,16 +352,9 @@ pub async fn ai_run_turn(
 
         let assistant = parse_assistant_message(&response.body);
 
-        // Emit any streamed content.
+        // Content was already streamed token-by-token via the on_delta callback
+        // above; just record the final text (the frontend accumulated the deltas).
         if !assistant.content.is_empty() {
-            let _ = emit_turn_event(
-                &app,
-                &TurnEvent::StreamDelta {
-                    turn_id: turn_id.clone(),
-                    content: assistant.content.clone(),
-                    reasoning: assistant.reasoning.clone(),
-                },
-            );
             final_content = assistant.content.clone();
         }
 
@@ -453,7 +467,6 @@ pub fn ai_cancel_turn(turn_id: String) {
 
 struct ParsedAssistant {
     content: String,
-    reasoning: String,
     tool_calls: Vec<ParsedToolCall>,
 }
 
@@ -463,6 +476,8 @@ struct ParsedToolCall {
     arguments: String,
 }
 
+// Reasoning text is streamed live to the UI via the on_delta callback during the
+// model call, so the loop only needs the final content + tool calls here.
 fn parse_assistant_message(body: &serde_json::Value) -> ParsedAssistant {
     let choice = body
         .get("choices")
@@ -474,11 +489,6 @@ fn parse_assistant_message(body: &serde_json::Value) -> ParsedAssistant {
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
-    let reasoning = message
-        .and_then(|m| m.get("reasoning_content").or_else(|| m.get("reasoning")))
-        .and_then(|r| r.as_str())
-        .unwrap_or("")
-        .to_string();
     let tool_calls = message
         .and_then(|m| m.get("tool_calls"))
         .and_then(|tc| tc.as_array())
@@ -486,7 +496,6 @@ fn parse_assistant_message(body: &serde_json::Value) -> ParsedAssistant {
         .unwrap_or_default();
     ParsedAssistant {
         content,
-        reasoning,
         tool_calls,
     }
 }

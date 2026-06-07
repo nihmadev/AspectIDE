@@ -21,6 +21,20 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
+/// Windows `CREATE_NO_WINDOW` — prevents a console window from flashing when the
+/// agent-browser CLI (and its npm/install steps) are spawned from the GUI app.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Spawns the agent-browser CLI without a visible console window on Windows.
+/// Centralizes the `creation_flags` call so no spawn site can forget it.
+fn agent_browser_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
 const DEFAULT_TIMEOUT_SECS: u64 = 90;
 const MAX_TIMEOUT_SECS: u64 = 180;
 const DEFAULT_MAX_OUTPUT: usize = 50_000;
@@ -450,7 +464,7 @@ async fn run_json(
     timeout_secs: u64,
 ) -> Result<ParsedCliResponse, String> {
     let started = Instant::now();
-    let mut command = Command::new(binary);
+    let mut command = agent_browser_command(binary);
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -635,7 +649,7 @@ fn truncate_text(text: String, max_chars: usize) -> (String, bool) {
 }
 
 async fn read_version(binary: &PathBuf) -> Result<String, String> {
-    let output = Command::new(binary)
+    let output = agent_browser_command(binary)
         .arg("--version")
         .output()
         .await
@@ -1117,7 +1131,7 @@ async fn run_install_step_in_dir(
     timeout_secs: u64,
 ) -> AgentBrowserInstallStep {
     let started = Instant::now();
-    let mut command = Command::new(&program);
+    let mut command = agent_browser_command(&program);
     command.args(&args);
     if let Some(dir) = working_dir {
         command.current_dir(dir);
