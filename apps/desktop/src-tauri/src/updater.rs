@@ -60,6 +60,14 @@ pub enum UpdateProgress {
 
 const UPDATE_EVENT: &str = "lux://update";
 
+/// Whether the updater plugin is configured (and therefore registered). The
+/// plugin is only registered when `plugins.updater` exists in the resolved Tauri
+/// config (CI-prepared release builds). Calling `app.updater()` without it would
+/// panic on missing managed state, so commands must gate on this first.
+fn updater_configured(app: &AppHandle) -> bool {
+    app.config().plugins.0.contains_key("updater")
+}
+
 /// Checks the configured release endpoints for a newer signed build.
 ///
 /// Returns `available: false` (never an error) when the updater is not
@@ -70,6 +78,16 @@ pub async fn update_check(app: AppHandle) -> Result<UpdateCheckResult, String> {
     let current_version = app.package_info().version.to_string();
 
     // No updater configured (dev build / missing endpoints): treat as current.
+    // Checked via config (not `app.updater()`) because the plugin — and thus its
+    // managed state — is absent in dev, and `app.updater()` would panic.
+    if !updater_configured(&app) {
+        return Ok(UpdateCheckResult {
+            available: false,
+            current_version,
+            version: None,
+            notes: None,
+        });
+    }
     let Ok(updater) = app.updater() else {
         return Ok(UpdateCheckResult {
             available: false,
@@ -103,6 +121,9 @@ pub async fn update_check(app: AppHandle) -> Result<UpdateCheckResult, String> {
 /// returns a human-readable error and the running app is left untouched.
 #[tauri::command]
 pub async fn update_install(app: AppHandle) -> Result<(), String> {
+    if !updater_configured(&app) {
+        return Err("Updater is not configured in this build.".to_string());
+    }
     let updater = app
         .updater()
         .map_err(|error| format!("Updater is not available: {error}"))?;

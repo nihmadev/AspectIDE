@@ -459,9 +459,20 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .setup(|app| {
+            // The updater plugin deserializes `plugins.updater` into a required
+            // struct at init and panics when it is absent. That section only
+            // exists in CI-prepared release configs (injected by
+            // prepare-release-config.mjs), not in source/dev builds — so register
+            // the plugin only when its config is present. Without it, the
+            // `update_check`/`update_install` commands degrade gracefully via
+            // their `app.updater()` guards.
+            if app.config().plugins.0.contains_key("updater") {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+            }
+
             let handle = app.handle();
             let lsp_handle = handle.clone();
             let terminal_handle = handle.clone();
