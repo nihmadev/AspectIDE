@@ -912,9 +912,28 @@ async fn execute_tool(
             Ok(serde_json::json!({ "query": query, "targetChars": target_chars, "selectedChars": used, "count": selected.len(), "packet": selected }).to_string())
         }
 
-        // ── Checkpoint: editor-snapshot store stays in TS (mutates editor state) ──
         "Checkpoint" => {
-            Err("Checkpoint manages editor file snapshots and runs in the TS layer.".to_string())
+            let action = json_str_opt(&args, "action").unwrap_or_else(|| "list".to_string());
+            let id = json_str_opt(&args, "id");
+            let label = json_str_opt(&args, "label");
+            let paths = args.get("paths").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>());
+            let max_files = args.get("maxFiles").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let max_bytes = args.get("maxBytesPerFile").and_then(|v| v.as_u64());
+            let save = args.get("saveToDisk").and_then(|v| v.as_bool());
+            let dry = args.get("dryRun").and_then(|v| v.as_bool());
+            // Restore mutates files → require approval (unless dry-run / full-access).
+            let is_restore = action.trim().to_lowercase().starts_with("rest")
+                || action.trim().to_lowercase().starts_with("rollback")
+                || action.trim().to_lowercase().starts_with("revert");
+            if is_restore && !dry.unwrap_or(false) {
+                require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "Checkpoint", "Restore checkpoint", id.as_deref().unwrap_or("latest"), "modify").await?;
+            }
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let result = crate::ai_checkpoint::ai_checkpoint(
+                app.clone(), state.clone(), action, id, label, paths, max_files, max_bytes, save, dry, now_ms,
+            ).await?;
+            Ok(result.to_string())
         }
 
         other => {

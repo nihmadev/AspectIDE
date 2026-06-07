@@ -37,6 +37,7 @@ mod workspace_watcher;
 
 mod ai_a2a;
 mod ai_chat_backend;
+mod ai_checkpoint;
 mod ai_compaction;
 mod ai_context_sources;
 mod ai_goal_eval;
@@ -550,6 +551,7 @@ pub fn run() {
             ai_shell_classify,
             ai_goal_eval::ai_goal_eval_verdict,
             ai_compaction::ai_compaction_summary,
+            ai_checkpoint::ai_checkpoint,
             ai_context_sources::ai_rules_context,
             ai_context_sources::ai_docs_context,
             ai_context_sources::ai_memory_context,
