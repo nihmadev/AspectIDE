@@ -33,7 +33,12 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
     let todo_block = if input.open_todo_summaries.is_empty() {
         "Open TodoWrite tasks: none".to_string()
     } else {
-        let lines: Vec<String> = input.open_todo_summaries.iter().take(8).map(|l| format!("- {l}")).collect();
+        let lines: Vec<String> = input
+            .open_todo_summaries
+            .iter()
+            .take(8)
+            .map(|l| format!("- {l}"))
+            .collect();
         format!("Open TodoWrite tasks:\n{}", lines.join("\n"))
     };
 
@@ -73,7 +78,11 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
 
     match crate::ai_chat_backend::completion(request).await {
         Ok(response) => {
-            let content = response.body.pointer("/choices/0/message/content").and_then(|v| v.as_str()).unwrap_or("");
+            let content = response
+                .body
+                .pointer("/choices/0/message/content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             Ok(parse_verdict(content))
         }
         Err(_) => Ok(None),
@@ -84,13 +93,29 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
 fn parse_verdict(content: &str) -> Option<GoalEvalVerdict> {
     let start = content.find('{')?;
     let end = content.rfind('}')?;
-    if end < start { return None; }
+    if end < start {
+        return None;
+    }
     let json_slice = &content[start..=end];
     let value: serde_json::Value = serde_json::from_str(json_slice).ok()?;
     let satisfied = value.get("satisfied")?.as_bool().unwrap_or(false);
-    let blocked = value.get("blocked").and_then(|v| v.as_bool()).unwrap_or(false);
-    let reason: String = value.get("reason").and_then(|v| v.as_str()).unwrap_or("").chars().take(220).collect();
-    Some(GoalEvalVerdict { satisfied, blocked, reason, source: "model".to_string() })
+    let blocked = value
+        .get("blocked")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let reason: String = value
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .chars()
+        .take(220)
+        .collect();
+    Some(GoalEvalVerdict {
+        satisfied,
+        blocked,
+        reason,
+        source: "model".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -99,7 +124,8 @@ mod tests {
 
     #[test]
     fn parse_clean_json() {
-        let v = parse_verdict(r#"{"satisfied": true, "blocked": false, "reason": "done"}"#).unwrap();
+        let v =
+            parse_verdict(r#"{"satisfied": true, "blocked": false, "reason": "done"}"#).unwrap();
         assert!(v.satisfied);
         assert!(!v.blocked);
         assert_eq!(v.reason, "done");
@@ -122,7 +148,8 @@ mod tests {
     #[test]
     fn reason_truncated_to_220() {
         let long_reason = "x".repeat(300);
-        let input = format!(r#"{{"satisfied": true, "blocked": false, "reason": "{long_reason}"}}"#);
+        let input =
+            format!(r#"{{"satisfied": true, "blocked": false, "reason": "{long_reason}"}}"#);
         let v = parse_verdict(&input).unwrap();
         assert_eq!(v.reason.chars().count(), 220);
     }

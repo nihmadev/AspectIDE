@@ -16,6 +16,8 @@ import {
   createBrowserOpenApproval,
 } from "./aiRuntimeApprovals";
 import { booleanArg, clamp, numberArg, stringArg, stringArrayArg, toolJson, type ToolResult, type UnknownRecord } from "./aiRuntimeShared";
+import { encodeVisionImageFromDataUrl } from "./aiFileContext";
+import { resolveVisionImageFormatFromPreferences } from "./aiVisionFormat";
 import { luxCommands } from "./tauri";
 
 type BrowserApprovalUi = {
@@ -75,7 +77,12 @@ async function visionForScreenshot(
   if (!path) return undefined;
   try {
     const image = await luxCommands.agentBrowserReadImage(path);
-    return [image.dataUrl];
+    // Screenshots live in temp dirs (outside the workspace), so the path-based
+    // encoder would be rejected — encode the data URL instead. Failures fall back
+    // to the original PNG inside the helper.
+    const format = resolveVisionImageFormatFromPreferences(input.preferences);
+    const encoded = await encodeVisionImageFromDataUrl(image.dataUrl, format);
+    return [encoded];
   } catch {
     return undefined;
   }

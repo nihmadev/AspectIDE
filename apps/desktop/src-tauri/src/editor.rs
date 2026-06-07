@@ -287,10 +287,11 @@ async fn save_document_to_path(
             .view
             .strategy
     };
-    let migrated_path = tokio::task::spawn_blocking(move || write_editor_text(&write_path, strategy, &save_text))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
+    let migrated_path =
+        tokio::task::spawn_blocking(move || write_editor_text(&write_path, strategy, &save_text))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?;
 
     let path_attachment = if attach_path {
         let mut documents = state.documents.lock().map_err(lock_error)?;
@@ -357,7 +358,10 @@ async fn save_document_to_path(
     Ok(document)
 }
 
-fn load_editor_text(path: &std::path::Path, strategy: FileViewStrategy) -> lux_core::AppResult<String> {
+fn load_editor_text(
+    path: &std::path::Path,
+    strategy: FileViewStrategy,
+) -> lux_core::AppResult<String> {
     match strategy {
         FileViewStrategy::SpreadsheetEditor => lux_file_intel::spreadsheet_edit_text(path),
         FileViewStrategy::TableEditor => lux_file_intel::table_edit_text(path),

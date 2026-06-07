@@ -6,7 +6,6 @@
 //! the restore patch reuses the existing guarded file-patch path.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use serde::Serialize;
@@ -75,7 +74,11 @@ fn summarize(cp: &Checkpoint) -> CheckpointSummary {
         label: cp.label.clone(),
         created_at_ms: cp.created_at_ms,
         file_count: cp.files.len(),
-        restorable_file_count: cp.files.iter().filter(|f| !f.truncated && f.error.is_none()).count(),
+        restorable_file_count: cp
+            .files
+            .iter()
+            .filter(|f| !f.truncated && f.error.is_none())
+            .count(),
         truncated_file_count: cp.files.iter().filter(|f| f.truncated).count(),
         error_file_count: cp.files.iter().filter(|f| f.error.is_some()).count(),
     }
@@ -83,6 +86,7 @@ fn summarize(cp: &Checkpoint) -> CheckpointSummary {
 
 /// The checkpoint tool entry point (create/list/diff/delete/restore).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri command signature is fixed by the JS invoke contract.
 pub async fn ai_checkpoint(
     app: tauri::AppHandle,
     state: State<'_, SharedState>,
@@ -110,11 +114,17 @@ pub async fn ai_checkpoint(
 
     match act {
         "create" => {
-            let max_files = max_files.unwrap_or(DEFAULT_MAX_FILES).clamp(1, MAX_FILES_LIMIT);
-            let max_bytes = max_bytes_per_file.unwrap_or(DEFAULT_MAX_BYTES).clamp(1_024, MAX_BYTES_LIMIT);
-            let target_paths = resolve_target_paths(&state, &root_str, &paths, max_files)?;
+            let max_files = max_files
+                .unwrap_or(DEFAULT_MAX_FILES)
+                .clamp(1, MAX_FILES_LIMIT);
+            let max_bytes = max_bytes_per_file
+                .unwrap_or(DEFAULT_MAX_BYTES)
+                .clamp(1_024, MAX_BYTES_LIMIT);
+            let target_paths = resolve_target_paths(&state, &root_str, paths.as_ref(), max_files);
             if target_paths.is_empty() {
-                return Ok(serde_json::json!({ "status": "skipped", "reason": "No file paths were available." }));
+                return Ok(
+                    serde_json::json!({ "status": "skipped", "reason": "No file paths were available." }),
+                );
             }
             let mut files = Vec::with_capacity(target_paths.len());
             for path in &target_paths {
@@ -122,7 +132,12 @@ pub async fn ai_checkpoint(
             }
             let cp = Checkpoint {
                 id: format!("cp-{}", uuid::Uuid::new_v4().simple()),
-                label: label.unwrap_or_default().trim().chars().take(120).collect::<String>(),
+                label: label
+                    .unwrap_or_default()
+                    .trim()
+                    .chars()
+                    .take(120)
+                    .collect::<String>(),
                 workspace_root: root_str.clone(),
                 created_at_ms: now_ms,
                 files,
@@ -134,25 +149,31 @@ pub async fn ai_checkpoint(
             let list = guard.entry(ws_key(&root_str)).or_default();
             list.insert(0, cp);
             list.truncate(MAX_CHECKPOINTS);
-            Ok(serde_json::json!({ "status": "created", "checkpoint": summary, "files": file_views }))
+            Ok(
+                serde_json::json!({ "status": "created", "checkpoint": summary, "files": file_views }),
+            )
         }
         "list" => {
             let guard = store().lock().map_err(lock_error)?;
             let list = guard.get(&ws_key(&root_str)).cloned().unwrap_or_default();
             let summaries: Vec<CheckpointSummary> = list.iter().map(summarize).collect();
-            Ok(serde_json::json!({ "workspaceRoot": root_str, "count": summaries.len(), "checkpoints": summaries }))
+            Ok(
+                serde_json::json!({ "workspaceRoot": root_str, "count": summaries.len(), "checkpoints": summaries }),
+            )
         }
         "diff" => {
-            let cp = select_checkpoint(&root_str, &id)?;
+            let cp = select_checkpoint(&root_str, id.as_ref())?;
             let mut diffs = Vec::new();
             for file in &cp.files {
                 diffs.push(diff_file(&state, &root_str, file, cp.max_bytes_per_file).await);
             }
             let summary = diff_summary(&diffs);
-            Ok(serde_json::json!({ "status": "diffed", "checkpoint": summarize(&cp), "summary": summary, "files": diffs }))
+            Ok(
+                serde_json::json!({ "status": "diffed", "checkpoint": summarize(&cp), "summary": summary, "files": diffs }),
+            )
         }
         "delete" => {
-            let cp = select_checkpoint(&root_str, &id)?;
+            let cp = select_checkpoint(&root_str, id.as_ref())?;
             let mut guard = store().lock().map_err(lock_error)?;
             if let Some(list) = guard.get_mut(&ws_key(&root_str)) {
                 list.retain(|c| c.id != cp.id);
@@ -160,11 +181,10 @@ pub async fn ai_checkpoint(
             Ok(serde_json::json!({ "status": "deleted", "checkpoint": summarize(&cp) }))
         }
         "restore" => {
-            let cp = select_checkpoint(&root_str, &id)?;
+            let cp = select_checkpoint(&root_str, id.as_ref())?;
             let save = save_to_disk.unwrap_or(true);
             let dry = dry_run.unwrap_or(false);
-            let blocked: Vec<_> = cp.files.iter().filter(|f| f.truncated || f.error.is_some()).collect();
-            if !blocked.is_empty() {
+            if cp.files.iter().any(|f| f.truncated || f.error.is_some()) {
                 return Ok(serde_json::json!({
                     "status": "blocked",
                     "checkpoint": summarize(&cp),
@@ -174,14 +194,16 @@ pub async fn ai_checkpoint(
             // Build restore operations by diffing each file against current state.
             let mut operations: Vec<crate::ai_tools::AiFilePatchOperation> = Vec::new();
             for file in &cp.files {
-                let current = read_current(&state, &root_str, &file.path, cp.max_bytes_per_file).await;
+                let current =
+                    read_current(&state, &root_str, &file.path, cp.max_bytes_per_file).await;
                 let changed = match (file.existed, current.existed) {
                     (true, true) => file.text != current.text,
-                    (true, false) => true,  // restore re-creates
-                    (false, true) => true,  // restore deletes
+                    (true, false) | (false, true) => true, // restore re-creates or deletes
                     (false, false) => false,
                 };
-                if !changed || current.truncated { continue; }
+                if !changed || current.truncated {
+                    continue;
+                }
                 if file.existed {
                     operations.push(serde_json::from_value(serde_json::json!({
                         "action": if current.disk_exists { "rewrite" } else { "create" },
@@ -190,48 +212,76 @@ pub async fn ai_checkpoint(
                         "overwrite": if current.disk_exists { serde_json::Value::Null } else { serde_json::Value::Bool(false) },
                     })).map_err(|e| e.to_string())?);
                 } else if current.disk_exists {
-                    operations.push(serde_json::from_value(serde_json::json!({
-                        "action": "delete", "path": file.path,
-                    })).map_err(|e| e.to_string())?);
+                    operations.push(
+                        serde_json::from_value(serde_json::json!({
+                            "action": "delete", "path": file.path,
+                        }))
+                        .map_err(|e| e.to_string())?,
+                    );
                 }
             }
             if operations.is_empty() {
-                return Ok(serde_json::json!({ "status": "unchanged", "checkpoint": summarize(&cp) }));
+                return Ok(
+                    serde_json::json!({ "status": "unchanged", "checkpoint": summarize(&cp) }),
+                );
             }
             let op_count = operations.len();
-            let result = crate::ai_tools::ai_file_patch(app.clone(), state.clone(), operations, Some(save), Some(dry)).await?;
-            Ok(serde_json::json!({ "status": if dry { "preview" } else { "restored" }, "operations": op_count, "result": result }))
+            let result = crate::ai_tools::ai_file_patch(
+                app.clone(),
+                state.clone(),
+                operations,
+                Some(save),
+                Some(dry),
+            )
+            .await?;
+            Ok(
+                serde_json::json!({ "status": if dry { "preview" } else { "restored" }, "operations": op_count, "result": result }),
+            )
         }
         _ => unreachable!(),
     }
 }
 
-fn select_checkpoint(root: &str, id: &Option<String>) -> Result<Checkpoint, String> {
+fn select_checkpoint(root: &str, id: Option<&String>) -> Result<Checkpoint, String> {
     let guard = store().lock().map_err(lock_error)?;
-    let list = guard.get(&ws_key(root)).ok_or_else(|| "No checkpoints exist for this workspace.".to_string())?;
+    let list = guard
+        .get(&ws_key(root))
+        .ok_or_else(|| "No checkpoints exist for this workspace.".to_string())?;
     if list.is_empty() {
         return Err("No checkpoints exist for this workspace.".to_string());
     }
-    match id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        None => Ok(list[0].clone()),
-        Some(want) => list.iter().find(|c| c.id == want).cloned()
-            .ok_or_else(|| format!("Checkpoint not found: {want}")),
-    }
+    id.map(String::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(
+            || Ok(list[0].clone()),
+            |want| {
+                list.iter()
+                    .find(|c| c.id == want)
+                    .cloned()
+                    .ok_or_else(|| format!("Checkpoint not found: {want}"))
+            },
+        )
 }
 
 fn resolve_target_paths(
     state: &State<'_, SharedState>,
     root: &str,
-    explicit: &Option<Vec<String>>,
+    explicit: Option<&Vec<String>>,
     max_files: usize,
-) -> Result<Vec<String>, String> {
+) -> Vec<String> {
     let mut selected: Vec<String> = Vec::new();
-    let mut add = |p: &str, acc: &mut Vec<String>| {
+    let add = |p: &str, acc: &mut Vec<String>| {
         let trimmed = p.trim();
-        if trimmed.is_empty() { return; }
+        if trimmed.is_empty() {
+            return;
+        }
         let resolved = resolve_in_workspace(trimmed, root);
         if let Some(resolved) = resolved {
-            if !acc.iter().any(|e: &String| e.eq_ignore_ascii_case(&resolved)) {
+            if !acc
+                .iter()
+                .any(|e: &String| e.eq_ignore_ascii_case(&resolved))
+            {
                 acc.push(resolved);
             }
         }
@@ -239,9 +289,11 @@ fn resolve_target_paths(
 
     if let Some(paths) = explicit {
         if !paths.is_empty() {
-            for p in paths { add(p, &mut selected); }
+            for p in paths {
+                add(p, &mut selected);
+            }
             selected.truncate(max_files);
-            return Ok(selected);
+            return selected;
         }
     }
 
@@ -254,7 +306,7 @@ fn resolve_target_paths(
         }
     }
     selected.truncate(max_files);
-    Ok(selected)
+    selected
 }
 
 fn resolve_in_workspace(path: &str, root: &str) -> Option<String> {
@@ -262,10 +314,18 @@ fn resolve_in_workspace(path: &str, root: &str) -> Option<String> {
     let resolved = if normalized.starts_with('/') || normalized.chars().nth(1) == Some(':') {
         normalized
     } else {
-        format!("{}/{}", root.trim_end_matches('/'), normalized.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            root.trim_end_matches('/'),
+            normalized.trim_start_matches('/')
+        )
     };
     let root_lower = root.to_lowercase();
-    if resolved.to_lowercase() == root_lower || resolved.to_lowercase().starts_with(&format!("{root_lower}/")) {
+    if resolved.to_lowercase() == root_lower
+        || resolved
+            .to_lowercase()
+            .starts_with(&format!("{root_lower}/"))
+    {
         Some(resolved)
     } else {
         None
@@ -281,63 +341,136 @@ fn relative_to(path: &str, root: &str) -> String {
     }
 }
 
-async fn snapshot_file(state: &State<'_, SharedState>, root: &str, path: &str, max_bytes: u64) -> CheckpointFileSnapshot {
+async fn snapshot_file(
+    state: &State<'_, SharedState>,
+    root: &str,
+    path: &str,
+    max_bytes: u64,
+) -> CheckpointFileSnapshot {
     let relative_path = relative_to(path, root);
     // Editor buffer first.
     if let Some(snap) = editor_snapshot(state, path) {
         let truncated = snap.text.len() as u64 > max_bytes;
-        let text: String = snap.text.chars().take(max_bytes as usize).collect();
+        let text: String = snap
+            .text
+            .chars()
+            .take(usize::try_from(max_bytes).unwrap_or(usize::MAX))
+            .collect();
         return CheckpointFileSnapshot {
-            path: path.to_string(), relative_path, existed: !snap.is_untitled,
-            size: snap.text.len() as u64, truncated, text, source: "editor".into(), error: None,
+            path: path.to_string(),
+            relative_path,
+            existed: !snap.is_untitled,
+            size: snap.text.len() as u64,
+            truncated,
+            text,
+            source: "editor".into(),
+            error: None,
         };
     }
     // Disk.
     match tokio::fs::read_to_string(path).await {
         Ok(text) => {
             let truncated = text.len() as u64 > max_bytes;
-            let clamped: String = text.chars().take(max_bytes as usize).collect();
+            let clamped: String = text
+                .chars()
+                .take(usize::try_from(max_bytes).unwrap_or(usize::MAX))
+                .collect();
             CheckpointFileSnapshot {
-                path: path.to_string(), relative_path, existed: true,
-                size: text.len() as u64, truncated, text: clamped, source: "disk".into(), error: None,
+                path: path.to_string(),
+                relative_path,
+                existed: true,
+                size: text.len() as u64,
+                truncated,
+                text: clamped,
+                source: "disk".into(),
+                error: None,
             }
         }
         Err(err) => CheckpointFileSnapshot {
-            path: path.to_string(), relative_path, existed: false, size: 0, truncated: false,
-            text: String::new(), source: "missing".into(), error: Some(err.to_string()),
+            path: path.to_string(),
+            relative_path,
+            existed: false,
+            size: 0,
+            truncated: false,
+            text: String::new(),
+            source: "missing".into(),
+            error: Some(err.to_string()),
         },
     }
 }
 
-struct CurrentFile { existed: bool, disk_exists: bool, text: String, truncated: bool, source: String }
+struct CurrentFile {
+    existed: bool,
+    disk_exists: bool,
+    text: String,
+    truncated: bool,
+    source: String,
+}
 
-async fn read_current(state: &State<'_, SharedState>, root: &str, path: &str, max_bytes: u64) -> CurrentFile {
+async fn read_current(
+    state: &State<'_, SharedState>,
+    root: &str,
+    path: &str,
+    max_bytes: u64,
+) -> CurrentFile {
     let _ = root;
     if let Some(snap) = editor_snapshot(state, path) {
         let disk_exists = tokio::fs::metadata(path).await.is_ok();
         let truncated = snap.text.len() as u64 > max_bytes;
         return CurrentFile {
-            existed: true, disk_exists, text: snap.text.chars().take(max_bytes as usize).collect(),
-            truncated, source: "editor".into(),
+            existed: true,
+            disk_exists,
+            text: snap
+                .text
+                .chars()
+                .take(usize::try_from(max_bytes).unwrap_or(usize::MAX))
+                .collect(),
+            truncated,
+            source: "editor".into(),
         };
     }
-    match tokio::fs::read_to_string(path).await {
-        Ok(text) => {
+    tokio::fs::read_to_string(path).await.map_or_else(
+        |_| CurrentFile {
+            existed: false,
+            disk_exists: false,
+            text: String::new(),
+            truncated: false,
+            source: "missing".into(),
+        },
+        |text| {
             let truncated = text.len() as u64 > max_bytes;
-            CurrentFile { existed: true, disk_exists: true, text: text.chars().take(max_bytes as usize).collect(), truncated, source: "disk".into() }
-        }
-        Err(_) => CurrentFile { existed: false, disk_exists: false, text: String::new(), truncated: false, source: "missing".into() },
-    }
+            CurrentFile {
+                existed: true,
+                disk_exists: true,
+                text: text
+                    .chars()
+                    .take(usize::try_from(max_bytes).unwrap_or(usize::MAX))
+                    .collect(),
+                truncated,
+                source: "disk".into(),
+            }
+        },
+    )
 }
 
-fn editor_snapshot(state: &State<'_, SharedState>, path: &str) -> Option<lux_core::DocumentSnapshot> {
+fn editor_snapshot(
+    state: &State<'_, SharedState>,
+    path: &str,
+) -> Option<lux_core::DocumentSnapshot> {
     let documents = state.documents.lock().ok()?;
     documents.snapshots().into_iter().find(|doc| {
-        doc.path.as_ref().map(|p| ai_semantic::normalize_slashes_pub(&p.to_string_lossy()).eq_ignore_ascii_case(path)).unwrap_or(false)
+        doc.path.as_ref().is_some_and(|p| {
+            ai_semantic::normalize_slashes_pub(&p.to_string_lossy()).eq_ignore_ascii_case(path)
+        })
     })
 }
 
-async fn diff_file(state: &State<'_, SharedState>, root: &str, file: &CheckpointFileSnapshot, max_bytes: u64) -> serde_json::Value {
+async fn diff_file(
+    state: &State<'_, SharedState>,
+    root: &str,
+    file: &CheckpointFileSnapshot,
+    max_bytes: u64,
+) -> serde_json::Value {
     let current = read_current(state, root, &file.path, max_bytes).await;
     let status = if file.error.is_some() {
         "error"
@@ -347,16 +480,19 @@ async fn diff_file(state: &State<'_, SharedState>, root: &str, file: &Checkpoint
         "missing"
     } else if !file.existed && current.existed {
         "created"
-    } else if !file.existed && !current.existed {
-        "unchanged"
     } else if file.text == current.text {
         "unchanged"
     } else {
         "modified"
     };
     let line_delta = if current.existed && file.existed {
-        Some(count_lines(&current.text) as i64 - count_lines(&file.text) as i64)
-    } else { None };
+        Some(
+            i64::try_from(count_lines(&current.text)).unwrap_or(i64::MAX)
+                - i64::try_from(count_lines(&file.text)).unwrap_or(i64::MAX),
+        )
+    } else {
+        None
+    };
     serde_json::json!({
         "path": file.path,
         "relativePath": file.relative_path,
@@ -371,7 +507,12 @@ async fn diff_file(state: &State<'_, SharedState>, root: &str, file: &Checkpoint
 }
 
 fn diff_summary(diffs: &[serde_json::Value]) -> serde_json::Value {
-    let count = |s: &str| diffs.iter().filter(|d| d.get("status").and_then(|v| v.as_str()) == Some(s)).count();
+    let count = |s: &str| {
+        diffs
+            .iter()
+            .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some(s))
+            .count()
+    };
     serde_json::json!({
         "total": diffs.len(),
         "unchanged": count("unchanged"),
@@ -397,7 +538,11 @@ fn compact_file(file: &CheckpointFileSnapshot) -> serde_json::Value {
 }
 
 fn count_lines(text: &str) -> usize {
-    if text.is_empty() { 0 } else { text.lines().count().max(1) }
+    if text.is_empty() {
+        0
+    } else {
+        text.lines().count().max(1)
+    }
 }
 
 #[cfg(test)]
@@ -406,8 +551,14 @@ mod tests {
 
     #[test]
     fn resolve_workspace_path_inside_only() {
-        assert_eq!(resolve_in_workspace("src/app.ts", "/root"), Some("/root/src/app.ts".to_string()));
-        assert_eq!(resolve_in_workspace("/root/src/app.ts", "/root"), Some("/root/src/app.ts".to_string()));
+        assert_eq!(
+            resolve_in_workspace("src/app.ts", "/root"),
+            Some("/root/src/app.ts".to_string())
+        );
+        assert_eq!(
+            resolve_in_workspace("/root/src/app.ts", "/root"),
+            Some("/root/src/app.ts".to_string())
+        );
         assert_eq!(resolve_in_workspace("/etc/passwd", "/root"), None);
     }
 

@@ -74,6 +74,7 @@ import {
   mergeAiPreferences,
   type AiPreferences,
 } from "../lib/aiPreferences";
+import { resolveVisionImageFormat } from "../lib/aiVisionFormat";
 import { loadChatCheckpointStore, saveChatCheckpointStore } from "../lib/aiChatCheckpointStore";
 import { buildCheckpointSendInput } from "../lib/aiChatCheckpointInput";
 import {
@@ -1039,6 +1040,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     try {
       const attachmentOptions = {
         includeVisionImage: aiPreferences.includeImages,
+        visionImageFormat: resolveVisionImageFormat(selectedProvider, selectedModel, aiPreferences.visionImageFormat),
         includeMediaContext: true,
         localSttCommand: aiPreferences.localSttCommand,
         localSttModelPath: aiPreferences.localSttModelPath,
@@ -1062,10 +1064,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         }
         return readEditorDocumentAttachment(document, attachmentOptions);
       }));
-      // Native Rust turn-loop is the primary path in the desktop runtime; the TS
-      // orchestration remains as the browser/dev fallback and behind the toggle.
-      const useNativeTurn = runtimePreferences.nativeTurnLoop && isTauriRuntime();
-      const runTurn = useNativeTurn ? runNativeChatTurn : sendAiChatMessage;
+      // The native Rust turn-loop is the only orchestration path in the desktop
+      // runtime; the TS turn-loop runs solely in dev-only browser preview where no
+      // Rust/Tauri backend exists.
+      const runTurn = isTauriRuntime() ? runNativeChatTurn : sendAiChatMessage;
       completedAssistantMessage = await runTurn({
         abortSignal: abortController.signal,
         activeDocument,

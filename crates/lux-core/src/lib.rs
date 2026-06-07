@@ -2,6 +2,9 @@
 #![deny(clippy::nursery)]
 #![allow(clippy::missing_errors_doc)]
 
+mod concurrency;
+pub use concurrency::{resolve_scan_threads, scan_threads, set_scan_concurrency, ScanConcurrency};
+
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -624,16 +627,16 @@ pub fn monaco_language_id_for_path(path: &Path) -> String {
         "rs" => "rust",
         "ts" | "tsx" | "mts" | "cts" | "d.ts" | "d.mts" | "d.cts" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
-        "json" | "jsonc" | "json5" | "jsonl" | "ndjson" | "webmanifest" | "geojson"
-        | "npmrc" | "yarnrc" | "prettierrc" | "eslintrc" | "babelrc" | "browserslistrc"
-        | "excalidraw" => "json",
+        "json" | "jsonc" | "json5" | "jsonl" | "ndjson" | "webmanifest" | "geojson" | "npmrc"
+        | "yarnrc" | "prettierrc" | "eslintrc" | "babelrc" | "browserslistrc" | "excalidraw"
+        | "dot" | "gv" => "json",
         "toml" | "tml" => "toml",
         "yaml" | "yml" => "yaml",
         "css" | "scss" | "sass" | "less" => "css",
         "html" | "htm" | "vue" | "svelte" | "astro" => "html",
         "sql" | "ddl" | "dml" => "sql",
         "xml" | "xsd" | "xsl" | "xslt" | "drawio" | "dio" | "vsdx" | "svg" => "xml",
-        "csv" => "csv",
+        "csv" | "tsv" | "psv" => "csv",
         "graphql" | "gql" => "graphql",
         "proto" => "proto",
         "prisma" => "prisma",
@@ -669,10 +672,9 @@ pub fn monaco_language_id_for_path(path: &Path) -> String {
         "ini" | "cfg" | "conf" | "config" | "properties" | "props" | "editorconfig"
         | "gitignore" | "gitattributes" | "gitmodules" => "ini",
         "env" => "properties",
-        "tsv" | "psv" => "csv",
-        "puml" | "plantuml" => "plaintext",
-        "dot" | "gv" => "json",
-        "log" | "out" | "err" | "diff" | "patch" | "lock" | "sum" => "plaintext",
+        "puml" | "plantuml" | "log" | "out" | "err" | "diff" | "patch" | "lock" | "sum" => {
+            "plaintext"
+        }
         other if !other.is_empty() => other,
         _ => "plaintext",
     }
@@ -741,16 +743,56 @@ mod file_view_tests {
     #[test]
     fn preview_media_and_documents_use_dedicated_strategies() {
         let cases = [
-            ("readme.pdf", FileViewStrategy::PdfPreview, FileOpenMode::Preview),
-            ("photo.webp", FileViewStrategy::ImagePreview, FileOpenMode::Preview),
-            ("clip.mp4", FileViewStrategy::VideoPreview, FileOpenMode::Preview),
-            ("song.mp3", FileViewStrategy::AudioPreview, FileOpenMode::Preview),
-            ("app.db", FileViewStrategy::DatabaseEditor, FileOpenMode::Preview),
-            ("workflow.mmd", FileViewStrategy::DiagramPreview, FileOpenMode::EditableText),
-            ("bundle.tar.gz", FileViewStrategy::ArchivePreview, FileOpenMode::Preview),
-            ("bundle.zip", FileViewStrategy::ArchivePreview, FileOpenMode::Preview),
-            ("letter.docx", FileViewStrategy::OfficePreview, FileOpenMode::Preview),
-            ("app.wasm", FileViewStrategy::BinaryPreview, FileOpenMode::Preview),
+            (
+                "readme.pdf",
+                FileViewStrategy::PdfPreview,
+                FileOpenMode::Preview,
+            ),
+            (
+                "photo.webp",
+                FileViewStrategy::ImagePreview,
+                FileOpenMode::Preview,
+            ),
+            (
+                "clip.mp4",
+                FileViewStrategy::VideoPreview,
+                FileOpenMode::Preview,
+            ),
+            (
+                "song.mp3",
+                FileViewStrategy::AudioPreview,
+                FileOpenMode::Preview,
+            ),
+            (
+                "app.db",
+                FileViewStrategy::DatabaseEditor,
+                FileOpenMode::Preview,
+            ),
+            (
+                "workflow.mmd",
+                FileViewStrategy::DiagramPreview,
+                FileOpenMode::EditableText,
+            ),
+            (
+                "bundle.tar.gz",
+                FileViewStrategy::ArchivePreview,
+                FileOpenMode::Preview,
+            ),
+            (
+                "bundle.zip",
+                FileViewStrategy::ArchivePreview,
+                FileOpenMode::Preview,
+            ),
+            (
+                "letter.docx",
+                FileViewStrategy::OfficePreview,
+                FileOpenMode::Preview,
+            ),
+            (
+                "app.wasm",
+                FileViewStrategy::BinaryPreview,
+                FileOpenMode::Preview,
+            ),
         ];
         for (file, strategy, mode) in cases {
             let descriptor = file_view_descriptor_for_path(Path::new(file));

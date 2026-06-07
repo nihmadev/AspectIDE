@@ -1,9 +1,7 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
-
 };
 
 use base64::{engine::general_purpose, Engine as _};
@@ -132,7 +130,7 @@ fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<Stri
         .arg("-i")
         .arg(path)
         .arg("-vf")
-        .arg(format!("fps=1/{}", (max_frames as u32).max(1)))
+        .arg(format!("fps=1/{}", u32::from(max_frames).max(1)))
         .arg("-frames:v")
         .arg(max_frames.to_string())
         .arg(&output_pattern)

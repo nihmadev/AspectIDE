@@ -20,6 +20,21 @@ export type AiPreferences = {
   projectIndexingEnabled: boolean;
   realtimeIndexing: boolean;
   includeImages: boolean;
+  /**
+   * Encoding for vision images sent to the model. `auto` picks lossless WebP for
+   * provider families known to decode it (Anthropic, OpenAI, Gemini, xAI,
+   * OpenRouter) and PNG everywhere else; `webp`/`png` force the choice. Lossless
+   * WebP shrinks the payload and persisted history without any pixel loss; PNG is
+   * the universal fallback for models that cannot read WebP.
+   */
+  visionImageFormat: AiVisionImageFormatPreference;
+  /**
+   * CPU budget for native filesystem scans and content search. `auto` reserves
+   * one logical core for the UI (`cores - 1`); `all` uses every core; `half` uses
+   * half. Applied to the Rust scan/search worker pools so large operations don't
+   * starve the main thread / WebView.
+   */
+  scanConcurrency: AiScanConcurrency;
   maxIndexedFiles: number;
   /** When true, chat history is compacted before send once estimated usage crosses the threshold. */
   contextAutoCompactEnabled: boolean;
@@ -29,13 +44,6 @@ export type AiPreferences = {
   /** Max concurrent Task subagents per chat session (agent-managed). */
   maxParallelSubagents: number;
   showResponseDuration: boolean;
-  /**
-   * Run the chat turn through the native Rust turn-loop (`ai_run_turn`) instead of
-   * the TypeScript orchestration. The Rust path runs the model↔tool loop, dispatch,
-   * and approvals natively; TS only renders `lux://ai-turn` events. Defaults on in
-   * the desktop runtime.
-   */
-  nativeTurnLoop: boolean;
   /**
    * Declarative tool permission rules, one per entry, format `[allow|deny|ask:]Tool(glob)`.
    * Examples: `allow:Bash(git *)`, `deny:Write(*.env)`, `ask:Bash(rm *)`. Evaluated in the
@@ -93,6 +101,10 @@ export type AiToolApprovalMode = "default" | "full-access";
 export type AiFileEditTrustMode = "apply-immediately" | "preview-before-apply";
 export type AiVoiceInputLanguage = "auto" | "ru-RU" | "en-US";
 export type AiVoiceInputProvider = "native-webview" | "local";
+/** Vision image encoding preference. `auto` = capability-based (WebP where safe, else PNG). */
+export type AiVisionImageFormatPreference = "auto" | "webp" | "png";
+/** CPU budget for native FS scans/search. `auto` reserves one core for the UI. */
+export type AiScanConcurrency = "auto" | "all" | "half";
 
 export type AiProviderPresetId =
   | "openai"
@@ -385,13 +397,14 @@ export const defaultAiPreferences: AiPreferences = {
   projectIndexingEnabled: true,
   realtimeIndexing: true,
   includeImages: true,
+  visionImageFormat: "auto",
+  scanConcurrency: "auto",
   maxIndexedFiles: 5000,
   contextAutoCompactEnabled: true,
   contextAutoCompactThreshold: DEFAULT_CONTEXT_AUTO_COMPACT_THRESHOLD,
   toolRoundLimit: defaultAiToolRoundLimit,
   maxParallelSubagents: defaultMaxParallelSubagents,
   showResponseDuration: true,
-  nativeTurnLoop: true,
   toolPermissionRules: [],
   globalInstructions: "",
   projectInstructionsByWorkspace: {},
@@ -455,6 +468,8 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     projectIndexingEnabled: typeof source.projectIndexingEnabled === "boolean" ? source.projectIndexingEnabled : defaultAiPreferences.projectIndexingEnabled,
     realtimeIndexing: typeof source.realtimeIndexing === "boolean" ? source.realtimeIndexing : defaultAiPreferences.realtimeIndexing,
     includeImages: typeof source.includeImages === "boolean" ? source.includeImages : defaultAiPreferences.includeImages,
+    visionImageFormat: normalizeVisionImageFormat(source.visionImageFormat),
+    scanConcurrency: normalizeScanConcurrency(source.scanConcurrency),
     maxIndexedFiles: clampInteger(source.maxIndexedFiles, 500, 20000, defaultAiPreferences.maxIndexedFiles),
     contextAutoCompactEnabled: typeof source.contextAutoCompactEnabled === "boolean"
       ? source.contextAutoCompactEnabled
@@ -467,7 +482,6 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     toolRoundLimit: normalizeToolRoundLimit(resolveToolRoundLimitSource(source)),
     maxParallelSubagents: clampInteger(source.maxParallelSubagents, maxParallelSubagentsMin, maxParallelSubagentsMax, defaultMaxParallelSubagents),
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
-    nativeTurnLoop: typeof source.nativeTurnLoop === "boolean" ? source.nativeTurnLoop : defaultAiPreferences.nativeTurnLoop,
     toolPermissionRules: Array.isArray(source.toolPermissionRules)
       ? source.toolPermissionRules
           .filter((rule): rule is string => typeof rule === "string" && rule.trim().length > 0)
@@ -870,6 +884,14 @@ function normalizeVoiceInputProvider(value: unknown): AiVoiceInputProvider {
 
 function normalizeVoiceInputLanguage(value: unknown): AiVoiceInputLanguage {
   return value === "ru-RU" || value === "en-US" || value === "auto" ? value : defaultAiPreferences.voiceInputLanguage;
+}
+
+function normalizeVisionImageFormat(value: unknown): AiVisionImageFormatPreference {
+  return value === "webp" || value === "png" || value === "auto" ? value : defaultAiPreferences.visionImageFormat;
+}
+
+function normalizeScanConcurrency(value: unknown): AiScanConcurrency {
+  return value === "all" || value === "half" || value === "auto" ? value : defaultAiPreferences.scanConcurrency;
 }
 
 function resolveToolRoundLimitSource(source: Record<string, unknown>) {

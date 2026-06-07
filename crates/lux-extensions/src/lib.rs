@@ -261,7 +261,9 @@ pub fn activate_extensions_in_roots(
 pub fn extension_contribution_registry_in_roots(
     roots: impl IntoIterator<Item = impl AsRef<Path>>,
 ) -> AppResult<ExtensionContributionRegistry> {
-    Ok(build_contribution_registry(activate_extensions_in_roots(roots)?))
+    Ok(build_contribution_registry(activate_extensions_in_roots(
+        roots,
+    )?))
 }
 
 pub fn extension_command_routes_in_roots(

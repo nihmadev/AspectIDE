@@ -1,8 +1,8 @@
-//! Native RelatedFiles tool — Stage 1 of the TS→Rust migration.
+//! Native `RelatedFiles` tool — Stage 1 of the TS→Rust migration.
 //!
 //! Finds files related to a target (tests, styles, types, routes, configs,
 //! stories, barrels, entrypoints) plus query-token hits. Composes `lux_fs`
-//! list_files entirely in Rust — no IPC for file lists.
+//! `list_files` entirely in Rust — no IPC for file lists.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use serde::Serialize;
 use tauri::State;
 
-use crate::{workspace_root, SharedState};
 use crate::ai_semantic::{self};
+use crate::{workspace_root, SharedState};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,15 +62,25 @@ impl Desc {
         let path = ai_semantic::normalize_slashes_pub(path);
         let root = ai_semantic::normalize_slashes_pub(root.trim_end_matches('/'));
         let relative_path = if !root.is_empty()
-            && path.to_lowercase().starts_with(&format!("{}/", root.to_lowercase()))
+            && path
+                .to_lowercase()
+                .starts_with(&format!("{}/", root.to_lowercase()))
         {
             path[root.len() + 1..].to_string()
         } else {
             path.clone()
         };
         let basename = path.rsplit('/').next().unwrap_or(&path).to_string();
-        let dir = if path.contains('/') { path[..path.rfind('/').unwrap()].to_string() } else { String::new() };
-        let relative_dir = if relative_path.contains('/') { relative_path[..relative_path.rfind('/').unwrap()].to_string() } else { String::new() };
+        let dir = if path.contains('/') {
+            path[..path.rfind('/').unwrap()].to_string()
+        } else {
+            String::new()
+        };
+        let relative_dir = if relative_path.contains('/') {
+            relative_path[..relative_path.rfind('/').unwrap()].to_string()
+        } else {
+            String::new()
+        };
         let extension = ai_semantic::file_extension_pub(&basename.to_lowercase());
         let stem = basename[..basename.len().saturating_sub(extension.len())].to_string();
         let family_stem = ai_semantic::family_stem_pub(&basename);
@@ -119,7 +129,10 @@ pub async fn ai_related_files(
             .unwrap_or_default()
     };
 
-    let file_count = files.iter().filter(|e| matches!(e.kind, lux_core::FsEntryKind::File)).count();
+    let file_count = files
+        .iter()
+        .filter(|e| matches!(e.kind, lux_core::FsEntryKind::File))
+        .count();
     let mut matches: BTreeMap<String, RelatedFileResult> = BTreeMap::new();
 
     for entry in &files {
@@ -141,19 +154,28 @@ pub async fn ai_related_files(
             continue;
         }
         let existing = matches.get(&desc.lower);
-        if existing.is_none() || existing.is_some_and(|e| e.score < score) {
-            matches.insert(desc.lower.clone(), RelatedFileResult {
-                path: desc.path,
-                relative_path: desc.relative_path,
-                relations: relations.into_iter().collect(),
-                query_hits,
-                score,
-            });
+        if existing.is_none_or(|e| e.score < score) {
+            matches.insert(
+                desc.lower.clone(),
+                RelatedFileResult {
+                    path: desc.path,
+                    relative_path: desc.relative_path,
+                    relations: relations.into_iter().collect(),
+                    query_hits,
+                    score,
+                },
+            );
         }
     }
 
     let mut ranked: Vec<RelatedFileResult> = matches.into_values().collect();
-    ranked.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.relative_path.to_lowercase().cmp(&b.relative_path.to_lowercase())));
+    ranked.sort_by(|a, b| {
+        b.score.cmp(&a.score).then_with(|| {
+            a.relative_path
+                .to_lowercase()
+                .cmp(&b.relative_path.to_lowercase())
+        })
+    });
     ranked.truncate(max_results);
 
     let target_info = target.map(|t| TargetInfo {
@@ -178,10 +200,18 @@ fn resolve_workspace_path_simple(path: &str, root: &str) -> String {
     if root.is_empty() || normalized.starts_with('/') || normalized.chars().nth(1) == Some(':') {
         return normalized;
     }
-    format!("{}/{}", root.trim_end_matches('/'), normalized.trim_start_matches('/'))
+    format!(
+        "{}/{}",
+        root.trim_end_matches('/'),
+        normalized.trim_start_matches('/')
+    )
 }
 
-fn score_related(desc: &Desc, target: Option<&Desc>, tokens: &[String]) -> (i64, BTreeSet<String>, Vec<String>) {
+fn score_related(
+    desc: &Desc,
+    target: Option<&Desc>,
+    tokens: &[String],
+) -> (i64, BTreeSet<String>, Vec<String>) {
     let mut relations = BTreeSet::new();
     let mut query_hits = Vec::new();
     let mut score: i64 = 0;
@@ -231,7 +261,7 @@ fn score_related(desc: &Desc, target: Option<&Desc>, tokens: &[String]) -> (i64,
         }
     } else {
         let kind_score = add_kind_relations(desc, &mut relations);
-        score += kind_score.min(20).max(0);
+        score += kind_score.clamp(0, 20);
         if is_important(desc) {
             score += 35;
         }
@@ -261,7 +291,10 @@ fn score_related(desc: &Desc, target: Option<&Desc>, tokens: &[String]) -> (i64,
     if desc.relative_lower.contains("/test") || desc.relative_lower.contains("/spec") {
         score += 4;
     }
-    if desc.basename_lower.ends_with(".lock") {
+    if std::path::Path::new(&desc.basename_lower)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lock"))
+    {
         score -= 20;
     }
 
@@ -269,32 +302,70 @@ fn score_related(desc: &Desc, target: Option<&Desc>, tokens: &[String]) -> (i64,
 }
 
 fn directory_distance(left: &str, right: &str) -> i64 {
-    if left == right { return 0; }
+    if left == right {
+        return 0;
+    }
     let lp: Vec<&str> = left.split('/').filter(|s| !s.is_empty()).collect();
     let rp: Vec<&str> = right.split('/').filter(|s| !s.is_empty()).collect();
     let mut common = 0;
-    while common < lp.len() && common < rp.len() && lp[common] == rp[common] { common += 1; }
-    ((lp.len() - common) + (rp.len() - common)) as i64
+    while common < lp.len() && common < rp.len() && lp[common] == rp[common] {
+        common += 1;
+    }
+    i64::try_from((lp.len() - common) + (rp.len() - common)).unwrap_or(i64::MAX)
 }
 
 fn add_kind_relations(desc: &Desc, relations: &mut BTreeSet<String>) -> i64 {
     let mut score = 0;
-    if is_test(desc) { relations.insert("test".into()); score += 35; }
-    if is_style(desc) { relations.insert("style".into()); score += 30; }
-    if is_type_def(desc) { relations.insert("type-definition".into()); score += 28; }
-    if is_route(desc) { relations.insert("route".into()); score += 24; }
-    if is_schema(desc) { relations.insert("schema".into()); score += 24; }
-    if is_config(desc) { relations.insert("config".into()); score += 18; }
-    if is_entrypoint(desc) { relations.insert("entrypoint".into()); score += 18; }
-    if is_story(desc) { relations.insert("story".into()); score += 22; }
-    if is_barrel(desc) { relations.insert("barrel".into()); score += 14; }
+    if is_test(desc) {
+        relations.insert("test".into());
+        score += 35;
+    }
+    if is_style(desc) {
+        relations.insert("style".into());
+        score += 30;
+    }
+    if is_type_def(desc) {
+        relations.insert("type-definition".into());
+        score += 28;
+    }
+    if is_route(desc) {
+        relations.insert("route".into());
+        score += 24;
+    }
+    if is_schema(desc) {
+        relations.insert("schema".into());
+        score += 24;
+    }
+    if is_config(desc) {
+        relations.insert("config".into());
+        score += 18;
+    }
+    if is_entrypoint(desc) {
+        relations.insert("entrypoint".into());
+        score += 18;
+    }
+    if is_story(desc) {
+        relations.insert("story".into());
+        score += 22;
+    }
+    if is_barrel(desc) {
+        relations.insert("barrel".into());
+        score += 14;
+    }
     score
 }
 
 fn add_important_relation(desc: &Desc, relations: &mut BTreeSet<String>) {
-    if is_config(desc) { relations.insert("config".into()); }
-    if is_entrypoint(desc) { relations.insert("entrypoint".into()); }
-    if desc.basename_lower.contains("readme") || desc.basename_lower.contains("license") || desc.basename_lower.contains("notice") {
+    if is_config(desc) {
+        relations.insert("config".into());
+    }
+    if is_entrypoint(desc) {
+        relations.insert("entrypoint".into());
+    }
+    if desc.basename_lower.contains("readme")
+        || desc.basename_lower.contains("license")
+        || desc.basename_lower.contains("notice")
+    {
         relations.insert("nearby-name".into());
     }
 }
@@ -305,50 +376,139 @@ fn has_segment(base: &str, words: &[&str]) -> bool {
 
 fn is_test(d: &Desc) -> bool {
     has_segment(&d.basename_lower, &["test", "spec", "tests", "specs"])
-        || d.relative_lower.split('/').any(|seg| matches!(seg, "__tests__" | "test" | "tests" | "spec" | "specs"))
+        || d.relative_lower
+            .split('/')
+            .any(|seg| matches!(seg, "__tests__" | "test" | "tests" | "spec" | "specs"))
 }
 fn is_style(d: &Desc) -> bool {
     matches!(d.extension.as_str(), ".css" | ".scss" | ".sass" | ".less")
         || has_segment(&d.basename_lower, &["styles", "style", "theme", "tokens"])
 }
 fn is_type_def(d: &Desc) -> bool {
-    d.basename_lower.ends_with(".d.ts") || d.basename_lower.ends_with(".d.mts") || d.basename_lower.ends_with(".d.cts")
-        || has_segment(&d.basename_lower, &["types", "type", "interfaces", "interface", "dto", "defs"])
+    d.basename_lower.ends_with(".d.ts")
+        || d.basename_lower.ends_with(".d.mts")
+        || d.basename_lower.ends_with(".d.cts")
+        || has_segment(
+            &d.basename_lower,
+            &["types", "type", "interfaces", "interface", "dto", "defs"],
+        )
 }
 fn is_route(d: &Desc) -> bool {
-    has_segment(&d.basename_lower, &["route", "routes", "router", "page", "layout"])
-        || d.relative_lower.split('/').any(|seg| matches!(seg, "app" | "pages" | "routes" | "route"))
+    has_segment(
+        &d.basename_lower,
+        &["route", "routes", "router", "page", "layout"],
+    ) || d
+        .relative_lower
+        .split('/')
+        .any(|seg| matches!(seg, "app" | "pages" | "routes" | "route"))
 }
 fn is_schema(d: &Desc) -> bool {
-    has_segment(&d.basename_lower, &["schema", "schemas", "model", "models", "entity", "entities", "migration", "prisma", "graphql", "proto"])
-        || matches!(d.extension.as_str(), ".graphql" | ".gql" | ".proto" | ".sql")
+    has_segment(
+        &d.basename_lower,
+        &[
+            "schema",
+            "schemas",
+            "model",
+            "models",
+            "entity",
+            "entities",
+            "migration",
+            "prisma",
+            "graphql",
+            "proto",
+        ],
+    ) || matches!(
+        d.extension.as_str(),
+        ".graphql" | ".gql" | ".proto" | ".sql"
+    )
 }
 fn is_config(d: &Desc) -> bool {
-    has_segment(&d.basename_lower, &["config", "conf", "rc", "settings", "eslint", "prettier", "vite", "webpack", "rollup", "tsconfig", "jsconfig", "cargo", "package", "pyproject"])
-        || d.relative_lower.contains("package.json") || d.relative_lower.contains("cargo.toml")
+    has_segment(
+        &d.basename_lower,
+        &[
+            "config",
+            "conf",
+            "rc",
+            "settings",
+            "eslint",
+            "prettier",
+            "vite",
+            "webpack",
+            "rollup",
+            "tsconfig",
+            "jsconfig",
+            "cargo",
+            "package",
+            "pyproject",
+        ],
+    ) || d.relative_lower.contains("package.json")
+        || d.relative_lower.contains("cargo.toml")
 }
 fn is_entrypoint(d: &Desc) -> bool {
-    let patterns = ["main.ts", "main.tsx", "main.js", "main.jsx", "main.rs", "main.go", "main.py", "main.java",
-        "index.ts", "index.tsx", "index.js", "index.jsx", "app.ts", "app.tsx", "app.js", "app.jsx",
-        "lib.ts", "lib.rs", "mod.rs"];
+    let patterns = [
+        "main.ts",
+        "main.tsx",
+        "main.js",
+        "main.jsx",
+        "main.rs",
+        "main.go",
+        "main.py",
+        "main.java",
+        "index.ts",
+        "index.tsx",
+        "index.js",
+        "index.jsx",
+        "app.ts",
+        "app.tsx",
+        "app.js",
+        "app.jsx",
+        "lib.ts",
+        "lib.rs",
+        "mod.rs",
+    ];
     patterns.iter().any(|p| d.basename_lower == *p)
-        || d.relative_lower.ends_with("src/main.rs") || d.relative_lower.ends_with("src-tauri/src/lib.rs")
+        || d.relative_lower.ends_with("src/main.rs")
+        || d.relative_lower.ends_with("src-tauri/src/lib.rs")
 }
-fn is_story(d: &Desc) -> bool { has_segment(&d.basename_lower, &["stories", "story"]) }
+fn is_story(d: &Desc) -> bool {
+    has_segment(&d.basename_lower, &["stories", "story"])
+}
 fn is_barrel(d: &Desc) -> bool {
-    matches!(d.basename_lower.as_str(), "index.ts" | "index.tsx" | "index.js" | "index.jsx" | "mod.rs" | "lib.rs")
+    matches!(
+        d.basename_lower.as_str(),
+        "index.ts" | "index.tsx" | "index.js" | "index.jsx" | "mod.rs" | "lib.rs"
+    )
 }
 fn is_important(d: &Desc) -> bool {
-    const NAMES: &[&str] = &["package.json", "cargo.toml", "pyproject.toml", "go.mod", "pom.xml", "build.gradle", "dockerfile", "makefile", ".env.example"];
+    const NAMES: &[&str] = &[
+        "package.json",
+        "cargo.toml",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "dockerfile",
+        "makefile",
+        ".env.example",
+    ];
     const PREFIXES: &[&str] = &["vite.config.", "tsconfig.", "jsconfig."];
-    NAMES.iter().any(|n| d.relative_lower == *n || d.relative_lower.ends_with(&format!("/{n}")))
-        || PREFIXES.iter().any(|p| d.relative_lower.starts_with(p) || d.relative_lower.contains(&format!("/{p}")))
+    NAMES
+        .iter()
+        .any(|n| d.relative_lower == *n || d.relative_lower.ends_with(&format!("/{n}")))
+        || PREFIXES
+            .iter()
+            .any(|p| d.relative_lower.starts_with(p) || d.relative_lower.contains(&format!("/{p}")))
         || d.relative_lower.contains("readme")
 }
 fn is_source_counterpart(a: &Desc, b: &Desc) -> bool {
-    if a.extension.to_lowercase() == b.extension.to_lowercase() { return false; }
-    const RELATED: &[&str] = &[".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".sass", ".less", ".d.ts"];
-    RELATED.contains(&a.extension.to_lowercase().as_str()) && RELATED.contains(&b.extension.to_lowercase().as_str())
+    const RELATED: &[&str] = &[
+        ".ts", ".tsx", ".js", ".jsx", ".css", ".scss", ".sass", ".less", ".d.ts",
+    ];
+    if a.extension.to_lowercase() == b.extension.to_lowercase() {
+        return false;
+    }
+    RELATED.contains(&a.extension.to_lowercase().as_str())
+        && RELATED.contains(&b.extension.to_lowercase().as_str())
 }
 
 #[cfg(test)]

@@ -204,7 +204,8 @@ async fn run_local_stt_command(
         .await
         .map_err(|_| "Local STT command timed out after 120 seconds".to_string());
     let _ = std::fs::remove_file(&audio_path);
-    let output = output_result?.map_err(|error| format!("Local STT command failed to start: {error}"))?;
+    let output =
+        output_result?.map_err(|error| format!("Local STT command failed to start: {error}"))?;
     parse_stt_output(Ok(output))
 }
 

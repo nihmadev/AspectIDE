@@ -32,7 +32,12 @@ import {
   type AiProviderProtocol,
   type AiFileEditTrustMode,
   type AiToolApprovalMode,
+  type AiVisionImageFormatPreference,
+  type AiScanConcurrency,
 } from "../lib/aiPreferences";
+import { AI_VISION_IMAGE_FORMATS } from "../lib/aiVisionFormat";
+
+const AI_SCAN_CONCURRENCY_OPTIONS: readonly AiScanConcurrency[] = ["auto", "all", "half"];
 import { formatCompactTokens } from "../lib/aiChatContextUsage";
 import { resolveModelContextTokens } from "../lib/aiModelContext";
 import {
@@ -49,7 +54,7 @@ import { LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from "../lib/i18
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
 import { useLuxStore } from "../lib/store";
-import { luxCommands, type AgentBrowserStatusResponse, type AiProviderDiagnosticResponse } from "../lib/tauri";
+import { isTauriRuntime, luxCommands, type AgentBrowserStatusResponse, type AiProviderDiagnosticResponse } from "../lib/tauri";
 import type { FsEntry, WorkspaceInfo } from "../lib/types";
 
 const scope = "user" as const;
@@ -203,6 +208,9 @@ export function SettingsDialog() {
     (nextPreferences: AiPreferences) => {
       setAiPreferences(nextPreferences);
       setSaveState("saving");
+      // Re-apply the scan/search CPU budget immediately (idempotent atomic set)
+      // so a changed setting takes effect without an app restart.
+      void luxCommands.setScanConcurrency(nextPreferences.scanConcurrency);
       void luxCommands.settingsSet(scope, AI_PREFERENCES_KEY, nextPreferences)
         .then(() => setSaveState("saved"))
         .catch(() => setSaveState("error"));
@@ -353,16 +361,97 @@ function SettingsSectionNav({ activeSectionId, onSelect, sections, t }: { active
 
 function GeneralSection({ locale, onChangeLocale, t }: { locale: Locale; onChangeLocale: (locale: Locale) => void; t: TranslateFn }) {
   return (
-    <SettingsPanel>
-      <SettingsGrid>
-        <SelectSetting<Locale>
-          label={t("settings.language.label")}
-          detail={t("settings.language.detail")}
-          value={locale}
-          options={LOCALES.map((entry) => ({ label: entry.nativeLabel, value: entry.id }))}
-          onChange={onChangeLocale}
-        />
-      </SettingsGrid>
+    <>
+      <SettingsPanel>
+        <SettingsGrid>
+          <SelectSetting<Locale>
+            label={t("settings.language.label")}
+            detail={t("settings.language.detail")}
+            value={locale}
+            options={LOCALES.map((entry) => ({ label: entry.nativeLabel, value: entry.id }))}
+            onChange={onChangeLocale}
+          />
+        </SettingsGrid>
+      </SettingsPanel>
+      <UpdatesSection t={t} />
+    </>
+  );
+}
+
+type UpdateCheckState =
+  | { status: "idle" | "checking" }
+  | { status: "available"; version: string }
+  | { status: "upToDate" }
+  | { status: "error"; message: string };
+
+function UpdatesSection({ t }: { t: TranslateFn }) {
+  const [currentVersion, setCurrentVersion] = useState("");
+  const [check, setCheck] = useState<UpdateCheckState>({ status: "idle" });
+  const [lastChecked, setLastChecked] = useState<number | null>(null);
+
+  const runCheck = useCallback(async () => {
+    if (!isTauriRuntime()) return;
+    setCheck({ status: "checking" });
+    try {
+      const result = await luxCommands.updateCheck();
+      if (result.currentVersion) setCurrentVersion(result.currentVersion);
+      setLastChecked(Date.now());
+      setCheck(
+        result.available && result.version
+          ? { status: "available", version: result.version }
+          : { status: "upToDate" },
+      );
+    } catch (error) {
+      setCheck({ status: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }, []);
+
+  useEffect(() => {
+    // Populate the current version on open without forcing a network check.
+    if (!isTauriRuntime()) return;
+    void luxCommands.updateCheck()
+      .then((result) => {
+        if (result.currentVersion) setCurrentVersion(result.currentVersion);
+        if (result.available && result.version) setCheck({ status: "available", version: result.version });
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const statusLine = (() => {
+    switch (check.status) {
+      case "checking":
+        return t("update.checking");
+      case "available":
+        return t("update.available.body", { version: check.version });
+      case "upToDate":
+        return t("update.upToDate");
+      case "error":
+        return check.message;
+      default:
+        return lastChecked === null
+          ? t("update.settings.lastCheckedNever")
+          : t("update.settings.lastChecked", { time: new Date(lastChecked).toLocaleTimeString() });
+    }
+  })();
+
+  return (
+    <SettingsPanel title={t("update.settings.title")} description={t("update.settings.detail")}>
+      <div className="settings-update-row" data-status={check.status}>
+        <div className="settings-update-info">
+          <span className="settings-update-version">
+            {currentVersion ? t("update.settings.currentVersion", { version: currentVersion }) : t("update.settings.title")}
+          </span>
+          <span className="settings-update-status">{statusLine}</span>
+        </div>
+        <button
+          type="button"
+          className="settings-update-check"
+          disabled={check.status === "checking" || !isTauriRuntime()}
+          onClick={() => void runCheck()}
+        >
+          {t("update.settings.check")}
+        </button>
+      </div>
     </SettingsPanel>
   );
 }
@@ -647,7 +736,6 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
           onChange={(maxParallelSubagents) => onChange({ maxParallelSubagents })}
         />
         <ToggleSetting label={t("settings.aiRuntime.responseDuration.label")} detail={t("settings.aiRuntime.responseDuration.detail")} checked={preferences.showResponseDuration} onChange={(showResponseDuration) => onChange({ showResponseDuration })} />
-        <ToggleSetting label={t("settings.aiRuntime.nativeTurnLoop.label")} detail={t("settings.aiRuntime.nativeTurnLoop.detail")} checked={preferences.nativeTurnLoop} onChange={(nativeTurnLoop) => onChange({ nativeTurnLoop })} />
         <ToggleSetting
           label={t("settings.aiRuntime.contextAutoCompact.label")}
           detail={t("settings.aiRuntime.contextAutoCompact.detail")}
@@ -1168,6 +1256,20 @@ function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: Ret
           <ToggleSetting label={t("settings.indexing.projectIndexing.label")} detail={t("settings.indexing.projectIndexing.detail")} checked={preferences.projectIndexingEnabled} onChange={(projectIndexingEnabled) => onChange({ projectIndexingEnabled })} />
           <ToggleSetting label={t("settings.indexing.realtime.label")} detail={t("settings.indexing.realtime.detail")} checked={preferences.realtimeIndexing} onChange={(realtimeIndexing) => onChange({ realtimeIndexing })} />
           <ToggleSetting label={t("settings.indexing.imageMetadata.label")} detail={t("settings.indexing.imageMetadata.detail")} checked={preferences.includeImages} onChange={(includeImages) => onChange({ includeImages })} />
+          <SelectSetting<AiVisionImageFormatPreference>
+            label={t("settings.indexing.visionFormat.label")}
+            detail={t("settings.indexing.visionFormat.detail")}
+            value={preferences.visionImageFormat}
+            options={AI_VISION_IMAGE_FORMATS.map((format) => ({ label: t(`settings.indexing.visionFormat.${format}` as MessageKey), value: format }))}
+            onChange={(visionImageFormat) => onChange({ visionImageFormat })}
+          />
+          <SelectSetting<AiScanConcurrency>
+            label={t("settings.indexing.scanConcurrency.label")}
+            detail={t("settings.indexing.scanConcurrency.detail")}
+            value={preferences.scanConcurrency}
+            options={AI_SCAN_CONCURRENCY_OPTIONS.map((mode) => ({ label: t(`settings.indexing.scanConcurrency.${mode}` as MessageKey), value: mode }))}
+            onChange={(scanConcurrency) => onChange({ scanConcurrency })}
+          />
           <NumberSetting label={t("settings.indexing.maxFiles.label")} detail={t("settings.indexing.maxFiles.detail")} value={preferences.maxIndexedFiles} min={500} max={20000} step={500} onChange={(maxIndexedFiles) => onChange({ maxIndexedFiles })} />
         </SettingsGrid>
       </SettingsPanel>

@@ -288,6 +288,38 @@ export type FileAssetResponse = {
   size: number;
 };
 
+export type UpdateCheckResult = {
+  /** Whether a newer signed build is available at the configured endpoints. */
+  available: boolean;
+  /** Currently running version. */
+  currentVersion: string;
+  /** Available version, when `available`. */
+  version: string | null;
+  /** Release notes for the available version, when provided. */
+  notes: string | null;
+};
+
+/** Download/apply progress emitted on `lux://update` during `updateInstall`. */
+export type UpdateProgress =
+  | { kind: "started"; contentLength: number | null }
+  | { kind: "progress"; downloaded: number; contentLength: number | null }
+  | { kind: "finished" };
+
+export type VisionEncodeResponse = {
+  /** `data:<mime>;base64,<...>` ready for an `image_url` content part. */
+  dataUrl: string;
+  /** Produced MIME type (`image/webp`, `image/png`, or original on passthrough). */
+  mimeType: string;
+  /** Encoded byte length (pre-base64). */
+  size: number;
+  /** Output width in pixels, when known. */
+  width: number | null;
+  /** Output height in pixels, when known. */
+  height: number | null;
+  /** True when original bytes were forwarded unchanged (undecodable / smallest-wins). */
+  passthrough: boolean;
+};
+
 export type TestHealthResponse = {
   workspaceRoot: string;
   status: "passed" | "failed" | "timeout" | "error" | string;
@@ -507,6 +539,14 @@ export const luxCommands = {
     notes: string[];
   }>("file_media_ai_context", { request }),
   fileAssetData: (path: string) => invokeRequired<FileAssetResponse>("file_asset_data", { path }),
+  aiVisionEncode: (request: {
+    path?: string | null;
+    dataUrl?: string | null;
+    format?: "webp" | "png" | "auto";
+    maxDimension?: number;
+  }) => invokeRequired<VisionEncodeResponse>("ai_vision_encode", { request }),
+  setScanConcurrency: (mode: "auto" | "all" | "half") =>
+    invokeOptional<void>("set_scan_concurrency", { mode }, () => undefined),
   fileOpenExternal: (path: string) => invokeRequired<void>("file_open_external", { path }),
   databaseListTables: (path: string, options?: Partial<FileInspectionOptions>) =>
     invokeRequired<DatabaseTablePreview[]>("database_list_tables", { path, options: options ?? null }),
@@ -701,6 +741,15 @@ export const luxCommands = {
     }),
   keybindingsGet: () => invokeOptional<KeybindingProfile>("keybindings_get", undefined, () => defaultKeybindingProfile()),
   keybindingsSet: (profile: KeybindingProfile) => invokeOptional<KeybindingProfile>("keybindings_set", { profile }, () => profile),
+  // Auto-update. In non-desktop/browser-preview runtimes there is no updater, so
+  // `updateCheck` reports "up to date" and `updateInstall` is unavailable.
+  updateCheck: () => invokeOptional<UpdateCheckResult>("update_check", undefined, () => ({
+    available: false,
+    currentVersion: "",
+    version: null,
+    notes: null,
+  })),
+  updateInstall: () => invokeRequired<void>("update_install"),
 };
 
 let browserUntitledCounter = 0;
@@ -815,12 +864,20 @@ export async function subscribeAiChatStream(handler: (event: AiChatStreamEvent) 
   return listen<AiChatStreamEvent>("lux://ai-chat-stream", (event) => handler(event.payload));
 }
 
+export async function subscribeUpdateProgress(handler: (event: UpdateProgress) => void) {
+  if (!isTauriRuntime()) return () => undefined;
+  return listen<UpdateProgress>("lux://update", (event) => handler(event.payload));
+}
+
 /** Input for the native Rust turn-loop (`ai_run_turn`). */
 export type AiRunTurnInput = {
   turnId: string;
   messageId: string;
   sessionId: string;
   message: string;
+  /** Fully assembled user content: plain string or OpenAI-style content-part array
+   *  (text + `image_url` vision parts). Carries attachments/vision to the native turn. */
+  userContent?: unknown;
   history: Array<{ role: string; content: string }>;
   baseUrl: string;
   apiKey: string | null;

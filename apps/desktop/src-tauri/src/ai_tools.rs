@@ -579,12 +579,12 @@ pub async fn ai_read_file(
     let max_bytes = max_bytes.unwrap_or(120_000).max(1);
     let path = resolve_workspace_path(&state, &path)?;
     tokio::task::spawn_blocking(move || -> Result<AiReadFileResult, String> {
+        use std::io::Read;
         let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
         if !metadata.is_file() {
             return Err("path is not a file".to_string());
         }
         let size = metadata.len();
-        use std::io::Read;
         let limit = usize::try_from(max_bytes.min(size)).unwrap_or(usize::MAX);
         let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
         let mut buffer = vec![0; limit];
@@ -635,7 +635,7 @@ pub async fn ai_glob(
         .map(|e| e.path)
         .collect();
     Ok(AiGlobResult {
-        pattern: pattern.to_string(),
+        pattern: pattern.clone(),
         count: files.len(),
         files,
     })

@@ -155,6 +155,8 @@ type LuxState = {
   aiChatOpen: boolean;
   settingsOpen: boolean;
   settingsInitialSection: string | null;
+  /** True when a newer signed build is available (drives the title-bar badge). */
+  updateAvailable: boolean;
   locale: Locale;
   aiPreferences: AiPreferences;
   aiIndex: AiIndexState;
@@ -198,6 +200,7 @@ type LuxState = {
   toggleAiChat: () => void;
   setSettingsOpen: (open: boolean) => void;
   openSettingsSection: (sectionId: string) => void;
+  setUpdateAvailable: (available: boolean) => void;
   setLocale: (locale: Locale) => void;
   updateAiPreferences: (preferences: Partial<AiPreferences>) => void;
   setAiPreferences: (preferences: AiPreferences) => void;
@@ -283,6 +286,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   sidebarVisible: true,
   aiChatOpen: false,
   settingsOpen: false,
+  updateAvailable: false,
   settingsInitialSection: null,
   locale: DEFAULT_LOCALE,
   aiPreferences: defaultAiPreferences,
@@ -325,6 +329,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   setAiChatOpen: (aiChatOpen) => set({ aiChatOpen }),
   toggleAiChat: () => set((state) => ({ aiChatOpen: !state.aiChatOpen })),
   setSettingsOpen: (settingsOpen) => set({ settingsOpen, ...(settingsOpen ? {} : { settingsInitialSection: null }) }),
+  setUpdateAvailable: (updateAvailable) => set({ updateAvailable }),
   openSettingsSection: (sectionId) => set({ settingsOpen: true, settingsInitialSection: sectionId }),
   setLocale: (locale) => set({ locale }),
   updateAiPreferences: (preferences) => set((state) => ({ aiPreferences: mergeAiPreferences(state.aiPreferences, preferences) })),

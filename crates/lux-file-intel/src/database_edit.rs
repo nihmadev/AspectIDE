@@ -1,6 +1,8 @@
 use std::path::Path;
 
-use lux_core::{AppError, AppResult, DatabaseColumnPreview, DatabaseTablePreview, FileInspectionOptions};
+use lux_core::{
+    AppError, AppResult, DatabaseColumnPreview, DatabaseTablePreview, FileInspectionOptions,
+};
 use rusqlite::{types::ValueRef, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 
@@ -60,8 +62,7 @@ pub fn database_execute(path: &Path, sql: &str) -> AppResult<DatabaseExecuteResu
         .map(|index| {
             statement
                 .column_name(index)
-                .map(ToOwned::to_owned)
-                .unwrap_or_else(|_| format!("column_{index}"))
+                .map_or_else(|_| format!("column_{index}"), ToOwned::to_owned)
         })
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
@@ -98,14 +99,9 @@ pub fn database_update_cell(path: &Path, update: &DatabaseCellUpdate) -> AppResu
     let connection = open_writable(path)?;
     let quoted_table = quote_sqlite_ident(&update.table);
     let quoted_column = quote_sqlite_ident(&update.column);
-    let sql = format!(
-        "UPDATE {quoted_table} SET {quoted_column} = ?1 WHERE rowid = ?2"
-    );
+    let sql = format!("UPDATE {quoted_table} SET {quoted_column} = ?1 WHERE rowid = ?2");
     connection
-        .execute(
-            &sql,
-            rusqlite::params![update.value, update.rowid],
-        )
+        .execute(&sql, rusqlite::params![update.value, update.rowid])
         .map_err(|error| AppError::Service(error.to_string()))?;
     Ok(())
 }
@@ -129,7 +125,9 @@ pub fn database_tables(
         )
         .map_err(|error| AppError::Service(error.to_string()))?;
     let schema_rows = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| AppError::Service(error.to_string()))?;
 
     let mut tables = Vec::new();
@@ -189,7 +187,10 @@ fn table_rows(
     options: &FileInspectionOptions,
 ) -> AppResult<(Vec<Vec<String>>, Option<usize>, bool)> {
     let quoted = quote_sqlite_ident(table);
-    let sql = format!("SELECT rowid, * FROM {quoted} LIMIT {}", options.max_rows + 1);
+    let sql = format!(
+        "SELECT rowid, * FROM {quoted} LIMIT {}",
+        options.max_rows + 1
+    );
     let mut statement = connection
         .prepare(&sql)
         .map_err(|error| AppError::Service(error.to_string()))?;

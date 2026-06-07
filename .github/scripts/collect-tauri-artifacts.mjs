@@ -4,15 +4,27 @@ import { basename, dirname, extname, join } from "node:path";
 const bundleRoot = "apps/desktop/src-tauri/target/release/bundle";
 const outputRoot = "release-assets";
 
+// User-facing installers, by platform.
 const platformExtensions = new Map([
   ["win32", new Set([".exe", ".msi"])],
   ["darwin", new Set([".dmg", ".pkg"])],
   ["linux", new Set([".appimage", ".deb", ".rpm"])],
 ]);
 
-const allowedExtensions = platformExtensions.get(process.platform);
+// Updater artifacts (the signed bundle the updater downloads + its detached
+// signature) use compound suffixes that `extname` cannot match. The updater
+// manifest (latest.json) is generated later from these. Collecting them here is
+// what makes the GitHub-Releases updater endpoint actually resolve.
+const platformUpdaterSuffixes = new Map([
+  ["win32", [".nsis.zip", ".nsis.zip.sig", ".msi.zip", ".msi.zip.sig"]],
+  ["darwin", [".app.tar.gz", ".app.tar.gz.sig"]],
+  ["linux", [".appimage.tar.gz", ".appimage.tar.gz.sig"]],
+]);
 
-if (!allowedExtensions) {
+const allowedExtensions = platformExtensions.get(process.platform);
+const updaterSuffixes = platformUpdaterSuffixes.get(process.platform);
+
+if (!allowedExtensions || !updaterSuffixes) {
   throw new Error(`Unsupported release platform: ${process.platform}`);
 }
 
@@ -23,8 +35,13 @@ if (!existsSync(bundleRoot)) {
 rmSync(outputRoot, { force: true, recursive: true });
 mkdirSync(outputRoot, { recursive: true });
 
+const matchesUpdaterSuffix = (file) => {
+  const lower = file.toLowerCase();
+  return updaterSuffixes.some((suffix) => lower.endsWith(suffix));
+};
+
 const files = walk(bundleRoot)
-  .filter((file) => allowedExtensions.has(extname(file).toLowerCase()))
+  .filter((file) => allowedExtensions.has(extname(file).toLowerCase()) || matchesUpdaterSuffix(file))
   .sort((left, right) => left.localeCompare(right));
 
 if (files.length === 0) {

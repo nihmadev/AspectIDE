@@ -2,8 +2,23 @@ import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 const distAssetsDir = join("dist", "assets");
+// Default ceiling for eager / feature chunks — the figure that actually governs
+// cold-start cost, kept strict.
 const maxAnyChunkBytes = 450 * 1024;
 const maxEntryChunkBytes = 300 * 1024;
+// Lazily-loaded heavy vendor chunks (diagram + math rendering) are split out and
+// only fetched when a Mermaid/KaTeX preview is opened — never on startup. They
+// carry an irreducible third-party footprint (Mermaid core alone is ~1.9 MB), so
+// they get an explicit higher ceiling instead of inflating the global budget.
+// Each prefix is matched against chunk names; anything not listed stays strict.
+const lazyVendorBudgets = [
+  { prefix: "vendor-mermaid-", maxBytes: 2_000 * 1024 },
+  { prefix: "vendor-graph-cytoscape-", maxBytes: 512 * 1024 },
+  { prefix: "vendor-graph-dagre-", maxBytes: 512 * 1024 },
+  { prefix: "vendor-graph-elk-", maxBytes: 768 * 1024 },
+  { prefix: "vendor-katex-", maxBytes: 512 * 1024 },
+  { prefix: "vendor-d3-", maxBytes: 512 * 1024 },
+];
 const requiredChunkPrefixes = [
   "AiChatPanel-",
   "BottomPanel-",
@@ -15,6 +30,11 @@ const requiredChunkPrefixes = [
   "vendor-terminal-",
 ];
 
+function budgetForChunk(name) {
+  const lazy = lazyVendorBudgets.find((entry) => name.startsWith(entry.prefix));
+  return lazy ? lazy.maxBytes : maxAnyChunkBytes;
+}
+
 const entries = await readdir(distAssetsDir);
 const jsAssets = entries.filter((entry) => entry.endsWith(".js"));
 if (jsAssets.length === 0) {
@@ -25,9 +45,11 @@ const sizes = await Promise.all(
   jsAssets.map(async (name) => ({ name, bytes: (await stat(join(distAssetsDir, name))).size })),
 );
 const errors = [];
-const oversized = sizes.filter((asset) => asset.bytes > maxAnyChunkBytes);
-for (const asset of oversized) {
-  errors.push(`${asset.name} is ${formatBytes(asset.bytes)}, above ${formatBytes(maxAnyChunkBytes)}.`);
+for (const asset of sizes) {
+  const budget = budgetForChunk(asset.name);
+  if (asset.bytes > budget) {
+    errors.push(`${asset.name} is ${formatBytes(asset.bytes)}, above ${formatBytes(budget)}.`);
+  }
 }
 
 const entryChunk = sizes.find((asset) => /^index-[\w-]+\.js$/.test(asset.name));

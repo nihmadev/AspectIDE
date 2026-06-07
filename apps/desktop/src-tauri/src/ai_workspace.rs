@@ -1,8 +1,8 @@
-//! Native RepoMap + WorkspaceIndex tools — Stage 1.
+//! Native `RepoMap` + `WorkspaceIndex` tools — Stage 1.
 //!
-//! RepoMap: sorted list of important workspace files by path-score.
-//! WorkspaceIndex: categorized snapshot (language mix, directories, important/test/
-//! source/entrypoint/largest files). Both compose `lux_fs` list_files natively.
+//! `RepoMap`: sorted list of important workspace files by path-score.
+//! `WorkspaceIndex`: categorized snapshot (language mix, directories, important/test/
+//! source/entrypoint/largest files). Both compose `lux_fs` `list_files` natively.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -108,7 +108,8 @@ struct FileDesc {
 impl FileDesc {
     fn new(path: &str, root: &str, size: u64) -> Self {
         let path = ai_semantic::normalize_slashes_pub(path);
-        let root_lower = ai_semantic::normalize_slashes_pub(root.trim_end_matches('/')).to_lowercase();
+        let root_lower =
+            ai_semantic::normalize_slashes_pub(root.trim_end_matches('/')).to_lowercase();
         let relative_path = if !root_lower.is_empty()
             && path.to_lowercase().starts_with(&format!("{root_lower}/"))
         {
@@ -133,10 +134,20 @@ impl FileDesc {
     }
 
     fn top_directory(&self) -> String {
-        let parts: Vec<&str> = self.relative_path.split('/').filter(|s| !s.is_empty()).collect();
-        if parts.is_empty() { return ".".to_string(); }
-        if parts[0].starts_with('.') { return parts[0].to_string(); }
-        if parts[0] == "src" { return "src".to_string(); }
+        let parts: Vec<&str> = self
+            .relative_path
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.is_empty() {
+            return ".".to_string();
+        }
+        if parts[0].starts_with('.') {
+            return parts[0].to_string();
+        }
+        if parts[0] == "src" {
+            return "src".to_string();
+        }
         if parts.len() > 1 && matches!(parts[0], "apps" | "crates" | "packages") {
             return format!("{}/{}", parts[0], parts[1]);
         }
@@ -144,28 +155,83 @@ impl FileDesc {
     }
 
     fn is_important(&self) -> bool {
-        const NAMES: &[&str] = &["package.json", "cargo.toml", "pyproject.toml", "go.mod", "pom.xml", "build.gradle", "dockerfile", "makefile", ".env.example"];
+        const NAMES: &[&str] = &[
+            "package.json",
+            "cargo.toml",
+            "pyproject.toml",
+            "go.mod",
+            "pom.xml",
+            "build.gradle",
+            "dockerfile",
+            "makefile",
+            ".env.example",
+        ];
         const PREFIXES: &[&str] = &["vite.config.", "tsconfig.", "jsconfig."];
-        NAMES.iter().any(|n| self.relative_lower == *n || self.relative_lower.ends_with(&format!("/{n}")))
-            || PREFIXES.iter().any(|p| self.relative_lower.starts_with(p) || self.relative_lower.contains(&format!("/{p}")))
+        NAMES
+            .iter()
+            .any(|n| self.relative_lower == *n || self.relative_lower.ends_with(&format!("/{n}")))
+            || PREFIXES.iter().any(|p| {
+                self.relative_lower.starts_with(p) || self.relative_lower.contains(&format!("/{p}"))
+            })
             || self.relative_lower.contains("readme")
     }
 
     fn is_test(&self) -> bool {
-        self.basename_lower.split(['.', '_', '-']).any(|seg| matches!(seg, "test" | "spec" | "tests" | "specs"))
-            || self.relative_lower.split('/').any(|seg| matches!(seg, "__tests__" | "test" | "tests" | "spec" | "specs"))
+        self.basename_lower
+            .split(['.', '_', '-'])
+            .any(|seg| matches!(seg, "test" | "spec" | "tests" | "specs"))
+            || self
+                .relative_lower
+                .split('/')
+                .any(|seg| matches!(seg, "__tests__" | "test" | "tests" | "spec" | "specs"))
     }
 
     fn is_source(&self) -> bool {
-        self.relative_lower.contains("/src/") || self.relative_lower.starts_with("src/")
-            || matches!(self.extension.as_str(), ".ts" | ".tsx" | ".js" | ".jsx" | ".rs" | ".py" | ".go" | ".java" | ".kt" | ".cs" | ".vue" | ".svelte" | ".astro")
+        self.relative_lower.contains("/src/")
+            || self.relative_lower.starts_with("src/")
+            || matches!(
+                self.extension.as_str(),
+                ".ts"
+                    | ".tsx"
+                    | ".js"
+                    | ".jsx"
+                    | ".rs"
+                    | ".py"
+                    | ".go"
+                    | ".java"
+                    | ".kt"
+                    | ".cs"
+                    | ".vue"
+                    | ".svelte"
+                    | ".astro"
+            )
     }
 
     fn is_entrypoint(&self) -> bool {
-        const ENTRYPOINTS: &[&str] = &["main.ts", "main.tsx", "main.js", "main.jsx", "main.rs", "main.go", "main.py", "main.java",
-            "index.ts", "index.tsx", "index.js", "index.jsx", "app.ts", "app.tsx", "app.js", "app.jsx", "lib.ts", "lib.rs", "mod.rs"];
+        const ENTRYPOINTS: &[&str] = &[
+            "main.ts",
+            "main.tsx",
+            "main.js",
+            "main.jsx",
+            "main.rs",
+            "main.go",
+            "main.py",
+            "main.java",
+            "index.ts",
+            "index.tsx",
+            "index.js",
+            "index.jsx",
+            "app.ts",
+            "app.tsx",
+            "app.js",
+            "app.jsx",
+            "lib.ts",
+            "lib.rs",
+            "mod.rs",
+        ];
         ENTRYPOINTS.contains(&self.basename_lower.as_str())
-            || self.relative_lower.ends_with("src/main.rs") || self.relative_lower.ends_with("src-tauri/src/lib.rs")
+            || self.relative_lower.ends_with("src/main.rs")
+            || self.relative_lower.ends_with("src-tauri/src/lib.rs")
     }
 
     fn to_index_file(&self) -> WorkspaceIndexFile {
@@ -196,32 +262,58 @@ pub async fn ai_workspace_index(
         .map(|e| ai_semantic::normalize_slashes_pub(&e.path.to_string_lossy()))
         .filter(|p| !ai_semantic::is_low_signal_path_pub(p))
         .map(|p| {
-            let size = entries.iter().find(|e| ai_semantic::normalize_slashes_pub(&e.path.to_string_lossy()) == p).map(|e| e.size).unwrap_or(0);
+            let size = entries
+                .iter()
+                .find(|e| ai_semantic::normalize_slashes_pub(&e.path.to_string_lossy()) == p)
+                .map_or(0, |e| e.size);
             FileDesc::new(&p, &root_str, size)
         })
         .collect();
 
-    let by_language = top_counts(descs.iter().map(|d| d.language()), 20);
-    let by_directory = top_counts(descs.iter().map(|d| d.top_directory()), 24);
+    let by_language = top_counts(descs.iter().map(FileDesc::language), 20);
+    let by_directory = top_counts(descs.iter().map(FileDesc::top_directory), 24);
 
     let mut important: Vec<&FileDesc> = descs.iter().filter(|d| d.is_important()).collect();
-    important.sort_by(|a, b| ai_semantic::score_path_pub(&b.relative_path).cmp(&ai_semantic::score_path_pub(&a.relative_path)).then_with(|| a.relative_lower.cmp(&b.relative_lower)));
+    important.sort_by(|a, b| {
+        ai_semantic::score_path_pub(&b.relative_path)
+            .cmp(&ai_semantic::score_path_pub(&a.relative_path))
+            .then_with(|| a.relative_lower.cmp(&b.relative_lower))
+    });
     important.truncate(max_files);
 
     let mut tests: Vec<&FileDesc> = descs.iter().filter(|d| d.is_test()).collect();
-    tests.sort_by(|a, b| ai_semantic::score_path_pub(&b.relative_path).cmp(&ai_semantic::score_path_pub(&a.relative_path)).then_with(|| a.relative_lower.cmp(&b.relative_lower)));
+    tests.sort_by(|a, b| {
+        ai_semantic::score_path_pub(&b.relative_path)
+            .cmp(&ai_semantic::score_path_pub(&a.relative_path))
+            .then_with(|| a.relative_lower.cmp(&b.relative_lower))
+    });
     tests.truncate(max_files);
 
-    let mut source: Vec<&FileDesc> = descs.iter().filter(|d| d.is_source() && !d.is_test()).collect();
-    source.sort_by(|a, b| ai_semantic::score_path_pub(&b.relative_path).cmp(&ai_semantic::score_path_pub(&a.relative_path)).then_with(|| a.relative_lower.cmp(&b.relative_lower)));
+    let mut source: Vec<&FileDesc> = descs
+        .iter()
+        .filter(|d| d.is_source() && !d.is_test())
+        .collect();
+    source.sort_by(|a, b| {
+        ai_semantic::score_path_pub(&b.relative_path)
+            .cmp(&ai_semantic::score_path_pub(&a.relative_path))
+            .then_with(|| a.relative_lower.cmp(&b.relative_lower))
+    });
     source.truncate(max_files);
 
     let mut entrypoints: Vec<&FileDesc> = descs.iter().filter(|d| d.is_entrypoint()).collect();
-    entrypoints.sort_by(|a, b| ai_semantic::score_path_pub(&b.relative_path).cmp(&ai_semantic::score_path_pub(&a.relative_path)).then_with(|| a.relative_lower.cmp(&b.relative_lower)));
+    entrypoints.sort_by(|a, b| {
+        ai_semantic::score_path_pub(&b.relative_path)
+            .cmp(&ai_semantic::score_path_pub(&a.relative_path))
+            .then_with(|| a.relative_lower.cmp(&b.relative_lower))
+    });
     entrypoints.truncate(max_files);
 
     let mut largest: Vec<&FileDesc> = descs.iter().collect();
-    largest.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.relative_lower.cmp(&b.relative_lower)));
+    largest.sort_by(|a, b| {
+        b.size
+            .cmp(&a.size)
+            .then_with(|| a.relative_lower.cmp(&b.relative_lower))
+    });
     largest.truncate(max_files.min(20));
 
     Ok(AiWorkspaceIndexResponse {
@@ -244,7 +336,10 @@ fn top_counts(iter: impl Iterator<Item = String>, limit: usize) -> Vec<CountEntr
     for item in iter {
         *map.entry(item).or_default() += 1;
     }
-    let mut entries: Vec<CountEntry> = map.into_iter().map(|(key, count)| CountEntry { key, count }).collect();
+    let mut entries: Vec<CountEntry> = map
+        .into_iter()
+        .map(|(key, count)| CountEntry { key, count })
+        .collect();
     entries.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
     entries.truncate(limit);
     entries
@@ -263,9 +358,16 @@ mod tests {
 
     #[test]
     fn top_counts_sorts_and_truncates() {
-        let items = vec!["rust", "rust", "typescript", "typescript", "typescript", "python"]
-            .into_iter()
-            .map(str::to_string);
+        let items = vec![
+            "rust",
+            "rust",
+            "typescript",
+            "typescript",
+            "typescript",
+            "python",
+        ]
+        .into_iter()
+        .map(str::to_string);
         let counts = top_counts(items, 2);
         assert_eq!(counts.len(), 2);
         assert_eq!(counts[0].key, "typescript");

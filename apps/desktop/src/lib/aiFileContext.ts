@@ -10,6 +10,7 @@ import {
 import { parseSpreadsheetDocument } from "./spreadsheetDocument";
 import { truncateText } from "./aiRuntimeShared";
 import { isTauriRuntime, luxCommands } from "./tauri";
+import type { VisionImageFormat } from "./aiVisionFormat";
 import type { DocumentSnapshot, FileInspection, FileInspectionOptions, FileViewStrategy } from "./types";
 
 export const defaultAttachmentInspectOptions: FileInspectionOptions = {
@@ -20,7 +21,14 @@ export const defaultAttachmentInspectOptions: FileInspectionOptions = {
 };
 
 const maxAttachmentChars = 18_000;
+/** Upper bound on the *encoded* vision payload sent inline to the model. */
 export const maxVisionImageBytes = 4 * 1024 * 1024;
+/**
+ * Upper bound on the *source* bytes we hand to the native encoder. Larger than
+ * {@link maxVisionImageBytes} because downscale + lossless WebP routinely shrinks
+ * a big screenshot well under the inline budget. Mirrors the Rust `MAX_SOURCE_BYTES`.
+ */
+export const maxVisionSourceBytes = 16 * 1024 * 1024;
 /** Stored inline on chat messages for thumbnail/history display. */
 export const maxMessageImagePreviewBytes = 2 * 1024 * 1024;
 const visionImageExtensions = new Set(["png", "jpg", "jpeg", "jpe", "webp", "gif", "bmp", "avif", "heif", "heic"]);
@@ -108,6 +116,58 @@ export function readFileAsDataUrl(file: File, maxBytes: number): Promise<string 
   });
 }
 
+/**
+ * Preprocesses a workspace image path into a vision data URL via the native
+ * encoder (downscale + lossless WebP/PNG with built-in fallback). Returns the
+ * encoded URL, or `undefined` when the encoded payload still exceeds the inline
+ * budget. Falls back to the raw `fileAssetData` data URL if the encoder command
+ * is unavailable (older backend) so vision never silently breaks.
+ */
+export async function encodeVisionImageFromPath(
+  path: string,
+  format: VisionImageFormat,
+): Promise<{ dataUrl: string; size: number } | undefined> {
+  try {
+    const encoded = await luxCommands.aiVisionEncode({ path, format });
+    if (!encoded.dataUrl.startsWith("data:image/")) return undefined;
+    if (encoded.size > maxVisionImageBytes) return undefined;
+    return { dataUrl: encoded.dataUrl, size: encoded.size };
+  } catch {
+    // Backend without ai_vision_encode (or an unexpected failure): fall back to
+    // the raw asset bytes so a vision-capable model still receives the image.
+    try {
+      const asset = await luxCommands.fileAssetData(path);
+      if (asset.size <= maxVisionImageBytes && asset.dataUrl.startsWith("data:image/")) {
+        return { dataUrl: asset.dataUrl, size: Number(asset.size) };
+      }
+    } catch {
+      // Vision is optional; structured inspect still applies.
+    }
+    return undefined;
+  }
+}
+
+/**
+ * Preprocesses an in-memory image data URL (clipboard paste, drag-drop without a
+ * disk path, browser screenshot) through the native encoder. Returns the encoded
+ * data URL, or the original on any failure so the model still sees the image.
+ */
+export async function encodeVisionImageFromDataUrl(
+  dataUrl: string,
+  format: VisionImageFormat,
+): Promise<string> {
+  if (!isTauriRuntime()) return dataUrl;
+  try {
+    const encoded = await luxCommands.aiVisionEncode({ dataUrl, format });
+    if (encoded.dataUrl.startsWith("data:image/") && encoded.size <= maxVisionImageBytes) {
+      return encoded.dataUrl;
+    }
+    return dataUrl;
+  } catch {
+    return dataUrl;
+  }
+}
+
 const audioExtensions = new Set(["mp3", "wav", "flac", "ogg", "oga", "m4a", "aac", "opus", "wma", "aiff", "aif", "mid", "midi"]);
 const videoExtensions = new Set(["mp4", "m4v", "webm", "mov", "mkv", "avi", "wmv", "mpeg", "mpg", "3gp", "ogv"]);
 
@@ -129,6 +189,7 @@ export async function buildPathAttachmentContext(
   options: {
     inspect?: FileInspectionOptions;
     includeVisionImage?: boolean;
+    visionImageFormat?: VisionImageFormat;
     includeMediaContext?: boolean;
     localSttCommand?: string;
     localSttModelPath?: string;
@@ -141,14 +202,10 @@ export async function buildPathAttachmentContext(
   let visionImageUrl: string | undefined;
 
   if (options.includeVisionImage && isTauriRuntime() && isVisionImagePath(path)) {
-    try {
-      const asset = await luxCommands.fileAssetData(path);
-      size = Number(asset.size);
-      if (asset.size <= maxVisionImageBytes && asset.dataUrl.startsWith("data:image/")) {
-        visionImageUrl = asset.dataUrl;
-      }
-    } catch {
-      // Vision is optional; structured inspect still applies.
+    const encoded = await encodeVisionImageFromPath(path, options.visionImageFormat ?? "png");
+    if (encoded) {
+      size = encoded.size;
+      visionImageUrl = encoded.dataUrl;
     }
   }
 

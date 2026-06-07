@@ -47,6 +47,18 @@ pub fn settings_set(
     Ok(setting)
 }
 
+/// Sets the global CPU budget for filesystem scans and content search. Called
+/// from the frontend on startup and whenever the user changes the preference.
+/// Accepts `"auto"` (reserve a core for the UI), `"all"`, or `"half"`.
+#[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized by value"
+)]
+pub fn set_scan_concurrency(mode: String) {
+    lux_core::set_scan_concurrency(lux_core::ScanConcurrency::from_preference(&mode));
+}
+
 #[tauri::command]
 pub fn keybindings_get(state: State<'_, SharedState>) -> Result<KeybindingProfile, String> {
     with_settings(&state, |settings| Ok(settings.keybinding_profile())).map_err(String::from)

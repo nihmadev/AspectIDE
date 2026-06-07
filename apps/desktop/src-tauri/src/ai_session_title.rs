@@ -31,7 +31,12 @@ pub struct GenerateTitleInput {
 /// Generate a short session title. Falls back to a heuristic title on any failure.
 #[tauri::command]
 pub async fn ai_generate_session_title(input: GenerateTitleInput) -> Result<String, String> {
-    let snippet: String = input.first_user_message.trim().chars().take(1_200).collect();
+    let snippet: String = input
+        .first_user_message
+        .trim()
+        .chars()
+        .take(1_200)
+        .collect();
     let fallback = heuristic_title(&input.first_user_message);
     if snippet.is_empty() {
         return Ok(fallback);
@@ -56,7 +61,8 @@ pub async fn ai_generate_session_title(input: GenerateTitleInput) -> Result<Stri
 
     match crate::ai_chat_backend::completion(request).await {
         Ok(response) => {
-            let raw = response.body
+            let raw = response
+                .body
                 .pointer("/choices/0/message/content")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
@@ -77,27 +83,53 @@ fn pick_title_model(models: &[TitleModel], active_alias: &str) -> String {
     for model in models {
         let haystack = format!("{} {} {}", model.id, model.alias, model.name).to_lowercase();
         let mut score = 0;
-        if haystack.contains("haiku") || haystack.contains("mini") || haystack.contains("nano")
-            || haystack.contains("flash") || haystack.contains("small") || haystack.contains("fast")
-            || haystack.contains("lite") || haystack.contains("8b") {
+        if haystack.contains("haiku")
+            || haystack.contains("mini")
+            || haystack.contains("nano")
+            || haystack.contains("flash")
+            || haystack.contains("small")
+            || haystack.contains("fast")
+            || haystack.contains("lite")
+            || haystack.contains("8b")
+        {
             score += 40;
         }
-        if haystack.contains("haiku") || haystack.contains("flash") { score += 20; }
-        if haystack.contains("mini") || haystack.contains("nano") { score += 15; }
-        if model.alias == active_alias || model.id == active_alias { score += 5; }
-        if score > 0 && best.as_ref().map(|(_, s)| score > *s).unwrap_or(true) {
+        if haystack.contains("haiku") || haystack.contains("flash") {
+            score += 20;
+        }
+        if haystack.contains("mini") || haystack.contains("nano") {
+            score += 15;
+        }
+        if model.alias == active_alias || model.id == active_alias {
+            score += 5;
+        }
+        if score > 0 && best.as_ref().is_none_or(|(_, s)| score > *s) {
             best = Some((model, score));
         }
     }
-    best.map(|(m, _)| if m.alias.is_empty() { m.id.clone() } else { m.alias.clone() })
-        .unwrap_or_else(|| active_alias.to_string())
+    best.map_or_else(
+        || active_alias.to_string(),
+        |(m, _)| {
+            if m.alias.is_empty() {
+                m.id.clone()
+            } else {
+                m.alias.clone()
+            }
+        },
+    )
 }
 
 fn parse_generated_title(raw: &str) -> String {
-    let line = raw.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     let without_prefix = line
-        .strip_prefix("title:").or_else(|| line.strip_prefix("Title:"))
-        .or_else(|| line.strip_prefix("chat title:")).or_else(|| line.strip_prefix("Chat title:"))
+        .strip_prefix("title:")
+        .or_else(|| line.strip_prefix("Title:"))
+        .or_else(|| line.strip_prefix("chat title:"))
+        .or_else(|| line.strip_prefix("Chat title:"))
         .unwrap_or(line)
         .trim();
     normalize_title(without_prefix)
@@ -114,7 +146,7 @@ fn normalize_title(value: &str) -> String {
     }
     let stripped = normalized
         .trim_matches(|c| c == '"' || c == '\'' || c == '`')
-        .trim_end_matches(|c| c == '.' || c == '!' || c == '?')
+        .trim_end_matches(['.', '!', '?'])
         .trim();
     if stripped.is_empty() {
         return DEFAULT_TITLE.to_string();
@@ -148,24 +180,40 @@ mod tests {
 
     #[test]
     fn parse_strips_title_prefix() {
-        assert_eq!(parse_generated_title("Title: Build auth flow"), "Build auth flow");
-        assert_eq!(parse_generated_title("chat title: Refactor parser"), "Refactor parser");
+        assert_eq!(
+            parse_generated_title("Title: Build auth flow"),
+            "Build auth flow"
+        );
+        assert_eq!(
+            parse_generated_title("chat title: Refactor parser"),
+            "Refactor parser"
+        );
     }
 
     #[test]
     fn pick_fastest_model() {
         let models = vec![
-            TitleModel { id: "gpt-5".into(), alias: "gpt-5".into(), name: "GPT-5".into() },
-            TitleModel { id: "claude-haiku".into(), alias: "haiku".into(), name: "Claude Haiku".into() },
+            TitleModel {
+                id: "gpt-5".into(),
+                alias: "gpt-5".into(),
+                name: "GPT-5".into(),
+            },
+            TitleModel {
+                id: "claude-haiku".into(),
+                alias: "haiku".into(),
+                name: "Claude Haiku".into(),
+            },
         ];
         assert_eq!(pick_title_model(&models, "gpt-5"), "haiku");
     }
 
     #[test]
     fn pick_model_falls_back_to_active() {
-        let models = vec![
-            TitleModel { id: "gpt-5".into(), alias: "gpt-5".into(), name: "GPT-5".into() },
-        ];
+        let models = vec![TitleModel {
+            id: "gpt-5".into(),
+            alias: "gpt-5".into(),
+            name: "GPT-5".into(),
+        }];
         assert_eq!(pick_title_model(&models, "gpt-5"), "gpt-5");
     }
 }

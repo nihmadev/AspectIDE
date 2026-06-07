@@ -6148,3 +6148,278 @@ kbd {
     display: none;
   }
 }
+
+/* ----------------------------------------------------------------
+   Auto-update notice (bottom-right transient card) + title badge.
+   ---------------------------------------------------------------- */
+.update-notice {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 60;
+  width: 360px;
+  max-width: calc(100vw - 36px);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--menu);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: update-notice-in 260ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes update-notice-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.update-notice-glow {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  opacity: 0.7;
+}
+
+.update-notice[data-status="error"] .update-notice-glow {
+  background: linear-gradient(90deg, transparent, var(--danger), transparent);
+}
+
+.update-notice-body {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  position: relative;
+}
+
+.update-notice-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-md);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.update-notice[data-status="error"] .update-notice-icon {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.update-notice-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.update-notice-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.update-notice-text {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+
+.update-notice-error-text {
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.update-notice-notes {
+  margin: var(--space-2) 0 0;
+  max-height: 160px;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  border: 1px solid var(--border-subtle);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-1);
+  white-space: pre-wrap;
+}
+
+.update-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.update-notice-primary {
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: var(--send-bg);
+  color: var(--send-fg);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.update-notice-primary:hover {
+  background: var(--send-bg-hover);
+}
+
+.update-notice-ghost {
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-1);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.update-notice-ghost:hover {
+  background: var(--hover);
+  border-color: var(--border-strong);
+}
+
+.update-notice-bar-track {
+  margin-top: var(--space-3);
+  height: 5px;
+  border-radius: 3px;
+  background: var(--bg-1);
+  overflow: hidden;
+}
+
+.update-notice-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--accent);
+  transition: width 200ms ease;
+}
+
+.update-notice-bar[data-indeterminate="true"] {
+  width: 36%;
+  animation: update-notice-indeterminate 1.1s ease-in-out infinite;
+}
+
+@keyframes update-notice-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(360%); }
+}
+
+.update-notice-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--icon-muted);
+  cursor: pointer;
+}
+
+.update-notice-close:hover {
+  background: var(--hover);
+  color: var(--icon-strong);
+}
+
+.update-notice-spin {
+  animation: update-notice-spin 1s linear infinite;
+}
+
+@keyframes update-notice-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Title-bar update badge */
+.title-update-badge {
+  position: relative;
+  color: var(--accent);
+}
+
+.title-update-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--chrome);
+}
+
+/* Settings → Updates row */
+.settings-update-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+}
+
+.settings-update-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-update-version {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+
+.settings-update-status {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.settings-update-row[data-status="available"] .settings-update-status {
+  color: var(--accent);
+}
+
+.settings-update-row[data-status="error"] .settings-update-status {
+  color: var(--danger);
+}
+
+.settings-update-check {
+  flex: 0 0 auto;
+  padding: 7px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-0);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.settings-update-check:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.settings-update-check:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

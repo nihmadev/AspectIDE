@@ -43,7 +43,9 @@ pub async fn database_update_cell(
     update: DatabaseCellUpdate,
 ) -> Result<(), String> {
     let path = resolve_workspace_path(&state, &path)?;
-    tokio::task::spawn_blocking(move || apply_database_cell_update(&path, &update).map_err(String::from))
-        .await
-        .map_err(|error| error.to_string())?
+    tokio::task::spawn_blocking(move || {
+        apply_database_cell_update(&path, &update).map_err(String::from)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }

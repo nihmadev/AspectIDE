@@ -22,12 +22,15 @@ import { runRuntimeTool } from "./aiRuntimeToolDispatch";
 import type { RuntimeToolSession } from "./aiRuntimeToolSession";
 import {
   buildPathAttachmentContext,
+  encodeVisionImageFromDataUrl,
   imageAttachmentText,
   isVisionImageFile,
   isVisionImagePath,
   maxVisionImageBytes,
+  maxVisionSourceBytes,
   readFileAsDataUrl,
 } from "./aiFileContext";
+import type { VisionImageFormat } from "./aiVisionFormat";
 import { buildToolStepsExhaustedBlock } from "./aiSystemPrompt";
 import { activeDocumentContextMaxChars, buildInitialMessages } from "./aiRuntimePrompt";
 import { isRecord, readErrorMessage, truncateText } from "./aiRuntimeShared";
@@ -48,6 +51,7 @@ export async function readChatAttachment(
   file: File,
   options: {
     includeVisionImage?: boolean;
+    visionImageFormat?: VisionImageFormat;
     includeMediaContext?: boolean;
     localSttCommand?: string;
     localSttModelPath?: string;
@@ -88,9 +92,16 @@ export async function readChatAttachment(
   }
 
   if (image) {
-    const visionImageUrl = options.includeVisionImage
-      ? await readFileAsDataUrl(file, maxVisionImageBytes)
-      : undefined;
+    // No disk path (clipboard paste / drag-drop blob): read the raw bytes up to
+    // the larger *source* budget, then let the native encoder downscale + encode
+    // to WebP/PNG. The encoder enforces the inline budget and falls back safely.
+    let visionImageUrl: string | undefined;
+    if (options.includeVisionImage) {
+      const rawDataUrl = await readFileAsDataUrl(file, maxVisionSourceBytes);
+      if (rawDataUrl) {
+        visionImageUrl = await encodeVisionImageFromDataUrl(rawDataUrl, options.visionImageFormat ?? "png");
+      }
+    }
     return {
       name: file.name,
       size: file.size,
@@ -98,8 +109,8 @@ export async function readChatAttachment(
         visionAttached: Boolean(visionImageUrl),
         note: !options.includeVisionImage
           ? "Enable image metadata in AI settings to send vision input."
-          : !visionImageUrl && file.size > maxVisionImageBytes
-            ? `Image exceeds ${maxVisionImageBytes} byte vision limit.`
+          : !visionImageUrl && file.size > maxVisionSourceBytes
+            ? `Image exceeds ${maxVisionSourceBytes} byte vision limit.`
             : undefined,
       }),
       visionImageUrl,

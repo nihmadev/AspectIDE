@@ -1,5 +1,6 @@
 import type { AiChatMessage, AiChatSendInput, AiToolApprovalRequest } from "./aiChatTypes";
 import type { AiChatToolCall } from "./aiChatTypes";
+import { buildUserContent } from "./aiRuntimePrompt";
 import { isTauriRuntime, luxCommands, subscribeAiTurn, type AiRunTurnInput, type AiTurnEvent } from "./tauri";
 
 /**
@@ -197,6 +198,10 @@ function buildRunTurnInput(input: AiChatSendInput, turnId: string, messageId: st
     messageId,
     sessionId: input.chatSessionId,
     message: input.message,
+    // Assemble the full user content (pinned attachments, goal/todo blocks,
+    // terminal snapshot, and vision `image_url` parts) so the native turn-loop
+    // delivers everything the dev/browser TS path does — including images.
+    userContent: buildUserContent(input),
     history: input.history.map((message) => ({ role: message.role, content: message.content })),
     baseUrl: input.provider.baseUrl,
     apiKey: input.provider.apiKey || null,

@@ -24,13 +24,14 @@ mod debug;
 mod editor;
 mod extensions;
 mod file_intel;
-mod media_intel;
 mod git;
 mod lsp;
+mod media_intel;
 mod search;
 mod settings;
 mod terminal;
 mod test_health;
+mod updater;
 mod voice_input;
 mod web_fetch;
 mod workspace_watcher;
@@ -44,15 +45,16 @@ mod ai_goal_eval;
 mod ai_permissions;
 mod ai_prompt;
 mod ai_related;
+mod ai_semantic;
 mod ai_session;
 mod ai_session_title;
-mod ai_semantic;
 mod ai_shell_safety;
-mod ai_tool_defs;
 mod ai_tokens;
-mod ai_turn;
-mod ai_workspace;
+mod ai_tool_defs;
 mod ai_tools;
+mod ai_turn;
+mod ai_vision;
+mod ai_workspace;
 
 use lux_core::{
     BufferId, FsEntry, LuxEvent, WorkspaceDiagnostic, WorkspaceEditResult, WorkspaceInfo,
@@ -66,10 +68,15 @@ use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_log::{log::LevelFilter, Target, TargetKind};
 use tokio::sync::oneshot;
 
+use agent_browser::{
+    agent_browser_dashboard, agent_browser_install, agent_browser_invoke, agent_browser_read_image,
+    agent_browser_skills, agent_browser_status, agent_browser_stream_status,
+};
 use ai_tools::{
     ai_file_delete, ai_file_patch, ai_file_str_replace, ai_file_write, ai_shell, ai_shell_classify,
     ai_symbol_context,
 };
+use database::{database_execute_sql, database_list_tables, database_update_cell};
 use debug::{
     debug_evaluate, debug_execute, debug_scopes, debug_sessions, debug_set_breakpoints,
     debug_stack_trace, debug_start, debug_stop, debug_variables, debug_workspace_info,
@@ -82,13 +89,9 @@ use extensions::{
     extensions_activate, extensions_activation_plan, extensions_command_routes,
     extensions_contribution_registry, extensions_execute_command, extensions_list,
 };
-use agent_browser::{
-    agent_browser_dashboard, agent_browser_install, agent_browser_invoke, agent_browser_read_image,
-    agent_browser_skills, agent_browser_status, agent_browser_stream_status,
-};
-use database::{database_execute_sql, database_list_tables, database_update_cell};
 use file_intel::{
-    file_asset_data, file_inspect, file_media_ai_context, file_open_external, file_supported_formats,
+    file_asset_data, file_inspect, file_media_ai_context, file_open_external,
+    file_supported_formats,
 };
 use git::{git_diff, git_status};
 use lsp::{
@@ -98,8 +101,8 @@ use lsp::{
 };
 use search::search_query;
 use settings::{
-    keybindings_get, keybindings_set, recent_workspace_forget, recent_workspaces, settings_get,
-    settings_set,
+    keybindings_get, keybindings_set, recent_workspace_forget, recent_workspaces,
+    set_scan_concurrency, settings_get, settings_set,
 };
 use terminal::{
     terminal_close, terminal_close_all, terminal_create, terminal_resize, terminal_write,
@@ -456,6 +459,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .setup(|app| {
             let handle = app.handle();
@@ -516,6 +520,7 @@ pub fn run() {
             file_inspect,
             file_media_ai_context,
             file_asset_data,
+            ai_vision::ai_vision_encode,
             file_open_external,
             database_list_tables,
             database_execute_sql,
@@ -621,8 +626,11 @@ pub fn run() {
             recent_workspace_forget,
             settings_get,
             settings_set,
+            set_scan_concurrency,
             keybindings_get,
             keybindings_set,
+            updater::update_check,
+            updater::update_install,
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Lux IDE");

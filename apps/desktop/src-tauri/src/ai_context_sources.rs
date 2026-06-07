@@ -1,4 +1,4 @@
-//! Native RulesContext, DocsContext, MemoryContext tools — Stage 4.
+//! Native `RulesContext`, `DocsContext`, `MemoryContext` tools — Stage 4.
 //!
 //! All three follow the same pattern: list workspace files → filter by path
 //! pattern → score by query tokens → read top-N files → return JSON.
@@ -42,7 +42,15 @@ pub async fn ai_rules_context(
     max_files: Option<usize>,
     max_scan: Option<usize>,
 ) -> Result<AiContextSourceResponse, String> {
-    context_source_tool(&state, "RulesContext", query, max_files.unwrap_or(12), max_scan.unwrap_or(5000), is_rules_path).await
+    context_source_tool(
+        &state,
+        "RulesContext",
+        query,
+        max_files.unwrap_or(12),
+        max_scan.unwrap_or(5000),
+        is_rules_path,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -52,7 +60,15 @@ pub async fn ai_docs_context(
     max_files: Option<usize>,
     max_scan: Option<usize>,
 ) -> Result<AiContextSourceResponse, String> {
-    context_source_tool(&state, "DocsContext", query, max_files.unwrap_or(12), max_scan.unwrap_or(5000), is_docs_path).await
+    context_source_tool(
+        &state,
+        "DocsContext",
+        query,
+        max_files.unwrap_or(12),
+        max_scan.unwrap_or(5000),
+        is_docs_path,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -62,7 +78,15 @@ pub async fn ai_memory_context(
     max_files: Option<usize>,
     max_scan: Option<usize>,
 ) -> Result<AiContextSourceResponse, String> {
-    context_source_tool(&state, "MemoryContext", query, max_files.unwrap_or(14), max_scan.unwrap_or(5000), is_memory_path).await
+    context_source_tool(
+        &state,
+        "MemoryContext",
+        query,
+        max_files.unwrap_or(14),
+        max_scan.unwrap_or(5000),
+        is_memory_path,
+    )
+    .await
 }
 
 async fn context_source_tool(
@@ -111,7 +135,10 @@ async fn context_source_tool(
         match read {
             Ok(text) => {
                 let truncated = text.len() as u64 > MAX_FILE_BYTES;
-                let clamped: String = text.chars().take(MAX_FILE_BYTES as usize).collect();
+                let clamped: String = text
+                    .chars()
+                    .take(usize::try_from(MAX_FILE_BYTES).unwrap_or(usize::MAX))
+                    .collect();
                 files.push(ContextFile {
                     path: path.clone(),
                     relative_path: rel.clone(),
@@ -156,18 +183,47 @@ fn score_context_file(relative_lower: &str, tokens: &[String]) -> i64 {
     let lower = relative_lower.to_lowercase();
     let mut score: i64 = 10;
     for token in tokens {
-        if lower.contains(token) { score += if token.len() >= 6 { 20 } else { 12 }; }
+        if lower.contains(token) {
+            score += if token.len() >= 6 { 20 } else { 12 };
+        }
     }
     // Boost well-known files.
-    if lower.ends_with("agents.md") || lower.ends_with("claude.md") || lower.ends_with(".cursorrules") { score += 50; }
-    if lower.contains("readme") { score += 30; }
-    if lower.ends_with("package.json") || lower.ends_with("cargo.toml") { score += 25; }
+    if lower.ends_with("agents.md")
+        || lower.ends_with("claude.md")
+        || lower.ends_with(".cursorrules")
+    {
+        score += 50;
+    }
+    if lower.contains("readme") {
+        score += 30;
+    }
+    if lower.ends_with("package.json") || lower.ends_with("cargo.toml") {
+        score += 25;
+    }
     score
 }
 
 // ── Path classification (ports isRulesContextPath, isDocsContextPath, isMemoryContextPath) ──
 
-const RULES_FILENAMES: &[&str] = &["agents.md", "claude.md", ".cursorrules", "cursor_rules.md", "cursor-rules.md", "codex.md"];
+/// Returns `true` when `path`'s file extension matches any of `exts` (ASCII case-insensitive).
+fn has_ext(path: &str, exts: &[&str]) -> bool {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| {
+            exts.iter()
+                .any(|&candidate| ext.eq_ignore_ascii_case(candidate))
+        })
+}
+
+const RULES_FILENAMES: &[&str] = &[
+    "agents.md",
+    "claude.md",
+    ".cursorrules",
+    "cursor_rules.md",
+    "cursor-rules.md",
+    "codex.md",
+];
 
 fn is_rules_path(rel: &str, _root: &str) -> bool {
     let lower = rel.to_lowercase();
@@ -175,34 +231,74 @@ fn is_rules_path(rel: &str, _root: &str) -> bool {
     RULES_FILENAMES.contains(&basename)
         || lower.starts_with(".cursor/rules/")
         || lower.contains("/.cursor/rules/")
-        || (lower.contains("/rules/") && (lower.ends_with(".md") || lower.ends_with(".mdx") || lower.ends_with(".txt")))
+        || (lower.contains("/rules/") && has_ext(&lower, &["md", "mdx", "txt"]))
 }
 
 fn is_docs_path(rel: &str, _root: &str) -> bool {
     let lower = rel.to_lowercase();
-    if ai_semantic::is_low_signal_path_pub(rel) { return false; }
-    lower.contains("readme") || lower.contains("contributing") || lower.contains("changelog")
-        || lower.contains("architecture") || lower.starts_with("docs/") || lower.contains("/docs/")
-        || lower.ends_with("package.json") || lower.ends_with("cargo.toml")
-        || lower.ends_with("pyproject.toml") || lower.ends_with("go.mod")
-        || lower.contains("vite.config.") || lower.contains("tsconfig.")
+    if ai_semantic::is_low_signal_path_pub(rel) {
+        return false;
+    }
+    lower.contains("readme")
+        || lower.contains("contributing")
+        || lower.contains("changelog")
+        || lower.contains("architecture")
+        || lower.starts_with("docs/")
+        || lower.contains("/docs/")
+        || lower.ends_with("package.json")
+        || lower.ends_with("cargo.toml")
+        || lower.ends_with("pyproject.toml")
+        || lower.ends_with("go.mod")
+        || lower.contains("vite.config.")
+        || lower.contains("tsconfig.")
 }
 
 const MEMORY_FILENAMES: &[&str] = &[
-    "memory.md", "memories.md", "project-memory.md", "decisions.md", "decision-log.md",
-    "preferences.md", "notes.md", "todo.md", "todos.md", "roadmap.md",
-    "agents.md", "claude.md", "codex.md", ".cursorrules",
+    "memory.md",
+    "memories.md",
+    "project-memory.md",
+    "decisions.md",
+    "decision-log.md",
+    "preferences.md",
+    "notes.md",
+    "todo.md",
+    "todos.md",
+    "roadmap.md",
+    "agents.md",
+    "claude.md",
+    "codex.md",
+    ".cursorrules",
 ];
 
 fn is_memory_path(rel: &str, _root: &str) -> bool {
     let lower = rel.to_lowercase();
-    if ai_semantic::is_low_signal_path_pub(rel) { return false; }
+    if ai_semantic::is_low_signal_path_pub(rel) {
+        return false;
+    }
     let basename = lower.rsplit('/').next().unwrap_or(&lower);
-    if MEMORY_FILENAMES.contains(&basename) { return true; }
-    let ext_ok = lower.ends_with(".md") || lower.ends_with(".mdx") || lower.ends_with(".txt")
-        || lower.ends_with(".json") || lower.ends_with(".yaml") || lower.ends_with(".yml") || lower.ends_with(".toml");
-    if !ext_ok { return false; }
-    lower.split('/').any(|seg| matches!(seg, "adr" | "adrs" | "decisions" | "decision" | "memory" | "notes" | "roadmap" | "todos" | "todo" | ".codex" | ".cursor"))
+    if MEMORY_FILENAMES.contains(&basename) {
+        return true;
+    }
+    let ext_ok = has_ext(&lower, &["md", "mdx", "txt", "json", "yaml", "yml", "toml"]);
+    if !ext_ok {
+        return false;
+    }
+    lower.split('/').any(|seg| {
+        matches!(
+            seg,
+            "adr"
+                | "adrs"
+                | "decisions"
+                | "decision"
+                | "memory"
+                | "notes"
+                | "roadmap"
+                | "todos"
+                | "todo"
+                | ".codex"
+                | ".cursor"
+        )
+    })
 }
 
 #[cfg(test)]

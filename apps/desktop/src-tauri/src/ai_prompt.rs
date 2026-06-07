@@ -40,7 +40,11 @@ pub fn ai_build_system_prompt(input: SystemPromptInput) -> String {
 pub fn build_system_prompt(input: &SystemPromptInput) -> String {
     let read_only = is_read_only_mode(&input.agent_mode);
     let full_exec = is_full_execution_mode(&input.agent_mode);
-    let body = if read_only { CORE_PROMPT_READONLY } else { CORE_PROMPT };
+    let body = if read_only {
+        CORE_PROMPT_READONLY
+    } else {
+        CORE_PROMPT
+    };
     let agent_name: &str = if input.agent_name.trim().is_empty() {
         &input.agent_mode
     } else {
@@ -49,7 +53,7 @@ pub fn build_system_prompt(input: &SystemPromptInput) -> String {
 
     let mut sections: Vec<String> = Vec::with_capacity(8);
     sections.push(body.to_string());
-    sections.push(runtime_section(input, &agent_name));
+    sections.push(runtime_section(input, agent_name));
 
     if input.runtime_tools_available {
         sections.push(tool_availability_section(input, full_exec, read_only));
@@ -66,7 +70,8 @@ pub fn build_system_prompt(input: &SystemPromptInput) -> String {
         ));
     }
 
-    let user_section = user_instruction_section(&input.global_instructions, &input.project_instructions);
+    let user_section =
+        user_instruction_section(&input.global_instructions, &input.project_instructions);
     if !user_section.is_empty() {
         sections.push(user_section);
     }
@@ -91,10 +96,9 @@ fn runtime_section(input: &SystemPromptInput, agent_name: &str) -> String {
     } else {
         format!("Workspace root: {}", input.workspace_root)
     };
-    let tool_round_limit = match input.tool_round_limit {
-        Some(limit) => limit.to_string(),
-        None => "unlimited".to_string(),
-    };
+    let tool_round_limit = input
+        .tool_round_limit
+        .map_or_else(|| "unlimited".to_string(), |limit| limit.to_string());
     let approval_line = if input.tool_approval_mode == "full-access" {
         "Tool approval mode: Full Access. Dangerous tools auto-run only through Lux workspace guards."
     } else {
@@ -106,7 +110,10 @@ fn runtime_section(input: &SystemPromptInput, agent_name: &str) -> String {
         &workspace_line,
         &format!("Agent profile: {agent_name}"),
         &format!("Agent mode: {}", input.agent_mode),
-        &format!("Provider: {} ({})", input.provider_name, input.provider_protocol),
+        &format!(
+            "Provider: {} ({})",
+            input.provider_name, input.provider_protocol
+        ),
         &format!("Model: {}", input.selected_model_alias),
         &format!("Reasoning effort: {}", input.selected_effort_id),
         &format!("Tool round limit: {tool_round_limit}"),
@@ -115,7 +122,11 @@ fn runtime_section(input: &SystemPromptInput, agent_name: &str) -> String {
     .join("\n")
 }
 
-fn tool_availability_section(input: &SystemPromptInput, full_exec: bool, read_only: bool) -> String {
+fn tool_availability_section(
+    input: &SystemPromptInput,
+    full_exec: bool,
+    read_only: bool,
+) -> String {
     let browser_line = if input.agent_browser_enabled {
         if full_exec {
             " Vercel agent-browser is fully enabled: isolated session per chat, live preview, BrowserAct, BrowserInvoke (full CLI), BrowserScreenshot with vision, etc."
@@ -150,7 +161,10 @@ fn tool_capability_map(full_exec: bool, _read_only: bool, browser_enabled: bool)
     }
     lines.push("- Verify: ReadLints/DiagnosticsContext, TestHealth, FailureAnalyzer, ReviewDiff, ImpactAnalysis, SecretGuard. Git: GitContext. Web: WebFetch.".to_string());
     if browser_enabled {
-        lines.push("- Browser: BrowserOpen → BrowserSnapshot (-i) → BrowserAct on @refs → re-snapshot.".to_string());
+        lines.push(
+            "- Browser: BrowserOpen → BrowserSnapshot (-i) → BrowserAct on @refs → re-snapshot."
+                .to_string(),
+        );
     }
     lines.join("\n")
 }
@@ -163,7 +177,9 @@ fn user_instruction_section(global: &str, project: &str) -> String {
     }
     let mut parts = vec!["User instruction layers".to_string()];
     if !global_text.is_empty() {
-        parts.push(format!("Global instructions for all projects:\n{global_text}"));
+        parts.push(format!(
+            "Global instructions for all projects:\n{global_text}"
+        ));
     }
     if !project_text.is_empty() {
         parts.push(format!("Current workspace instructions:\n{project_text}"));
@@ -233,12 +249,20 @@ mod tests {
     #[test]
     fn prompt_length_within_budget() {
         let prompt = build_system_prompt(&test_input());
-        assert!(prompt.len() <= 15_000, "agent prompt too long: {}", prompt.len());
+        assert!(
+            prompt.len() <= 15_000,
+            "agent prompt too long: {}",
+            prompt.len()
+        );
 
         let mut auto_input = test_input();
         auto_input.agent_mode = "automatic".to_string();
         let auto_prompt = build_system_prompt(&auto_input);
-        assert!(auto_prompt.len() <= 16_000, "automatic prompt too long: {}", auto_prompt.len());
+        assert!(
+            auto_prompt.len() <= 16_000,
+            "automatic prompt too long: {}",
+            auto_prompt.len()
+        );
     }
 
     #[test]

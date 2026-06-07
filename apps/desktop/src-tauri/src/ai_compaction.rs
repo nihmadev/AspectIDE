@@ -39,14 +39,25 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
 
     let mut user_parts: Vec<String> = Vec::new();
     if !input.pinned_goal.trim().is_empty() {
-        user_parts.push(format!("Pinned session goal:\n{}", truncate(&input.pinned_goal, 2_000)));
+        user_parts.push(format!(
+            "Pinned session goal:\n{}",
+            truncate(&input.pinned_goal, 2_000)
+        ));
     }
     if !input.open_tasks.is_empty() {
-        let tasks = input.open_tasks.iter().map(|t| format!("- {t}")).collect::<Vec<_>>().join("\n");
+        let tasks = input
+            .open_tasks
+            .iter()
+            .map(|t| format!("- {t}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         user_parts.push(format!("Open tasks:\n{tasks}"));
     }
     if !input.previous_summary.trim().is_empty() {
-        user_parts.push(format!("Previous checkpoint to merge:\n{}", truncate(&input.previous_summary, 4_000)));
+        user_parts.push(format!(
+            "Previous checkpoint to merge:\n{}",
+            truncate(&input.previous_summary, 4_000)
+        ));
     }
     user_parts.push(format!(
         "Transcript ({} chars):\n{}",
@@ -71,7 +82,8 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
     );
 
     let response = crate::ai_chat_backend::completion(request).await?;
-    let content = response.body
+    let content = response
+        .body
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())
         .unwrap_or("")

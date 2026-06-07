@@ -72,7 +72,7 @@ pub async fn ai_semantic_search(
         .map(|p| normalize_slashes(p.trim()).to_lowercase())
         .filter(|p| !p.is_empty());
     let file_cap = max_files.unwrap_or(5_000).clamp(500, 20_000);
-    let search_max = (max_results * 4).max(40).min(120);
+    let search_max = (max_results * 4).clamp(40, 120);
     let tokens = tokenize(&query);
     let root_str = normalize_slashes(&root.to_string_lossy());
 
@@ -134,20 +134,23 @@ pub async fn ai_semantic_search(
             Some(container) if !container.is_empty() => format!("{container}.{}", symbol.name),
             _ => symbol.name.clone(),
         };
-        upsert(&mut results, AiSemanticResult {
-            kind: "symbol",
-            source: "lsp-symbols",
-            score,
-            path: descriptor.path.clone(),
-            relative_path: descriptor.relative_path.clone(),
-            line: Some(symbol.location.range.start_line + 1),
-            column: Some(symbol.location.range.start_column + 1),
-            name: Some(symbol.name.clone()),
-            symbol_kind,
-            container_name: symbol.container_name.clone(),
-            preview: Some(preview),
-            match_text: None,
-        });
+        upsert(
+            &mut results,
+            AiSemanticResult {
+                kind: "symbol",
+                source: "lsp-symbols",
+                score,
+                path: descriptor.path.clone(),
+                relative_path: descriptor.relative_path.clone(),
+                line: Some(symbol.location.range.start_line + 1),
+                column: Some(symbol.location.range.start_column + 1),
+                name: Some(symbol.name.clone()),
+                symbol_kind,
+                container_name: symbol.container_name.clone(),
+                preview: Some(preview),
+                match_text: None,
+            },
+        );
     }
 
     for hit in &search_hits {
@@ -157,20 +160,23 @@ pub async fn ai_semantic_search(
         }
         let descriptor = Descriptor::new(&path, &root_str);
         let score = score_text_hit(&descriptor, &hit.preview, &hit.match_text, &tokens);
-        upsert(&mut results, AiSemanticResult {
-            kind: "text",
-            source: "indexed-search",
-            score,
-            path: descriptor.path.clone(),
-            relative_path: descriptor.relative_path.clone(),
-            line: Some(hit.line as u32),
-            column: Some(hit.column as u32),
-            name: None,
-            symbol_kind: None,
-            container_name: None,
-            preview: Some(hit.preview.clone()),
-            match_text: Some(hit.match_text.clone()),
-        });
+        upsert(
+            &mut results,
+            AiSemanticResult {
+                kind: "text",
+                source: "indexed-search",
+                score,
+                path: descriptor.path.clone(),
+                relative_path: descriptor.relative_path.clone(),
+                line: Some(u32::try_from(hit.line).unwrap_or(u32::MAX)),
+                column: Some(u32::try_from(hit.column).unwrap_or(u32::MAX)),
+                name: None,
+                symbol_kind: None,
+                container_name: None,
+                preview: Some(hit.preview.clone()),
+                match_text: Some(hit.match_text.clone()),
+            },
+        );
     }
 
     let file_limit = (max_results * 2).min(80);
@@ -187,26 +193,32 @@ pub async fn ai_semantic_search(
         })
         .filter(|(_, score)| *score > 0)
         .collect();
-    file_candidates.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.relative_lower.cmp(&b.0.relative_lower)));
+    file_candidates.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.relative_lower.cmp(&b.0.relative_lower))
+    });
     file_candidates.truncate(file_limit);
     for (descriptor, score) in file_candidates {
         let kind_label = language_for_path(&descriptor.basename_lower);
         let preview = descriptor.relative_path.clone();
         let name = descriptor.basename.clone();
-        upsert(&mut results, AiSemanticResult {
-            kind: "file",
-            source: "workspace-index",
-            score,
-            path: descriptor.path.clone(),
-            relative_path: descriptor.relative_path,
-            line: None,
-            column: None,
-            name: Some(name),
-            symbol_kind: Some(kind_label),
-            container_name: None,
-            preview: Some(preview),
-            match_text: None,
-        });
+        upsert(
+            &mut results,
+            AiSemanticResult {
+                kind: "file",
+                source: "workspace-index",
+                score,
+                path: descriptor.path.clone(),
+                relative_path: descriptor.relative_path,
+                line: None,
+                column: None,
+                name: Some(name),
+                symbol_kind: Some(kind_label),
+                container_name: None,
+                preview: Some(preview),
+                match_text: None,
+            },
+        );
     }
 
     let mut ranked: Vec<AiSemanticResult> = results.into_values().collect();
@@ -245,7 +257,9 @@ impl Descriptor {
         let path = normalize_slashes(path);
         let root = normalize_slashes(root_lower_root.trim_end_matches('/'));
         let relative_path = if !root.is_empty()
-            && path.to_lowercase().starts_with(&format!("{}/", root.to_lowercase()))
+            && path
+                .to_lowercase()
+                .starts_with(&format!("{}/", root.to_lowercase()))
         {
             path[root.len() + 1..].to_string()
         } else {
@@ -257,7 +271,7 @@ impl Descriptor {
         let family_stem = family_stem(&basename);
         let _ = stem;
         Self {
-            path: path.clone(),
+            path,
             relative_lower: relative_path.to_lowercase(),
             relative_path,
             basename_lower: basename.to_lowercase(),
@@ -271,19 +285,30 @@ fn normalize_slashes(value: &str) -> String {
     value.replace('\\', "/")
 }
 
-pub fn normalize_slashes_pub(value: &str) -> String { normalize_slashes(value) }
-pub fn file_extension_pub(basename_lower: &str) -> String { file_extension(basename_lower) }
-pub fn family_stem_pub(basename: &str) -> String { family_stem(basename) }
-pub fn tokenize_pub(query: &str) -> Vec<String> { tokenize(query) }
-pub fn is_low_signal_path_pub(path: &str) -> bool { is_low_signal_path(path) }
-pub fn score_path_pub(path: &str) -> i64 { score_path(path) }
-pub fn language_for_path_pub(basename_lower: &str) -> String { language_for_path(basename_lower) }
+pub fn normalize_slashes_pub(value: &str) -> String {
+    normalize_slashes(value)
+}
+pub fn file_extension_pub(basename_lower: &str) -> String {
+    file_extension(basename_lower)
+}
+pub fn family_stem_pub(basename: &str) -> String {
+    family_stem(basename)
+}
+pub fn tokenize_pub(query: &str) -> Vec<String> {
+    tokenize(query)
+}
+pub fn is_low_signal_path_pub(path: &str) -> bool {
+    is_low_signal_path(path)
+}
+pub fn score_path_pub(path: &str) -> i64 {
+    score_path(path)
+}
+pub fn language_for_path_pub(basename_lower: &str) -> String {
+    language_for_path(basename_lower)
+}
 
 fn passes_path_filter(path: &str, filter: Option<&str>) -> bool {
-    match filter {
-        None => true,
-        Some(filter) => normalize_slashes(path).to_lowercase().contains(filter),
-    }
+    filter.is_none_or(|filter| normalize_slashes(path).to_lowercase().contains(filter))
 }
 
 fn score_symbol(
@@ -293,7 +318,11 @@ fn score_symbol(
     file: &Descriptor,
 ) -> i64 {
     let name = symbol.name.to_lowercase();
-    let container = symbol.container_name.as_deref().unwrap_or("").to_lowercase();
+    let container = symbol
+        .container_name
+        .as_deref()
+        .unwrap_or("")
+        .to_lowercase();
     let mut score = 80 + score_path(&file.relative_path);
     if name == normalized_query {
         score += 90;
@@ -335,9 +364,20 @@ fn score_text_hit(file: &Descriptor, preview: &str, match_text: &str, tokens: &[
         }
     }
     let lower_preview = preview.to_lowercase();
-    if ["function", "class", "interface", "type", "struct", "enum", "impl", "export", "const", "async"]
-        .iter()
-        .any(|kw| lower_preview.contains(kw))
+    if [
+        "function",
+        "class",
+        "interface",
+        "type",
+        "struct",
+        "enum",
+        "impl",
+        "export",
+        "const",
+        "async",
+    ]
+    .iter()
+    .any(|kw| lower_preview.contains(kw))
     {
         score += 12;
     }
@@ -403,7 +443,11 @@ fn score_path(path: &str) -> i64 {
 }
 
 fn upsert(results: &mut BTreeMap<String, AiSemanticResult>, result: AiSemanticResult) {
-    let detail = result.name.clone().or_else(|| result.match_text.clone()).unwrap_or_default();
+    let detail = result
+        .name
+        .clone()
+        .or_else(|| result.match_text.clone())
+        .unwrap_or_default();
     let key = format!(
         "{}:{}:{}:{}",
         result.kind,
@@ -424,7 +468,10 @@ const TEST_DIR_WORDS: &[&str] = &["__tests__", "test", "tests", "spec", "specs"]
 
 fn is_test_file(file: &Descriptor) -> bool {
     let base_parts = split_delims(&file.basename_lower);
-    if base_parts.iter().any(|p| TEST_SEGMENT_WORDS.contains(&p.as_str())) {
+    if base_parts
+        .iter()
+        .any(|p| TEST_SEGMENT_WORDS.contains(&p.as_str()))
+    {
         return true;
     }
     file.relative_lower
@@ -434,8 +481,15 @@ fn is_test_file(file: &Descriptor) -> bool {
 
 fn is_important_project_file(file: &Descriptor) -> bool {
     const NAMES: &[&str] = &[
-        "package.json", "cargo.toml", "pyproject.toml", "go.mod", "pom.xml", "build.gradle",
-        "dockerfile", "makefile", ".env.example",
+        "package.json",
+        "cargo.toml",
+        "pyproject.toml",
+        "go.mod",
+        "pom.xml",
+        "build.gradle",
+        "dockerfile",
+        "makefile",
+        ".env.example",
     ];
     const PREFIXES: &[&str] = &["vite.config.", "tsconfig.", "jsconfig."];
     let rel = &file.relative_lower;
@@ -453,19 +507,33 @@ fn is_important_project_file(file: &Descriptor) -> bool {
 }
 
 fn is_low_signal_path(path: &str) -> bool {
-    let lower = normalize_slashes(path).to_lowercase();
     const IGNORED_DIRS: &[&str] = &[
-        "node_modules", "target", "dist", "build", "out", "coverage", ".git", ".next", ".turbo",
-        "vendor", "venv", ".venv", "__pycache__",
+        "node_modules",
+        "target",
+        "dist",
+        "build",
+        "out",
+        "coverage",
+        ".git",
+        ".next",
+        ".turbo",
+        "vendor",
+        "venv",
+        ".venv",
+        "__pycache__",
     ];
-    if lower.split('/').any(|segment| IGNORED_DIRS.contains(&segment)) {
-        return true;
-    }
     const BINARY_EXTS: &[&str] = &[
         ".7z", ".avi", ".bmp", ".class", ".db", ".dll", ".dmg", ".exe", ".gif", ".gz", ".ico",
         ".jar", ".jpeg", ".jpg", ".lockb", ".mov", ".mp3", ".mp4", ".o", ".obj", ".pdf", ".png",
         ".rar", ".so", ".tar", ".ttf", ".webm", ".webp", ".woff", ".woff2", ".zip",
     ];
+    let lower = normalize_slashes(path).to_lowercase();
+    if lower
+        .split('/')
+        .any(|segment| IGNORED_DIRS.contains(&segment))
+    {
+        return true;
+    }
     if BINARY_EXTS.iter().any(|ext| lower.ends_with(ext)) {
         return true;
     }
@@ -487,30 +555,41 @@ fn is_extensionless_project_file(lower_path: &str) -> bool {
     let basename = lower_path.rsplit('/').next().unwrap_or(lower_path);
     matches!(
         basename,
-        "dockerfile" | "makefile" | "readme" | "license" | "notice" | "procfile" | "gemfile" | "rakefile"
+        "dockerfile"
+            | "makefile"
+            | "readme"
+            | "license"
+            | "notice"
+            | "procfile"
+            | "gemfile"
+            | "rakefile"
     )
 }
 
 fn language_for_path(lower: &str) -> String {
-    let lang = if lower.ends_with(".tsx") || lower.ends_with(".ts") || lower.ends_with(".mts") || lower.ends_with(".cts") {
+    let lang = if ends_with_any(lower, &[".tsx", ".ts", ".mts", ".cts"]) {
         "typescript"
-    } else if lower.ends_with(".jsx") || lower.ends_with(".js") || lower.ends_with(".mjs") || lower.ends_with(".cjs") {
+    } else if ends_with_any(lower, &[".jsx", ".js", ".mjs", ".cjs"]) {
         "javascript"
-    } else if lower.ends_with(".rs") {
+    } else if ends_with_any(lower, &[".rs"]) {
         "rust"
-    } else if lower.ends_with(".py") {
+    } else if ends_with_any(lower, &[".py"]) {
         "python"
-    } else if lower.ends_with(".go") {
+    } else if ends_with_any(lower, &[".go"]) {
         "go"
-    } else if lower.ends_with(".java") || lower.ends_with(".kt") || lower.ends_with(".kts") {
+    } else if ends_with_any(lower, &[".java", ".kt", ".kts"]) {
         "jvm"
-    } else if lower.ends_with(".cs") {
+    } else if ends_with_any(lower, &[".cs"]) {
         "csharp"
     } else if ends_with_any(lower, &[".css", ".scss", ".sass", ".less"]) {
         "styles"
     } else if ends_with_any(lower, &[".json", ".yaml", ".yml", ".toml", ".xml"]) {
         "config-data"
-    } else if ends_with_any(lower, &[".md", ".mdx"]) || lower.contains("readme") || lower.contains("license") || lower.contains("notice") {
+    } else if ends_with_any(lower, &[".md", ".mdx"])
+        || lower.contains("readme")
+        || lower.contains("license")
+        || lower.contains("notice")
+    {
         "docs"
     } else if ends_with_any(lower, &[".html", ".vue", ".svelte", ".astro"]) {
         "web"
@@ -539,9 +618,33 @@ fn file_extension(basename_lower: &str) -> String {
 }
 
 const FAMILY_SUFFIXES: &[&str] = &[
-    "test", "spec", "stories", "story", "module", "types", "schema", "route", "routes", "model",
-    "models", "entity", "entities", "service", "controller", "view", "styles", "style", "component",
-    "page", "layout", "hook", "hooks", "util", "utils", "helper", "helpers",
+    "test",
+    "spec",
+    "stories",
+    "story",
+    "module",
+    "types",
+    "schema",
+    "route",
+    "routes",
+    "model",
+    "models",
+    "entity",
+    "entities",
+    "service",
+    "controller",
+    "view",
+    "styles",
+    "style",
+    "component",
+    "page",
+    "layout",
+    "hook",
+    "hooks",
+    "util",
+    "utils",
+    "helper",
+    "helpers",
 ];
 
 fn family_stem(basename: &str) -> String {

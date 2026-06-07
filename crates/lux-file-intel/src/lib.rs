@@ -12,9 +12,8 @@ use calamine::{open_workbook_auto, Data, Reader};
 use chrono::{DateTime, Utc};
 use lux_core::{
     file_view_descriptor_for_path, monaco_language_id_for_path, supported_file_formats, AppError,
-    AppResult, ArchiveEntryPreview,
-    FileFormatSupport, FileInspection, FileInspectionOptions, FileMetadata, FilePreview,
-    FileViewStrategy, NotebookCellPreview, SpreadsheetSheetPreview,
+    AppResult, ArchiveEntryPreview, FileFormatSupport, FileInspection, FileInspectionOptions,
+    FileMetadata, FilePreview, FileViewStrategy, NotebookCellPreview, SpreadsheetSheetPreview,
 };
 use quick_xml::{events::Event, Reader as XmlReader};
 
@@ -29,7 +28,9 @@ pub use database_edit::{
     database_execute, database_tables, database_update_cell, DatabaseCellUpdate,
     DatabaseExecuteRequest, DatabaseExecuteResult,
 };
-pub use delimited_edit::{table_edit_text, table_write_from_text, TableEditDocument, TABLE_EDIT_FORMAT};
+pub use delimited_edit::{
+    table_edit_text, table_write_from_text, TableEditDocument, TABLE_EDIT_FORMAT,
+};
 
 const BINARY_SAMPLE_BYTES: usize = 512;
 const OFFICE_TEXT_LIMIT: usize = 80_000;
@@ -107,16 +108,18 @@ fn preview_for_file(
         FileViewStrategy::MonacoText
         | FileViewStrategy::MarkdownPreview
         | FileViewStrategy::DiagramPreview => text_preview(path, descriptor, options),
-        FileViewStrategy::TablePreview | FileViewStrategy::TableEditor => table_preview(path, options),
+        FileViewStrategy::TablePreview | FileViewStrategy::TableEditor => {
+            table_preview(path, options)
+        }
         FileViewStrategy::SpreadsheetPreview | FileViewStrategy::SpreadsheetEditor => {
             spreadsheet_preview(path, options)
         }
         FileViewStrategy::DatabasePreview | FileViewStrategy::DatabaseEditor => {
-            database_preview(path, options)
+            Ok(database_preview(path, options))
         }
         FileViewStrategy::PdfPreview => Ok(pdf_preview(path)),
         FileViewStrategy::OfficePreview => office_preview(path, options),
-        FileViewStrategy::ArchivePreview => archive_preview(path, options),
+        FileViewStrategy::ArchivePreview => Ok(archive_preview(path, options)),
         FileViewStrategy::NotebookPreview => notebook_preview(path, options),
         FileViewStrategy::ImagePreview => Ok(image_preview(path, descriptor)),
         FileViewStrategy::AudioPreview => Ok(audio_preview(path, descriptor)),
@@ -300,22 +303,22 @@ fn spreadsheet_preview(path: &Path, options: &FileInspectionOptions) -> AppResul
     })
 }
 
-fn database_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
+fn database_preview(path: &Path, options: &FileInspectionOptions) -> FilePreview {
     if extension(path) == "duckdb" {
-        return Ok(FilePreview::External {
+        return FilePreview::External {
             reason: "DuckDB files are identified, but direct DuckDB inspection is not bundled yet."
                 .to_string(),
-        });
+        };
     }
 
     match database_edit::database_tables(path, options) {
         Ok(tables) => {
             let truncated = tables.iter().any(|table| table.truncated);
-            Ok(FilePreview::Database { tables, truncated })
+            FilePreview::Database { tables, truncated }
         }
-        Err(error) => Ok(FilePreview::External {
+        Err(error) => FilePreview::External {
             reason: format!("Cannot open SQLite database: {error}"),
-        }),
+        },
     }
 }
 
@@ -387,19 +390,19 @@ fn office_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<Fil
     })
 }
 
-fn archive_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
+fn archive_preview(path: &Path, options: &FileInspectionOptions) -> FilePreview {
     match archive_list::list_archive_entries(path, options.max_archive_entries) {
-        Ok(listing) => Ok(FilePreview::Archive {
+        Ok(listing) => FilePreview::Archive {
             entries: listing.entries,
             total_entries: listing.total_entries,
             truncated: listing.truncated,
-        }),
-        Err(_) => Ok(FilePreview::External {
+        },
+        Err(_) => FilePreview::External {
             reason: format!(
                 "Archive .{} is identified; listing is bundled for zip, tar, tar.gz, tgz, gz, bz2, and xz containers.",
                 extension(path)
             ),
-        }),
+        },
     }
 }
 

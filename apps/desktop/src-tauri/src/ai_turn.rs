@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 fn approval_channels() -> &'static Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>> {
-    static CHANNELS: OnceLock<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>> = OnceLock::new();
+    static CHANNELS: OnceLock<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>> =
+        OnceLock::new();
     CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -39,7 +40,11 @@ pub enum TurnEvent {
 
     /// Streamed text/reasoning delta.
     #[serde(rename_all = "camelCase")]
-    StreamDelta { turn_id: String, content: String, reasoning: String },
+    StreamDelta {
+        turn_id: String,
+        content: String,
+        reasoning: String,
+    },
 
     /// Status phase changed (thinking, streaming, running-tools, waiting-approval).
     #[serde(rename_all = "camelCase")]
@@ -97,10 +102,6 @@ pub enum TurnEvent {
     /// Turn failed.
     #[serde(rename_all = "camelCase")]
     TurnError { turn_id: String, error: String },
-
-    /// Turn was cancelled.
-    #[serde(rename_all = "camelCase")]
-    TurnCancelled { turn_id: String },
 }
 
 // ── Approval types (UI → Rust) ──
@@ -135,14 +136,20 @@ pub fn ai_resolve_turn_approval(
         .map_err(|_| "approval lock poisoned".to_string())?
         .remove(&key)
         .ok_or_else(|| format!("no pending approval for {key}"))?;
-    sender.send(decision).map_err(|_| "approval receiver dropped".to_string())
+    sender
+        .send(decision)
+        .map_err(|_| "approval receiver dropped".to_string())
 }
 
 /// Cancel all pending approvals for a turn (e.g. on abort).
 pub fn cancel_approvals_for_turn(turn_id: &str) {
     if let Ok(mut map) = approval_channels().lock() {
         let prefix = format!("{turn_id}:");
-        let keys: Vec<String> = map.keys().filter(|k| k.starts_with(&prefix)).cloned().collect();
+        let keys: Vec<String> = map
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
         for key in keys {
             if let Some(sender) = map.remove(&key) {
                 let _ = sender.send(ApprovalDecision::Rejected);
@@ -171,6 +178,13 @@ pub struct TurnInput {
     pub message_id: Option<String>,
     pub session_id: String,
     pub message: String,
+    /// Fully assembled user content for this turn: either a plain string or an
+    /// OpenAI-style content-part array (text parts plus `image_url` vision parts).
+    /// Built on the frontend so attachments, pinned context, goal/todo blocks, the
+    /// terminal snapshot, and vision images all reach the model on the native path.
+    /// Falls back to `message` when absent (older frontend).
+    #[serde(default)]
+    pub user_content: Option<serde_json::Value>,
     pub history: Vec<serde_json::Value>,
     pub base_url: String,
     pub api_key: Option<String>,
@@ -185,9 +199,6 @@ pub struct TurnInput {
     /// Active document path (from React state).
     #[serde(default)]
     pub active_document_path: Option<String>,
-    /// Open document paths (from React state).
-    #[serde(default)]
-    pub open_document_paths: Vec<String>,
     /// Terminal context snapshot (sessions + output buffer tails from React state).
     #[serde(default)]
     pub terminal_context: Option<serde_json::Value>,
@@ -201,19 +212,31 @@ pub async fn ai_run_turn(
     state: tauri::State<'_, crate::SharedState>,
     input: TurnInput,
 ) -> Result<(), String> {
-    let turn_id = input.turn_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let message_id = input.message_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let turn_id = input
+        .turn_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let message_id = input
+        .message_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let started_at = std::time::Instant::now();
     let max_rounds = input.tool_round_limit.unwrap_or(32).min(128) as usize;
 
-    let _ = emit_turn_event(&app, &TurnEvent::AssistantCreated {
-        turn_id: turn_id.clone(),
-        message_id: message_id.clone(),
-    });
-    let _ = emit_turn_event(&app, &TurnEvent::StatusChange {
-        turn_id: turn_id.clone(),
-        phase: "thinking".to_string(),
-    });
+    let _ = emit_turn_event(
+        &app,
+        &TurnEvent::AssistantCreated {
+            turn_id: turn_id.clone(),
+            message_id: message_id.clone(),
+        },
+    );
+    let _ = emit_turn_event(
+        &app,
+        &TurnEvent::StatusChange {
+            turn_id: turn_id.clone(),
+            phase: "thinking".to_string(),
+        },
+    );
 
     // Build system prompt natively.
     let system = crate::ai_prompt::build_system_prompt(&input.prompt_input);
@@ -224,7 +247,14 @@ pub async fn ai_run_turn(
     for entry in &input.history {
         messages.push(entry.clone());
     }
-    messages.push(serde_json::json!({ "role": "user", "content": input.message }));
+    // Prefer the frontend-assembled content (carries attachments + vision parts);
+    // fall back to the raw message string when not provided.
+    let user_content = input
+        .user_content
+        .clone()
+        .filter(|value| !matches!(value, serde_json::Value::Null))
+        .unwrap_or_else(|| serde_json::Value::String(input.message.clone()));
+    messages.push(serde_json::json!({ "role": "user", "content": user_content }));
 
     // Runtime tool definitions — generated natively in Rust, filtered by mode.
     let tools = crate::ai_tool_defs::runtime_tool_definitions(
@@ -239,11 +269,18 @@ pub async fn ai_run_turn(
 
     // ── Model ↔ tool loop ──
     for round in 0..max_rounds {
-        let phase = if round == 0 { "thinking" } else { "running-tools" };
-        let _ = emit_turn_event(&app, &TurnEvent::StatusChange {
-            turn_id: turn_id.clone(),
-            phase: phase.to_string(),
-        });
+        let phase = if round == 0 {
+            "thinking"
+        } else {
+            "running-tools"
+        };
+        let _ = emit_turn_event(
+            &app,
+            &TurnEvent::StatusChange {
+                turn_id: turn_id.clone(),
+                phase: phase.to_string(),
+            },
+        );
 
         let payload = serde_json::json!({
             "model": input.model,
@@ -263,30 +300,47 @@ pub async fn ai_run_turn(
         let response = match crate::ai_chat_backend::completion(request).await {
             Ok(r) => r,
             Err(error) => {
-                let _ = emit_turn_event(&app, &TurnEvent::TurnError {
-                    turn_id: turn_id.clone(),
-                    error,
-                });
+                let _ = emit_turn_event(
+                    &app,
+                    &TurnEvent::TurnError {
+                        turn_id: turn_id.clone(),
+                        error,
+                    },
+                );
                 return Ok(());
             }
         };
 
         // Accumulate token usage if the provider reported it.
         if let Some(usage) = response.body.get("usage") {
-            usage_prompt += usage.get("prompt_tokens").or_else(|| usage.get("input_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-            usage_completion += usage.get("completion_tokens").or_else(|| usage.get("output_tokens")).and_then(|v| v.as_u64()).unwrap_or(0);
-            usage_total += usage.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            usage_prompt += usage
+                .get("prompt_tokens")
+                .or_else(|| usage.get("input_tokens"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            usage_completion += usage
+                .get("completion_tokens")
+                .or_else(|| usage.get("output_tokens"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            usage_total += usage
+                .get("total_tokens")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
         }
 
         let assistant = parse_assistant_message(&response.body);
 
         // Emit any streamed content.
         if !assistant.content.is_empty() {
-            let _ = emit_turn_event(&app, &TurnEvent::StreamDelta {
-                turn_id: turn_id.clone(),
-                content: assistant.content.clone(),
-                reasoning: assistant.reasoning.clone(),
-            });
+            let _ = emit_turn_event(
+                &app,
+                &TurnEvent::StreamDelta {
+                    turn_id: turn_id.clone(),
+                    content: assistant.content.clone(),
+                    reasoning: assistant.reasoning.clone(),
+                },
+            );
             final_content = assistant.content.clone();
         }
 
@@ -306,19 +360,25 @@ pub async fn ai_run_turn(
             })).collect::<Vec<_>>(),
         }));
 
-        let _ = emit_turn_event(&app, &TurnEvent::StatusChange {
-            turn_id: turn_id.clone(),
-            phase: "running-tools".to_string(),
-        });
+        let _ = emit_turn_event(
+            &app,
+            &TurnEvent::StatusChange {
+                turn_id: turn_id.clone(),
+                phase: "running-tools".to_string(),
+            },
+        );
 
         // Execute each tool call.
         for tc in &assistant.tool_calls {
-            let _ = emit_turn_event(&app, &TurnEvent::ToolCallStarted {
-                turn_id: turn_id.clone(),
-                call_id: tc.id.clone(),
-                tool: tc.name.clone(),
-                input: tc.arguments.clone(),
-            });
+            let _ = emit_turn_event(
+                &app,
+                &TurnEvent::ToolCallStarted {
+                    turn_id: turn_id.clone(),
+                    call_id: tc.id.clone(),
+                    tool: tc.name.clone(),
+                    input: tc.arguments.clone(),
+                },
+            );
 
             let result = execute_tool(&app, &state, &input, &turn_id, tc).await;
 
@@ -327,13 +387,16 @@ pub async fn ai_run_turn(
                 Err(err) => ("error".to_string(), String::new(), Some(err)),
             };
 
-            let _ = emit_turn_event(&app, &TurnEvent::ToolCallCompleted {
-                turn_id: turn_id.clone(),
-                call_id: tc.id.clone(),
-                status: status.clone(),
-                output: output.clone(),
-                error: error.clone(),
-            });
+            let _ = emit_turn_event(
+                &app,
+                &TurnEvent::ToolCallCompleted {
+                    turn_id: turn_id.clone(),
+                    call_id: tc.id.clone(),
+                    status: status.clone(),
+                    output: output.clone(),
+                    error: error.clone(),
+                },
+            );
 
             // Append tool result to conversation.
             messages.push(serde_json::json!({
@@ -348,33 +411,42 @@ pub async fn ai_run_turn(
         }
     }
 
-    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     if final_content.is_empty() {
         final_content = "Done.".to_string();
     }
     if usage_prompt > 0 || usage_completion > 0 || usage_total > 0 {
-        let _ = emit_turn_event(&app, &TurnEvent::TurnUsage {
-            turn_id: turn_id.clone(),
-            prompt_tokens: usage_prompt,
-            completion_tokens: usage_completion,
-            total_tokens: if usage_total > 0 { usage_total } else { usage_prompt + usage_completion },
-        });
+        let _ = emit_turn_event(
+            &app,
+            &TurnEvent::TurnUsage {
+                turn_id: turn_id.clone(),
+                prompt_tokens: usage_prompt,
+                completion_tokens: usage_completion,
+                total_tokens: if usage_total > 0 {
+                    usage_total
+                } else {
+                    usage_prompt + usage_completion
+                },
+            },
+        );
     }
-    let _ = emit_turn_event(&app, &TurnEvent::TurnDone {
-        turn_id,
-        message_id,
-        content: final_content,
-        duration_ms,
-    });
+    let _ = emit_turn_event(
+        &app,
+        &TurnEvent::TurnDone {
+            turn_id,
+            message_id,
+            content: final_content,
+            duration_ms,
+        },
+    );
 
     Ok(())
 }
 
 /// Cancel a running native turn — aborts pending approvals and signals stop.
 #[tauri::command]
-pub fn ai_cancel_turn(turn_id: String) -> Result<(), String> {
+pub fn ai_cancel_turn(turn_id: String) {
     cancel_approvals_for_turn(&turn_id);
-    Ok(())
 }
 
 // ── Response parsing ──
@@ -392,7 +464,8 @@ struct ParsedToolCall {
 }
 
 fn parse_assistant_message(body: &serde_json::Value) -> ParsedAssistant {
-    let choice = body.get("choices")
+    let choice = body
+        .get("choices")
         .and_then(|c| c.as_array())
         .and_then(|arr| arr.first());
     let message = choice.and_then(|c| c.get("message"));
@@ -411,24 +484,61 @@ fn parse_assistant_message(body: &serde_json::Value) -> ParsedAssistant {
         .and_then(|tc| tc.as_array())
         .map(|arr| arr.iter().filter_map(parse_tool_call).collect())
         .unwrap_or_default();
-    ParsedAssistant { content, reasoning, tool_calls }
+    ParsedAssistant {
+        content,
+        reasoning,
+        tool_calls,
+    }
 }
 
 fn parse_tool_call(value: &serde_json::Value) -> Option<ParsedToolCall> {
     let id = value.get("id")?.as_str()?.to_string();
     let function = value.get("function")?;
     let name = function.get("name")?.as_str()?.to_string();
-    let arguments = function.get("arguments")
+    let arguments = function
+        .get("arguments")
         .and_then(|a| a.as_str())
         .unwrap_or("{}")
         .to_string();
-    Some(ParsedToolCall { id, name, arguments })
+    Some(ParsedToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 // ── Tool execution ──
 // Dispatches to native Rust implementations for tools that are already ported;
 // remaining tools fall through to a Tauri self-invoke bridge (calls the existing
 // TS tool dispatcher through IPC).
+
+/// Read-before-edit guard. An edit against an **existing** file must be preceded
+/// by a `Read`/`InspectFile` of that file in the same session, so the model never
+/// mutates content it hasn't seen. Editing a path that does not yet exist (a
+/// create) is always allowed. Returns an actionable error the model can recover
+/// from by reading the file first.
+fn require_file_read_before_edit(
+    state: &tauri::State<'_, crate::SharedState>,
+    session_id: &str,
+    tool: &str,
+    raw_path: &str,
+) -> Result<(), String> {
+    let Ok(resolved) = crate::resolve_workspace_path(state, std::path::Path::new(raw_path)) else {
+        // If the path cannot be resolved the downstream tool will surface the real
+        // error; don't block on the guard here.
+        return Ok(());
+    };
+    // Only existing files require a prior read — creating a new file cannot.
+    if !resolved.is_file() {
+        return Ok(());
+    }
+    if crate::ai_session::was_file_read(session_id, &resolved) {
+        return Ok(());
+    }
+    Err(format!(
+        "{tool} blocked: read {raw_path} before editing it. Call Read (or InspectFile) on this file first, then retry the edit so the change is based on its current contents."
+    ))
+}
 
 async fn execute_tool(
     app: &tauri::AppHandle,
@@ -437,7 +547,8 @@ async fn execute_tool(
     turn_id: &str,
     tc: &ParsedToolCall,
 ) -> Result<String, String> {
-    let args: serde_json::Value = serde_json::from_str(&tc.arguments).unwrap_or(serde_json::json!({}));
+    let args: serde_json::Value =
+        serde_json::from_str(&tc.arguments).unwrap_or_else(|_| serde_json::json!({}));
 
     match tc.name.as_str() {
         // ── Natively ported tools (Stage 1) ──
@@ -447,8 +558,13 @@ async fn execute_tool(
             let max_results = json_usize(&args, "maxResults", 24);
             let max_files = json_usize(&args, "maxFiles", 5000);
             let result = crate::ai_semantic::ai_semantic_search(
-                state.clone(), query, path, Some(max_results), Some(max_files),
-            ).await?;
+                state.clone(),
+                query,
+                path,
+                Some(max_results),
+                Some(max_files),
+            )
+            .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "RelatedFiles" => {
@@ -457,8 +573,13 @@ async fn execute_tool(
             let max_results = json_usize(&args, "maxResults", 40);
             let max_files = json_usize(&args, "maxFiles", 5000);
             let result = crate::ai_related::ai_related_files(
-                state.clone(), path, query, Some(max_results), Some(max_files),
-            ).await?;
+                state.clone(),
+                path,
+                query,
+                Some(max_results),
+                Some(max_files),
+            )
+            .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "RepoMap" => {
@@ -469,7 +590,12 @@ async fn execute_tool(
         "WorkspaceIndex" => {
             let max_files = json_usize(&args, "maxFiles", 60);
             let max_scan = json_usize(&args, "maxScan", 5000);
-            let result = crate::ai_workspace::ai_workspace_index(state.clone(), Some(max_files), Some(max_scan)).await?;
+            let result = crate::ai_workspace::ai_workspace_index(
+                state.clone(),
+                Some(max_files),
+                Some(max_scan),
+            )
+            .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
@@ -477,17 +603,29 @@ async fn execute_tool(
         "Shell" => {
             let command = json_str(&args, "command");
             let cwd = json_str_opt(&args, "cwd");
-            let timeout_secs = args.get("timeoutSecs").and_then(|v| v.as_u64());
+            let timeout_secs = args.get("timeoutSecs").and_then(serde_json::Value::as_u64);
             let result = crate::ai_tools::ai_shell(
-                state.clone(), command, cwd.map(std::path::PathBuf::from), timeout_secs,
-            ).await?;
+                state.clone(),
+                command,
+                cwd.map(std::path::PathBuf::from),
+                timeout_secs,
+            )
+            .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         // ── File read tools ──
         "Read" => {
             let path = json_str(&args, "path");
-            let max_bytes = args.get("maxBytes").and_then(|v| v.as_u64());
-            let result = crate::ai_tools::ai_read_file(state.clone(), std::path::PathBuf::from(path), max_bytes).await?;
+            let max_bytes = args.get("maxBytes").and_then(serde_json::Value::as_u64);
+            let result = crate::ai_tools::ai_read_file(
+                state.clone(),
+                std::path::PathBuf::from(path),
+                max_bytes,
+            )
+            .await?;
+            // Record the resolved path so a later edit tool can confirm this turn
+            // read the file before mutating it.
+            crate::ai_session::mark_file_read(&input.session_id, &result.path);
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "Glob" => {
@@ -499,10 +637,24 @@ async fn execute_tool(
         "SymbolContext" => {
             let query = json_str_opt(&args, "query");
             let path = json_str_opt(&args, "path").map(std::path::PathBuf::from);
-            let line = args.get("line").and_then(|v| v.as_u64()).map(|v| v as u32);
-            let column = args.get("column").and_then(|v| v.as_u64()).map(|v| v as u32);
+            let line = args
+                .get("line")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok());
+            let column = args
+                .get("column")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok());
             let max = json_usize(&args, "maxResults", 80);
-            let result = crate::ai_tools::ai_symbol_context(state.clone(), query, path, line, column, Some(max)).await?;
+            let result = crate::ai_tools::ai_symbol_context(
+                state.clone(),
+                query,
+                path,
+                line,
+                column,
+                Some(max),
+            )
+            .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
@@ -510,26 +662,106 @@ async fn execute_tool(
         "Write" => {
             let path = json_str(&args, "path");
             let text = json_str(&args, "text");
-            let overwrite = args.get("overwrite").and_then(|v| v.as_bool());
-            let save = args.get("saveToDisk").and_then(|v| v.as_bool());
-            require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "Write", &format!("Write to {path}"), &text.chars().take(400).collect::<String>(), if overwrite.unwrap_or(false) { "modify" } else { "create" }).await?;
-            let result = crate::ai_tools::ai_file_write(app.clone(), state.clone(), std::path::PathBuf::from(path), text, overwrite, save).await?;
+            let overwrite = args.get("overwrite").and_then(serde_json::Value::as_bool);
+            // Overwriting an existing file is an edit — require it was read first.
+            // (Creating a new file is a no-op in the guard.)
+            if overwrite.unwrap_or(false) {
+                require_file_read_before_edit(state, &input.session_id, "Write", &path)?;
+            }
+            let save = args.get("saveToDisk").and_then(serde_json::Value::as_bool);
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                &input.tool_approval_mode,
+                "Write",
+                &format!("Write to {path}"),
+                &text.chars().take(400).collect::<String>(),
+                if overwrite.unwrap_or(false) {
+                    "modify"
+                } else {
+                    "create"
+                },
+            )
+            .await?;
+            let result = crate::ai_tools::ai_file_write(
+                app.clone(),
+                state.clone(),
+                std::path::PathBuf::from(&path),
+                text,
+                overwrite,
+                save,
+            )
+            .await?;
+            // The file's contents are now known to this turn; allow follow-up edits.
+            if let Ok(resolved) = crate::resolve_workspace_path(state, std::path::Path::new(&path))
+            {
+                crate::ai_session::mark_file_read(&input.session_id, &resolved);
+            }
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "StrReplace" => {
             let path = json_str(&args, "path");
+            // StrReplace always edits existing content — enforce read-before-edit.
+            require_file_read_before_edit(state, &input.session_id, "StrReplace", &path)?;
             let old_text = json_str(&args, "oldText");
             let new_text = json_str(&args, "newText");
-            let expected = args.get("expectedReplacements").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let save = args.get("saveToDisk").and_then(|v| v.as_bool());
-            require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "StrReplace", &format!("Replace in {path}"), &format!("-{}\n+{}", old_text.chars().take(200).collect::<String>(), new_text.chars().take(200).collect::<String>()), "modify").await?;
-            let result = crate::ai_tools::ai_file_str_replace(app.clone(), state.clone(), std::path::PathBuf::from(path), old_text, new_text, expected, save).await?;
+            let expected = args
+                .get("expectedReplacements")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok());
+            let save = args.get("saveToDisk").and_then(serde_json::Value::as_bool);
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                &input.tool_approval_mode,
+                "StrReplace",
+                &format!("Replace in {path}"),
+                &format!(
+                    "-{}\n+{}",
+                    old_text.chars().take(200).collect::<String>(),
+                    new_text.chars().take(200).collect::<String>()
+                ),
+                "modify",
+            )
+            .await?;
+            let result = crate::ai_tools::ai_file_str_replace(
+                app.clone(),
+                state.clone(),
+                std::path::PathBuf::from(&path),
+                old_text,
+                new_text,
+                expected,
+                save,
+            )
+            .await?;
+            // Keep the read marker fresh after a successful edit.
+            if let Ok(resolved) = crate::resolve_workspace_path(state, std::path::Path::new(&path))
+            {
+                crate::ai_session::mark_file_read(&input.session_id, &resolved);
+            }
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "Delete" => {
             let path = json_str(&args, "path");
-            require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "Delete", &format!("Delete {path}"), &path, "delete").await?;
-            let result = crate::ai_tools::ai_file_delete(app.clone(), state.clone(), std::path::PathBuf::from(path)).await?;
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                &input.tool_approval_mode,
+                "Delete",
+                &format!("Delete {path}"),
+                &path,
+                "delete",
+            )
+            .await?;
+            let result = crate::ai_tools::ai_file_delete(
+                app.clone(),
+                state.clone(),
+                std::path::PathBuf::from(path),
+            )
+            .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
@@ -539,15 +771,22 @@ async fn execute_tool(
                 state.clone(),
                 query,
                 lux_core::SearchOptions {
-                    case_sensitive: args.get("caseSensitive").and_then(|v| v.as_bool()).unwrap_or(false),
+                    case_sensitive: args
+                        .get("caseSensitive")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                     whole_word: false,
-                    use_regex: args.get("useRegex").and_then(|v| v.as_bool()).unwrap_or(false),
+                    use_regex: args
+                        .get("useRegex")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
                     include_hidden: false,
                     include_globs: vec![],
                     exclude_globs: vec![],
                     max_results: json_usize(&args, "maxResults", 50),
                 },
-            ).await?;
+            )
+            .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "GitContext" => {
@@ -565,46 +804,97 @@ async fn execute_tool(
             let action = json_str(&args, "action");
             if action == "read" {
                 let topic = json_str_opt(&args, "topic");
-                let limit = args.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
-                let entries = crate::ai_a2a::ai_blackboard_read(input.session_id.clone(), topic, limit)?;
-                serde_json::to_string(&serde_json::json!({ "action": "read", "messages": entries })).map_err(|e| e.to_string())
+                let limit = args
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|v| usize::try_from(v).ok());
+                let entries =
+                    crate::ai_a2a::ai_blackboard_read(input.session_id.clone(), topic, limit)?;
+                serde_json::to_string(&serde_json::json!({ "action": "read", "messages": entries }))
+                    .map_err(|e| e.to_string())
             } else {
                 let content = json_str(&args, "content");
                 let topic = json_str(&args, "topic");
                 if topic.is_empty() || content.is_empty() {
                     return Err("AgentMessage post requires topic and content.".to_string());
                 }
-                let entry = crate::ai_a2a::ai_blackboard_post(input.session_id.clone(), input.agent_mode.clone(), topic, content)?;
-                serde_json::to_string(&serde_json::json!({ "action": "post", "posted": entry })).map_err(|e| e.to_string())
+                let entry = crate::ai_a2a::ai_blackboard_post(
+                    input.session_id.clone(),
+                    input.agent_mode.clone(),
+                    topic,
+                    content,
+                )?;
+                serde_json::to_string(&serde_json::json!({ "action": "post", "posted": entry }))
+                    .map_err(|e| e.to_string())
             }
         }
         "PatchEngine" => {
-            let operations_raw = args.get("operations").cloned().unwrap_or(serde_json::json!([]));
-            let operations: Vec<crate::ai_tools::AiFilePatchOperation> = serde_json::from_value(operations_raw).map_err(|e| format!("Invalid patch operations: {e}"))?;
-            let save = args.get("saveToDisk").and_then(|v| v.as_bool());
-            let dry_run = args.get("dryRun").and_then(|v| v.as_bool());
+            let operations_raw = args
+                .get("operations")
+                .cloned()
+                .unwrap_or(serde_json::json!([]));
+            let operations: Vec<crate::ai_tools::AiFilePatchOperation> =
+                serde_json::from_value(operations_raw)
+                    .map_err(|e| format!("Invalid patch operations: {e}"))?;
+            let save = args.get("saveToDisk").and_then(serde_json::Value::as_bool);
+            let dry_run = args.get("dryRun").and_then(serde_json::Value::as_bool);
             if !dry_run.unwrap_or(false) {
-                require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "PatchEngine", &format!("{} operations", operations.len()), "multi-file patch", "modify").await?;
+                require_tool_approval(
+                    app,
+                    turn_id,
+                    tc,
+                    &input.tool_approval_mode,
+                    "PatchEngine",
+                    &format!("{} operations", operations.len()),
+                    "multi-file patch",
+                    "modify",
+                )
+                .await?;
             }
-            let result = crate::ai_tools::ai_file_patch(app.clone(), state.clone(), operations, save, dry_run).await?;
+            let result = crate::ai_tools::ai_file_patch(
+                app.clone(),
+                state.clone(),
+                operations,
+                save,
+                dry_run,
+            )
+            .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "InspectFile" => {
             let path = json_str(&args, "path");
             let mut options = lux_core::FileInspectionOptions::default();
-            if let Some(v) = args.get("maxRows").and_then(|v| v.as_u64()) { options.max_rows = v as usize; }
-            if let Some(v) = args.get("maxColumns").and_then(|v| v.as_u64()) { options.max_columns = v as usize; }
-            if let Some(v) = args.get("maxBytes").and_then(|v| v.as_u64()) { options.max_text_bytes = v; }
-            let result = crate::file_intel::file_inspect(state.clone(), std::path::PathBuf::from(path), Some(options)).await?;
+            if let Some(v) = args.get("maxRows").and_then(serde_json::Value::as_u64) {
+                options.max_rows = usize::try_from(v).unwrap_or(options.max_rows);
+            }
+            if let Some(v) = args.get("maxColumns").and_then(serde_json::Value::as_u64) {
+                options.max_columns = usize::try_from(v).unwrap_or(options.max_columns);
+            }
+            if let Some(v) = args.get("maxBytes").and_then(serde_json::Value::as_u64) {
+                options.max_text_bytes = v;
+            }
+            let result = crate::file_intel::file_inspect(
+                state.clone(),
+                std::path::PathBuf::from(path),
+                Some(options),
+            )
+            .await?;
+            // InspectFile is a valid "read" for the read-before-edit guard.
+            crate::ai_session::mark_file_read(&input.session_id, &result.path);
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "WebFetch" => {
             let url = json_str(&args, "url");
-            if url.is_empty() { return Err("WebFetch requires a URL.".to_string()); }
-            let max_bytes = args.get("maxBytes").and_then(|v| v.as_u64());
-            let timeout_secs = args.get("timeoutSecs").and_then(|v| v.as_u64());
-            let allow_private = args.get("allowPrivateHosts").and_then(|v| v.as_bool());
-            let result = crate::web_fetch::fetch(url, max_bytes, timeout_secs, allow_private).await?;
+            if url.is_empty() {
+                return Err("WebFetch requires a URL.".to_string());
+            }
+            let max_bytes = args.get("maxBytes").and_then(serde_json::Value::as_u64);
+            let timeout_secs = args.get("timeoutSecs").and_then(serde_json::Value::as_u64);
+            let allow_private = args
+                .get("allowPrivateHosts")
+                .and_then(serde_json::Value::as_bool);
+            let result =
+                crate::web_fetch::fetch(url, max_bytes, timeout_secs, allow_private).await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "TestHealth" => {
@@ -615,42 +905,66 @@ async fn execute_tool(
 
         // ── Browser tools via agent-browser invoke ──
         "BrowserStatus" => {
-            let result = crate::agent_browser::status(crate::agent_browser::AgentBrowserStatusRequest {
-                command_path: None, skip_auto_update: Some(true), lightweight: Some(true),
-            }).await?;
+            let result =
+                crate::agent_browser::status(crate::agent_browser::AgentBrowserStatusRequest {
+                    command_path: None,
+                    skip_auto_update: Some(true),
+                    lightweight: Some(true),
+                })
+                .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
-        "BrowserOpen" | "BrowserAct" | "BrowserSnapshot" | "BrowserScreenshot"
-        | "BrowserClose" | "BrowserChat" | "BrowserDashboard" | "BrowserInstall"
-        | "BrowserHelp" | "BrowserDoctor" | "BrowserInvoke" => {
+        "BrowserOpen" | "BrowserAct" | "BrowserSnapshot" | "BrowserScreenshot" | "BrowserClose"
+        | "BrowserChat" | "BrowserDashboard" | "BrowserInstall" | "BrowserHelp"
+        | "BrowserDoctor" | "BrowserInvoke" => {
             let browser_args = build_browser_args(&tc.name, &args);
-            if matches!(tc.name.as_str(), "BrowserOpen" | "BrowserAct" | "BrowserClose" | "BrowserChat" | "BrowserInstall") {
-                require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, &tc.name, &tc.name, &browser_args.join(" "), "execute").await?;
+            if matches!(
+                tc.name.as_str(),
+                "BrowserOpen" | "BrowserAct" | "BrowserClose" | "BrowserChat" | "BrowserInstall"
+            ) {
+                require_tool_approval(
+                    app,
+                    turn_id,
+                    tc,
+                    &input.tool_approval_mode,
+                    &tc.name,
+                    &tc.name,
+                    &browser_args.join(" "),
+                    "execute",
+                )
+                .await?;
             }
-            let result = crate::agent_browser::invoke(crate::agent_browser::AgentBrowserInvokeRequest {
-                session: input.session_id.clone(),
-                args: browser_args,
-                headed: None,
-                allowed_domains: None,
-                max_output: Some(24_000),
-                timeout_secs: Some(30),
-                command_path: None,
-                session_name: None,
-                profile: None,
-                state_path: None,
-                content_boundaries: None,
-                ignore_https_errors: None,
-                allow_file_access: None,
-                provider: None,
-                proxy: None,
-            }).await?;
+            let result =
+                crate::agent_browser::invoke(crate::agent_browser::AgentBrowserInvokeRequest {
+                    session: input.session_id.clone(),
+                    args: browser_args,
+                    headed: None,
+                    allowed_domains: None,
+                    max_output: Some(24_000),
+                    timeout_secs: Some(30),
+                    command_path: None,
+                    session_name: None,
+                    profile: None,
+                    state_path: None,
+                    content_boundaries: None,
+                    ignore_https_errors: None,
+                    allow_file_access: None,
+                    provider: None,
+                    proxy: None,
+                })
+                .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
         // ── Orchestration tools (session state in Rust) ──
         "Goal" => {
             let goal = json_str_opt(&args, "goal");
-            let progress = args.get("progress").and_then(|v| v.as_f64()).map(|v| v.clamp(0.0, 100.0) as u32);
+            // Value is clamped to [0.0, 100.0] before the cast, so the conversion is lossless and non-negative.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let progress = args
+                .get("progress")
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v.clamp(0.0, 100.0) as u32);
             let status = json_str_opt(&args, "status");
             let summary = json_str_opt(&args, "summary");
             if let Some(ref g) = goal {
@@ -667,20 +981,39 @@ async fn execute_tool(
         "TodoWrite" => {
             let raw_todos = args.get("todos").and_then(|v| v.as_array());
             let items: Vec<crate::ai_session::SessionTodo> = match raw_todos {
-                Some(arr) => arr.iter().enumerate().filter_map(|(i, v)| {
-                    let content = v.get("content")?.as_str()?.trim().to_string();
-                    if content.is_empty() { return None; }
-                    Some(crate::ai_session::SessionTodo {
-                        id: v.get("id").and_then(|v| v.as_str()).map(str::to_string).unwrap_or_else(|| format!("todo-{}", i + 1)),
-                        content,
-                        status: v.get("status").and_then(|v| v.as_str()).unwrap_or("pending").to_string(),
-                        priority: v.get("priority").and_then(|v| v.as_str()).unwrap_or("medium").to_string(),
-                        notes: v.get("notes").and_then(|v| v.as_str()).map(str::to_string),
+                Some(arr) => arr
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| {
+                        let content = v.get("content")?.as_str()?.trim().to_string();
+                        if content.is_empty() {
+                            return None;
+                        }
+                        Some(crate::ai_session::SessionTodo {
+                            id: v
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map_or_else(|| format!("todo-{}", i + 1), str::to_string),
+                            content,
+                            status: v
+                                .get("status")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("pending")
+                                .to_string(),
+                            priority: v
+                                .get("priority")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("medium")
+                                .to_string(),
+                            notes: v.get("notes").and_then(|v| v.as_str()).map(str::to_string),
+                        })
                     })
-                }).collect(),
+                    .collect(),
                 None => return Err("TodoWrite requires a todos array.".to_string()),
             };
-            if items.is_empty() { return Err("TodoWrite requires at least one todo item.".to_string()); }
+            if items.is_empty() {
+                return Err("TodoWrite requires at least one todo item.".to_string());
+            }
             crate::ai_session::set_todos(&input.session_id, items.clone());
             Ok(serde_json::json!({ "count": items.len(), "todos": items }).to_string())
         }
@@ -709,7 +1042,8 @@ async fn execute_tool(
                     "agent": input.agent_mode,
                     "toolApprovalMode": input.tool_approval_mode,
                 },
-            }).to_string())
+            })
+            .to_string())
         }
         "SecretGuard" => {
             let text = json_str(&args, "text");
@@ -720,26 +1054,42 @@ async fn execute_tool(
                     "status": "scanned",
                     "scannedBytes": text.len(),
                     "notes": ["Secret scanning runs inline — check the text before sharing."],
-                }).to_string())
+                })
+                .to_string())
             }
         }
 
         "RulesContext" => {
             let query = json_str_opt(&args, "query");
-            let max_files = args.get("maxFiles").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let result = crate::ai_context_sources::ai_rules_context(state.clone(), query, max_files, None).await?;
+            let max_files = args
+                .get("maxFiles")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok());
+            let result =
+                crate::ai_context_sources::ai_rules_context(state.clone(), query, max_files, None)
+                    .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "DocsContext" => {
             let query = json_str_opt(&args, "query");
-            let max_files = args.get("maxFiles").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let result = crate::ai_context_sources::ai_docs_context(state.clone(), query, max_files, None).await?;
+            let max_files = args
+                .get("maxFiles")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok());
+            let result =
+                crate::ai_context_sources::ai_docs_context(state.clone(), query, max_files, None)
+                    .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "MemoryContext" => {
             let query = json_str_opt(&args, "query");
-            let max_files = args.get("maxFiles").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let result = crate::ai_context_sources::ai_memory_context(state.clone(), query, max_files, None).await?;
+            let max_files = args
+                .get("maxFiles")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok());
+            let result =
+                crate::ai_context_sources::ai_memory_context(state.clone(), query, max_files, None)
+                    .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
@@ -747,42 +1097,95 @@ async fn execute_tool(
             let query = json_str(&args, "query");
             // FastContext composes multiple tools — call them sequentially in Rust.
             let mut parts = Vec::new();
-            parts.push(format!("Active document: {}", input.active_document_path.as_deref().unwrap_or("none")));
+            parts.push(format!(
+                "Active document: {}",
+                input.active_document_path.as_deref().unwrap_or("none")
+            ));
 
             // WorkspaceIndex
-            if let Ok(wi) = crate::ai_workspace::ai_workspace_index(state.clone(), Some(24), Some(2500)).await {
-                if let Ok(json) = serde_json::to_string(&wi) { parts.push(format!("WorkspaceIndex: {json}")); }
+            if let Ok(wi) =
+                crate::ai_workspace::ai_workspace_index(state.clone(), Some(24), Some(2500)).await
+            {
+                if let Ok(json) = serde_json::to_string(&wi) {
+                    parts.push(format!("WorkspaceIndex: {json}"));
+                }
             }
             // RepoMap
             if let Ok(rm) = crate::ai_workspace::ai_repo_map(state.clone(), Some(48)).await {
-                if let Ok(json) = serde_json::to_string(&rm) { parts.push(format!("RepoMap: {json}")); }
+                if let Ok(json) = serde_json::to_string(&rm) {
+                    parts.push(format!("RepoMap: {json}"));
+                }
             }
             // RulesContext
-            if let Ok(rc) = crate::ai_context_sources::ai_rules_context(state.clone(), Some(query.clone()), Some(8), None).await {
-                if let Ok(json) = serde_json::to_string(&rc) { parts.push(format!("RulesContext: {json}")); }
+            if let Ok(rc) = crate::ai_context_sources::ai_rules_context(
+                state.clone(),
+                Some(query.clone()),
+                Some(8),
+                None,
+            )
+            .await
+            {
+                if let Ok(json) = serde_json::to_string(&rc) {
+                    parts.push(format!("RulesContext: {json}"));
+                }
             }
             // MemoryContext
-            if let Ok(mc) = crate::ai_context_sources::ai_memory_context(state.clone(), Some(query.clone()), Some(8), None).await {
-                if let Ok(json) = serde_json::to_string(&mc) { parts.push(format!("MemoryContext: {json}")); }
+            if let Ok(mc) = crate::ai_context_sources::ai_memory_context(
+                state.clone(),
+                Some(query.clone()),
+                Some(8),
+                None,
+            )
+            .await
+            {
+                if let Ok(json) = serde_json::to_string(&mc) {
+                    parts.push(format!("MemoryContext: {json}"));
+                }
             }
             // DiagnosticsContext
             if let Ok(diag) = crate::lsp::diagnostics_snapshot(state.clone()) {
                 let count = diag.len();
                 let truncated: Vec<_> = diag.into_iter().take(40).collect();
-                parts.push(format!("DiagnosticsContext: {{\"count\":{count},\"diagnostics\":{}}}", serde_json::to_string(&truncated).unwrap_or_default()));
+                parts.push(format!(
+                    "DiagnosticsContext: {{\"count\":{count},\"diagnostics\":{}}}",
+                    serde_json::to_string(&truncated).unwrap_or_default()
+                ));
             }
             // GitContext
             if let Ok(git) = crate::git::git_status(state.clone()).await {
-                if let Ok(json) = serde_json::to_string(&git) { parts.push(format!("GitContext: {json}")); }
+                if let Ok(json) = serde_json::to_string(&git) {
+                    parts.push(format!("GitContext: {json}"));
+                }
             }
             // RelatedFiles
-            if let Ok(rf) = crate::ai_related::ai_related_files(state.clone(), input.active_document_path.clone(), Some(query.clone()), Some(24), Some(5000)).await {
-                if let Ok(json) = serde_json::to_string(&rf) { parts.push(format!("RelatedFiles: {json}")); }
+            if let Ok(rf) = crate::ai_related::ai_related_files(
+                state.clone(),
+                input.active_document_path.clone(),
+                Some(query.clone()),
+                Some(24),
+                Some(5000),
+            )
+            .await
+            {
+                if let Ok(json) = serde_json::to_string(&rf) {
+                    parts.push(format!("RelatedFiles: {json}"));
+                }
             }
             // Grep/Glob
             if !query.is_empty() {
-                if let Ok(search) = crate::search::search_query(state.clone(), query.clone(), lux_core::SearchOptions { max_results: 20, ..Default::default() }).await {
-                    if let Ok(json) = serde_json::to_string(&search) { parts.push(format!("Search: {json}")); }
+                if let Ok(search) = crate::search::search_query(
+                    state.clone(),
+                    query.clone(),
+                    lux_core::SearchOptions {
+                        max_results: 20,
+                        ..Default::default()
+                    },
+                )
+                .await
+                {
+                    if let Ok(json) = serde_json::to_string(&search) {
+                        parts.push(format!("Search: {json}"));
+                    }
                 }
             }
 
@@ -795,7 +1198,7 @@ async fn execute_tool(
             let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
             Ok(serde_json::json!({
                 "branch": git.as_ref().map(|g| &g.branch),
-                "changedFiles": git.as_ref().map(|g| g.files.len()).unwrap_or(0),
+                "changedFiles": git.as_ref().map_or(0, |g| g.files.len()),
                 "patch": diff.as_ref().map(|d| d.patch.chars().take(8000).collect::<String>()).unwrap_or_default(),
                 "diagnosticCount": diagnostics.len(),
                 "diagnostics": diagnostics.into_iter().take(24).collect::<Vec<_>>(),
@@ -806,14 +1209,17 @@ async fn execute_tool(
             let root = crate::workspace_root(state).ok();
             let test_result = if let Some(root) = root {
                 crate::test_health::run(root).await.ok()
-            } else { None };
+            } else {
+                None
+            };
             let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
             Ok(serde_json::json!({
                 "testHealth": test_result,
                 "diagnosticCount": diagnostics.len(),
                 "diagnostics": diagnostics.into_iter().take(40).collect::<Vec<_>>(),
                 "notes": ["Analyze failing tests and diagnostics above to identify root causes."],
-            }).to_string())
+            })
+            .to_string())
         }
 
         "ImpactAnalysis" => {
@@ -821,13 +1227,38 @@ async fn execute_tool(
             let path = json_str_opt(&args, "path").or_else(|| input.active_document_path.clone());
             let max_results = json_usize(&args, "maxResults", 32);
             // Compose: RelatedFiles + diagnostics + symbols.
-            let related = crate::ai_related::ai_related_files(state.clone(), path.clone(), Some(query.clone()), Some(max_results), Some(5000)).await.ok();
+            let related = crate::ai_related::ai_related_files(
+                state.clone(),
+                path.clone(),
+                Some(query.clone()),
+                Some(max_results),
+                Some(5000),
+            )
+            .await
+            .ok();
             let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
-            let symbols = if !query.is_empty() {
-                crate::ai_tools::ai_symbol_context(state.clone(), Some(query.clone()), path.clone().map(std::path::PathBuf::from), None, None, Some(40)).await.ok()
-            } else { None };
+            let symbols = if query.is_empty() {
+                None
+            } else {
+                crate::ai_tools::ai_symbol_context(
+                    state.clone(),
+                    Some(query.clone()),
+                    path.clone().map(std::path::PathBuf::from),
+                    None,
+                    None,
+                    Some(40),
+                )
+                .await
+                .ok()
+            };
             let diag_count = diagnostics.len();
-            let risk = if diag_count > 10 { "high" } else if diag_count > 0 { "medium" } else { "low" };
+            let risk = if diag_count > 10 {
+                "high"
+            } else if diag_count > 0 {
+                "medium"
+            } else {
+                "low"
+            };
             Ok(serde_json::json!({
                 "target": path,
                 "query": query,
@@ -836,27 +1267,45 @@ async fn execute_tool(
                 "symbols": symbols,
                 "diagnosticCount": diag_count,
                 "diagnostics": diagnostics.into_iter().take(24).collect::<Vec<_>>(),
-            }).to_string())
+            })
+            .to_string())
         }
 
         "TerminalContext" => {
             // Terminal session + output state is buffered in React; passed through TurnInput.
-            match &input.terminal_context {
-                Some(ctx) => Ok(ctx.to_string()),
-                None => Ok(serde_json::json!({
-                    "sessionCount": 0,
-                    "sessions": [],
-                    "notes": ["No terminal context was provided for this turn."],
-                }).to_string()),
-            }
+            Ok(input.terminal_context.as_ref().map_or_else(
+                || {
+                    serde_json::json!({
+                        "sessionCount": 0,
+                        "sessions": [],
+                        "notes": ["No terminal context was provided for this turn."],
+                    })
+                    .to_string()
+                },
+                std::string::ToString::to_string,
+            ))
         }
         "TerminalWrite" => {
             let data = json_str(&args, "data");
-            if data.is_empty() { return Err("TerminalWrite requires non-empty data.".to_string()); }
+            if data.is_empty() {
+                return Err("TerminalWrite requires non-empty data.".to_string());
+            }
             let session_id_str = json_str_opt(&args, "sessionId");
-            require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "TerminalWrite", "Write to terminal", &data.chars().take(120).collect::<String>(), "execute").await?;
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                &input.tool_approval_mode,
+                "TerminalWrite",
+                "Write to terminal",
+                &data.chars().take(120).collect::<String>(),
+                "execute",
+            )
+            .await?;
             let session_id = match session_id_str {
-                Some(id) => uuid::Uuid::parse_str(&id).map_err(|_| "invalid session id".to_string())?,
+                Some(id) => {
+                    uuid::Uuid::parse_str(&id).map_err(|_| "invalid session id".to_string())?
+                }
                 None => return Err("TerminalWrite requires a sessionId.".to_string()),
             };
             crate::terminal::terminal_write(state.clone(), session_id, data.clone())?;
@@ -869,42 +1318,101 @@ async fn execute_tool(
             if description.is_empty() || prompt.is_empty() {
                 return Err("Task requires description and prompt.".to_string());
             }
-            let subagent_type = json_str_opt(&args, "subagent_type").unwrap_or_else(|| "generalPurpose".to_string());
+            let subagent_type = json_str_opt(&args, "subagent_type")
+                .unwrap_or_else(|| "generalPurpose".to_string());
             let agent_id = format!("subagent-{}", uuid::Uuid::new_v4().simple());
-            let summary = run_subagent(app, state, input, &agent_id, &description, &prompt, &subagent_type).await?;
+            let summary = run_subagent(
+                app,
+                state,
+                input,
+                &agent_id,
+                &description,
+                &prompt,
+                &subagent_type,
+            )
+            .await?;
             Ok(serde_json::json!({
                 "agentId": agent_id,
                 "subagentType": subagent_type,
                 "summary": summary,
-            }).to_string())
+            })
+            .to_string())
         }
 
         "ContextBudgeter" => {
             let query = json_str(&args, "query");
-            if query.is_empty() { return Err("ContextBudgeter requires a non-empty query.".to_string()); }
+            if query.is_empty() {
+                return Err("ContextBudgeter requires a non-empty query.".to_string());
+            }
             let target_chars = json_usize(&args, "targetChars", 16_000).clamp(2_000, 22_000);
             // Compose ranked context from native tools, then budget-select by score.
             let mut items: Vec<(String, String, i64)> = Vec::new(); // (kind, content, score)
-            if let Ok(rc) = crate::ai_context_sources::ai_rules_context(state.clone(), Some(query.clone()), Some(6), None).await {
-                for f in rc.files { items.push(("rule".into(), format!("{}: {}", f.relative_path, f.text), 60)); }
+            if let Ok(rc) = crate::ai_context_sources::ai_rules_context(
+                state.clone(),
+                Some(query.clone()),
+                Some(6),
+                None,
+            )
+            .await
+            {
+                for f in rc.files {
+                    items.push((
+                        "rule".into(),
+                        format!("{}: {}", f.relative_path, f.text),
+                        60,
+                    ));
+                }
             }
-            if let Ok(mc) = crate::ai_context_sources::ai_memory_context(state.clone(), Some(query.clone()), Some(6), None).await {
-                for f in mc.files { items.push(("memory".into(), format!("{}: {}", f.relative_path, f.text), 55)); }
+            if let Ok(mc) = crate::ai_context_sources::ai_memory_context(
+                state.clone(),
+                Some(query.clone()),
+                Some(6),
+                None,
+            )
+            .await
+            {
+                for f in mc.files {
+                    items.push((
+                        "memory".into(),
+                        format!("{}: {}", f.relative_path, f.text),
+                        55,
+                    ));
+                }
             }
-            if let Ok(rf) = crate::ai_related::ai_related_files(state.clone(), input.active_document_path.clone(), Some(query.clone()), Some(18), Some(5000)).await {
-                for f in rf.files { items.push(("related-file".into(), format!("{} (score {})", f.relative_path, f.score), 40 + f.score.min(40))); }
+            if let Ok(rf) = crate::ai_related::ai_related_files(
+                state.clone(),
+                input.active_document_path.clone(),
+                Some(query.clone()),
+                Some(18),
+                Some(5000),
+            )
+            .await
+            {
+                for f in rf.files {
+                    items.push((
+                        "related-file".into(),
+                        format!("{} (score {})", f.relative_path, f.score),
+                        40 + f.score.min(40),
+                    ));
+                }
             }
             if let Ok(diag) = crate::lsp::diagnostics_snapshot(state.clone()) {
                 for d in diag.into_iter().take(20) {
-                    items.push(("diagnostic".into(), serde_json::to_string(&d).unwrap_or_default(), 50));
+                    items.push((
+                        "diagnostic".into(),
+                        serde_json::to_string(&d).unwrap_or_default(),
+                        50,
+                    ));
                 }
             }
             // Rank by score desc, then budget-select.
-            items.sort_by(|a, b| b.2.cmp(&a.2));
+            items.sort_by_key(|item| std::cmp::Reverse(item.2));
             let mut selected = Vec::new();
             let mut used = 0usize;
             for (kind, content, score) in items {
-                if used >= target_chars { break; }
+                if used >= target_chars {
+                    break;
+                }
                 let clamped: String = content.chars().take(1800).collect();
                 used += clamped.len();
                 selected.push(serde_json::json!({ "kind": kind, "score": score, "chars": clamped.len(), "content": clamped }));
@@ -916,29 +1424,56 @@ async fn execute_tool(
             let action = json_str_opt(&args, "action").unwrap_or_else(|| "list".to_string());
             let id = json_str_opt(&args, "id");
             let label = json_str_opt(&args, "label");
-            let paths = args.get("paths").and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>());
-            let max_files = args.get("maxFiles").and_then(|v| v.as_u64()).map(|v| v as usize);
-            let max_bytes = args.get("maxBytesPerFile").and_then(|v| v.as_u64());
-            let save = args.get("saveToDisk").and_then(|v| v.as_bool());
-            let dry = args.get("dryRun").and_then(|v| v.as_bool());
+            let paths = args.get("paths").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            });
+            let max_files = args
+                .get("maxFiles")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok());
+            let max_bytes = args
+                .get("maxBytesPerFile")
+                .and_then(serde_json::Value::as_u64);
+            let save = args.get("saveToDisk").and_then(serde_json::Value::as_bool);
+            let dry = args.get("dryRun").and_then(serde_json::Value::as_bool);
             // Restore mutates files → require approval (unless dry-run / full-access).
             let is_restore = action.trim().to_lowercase().starts_with("rest")
                 || action.trim().to_lowercase().starts_with("rollback")
                 || action.trim().to_lowercase().starts_with("revert");
             if is_restore && !dry.unwrap_or(false) {
-                require_tool_approval(app, turn_id, tc, &input.tool_approval_mode, "Checkpoint", "Restore checkpoint", id.as_deref().unwrap_or("latest"), "modify").await?;
+                require_tool_approval(
+                    app,
+                    turn_id,
+                    tc,
+                    &input.tool_approval_mode,
+                    "Checkpoint",
+                    "Restore checkpoint",
+                    id.as_deref().unwrap_or("latest"),
+                    "modify",
+                )
+                .await?;
             }
             let now_ms = chrono::Utc::now().timestamp_millis();
             let result = crate::ai_checkpoint::ai_checkpoint(
-                app.clone(), state.clone(), action, id, label, paths, max_files, max_bytes, save, dry, now_ms,
-            ).await?;
+                app.clone(),
+                state.clone(),
+                action,
+                id,
+                label,
+                paths,
+                max_files,
+                max_bytes,
+                save,
+                dry,
+                now_ms,
+            )
+            .await?;
             Ok(result.to_string())
         }
 
-        other => {
-            Err(format!("Unknown tool: {other}"))
-        }
+        other => Err(format!("Unknown tool: {other}")),
     }
 }
 
@@ -992,7 +1527,9 @@ async fn run_subagent(
             "tool_choice": "auto",
         });
         let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
-            parent.base_url.clone(), parent.api_key.clone(), payload,
+            parent.base_url.clone(),
+            parent.api_key.clone(),
+            payload,
         );
         let response = crate::ai_chat_backend::completion(request).await?;
         let assistant = parse_assistant_message(&response.body);
@@ -1030,10 +1567,17 @@ async fn run_subagent(
         }
     }
 
-    Ok(if final_content.is_empty() { "Subagent finished without a summary.".to_string() } else { final_content })
+    Ok(if final_content.is_empty() {
+        "Subagent finished without a summary.".to_string()
+    } else {
+        final_content
+    })
 }
 
 /// Check permission rules + mode, then prompt the UI for approval if needed.
+// Approval context (tool, summary, preview, risk) is passed positionally; bundling into a
+// struct would only shift the boilerplate to every call site without improving clarity.
+#[allow(clippy::too_many_arguments)]
 async fn require_tool_approval(
     app: &tauri::AppHandle,
     turn_id: &str,
@@ -1050,15 +1594,18 @@ async fn require_tool_approval(
     }
     // Emit approval request and wait for decision from UI.
     let rx = register_approval(turn_id, &tc.id);
-    let _ = emit_turn_event(app, &TurnEvent::ApprovalRequired {
-        turn_id: turn_id.to_string(),
-        request_id: tc.id.clone(),
-        tool: tool.to_string(),
-        title: format!("Approve {tool}"),
-        summary: summary.to_string(),
-        preview: preview.to_string(),
-        risk: risk.to_string(),
-    });
+    let _ = emit_turn_event(
+        app,
+        &TurnEvent::ApprovalRequired {
+            turn_id: turn_id.to_string(),
+            request_id: tc.id.clone(),
+            tool: tool.to_string(),
+            title: format!("Approve {tool}"),
+            summary: summary.to_string(),
+            preview: preview.to_string(),
+            risk: risk.to_string(),
+        },
+    );
     match rx.await {
         Ok(ApprovalDecision::Approved) => Ok(()),
         _ => Err(format!("{tool} was rejected by the user.")),
@@ -1070,77 +1617,157 @@ fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
     match tool_name {
         "BrowserOpen" => {
             let mut a = vec!["open".to_string()];
-            if let Some(url) = args.get("url").and_then(|v| v.as_str()) { a.push(url.to_string()); }
-            if args.get("headed").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--headed".to_string()); }
+            if let Some(url) = args.get("url").and_then(|v| v.as_str()) {
+                a.push(url.to_string());
+            }
+            if args
+                .get("headed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--headed".to_string());
+            }
             a
         }
-        "BrowserAct" => {
-            if let Some(cmds) = args.get("batchCommands").and_then(|v| v.as_array()) {
-                let mut a = vec!["batch".to_string()];
-                for cmd in cmds { if let Some(s) = cmd.as_str() { a.push(s.to_string()); } }
-                a
-            } else {
-                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                cmd.split_whitespace().map(str::to_string).collect()
-            }
-        }
+        "BrowserAct" => args
+            .get("batchCommands")
+            .and_then(|v| v.as_array())
+            .map_or_else(
+                || {
+                    let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                    cmd.split_whitespace().map(str::to_string).collect()
+                },
+                |cmds| {
+                    let mut a = vec!["batch".to_string()];
+                    for cmd in cmds {
+                        if let Some(s) = cmd.as_str() {
+                            a.push(s.to_string());
+                        }
+                    }
+                    a
+                },
+            ),
         "BrowserSnapshot" => {
             let mut a = vec!["snapshot".to_string()];
-            if args.get("interactive").and_then(|v| v.as_bool()).unwrap_or(true) { a.push("-i".to_string()); }
-            if args.get("compact").and_then(|v| v.as_bool()).unwrap_or(true) { a.push("--compact".to_string()); }
-            if let Some(d) = args.get("depth").and_then(|v| v.as_u64()) { a.push("--depth".to_string()); a.push(d.to_string()); }
+            if args
+                .get("interactive")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+            {
+                a.push("-i".to_string());
+            }
+            if args
+                .get("compact")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true)
+            {
+                a.push("--compact".to_string());
+            }
+            if let Some(d) = args.get("depth").and_then(serde_json::Value::as_u64) {
+                a.push("--depth".to_string());
+                a.push(d.to_string());
+            }
             a
         }
         "BrowserScreenshot" => {
             let mut a = vec!["screenshot".to_string()];
-            if args.get("annotate").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--annotate".to_string()); }
-            if args.get("fullPage").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--full-page".to_string()); }
-            if let Some(p) = args.get("path").and_then(|v| v.as_str()) { a.push(p.to_string()); }
+            if args
+                .get("annotate")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--annotate".to_string());
+            }
+            if args
+                .get("fullPage")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--full-page".to_string());
+            }
+            if let Some(p) = args.get("path").and_then(|v| v.as_str()) {
+                a.push(p.to_string());
+            }
             a
         }
         "BrowserClose" => {
             let mut a = vec!["close".to_string()];
-            if args.get("all").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--all".to_string()); }
+            if args
+                .get("all")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--all".to_string());
+            }
             a
         }
         "BrowserChat" => {
-            let instruction = args.get("instruction").and_then(|v| v.as_str()).unwrap_or("");
+            let instruction = args
+                .get("instruction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             vec!["chat".to_string(), instruction.to_string()]
         }
         "BrowserDashboard" => {
-            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("status");
+            let action = args
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("status");
             vec!["dashboard".to_string(), action.to_string()]
         }
         "BrowserInstall" => vec!["install".to_string()],
         "BrowserHelp" => {
             let mut a = vec!["help".to_string()];
-            if let Some(t) = args.get("topic").and_then(|v| v.as_str()) { a.push(t.to_string()); }
+            if let Some(t) = args.get("topic").and_then(|v| v.as_str()) {
+                a.push(t.to_string());
+            }
             a
         }
         "BrowserDoctor" => {
             let mut a = vec!["doctor".to_string()];
-            if args.get("fix").and_then(|v| v.as_bool()).unwrap_or(false) { a.push("--fix".to_string()); }
+            if args
+                .get("fix")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--fix".to_string());
+            }
             a
         }
-        "BrowserInvoke" => {
-            args.get("args").and_then(|v| v.as_array())
-                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
-                .unwrap_or_default()
-        }
+        "BrowserInvoke" => args
+            .get("args")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default(),
         _ => vec![],
     }
 }
 
 fn json_str(value: &serde_json::Value, key: &str) -> String {
-    value.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 fn json_str_opt(value: &serde_json::Value, key: &str) -> Option<String> {
-    value.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string)
+    value
+        .get(key)
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn json_usize(value: &serde_json::Value, key: &str, default: usize) -> usize {
-    value.get(key).and_then(|v| v.as_u64()).map(|v| v as usize).unwrap_or(default)
+    value
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .map_or(default, |v| usize::try_from(v).unwrap_or(default))
 }
 
 #[cfg(test)]
@@ -1150,14 +1777,16 @@ mod tests {
     #[test]
     fn approval_roundtrip() {
         let rx = register_approval("turn-1", "req-1");
-        ai_resolve_turn_approval("turn-1".into(), "req-1".into(), ApprovalDecision::Approved).unwrap();
+        ai_resolve_turn_approval("turn-1".into(), "req-1".into(), ApprovalDecision::Approved)
+            .unwrap();
         assert_eq!(rx.blocking_recv().unwrap(), ApprovalDecision::Approved);
     }
 
     #[test]
     fn approval_reject() {
         let rx = register_approval("turn-2", "req-2");
-        ai_resolve_turn_approval("turn-2".into(), "req-2".into(), ApprovalDecision::Rejected).unwrap();
+        ai_resolve_turn_approval("turn-2".into(), "req-2".into(), ApprovalDecision::Rejected)
+            .unwrap();
         assert_eq!(rx.blocking_recv().unwrap(), ApprovalDecision::Rejected);
     }
 
@@ -1170,7 +1799,11 @@ mod tests {
 
     #[test]
     fn missing_approval_returns_error() {
-        let result = ai_resolve_turn_approval("no-turn".into(), "no-req".into(), ApprovalDecision::Approved);
+        let result = ai_resolve_turn_approval(
+            "no-turn".into(),
+            "no-req".into(),
+            ApprovalDecision::Approved,
+        );
         assert!(result.is_err());
     }
 }

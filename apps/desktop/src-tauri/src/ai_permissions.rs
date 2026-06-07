@@ -11,6 +11,7 @@
 //!   - `deny:Write(*.env)`      → never write .env files
 //!   - `ask:Bash(rm *)`         → always prompt for rm
 //!   - `Read`                   → bare tool name (no glob) matches every input
+//!
 //! A missing prefix defaults to `allow`. `*` is a wildcard in the glob.
 //! Precedence: deny > ask > allow; first matching rule of the winning tier wins.
 
@@ -56,7 +57,12 @@ fn parse_rule(raw: &str) -> Option<ParsedRule> {
     // Optional `tier:` prefix. Only split on the first colon when the prefix is a
     // known tier, so `Bash(curl http://x)` isn't mis-split.
     let (tier, body) = match raw.split_once(':') {
-        Some((prefix, rest)) if matches!(prefix.trim().to_lowercase().as_str(), "allow" | "deny" | "ask") => {
+        Some((prefix, rest))
+            if matches!(
+                prefix.trim().to_lowercase().as_str(),
+                "allow" | "deny" | "ask"
+            ) =>
+        {
             let tier = match prefix.trim().to_lowercase().as_str() {
                 "deny" => RuleTier::Deny,
                 "ask" => RuleTier::Ask,
@@ -158,7 +164,11 @@ pub fn evaluate(tool: &str, input: &str, rules: &[String]) -> PermissionEvaluati
 
 /// Tauri command: decide a tool call against the configured permission rules.
 #[tauri::command]
-pub fn ai_permission_decide(tool: String, input: String, rules: Vec<String>) -> PermissionEvaluation {
+pub fn ai_permission_decide(
+    tool: String,
+    input: String,
+    rules: Vec<String>,
+) -> PermissionEvaluation {
     evaluate(&tool, &input, &rules)
 }
 
@@ -167,50 +177,80 @@ mod tests {
     use super::*;
 
     fn decide(tool: &str, input: &str, rules: &[&str]) -> PermissionDecision {
-        let owned: Vec<String> = rules.iter().map(|s| s.to_string()).collect();
+        let owned: Vec<String> = rules.iter().map(std::string::ToString::to_string).collect();
         evaluate(tool, input, &owned).decision
     }
 
     #[test]
     fn allow_glob_matches() {
-        assert_eq!(decide("Shell", "git status", &["allow:Shell(git *)"]), PermissionDecision::Allow);
-        assert_eq!(decide("Shell", "npm install", &["allow:Shell(git *)"]), PermissionDecision::Default);
+        assert_eq!(
+            decide("Shell", "git status", &["allow:Shell(git *)"]),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            decide("Shell", "npm install", &["allow:Shell(git *)"]),
+            PermissionDecision::Default
+        );
     }
 
     #[test]
     fn deny_beats_allow() {
         let rules = &["allow:Shell(*)", "deny:Shell(rm *)"];
-        assert_eq!(decide("Shell", "rm -rf node_modules", rules), PermissionDecision::Deny);
+        assert_eq!(
+            decide("Shell", "rm -rf node_modules", rules),
+            PermissionDecision::Deny
+        );
         assert_eq!(decide("Shell", "ls", rules), PermissionDecision::Allow);
     }
 
     #[test]
     fn ask_beats_allow_below_deny() {
         let rules = &["allow:Shell(*)", "ask:Shell(git push *)"];
-        assert_eq!(decide("Shell", "git push --force", rules), PermissionDecision::Ask);
+        assert_eq!(
+            decide("Shell", "git push --force", rules),
+            PermissionDecision::Ask
+        );
     }
 
     #[test]
     fn bare_tool_matches_any_input() {
-        assert_eq!(decide("Read", "/etc/hosts", &["allow:Read"]), PermissionDecision::Allow);
-        assert_eq!(decide("Write", "x", &["deny:Write"]), PermissionDecision::Deny);
+        assert_eq!(
+            decide("Read", "/etc/hosts", &["allow:Read"]),
+            PermissionDecision::Allow
+        );
+        assert_eq!(
+            decide("Write", "x", &["deny:Write"]),
+            PermissionDecision::Deny
+        );
     }
 
     #[test]
     fn no_prefix_defaults_to_allow() {
-        assert_eq!(decide("Shell", "git status", &["Shell(git *)"]), PermissionDecision::Allow);
+        assert_eq!(
+            decide("Shell", "git status", &["Shell(git *)"]),
+            PermissionDecision::Allow
+        );
     }
 
     #[test]
     fn path_glob_for_writes() {
         let rules = &["deny:Write(*.env)"];
-        assert_eq!(decide("Write", "config/.env", rules), PermissionDecision::Deny);
-        assert_eq!(decide("Write", "src/app.ts", rules), PermissionDecision::Default);
+        assert_eq!(
+            decide("Write", "config/.env", rules),
+            PermissionDecision::Deny
+        );
+        assert_eq!(
+            decide("Write", "src/app.ts", rules),
+            PermissionDecision::Default
+        );
     }
 
     #[test]
     fn empty_rules_is_default() {
-        assert_eq!(decide("Shell", "anything", &[]), PermissionDecision::Default);
+        assert_eq!(
+            decide("Shell", "anything", &[]),
+            PermissionDecision::Default
+        );
     }
 
     #[test]

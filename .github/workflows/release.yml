@@ -297,11 +297,20 @@ jobs:
           pattern: lux-ide-*
           merge-multiple: true
 
-      - name: Prepare release manifest and checksums
+      - name: Generate updater manifest (latest.json)
+        env:
+          RELEASE_TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_NOTES: Lux IDE ${{ needs.metadata.outputs.version }}
         shell: bash
         run: |
           mkdir -p release-assets
           find downloaded-assets -maxdepth 1 -type f -print -exec cp {} release-assets/ \;
+          node .github/scripts/write-updater-manifest.mjs
+
+      - name: Prepare release manifest and checksums
+        shell: bash
+        run: |
           node .github/scripts/write-release-manifest.mjs
           cp release-manifest.json release-assets/release-manifest.json
 
@@ -312,6 +321,7 @@ jobs:
           path: |
             release-assets/SHA256SUMS.txt
             release-assets/release-manifest.json
+            release-assets/latest.json
           if-no-files-found: error
           retention-days: 30
 

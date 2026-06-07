@@ -6,6 +6,7 @@ import {
   spreadsheetEditorSupplement,
 } from "./aiFileContext";
 import { truncateText } from "./aiRuntimeShared";
+import type { VisionImageFormat } from "./aiVisionFormat";
 import type { DocumentSnapshot } from "./types";
 
 const maxAttachmentChars = 18_000;
@@ -53,6 +54,7 @@ export async function readEditorDocumentAttachment(
   document: DocumentSnapshot,
   options: {
     includeVisionImage?: boolean;
+    visionImageFormat?: VisionImageFormat;
     includeMediaContext?: boolean;
     localSttCommand?: string;
     localSttModelPath?: string;
@@ -82,6 +84,7 @@ export async function readEditorDocumentAttachment(
         : "";
     const context = await buildPathAttachmentContext(document.path, label, {
       includeVisionImage: options.includeVisionImage,
+      visionImageFormat: options.visionImageFormat,
       includeMediaContext: options.includeMediaContext,
       localSttCommand: options.localSttCommand,
       localSttModelPath: options.localSttModelPath,

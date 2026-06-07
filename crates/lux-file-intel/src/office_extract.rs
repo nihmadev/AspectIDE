@@ -19,13 +19,13 @@ pub fn office_preview_for_path(
         return odf_zip_office_preview(path, options);
     }
     if ext == "rtf" {
-        return rtf_office_preview(path);
+        return Ok(rtf_office_preview(path));
     }
     if matches!(ext.as_str(), "doc" | "dot") {
-        return ole_word_office_preview(path);
+        return Ok(ole_word_office_preview(path));
     }
     if matches!(ext.as_str(), "ppt" | "pot" | "pps") {
-        return ole_powerpoint_office_preview(path);
+        return Ok(ole_powerpoint_office_preview(path));
     }
     Ok(FilePreview::External {
         reason: format!(
@@ -40,7 +40,8 @@ fn is_odf_zip(ext: &str) -> bool {
 
 fn odf_zip_office_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
     let file = fs::File::open(path)?;
-    let mut archive = ZipArchive::new(file).map_err(|error| AppError::Service(error.to_string()))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| AppError::Service(error.to_string()))?;
     let mut text = String::new();
     let mut parts = Vec::new();
     for index in 0..archive.len() {
@@ -75,51 +76,56 @@ fn odf_zip_office_preview(path: &Path, options: &FileInspectionOptions) -> AppRe
     })
 }
 
-fn rtf_office_preview(path: &Path) -> AppResult<FilePreview> {
+fn rtf_office_preview(path: &Path) -> FilePreview {
     let raw = fs::read_to_string(path).unwrap_or_else(|_| {
         String::from_utf8_lossy(&fs::read(path).unwrap_or_default()).into_owned()
     });
     let text = truncate_chars(&strip_rtf(&raw), OFFICE_TEXT_LIMIT);
-    Ok(FilePreview::Office {
+    FilePreview::Office {
         text,
         parts: Vec::new(),
         truncated: raw.len() > OFFICE_TEXT_LIMIT,
-    })
+    }
 }
 
-fn ole_word_office_preview(path: &Path) -> AppResult<FilePreview> {
-    let text = truncate_chars(&extract_ole_utf16_stream(path, "WordDocument"), OFFICE_TEXT_LIMIT);
-    Ok(FilePreview::Office {
+fn ole_word_office_preview(path: &Path) -> FilePreview {
+    let text = truncate_chars(
+        &extract_ole_utf16_stream(path, "WordDocument"),
+        OFFICE_TEXT_LIMIT,
+    );
+    FilePreview::Office {
         text,
         parts: Vec::new(),
         truncated: false,
-    })
+    }
 }
 
-fn ole_powerpoint_office_preview(path: &Path) -> AppResult<FilePreview> {
+fn ole_powerpoint_office_preview(path: &Path) -> FilePreview {
     let mut chunks = Vec::new();
-    for stream in ["PowerPoint Document", "Current User", "\u{0005}SummaryInformation"] {
+    for stream in [
+        "PowerPoint Document",
+        "Current User",
+        "\u{0005}SummaryInformation",
+    ] {
         let chunk = extract_ole_utf16_stream(path, stream);
         if !chunk.trim().is_empty() {
             chunks.push(chunk);
         }
     }
     let text = truncate_chars(&chunks.join("\n\n"), OFFICE_TEXT_LIMIT);
-    Ok(FilePreview::Office {
+    FilePreview::Office {
         text,
         parts: Vec::new(),
         truncated: false,
-    })
+    }
 }
 
 fn extract_ole_utf16_stream(path: &Path, stream_name: &str) -> String {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return String::new(),
+    let Ok(file) = fs::File::open(path) else {
+        return String::new();
     };
-    let mut comp = match CompoundFile::open(file) {
-        Ok(comp) => comp,
-        Err(_) => return String::new(),
+    let Ok(mut comp) = CompoundFile::open(file) else {
+        return String::new();
     };
     let mut buffer = Vec::new();
     let Ok(mut stream) = comp.open_stream(stream_name) else {

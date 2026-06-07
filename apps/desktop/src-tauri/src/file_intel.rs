@@ -51,11 +51,11 @@ pub async fn file_media_ai_context(
     request: FileMediaAiContextRequest,
 ) -> Result<FileMediaAiContextResponse, String> {
     let path = resolve_workspace_path(&state, &request.path)?;
-    Ok(tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         build_media_ai_context(FileMediaAiContextRequest { path, ..request })
     })
     .await
-    .map_err(|error| error.to_string())?)
+    .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

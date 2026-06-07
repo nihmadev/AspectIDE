@@ -1,4 +1,4 @@
-import { Minus, PanelLeft, PanelTop, Settings, Sparkles, Square, X } from "lucide-react";
+import { ArrowUpCircle, Minus, PanelLeft, PanelTop, Settings, Sparkles, Square, X } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useRef, useState } from "react";
@@ -58,6 +58,8 @@ export function TitleBar() {
   const setSidebarVisible = useLuxStore((state) => state.setSidebarVisible);
   const setCommandPaletteOpen = useLuxStore((state) => state.setCommandPaletteOpen);
   const setSettingsOpen = useLuxStore((state) => state.setSettingsOpen);
+  const updateAvailable = useLuxStore((state) => state.updateAvailable);
+  const openSettingsSection = useLuxStore((state) => state.openSettingsSection);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const menuRef = useRef<HTMLElement | null>(null);
   const hoverSwitchedMenuRef = useRef<string | null>(null);
@@ -304,6 +306,18 @@ export function TitleBar() {
         >
           <PanelLeft size={15} />
         </button>
+        {updateAvailable && (
+          <button
+            className="title-tool-button title-update-badge"
+            type="button"
+            aria-label={t("titlebar.action.updateAvailable")}
+            title={t("titlebar.action.updateAvailable")}
+            onClick={() => openSettingsSection("general")}
+          >
+            <ArrowUpCircle size={15} />
+            <span className="title-update-dot" aria-hidden="true" />
+          </button>
+        )}
         <button className="title-tool-button" type="button" aria-label={t("titlebar.settings")} title={t("titlebar.settings")} onClick={() => setSettingsOpen(true)}>
           <Settings size={15} />
         </button>

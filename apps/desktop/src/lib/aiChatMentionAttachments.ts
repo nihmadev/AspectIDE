@@ -4,6 +4,7 @@ import type { AiChatAttachmentInput, AiChatMentionHints } from "./aiChatTypes";
 import { luxCommands } from "./tauri";
 import { readEditorDocumentAttachment } from "./aiChatDocumentAttachment";
 import { truncateText } from "./aiRuntimeShared";
+import type { VisionImageFormat } from "./aiVisionFormat";
 import type { DocumentSnapshot } from "./types";
 
 export function collectMentionHints(attachments: readonly ComposerAttachment[]): AiChatMentionHints {
@@ -21,6 +22,7 @@ export async function buildMentionRuntimeAttachments(
   openDocuments: DocumentSnapshot[],
   options: {
     includeVisionImage?: boolean;
+    visionImageFormat?: VisionImageFormat;
     includeMediaContext?: boolean;
     localSttCommand?: string;
     localSttModelPath?: string;

@@ -13,8 +13,8 @@ static NPM_LATEST_CACHE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
 static LAST_AUTO_UPGRADE: Mutex<Option<Instant>> = Mutex::new(None);
 static STATUS_PROBE_IN_FLIGHT: Mutex<bool> = Mutex::new(false);
 
-const NPM_CACHE_TTL: Duration = Duration::from_secs(3600);
-const AUTO_UPGRADE_COOLDOWN: Duration = Duration::from_secs(1800);
+const NPM_CACHE_TTL: Duration = Duration::from_hours(1);
+const AUTO_UPGRADE_COOLDOWN: Duration = Duration::from_mins(30);
 const NPM_LATEST_URL: &str = "https://registry.npmjs.org/agent-browser/latest";
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -179,7 +179,9 @@ pub struct AgentBrowserSkillsResponse {
     pub data: serde_json::Value,
 }
 
-pub async fn status(request: AgentBrowserStatusRequest) -> Result<AgentBrowserStatusResponse, String> {
+pub async fn status(
+    request: AgentBrowserStatusRequest,
+) -> Result<AgentBrowserStatusResponse, String> {
     let lightweight = request.lightweight == Some(true);
     if lightweight {
         let Ok(mut in_flight) = STATUS_PROBE_IN_FLIGHT.lock() else {
@@ -213,6 +215,9 @@ pub async fn status(request: AgentBrowserStatusRequest) -> Result<AgentBrowserSt
     result
 }
 
+// Linear status-resolution flow (fetch latest, auto-upgrade, doctor, detail string); splitting it
+// would scatter shared local state across helpers without reducing real complexity.
+#[allow(clippy::too_many_lines)]
 async fn status_inner(
     request: AgentBrowserStatusRequest,
     lightweight: bool,
@@ -277,10 +282,15 @@ async fn status_inner(
     let doctor = if lightweight {
         None
     } else {
-        run_json(&binary, None, &["doctor", "--json", "--offline", "--quick"], 45)
-            .await
-            .ok()
-            .map(|response| response.data)
+        run_json(
+            &binary,
+            None,
+            &["doctor", "--json", "--offline", "--quick"],
+            45,
+        )
+        .await
+        .ok()
+        .map(|response| response.data)
     };
 
     let available = if lightweight {
@@ -296,7 +306,9 @@ async fn status_inner(
     let base_detail = if available {
         format!(
             "agent-browser is available ({})",
-            version.clone().unwrap_or_else(|| "version unknown".to_string())
+            version
+                .clone()
+                .unwrap_or_else(|| "version unknown".to_string())
         )
     } else {
         "agent-browser responded, but doctor reported issues. Run `agent-browser doctor --fix` in a terminal.".to_string()
@@ -333,7 +345,9 @@ async fn status_inner(
     })
 }
 
-pub async fn invoke(request: AgentBrowserInvokeRequest) -> Result<AgentBrowserInvokeResponse, String> {
+pub async fn invoke(
+    request: AgentBrowserInvokeRequest,
+) -> Result<AgentBrowserInvokeResponse, String> {
     let binary = resolve_binary(request.command_path.as_deref())?;
     let session = sanitize_session(&request.session);
     if request.args.is_empty() {
@@ -399,7 +413,7 @@ struct InvokeOptions {
     proxy: Option<String>,
 }
 
-fn session_invoke_options(session: String, max_output: usize) -> InvokeOptions {
+const fn session_invoke_options(session: String, max_output: usize) -> InvokeOptions {
     InvokeOptions {
         session,
         headed: None,
@@ -425,6 +439,10 @@ struct ParsedCliResponse {
     exit_code: Option<i32>,
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "cohesive subprocess JSON invocation; splitting would scatter shared state"
+)]
 async fn run_json(
     binary: &PathBuf,
     options: Option<InvokeOptions>,
@@ -439,22 +457,40 @@ async fn run_json(
     command.kill_on_drop(true);
     command.arg("--json");
 
-    let max_output = options.as_ref().map_or(DEFAULT_MAX_OUTPUT, |value| value.max_output);
+    let max_output = options
+        .as_ref()
+        .map_or(DEFAULT_MAX_OUTPUT, |value| value.max_output);
     if let Some(options) = options.as_ref() {
         command.arg("--session").arg(&options.session);
         if options.headed == Some(true) {
             command.arg("--headed");
         }
-        if let Some(domains) = options.allowed_domains.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(domains) = options
+            .allowed_domains
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             command.arg("--allowed-domains").arg(domains);
         }
-        if let Some(session_name) = options.session_name.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(session_name) = options
+            .session_name
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             command.arg("--session-name").arg(session_name);
         }
-        if let Some(profile) = options.profile.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(profile) = options
+            .profile
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             command.arg("--profile").arg(profile);
         }
-        if let Some(state_path) = options.state_path.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(state_path) = options
+            .state_path
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             command.arg("--state").arg(state_path);
         }
         if options.content_boundaries == Some(true) {
@@ -466,16 +502,21 @@ async fn run_json(
         if options.allow_file_access == Some(true) {
             command.arg("--allow-file-access");
         }
-        if let Some(provider) = options.provider.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(provider) = options
+            .provider
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             command.arg("--provider").arg(provider.trim());
         }
-        if let Some(proxy) = options.proxy.as_ref().filter(|value| !value.trim().is_empty()) {
+        if let Some(proxy) = options
+            .proxy
+            .as_ref()
+            .filter(|value| !value.trim().is_empty())
+        {
             command.arg("--proxy").arg(proxy.trim());
         }
-        command.env(
-            "AGENT_BROWSER_MAX_OUTPUT",
-            options.max_output.to_string(),
-        );
+        command.env("AGENT_BROWSER_MAX_OUTPUT", options.max_output.to_string());
     }
 
     command.args(args);
@@ -500,11 +541,11 @@ async fn run_json(
         return Err(stderr);
     }
 
-    let parsed = parse_cli_json(&stdout, stderr.clone());
+    let parsed = parse_cli_json(&stdout, &stderr);
     let success = parsed
         .get("success")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(output.status.success());
+        .unwrap_or_else(|| output.status.success());
     let data = parsed
         .get("data")
         .cloned()
@@ -522,7 +563,7 @@ async fn run_json(
     })
 }
 
-fn parse_cli_json(stdout: &str, stderr: String) -> serde_json::Value {
+fn parse_cli_json(stdout: &str, stderr: &str) -> serde_json::Value {
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
         return value;
     }
@@ -637,10 +678,15 @@ fn resolve_binary(override_path: Option<&str>) -> Result<PathBuf, String> {
         if candidate.exists() {
             return Ok(candidate);
         }
-        return Err(format!("agent-browser not found at configured path: {}", candidate.display()));
+        return Err(format!(
+            "agent-browser not found at configured path: {}",
+            candidate.display()
+        ));
     }
 
-    if let Ok(path) = std::env::var("AGENT_BROWSER_PATH").or_else(|_| std::env::var("LUX_AGENT_BROWSER_COMMAND")) {
+    if let Ok(path) =
+        std::env::var("AGENT_BROWSER_PATH").or_else(|_| std::env::var("LUX_AGENT_BROWSER_COMMAND"))
+    {
         let candidate = PathBuf::from(path.trim());
         if candidate.exists() {
             return Ok(candidate);
@@ -669,10 +715,7 @@ fn bundled_binary() -> Option<PathBuf> {
     } else {
         "agent-browser"
     };
-    let candidate = desktop_dir
-        .join("node_modules")
-        .join(".bin")
-        .join(bin_name);
+    let candidate = desktop_dir.join("node_modules").join(".bin").join(bin_name);
     candidate.exists().then_some(candidate)
 }
 
@@ -715,7 +758,9 @@ pub async fn agent_browser_invoke(
     invoke(request).await
 }
 
-pub async fn install(request: AgentBrowserInstallRequest) -> Result<AgentBrowserInstallResponse, String> {
+pub async fn install(
+    request: AgentBrowserInstallRequest,
+) -> Result<AgentBrowserInstallResponse, String> {
     let mut steps = Vec::new();
     let desktop_dir = desktop_package_dir();
     let (package_manager, install_args) = resolve_package_manager_latest()?;
@@ -758,10 +803,7 @@ pub async fn install(request: AgentBrowserInstallRequest) -> Result<AgentBrowser
 
     let binary = resolve_binary(request.command_path.as_deref()).ok();
     let chrome_args = if request.with_deps == Some(true) {
-        vec![
-            "install".to_string(),
-            "--with-deps".to_string(),
-        ]
+        vec!["install".to_string(), "--with-deps".to_string()]
     } else {
         vec!["install".to_string()]
     };
@@ -784,7 +826,7 @@ pub async fn install(request: AgentBrowserInstallRequest) -> Result<AgentBrowser
         )
         .await
     };
-    steps.push(chrome_step.clone());
+    steps.push(chrome_step);
 
     let command_path = resolve_binary(request.command_path.as_deref()).ok();
     let success = steps.iter().all(|step| step.success);
@@ -802,7 +844,9 @@ pub async fn install(request: AgentBrowserInstallRequest) -> Result<AgentBrowser
     })
 }
 
-pub async fn read_image(request: AgentBrowserReadImageRequest) -> Result<AgentBrowserReadImageResponse, String> {
+pub async fn read_image(
+    request: AgentBrowserReadImageRequest,
+) -> Result<AgentBrowserReadImageResponse, String> {
     let path = PathBuf::from(request.path.trim());
     if request.path.trim().is_empty() {
         return Err("Image path is required.".to_string());
@@ -816,7 +860,7 @@ pub async fn read_image(request: AgentBrowserReadImageRequest) -> Result<AgentBr
     if !metadata.is_file() {
         return Err(format!("Screenshot path is not a file: {}", path.display()));
     }
-    if metadata.len() as usize > MAX_IMAGE_BYTES {
+    if metadata.len() > MAX_IMAGE_BYTES as u64 {
         return Err(format!(
             "Screenshot exceeds maximum size ({} bytes > {} bytes)",
             metadata.len(),
@@ -837,7 +881,9 @@ pub async fn read_image(request: AgentBrowserReadImageRequest) -> Result<AgentBr
     })
 }
 
-pub async fn stream_status(request: AgentBrowserStreamStatusRequest) -> Result<AgentBrowserStreamStatusResponse, String> {
+pub async fn stream_status(
+    request: AgentBrowserStreamStatusRequest,
+) -> Result<AgentBrowserStreamStatusResponse, String> {
     let binary = resolve_binary(request.command_path.as_deref())?;
     let session = sanitize_session(&request.session);
     let enable_stream = request.enable == Some(true);
@@ -868,7 +914,9 @@ pub async fn stream_status(request: AgentBrowserStreamStatusRequest) -> Result<A
     })
 }
 
-pub async fn dashboard(request: AgentBrowserDashboardRequest) -> Result<AgentBrowserDashboardResponse, String> {
+pub async fn dashboard(
+    request: AgentBrowserDashboardRequest,
+) -> Result<AgentBrowserDashboardResponse, String> {
     let binary = resolve_binary(request.command_path.as_deref())?;
     let action = request.action.trim().to_ascii_lowercase();
     let port = request.port.unwrap_or(4848);
@@ -907,11 +955,17 @@ pub async fn dashboard(request: AgentBrowserDashboardRequest) -> Result<AgentBro
     })
 }
 
-pub async fn skills(request: AgentBrowserSkillsRequest) -> Result<AgentBrowserSkillsResponse, String> {
+pub async fn skills(
+    request: AgentBrowserSkillsRequest,
+) -> Result<AgentBrowserSkillsResponse, String> {
     let binary = resolve_binary(request.command_path.as_deref())?;
     let args: Vec<String> = if request.all == Some(true) {
         vec!["skills".to_string(), "get".to_string(), "--all".to_string()]
-    } else if let Some(name) = request.name.as_ref().filter(|value| !value.trim().is_empty()) {
+    } else if let Some(name) = request
+        .name
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         vec![
             "skills".to_string(),
             "get".to_string(),
@@ -932,26 +986,20 @@ pub async fn skills(request: AgentBrowserSkillsRequest) -> Result<AgentBrowserSk
 
 fn desktop_package_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir.parent().map(|path| path.to_path_buf())
+    manifest_dir.parent().map(std::path::Path::to_path_buf)
 }
 
 fn resolve_package_manager_latest() -> Result<(PathBuf, Vec<String>), String> {
     if let Ok(path) = which::which("pnpm") {
         return Ok((
             path,
-            vec![
-                "add".to_string(),
-                "agent-browser@latest".to_string(),
-            ],
+            vec!["add".to_string(), "agent-browser@latest".to_string()],
         ));
     }
     let npm = resolve_npm()?;
     Ok((
         npm,
-        vec![
-            "install".to_string(),
-            "agent-browser@latest".to_string(),
-        ],
+        vec!["install".to_string(), "agent-browser@latest".to_string()],
     ))
 }
 
@@ -1126,7 +1174,8 @@ fn resolve_npm() -> Result<PathBuf, String> {
         }
     }
     which::which("npm").map_err(|_| {
-        "npm was not found on PATH. Install Node.js 24+ before installing agent-browser.".to_string()
+        "npm was not found on PATH. Install Node.js 24+ before installing agent-browser."
+            .to_string()
     })
 }
 
@@ -1152,7 +1201,9 @@ fn stream_port_from_data(data: &serde_json::Value) -> Option<u16> {
 
 fn parse_port_value(value: &serde_json::Value) -> Option<u16> {
     match value {
-        serde_json::Value::Number(number) => number.as_u64().and_then(|port| u16::try_from(port).ok()),
+        serde_json::Value::Number(number) => {
+            number.as_u64().and_then(|port| u16::try_from(port).ok())
+        }
         serde_json::Value::String(text) => text.trim().parse::<u16>().ok(),
         _ => None,
     }
@@ -1165,7 +1216,7 @@ fn mime_type_for_path(path: &Path) -> String {
         .map(str::to_ascii_lowercase)
         .as_deref()
     {
-        Some("jpg") | Some("jpeg") | Some("jpe") => "image/jpeg".to_string(),
+        Some("jpg" | "jpeg" | "jpe") => "image/jpeg".to_string(),
         Some("webp") => "image/webp".to_string(),
         Some("gif") => "image/gif".to_string(),
         _ => "image/png".to_string(),

@@ -2,11 +2,15 @@
 #![deny(clippy::nursery)]
 #![allow(clippy::missing_errors_doc)]
 
-use std::{path::Path, time::Instant};
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use ignore::WalkBuilder;
-use lux_core::{AppResult, SearchHit, SearchOptions, SearchResponse};
+use ignore::{WalkBuilder, WalkState};
+use lux_core::{scan_threads, AppResult, SearchHit, SearchOptions, SearchResponse};
 use rayon::prelude::*;
 use regex::{Regex, RegexBuilder};
 
@@ -33,27 +37,64 @@ pub fn query(
     let exclude_globs = compile_globs(&options.exclude_globs)?;
     let matcher = SearchMatcher::new(&search, options)?;
 
+    let threads = scan_threads();
+
     let mut builder = WalkBuilder::new(&root);
     builder.hidden(!options.include_hidden);
-    builder.git_ignore(true).git_exclude(true).parents(true);
+    builder
+        .git_ignore(true)
+        .git_exclude(true)
+        .parents(true)
+        .threads(threads);
 
-    let files: Vec<_> = builder
+    // Parallel file discovery: worker threads collect candidate paths (after glob
+    // filtering) into a shared buffer, fanning directory traversal across cores.
+    let collected: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+    builder.build_parallel().run(|| {
+        let collected = Arc::clone(&collected);
+        let root = root.clone();
+        let include = include_globs.clone();
+        let exclude = exclude_globs.clone();
+        Box::new(move |result| {
+            let Ok(entry) = result else {
+                return WalkState::Continue;
+            };
+            if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+                return WalkState::Continue;
+            }
+            let path = entry.into_path();
+            if matches_glob_filters(&root, &path, include.as_ref(), exclude.as_ref()) {
+                if let Ok(mut buffer) = collected.lock() {
+                    buffer.push(path);
+                }
+            }
+            WalkState::Continue
+        })
+    });
+    let files = Arc::try_unwrap(collected)
+        .ok()
+        .and_then(|mutex| mutex.into_inner().ok())
+        .unwrap_or_default();
+
+    // Content matching across a thread pool capped to the scan budget, so search
+    // honors the "reserve a core for the UI" policy instead of grabbing every
+    // core via rayon's default global pool.
+    let match_files = |files: &[PathBuf]| -> Vec<SearchHit> {
+        files
+            .par_iter()
+            .flat_map_iter(|path| {
+                std::fs::read_to_string(path)
+                    .map_or_else(|_| Vec::new(), |text| collect_hits(path, &text, &matcher))
+            })
+            .collect()
+    };
+    let mut hits: Vec<SearchHit> = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
         .build()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_some_and(|kind| kind.is_file()))
-        .map(ignore::DirEntry::into_path)
-        .filter(|path| {
-            matches_glob_filters(&root, path, include_globs.as_ref(), exclude_globs.as_ref())
-        })
-        .collect();
-
-    let mut hits: Vec<SearchHit> = files
-        .par_iter()
-        .flat_map_iter(|path| {
-            std::fs::read_to_string(path)
-                .map_or_else(|_| Vec::new(), |text| collect_hits(path, &text, &matcher))
-        })
-        .collect();
+        .map_or_else(
+            |_| match_files(&files),
+            |pool| pool.install(|| match_files(&files)),
+        );
 
     hits.sort_by(|left, right| {
         left.path

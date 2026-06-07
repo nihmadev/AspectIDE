@@ -4,7 +4,7 @@ use calamine::{open_workbook_auto, Data, Reader};
 use icu_locale_core::locale;
 use lux_core::{AppError, AppResult};
 use serde::{Deserialize, Serialize};
-use spreadsheet_ods::{Sheet, WorkBook, write_ods};
+use spreadsheet_ods::{write_ods, Sheet, WorkBook};
 use umya_spreadsheet::{new_file_empty_worksheet, writer};
 
 pub const SPREADSHEET_EDIT_FORMAT: &str = "lux-spreadsheet/v1";
@@ -145,8 +145,10 @@ fn write_ods_document(path: &Path, document: &SpreadsheetEditDocument) -> AppRes
                     continue;
                 }
                 ods_sheet.set_value(
-                    u32::try_from(row_index).map_err(|error| AppError::Service(error.to_string()))?,
-                    u32::try_from(column_index).map_err(|error| AppError::Service(error.to_string()))?,
+                    u32::try_from(row_index)
+                        .map_err(|error| AppError::Service(error.to_string()))?,
+                    u32::try_from(column_index)
+                        .map_err(|error| AppError::Service(error.to_string()))?,
                     value.as_str(),
                 );
             }
@@ -220,7 +222,8 @@ mod tests {
             .get_cell_mut("A1")
             .set_value("before");
         let mut buffer = Vec::new();
-        umya_writer::xlsx::write_writer(&book, &mut Cursor::new(&mut buffer)).expect("write buffer");
+        umya_writer::xlsx::write_writer(&book, &mut Cursor::new(&mut buffer))
+            .expect("write buffer");
         buffer
     }
 }

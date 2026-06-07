@@ -7,6 +7,7 @@ import { LazyAiChatPanel } from "./components/LazyAiChatPanel";
 import { ProjectLoadingStatus } from "./components/ProjectLoadingStatus";
 import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
+import { UpdateNoticeHost } from "./components/UpdateNoticeHost";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { saveChatCheckpointStore } from "./lib/aiChatCheckpointStore";
 import { loadAiChatHistory, saveAiChatHistory } from "./lib/aiChatHistory";
@@ -232,7 +233,11 @@ export function App() {
   useEffect(() => {
     void luxCommands.settingsGet("user", AI_PREFERENCES_KEY)
       .then((setting) => {
-        if (setting) setAiPreferences(normalizeAiPreferences(setting.value));
+        const prefs = setting ? normalizeAiPreferences(setting.value) : null;
+        if (prefs) setAiPreferences(prefs);
+        // Apply the persisted (or default) scan/search CPU budget to the Rust
+        // worker pools on startup so the policy is in effect before any scan.
+        void luxCommands.setScanConcurrency(prefs?.scanConcurrency ?? "auto");
       })
       .catch(() => undefined);
 
@@ -562,6 +567,7 @@ export function App() {
         <StatusBar />
         <DeferredCommandPalette open={commandPaletteOpen} />
         <DeferredSettingsDialog open={settingsOpen} />
+        <UpdateNoticeHost />
       </div>
     );
   }
@@ -577,6 +583,7 @@ export function App() {
         <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
         <DeferredCommandPalette open={commandPaletteOpen} />
         <DeferredSettingsDialog open={settingsOpen} />
+        <UpdateNoticeHost />
       </div>
     );
   }

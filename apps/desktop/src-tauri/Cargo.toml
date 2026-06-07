@@ -32,6 +32,7 @@ lux-search = { path = "../../../crates/lux-search" }
 lux-settings = { path = "../../../crates/lux-settings" }
 lux-terminal = { path = "../../../crates/lux-terminal" }
 lux-workspace = { path = "../../../crates/lux-workspace" }
+image.workspace = true
 notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true

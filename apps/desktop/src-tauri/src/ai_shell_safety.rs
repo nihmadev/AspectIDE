@@ -135,7 +135,11 @@ fn split_segments(command: &str) -> Vec<String> {
 
 /// Lowercase + whitespace-collapsed copy for matching.
 fn normalize(segment: &str) -> String {
-    segment.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    segment
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 /// A whitespace-free copy for fork-bomb / glued-token detection.
@@ -162,7 +166,9 @@ fn catastrophic_reason(normalized: &str) -> Option<String> {
     if is_rm_recursive_force(normalized) {
         if let Some(target) = rm_target(normalized) {
             if is_dangerous_root_target(&target) {
-                return Some(format!("recursive force delete of a protected path: {target}"));
+                return Some(format!(
+                    "recursive force delete of a protected path: {target}"
+                ));
             }
         }
     }
@@ -242,9 +248,9 @@ fn is_dangerous_root_target(target: &str) -> bool {
 }
 
 fn writes_to_block_device(normalized: &str) -> bool {
-    normalized.split(' ').any(|token| {
-        token.strip_prefix("of=").is_some_and(is_block_device_path)
-    })
+    normalized
+        .split(' ')
+        .any(|token| token.strip_prefix("of=").is_some_and(is_block_device_path))
 }
 
 fn redirects_to_block_device(normalized: &str) -> bool {
@@ -288,13 +294,13 @@ fn segment_targets_root(normalized: &str) -> bool {
 
 fn mentions_windows_drive_root(normalized: &str) -> bool {
     // c:, c:\, c:/ for any drive letter.
-    normalized.split(|c: char| c == ' ' || c == '"').any(|token| {
+    normalized.split([' ', '"']).any(|token| {
         let token = token.trim();
         let bytes = token.as_bytes();
         bytes.len() >= 2
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
-            && (token.len() == 2 || matches!(bytes.get(2), Some(b'\\') | Some(b'/')))
+            && (token.len() == 2 || matches!(bytes.get(2), Some(b'\\' | b'/')))
     })
 }
 
@@ -307,7 +313,9 @@ fn risky_warnings(normalized: &str) -> Vec<String> {
         warnings.push("runs with elevated privileges (sudo/doas)".to_string());
     }
     if ft == "git" {
-        if normalized.contains("push") && (normalized.contains("--force") || normalized.contains(" -f")) {
+        if normalized.contains("push")
+            && (normalized.contains("--force") || normalized.contains(" -f"))
+        {
             warnings.push("git force-push can overwrite remote history".to_string());
         }
         if normalized.contains("reset --hard") {
@@ -352,8 +360,19 @@ fn is_read_only_segment(normalized: &str) -> bool {
                 .unwrap_or("");
             matches!(
                 sub,
-                "status" | "log" | "diff" | "show" | "branch" | "remote" | "describe"
-                    | "rev-parse" | "blame" | "tag" | "ls-files" | "config" | "shortlog"
+                "status"
+                    | "log"
+                    | "diff"
+                    | "show"
+                    | "branch"
+                    | "remote"
+                    | "describe"
+                    | "rev-parse"
+                    | "blame"
+                    | "tag"
+                    | "ls-files"
+                    | "config"
+                    | "shortlog"
             )
         }
         "node" | "npm" | "pnpm" | "yarn" | "cargo" | "python" | "python3" | "rustc" | "go"

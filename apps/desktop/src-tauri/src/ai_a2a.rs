@@ -68,17 +68,27 @@ pub fn ai_blackboard_post(
         id: uuid::Uuid::new_v4().to_string(),
         author: {
             let a = clamp_chars(&author, MAX_AUTHOR_CHARS);
-            if a.is_empty() { "agent".to_string() } else { a }
+            if a.is_empty() {
+                "agent".to_string()
+            } else {
+                a
+            }
         },
         topic: {
             let t = clamp_chars(&topic, MAX_TOPIC_CHARS);
-            if t.is_empty() { "general".to_string() } else { t }
+            if t.is_empty() {
+                "general".to_string()
+            } else {
+                t
+            }
         },
         content,
         timestamp_ms: Utc::now().timestamp_millis(),
     };
 
-    let mut guard = board().lock().map_err(|_| "blackboard lock poisoned".to_string())?;
+    let mut guard = board()
+        .lock()
+        .map_err(|_| "blackboard lock poisoned".to_string())?;
 
     // Evict the least-recently-touched session if we hit the session cap.
     if !guard.contains_key(&session_id) && guard.len() >= MAX_SESSIONS {
@@ -108,7 +118,9 @@ pub fn ai_blackboard_read(
     if session_id.is_empty() {
         return Ok(Vec::new());
     }
-    let guard = board().lock().map_err(|_| "blackboard lock poisoned".to_string())?;
+    let guard = board()
+        .lock()
+        .map_err(|_| "blackboard lock poisoned".to_string())?;
     let Some(entries) = guard.get(&session_id) else {
         return Ok(Vec::new());
     };
@@ -120,9 +132,10 @@ pub fn ai_blackboard_read(
     let mut selected: Vec<BlackboardEntry> = entries
         .iter()
         .rev()
-        .filter(|entry| match &topic_filter {
-            Some(t) => entry.topic.to_lowercase() == *t,
-            None => true,
+        .filter(|entry| {
+            topic_filter
+                .as_ref()
+                .is_none_or(|t| entry.topic.to_lowercase() == *t)
         })
         .take(limit)
         .cloned()
@@ -138,7 +151,9 @@ pub fn ai_blackboard_clear(session_id: String) -> Result<(), String> {
     if session_id.is_empty() {
         return Ok(());
     }
-    let mut guard = board().lock().map_err(|_| "blackboard lock poisoned".to_string())?;
+    let mut guard = board()
+        .lock()
+        .map_err(|_| "blackboard lock poisoned".to_string())?;
     guard.remove(&session_id);
     Ok(())
 }
@@ -146,7 +161,7 @@ pub fn ai_blackboard_clear(session_id: String) -> Result<(), String> {
 fn oldest_session(board: &Board) -> Option<String> {
     board
         .iter()
-        .min_by_key(|(_, entries)| entries.last().map(|e| e.timestamp_ms).unwrap_or(0))
+        .min_by_key(|(_, entries)| entries.last().map_or(0, |e| e.timestamp_ms))
         .map(|(key, _)| key.clone())
 }
 
@@ -157,9 +172,27 @@ mod tests {
     #[test]
     fn post_and_read_roundtrip() {
         let session = format!("test-{}", uuid::Uuid::new_v4());
-        ai_blackboard_post(session.clone(), "explorer".into(), "auth".into(), "found login in auth.rs".into()).unwrap();
-        ai_blackboard_post(session.clone(), "reviewer".into(), "auth".into(), "token TTL is 30s".into()).unwrap();
-        ai_blackboard_post(session.clone(), "explorer".into(), "ui".into(), "button in App.tsx".into()).unwrap();
+        ai_blackboard_post(
+            session.clone(),
+            "explorer".into(),
+            "auth".into(),
+            "found login in auth.rs".into(),
+        )
+        .unwrap();
+        ai_blackboard_post(
+            session.clone(),
+            "reviewer".into(),
+            "auth".into(),
+            "token TTL is 30s".into(),
+        )
+        .unwrap();
+        ai_blackboard_post(
+            session.clone(),
+            "explorer".into(),
+            "ui".into(),
+            "button in App.tsx".into(),
+        )
+        .unwrap();
 
         let all = ai_blackboard_read(session.clone(), None, None).unwrap();
         assert_eq!(all.len(), 3);
@@ -182,11 +215,16 @@ mod tests {
     fn caps_entries_per_session() {
         let session = format!("test-{}", uuid::Uuid::new_v4());
         for i in 0..(MAX_ENTRIES_PER_SESSION + 25) {
-            ai_blackboard_post(session.clone(), "a".into(), "t".into(), format!("msg {i}")).unwrap();
+            ai_blackboard_post(session.clone(), "a".into(), "t".into(), format!("msg {i}"))
+                .unwrap();
         }
         let all = ai_blackboard_read(session, None, Some(MAX_ENTRIES_PER_SESSION)).unwrap();
         assert_eq!(all.len(), MAX_ENTRIES_PER_SESSION);
         // Oldest entries dropped; newest retained.
-        assert!(all.last().unwrap().content.contains(&format!("{}", MAX_ENTRIES_PER_SESSION + 24)));
+        assert!(all
+            .last()
+            .unwrap()
+            .content
+            .contains(&format!("{}", MAX_ENTRIES_PER_SESSION + 24)));
     }
 }
