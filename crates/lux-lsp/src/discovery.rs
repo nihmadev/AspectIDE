@@ -39,7 +39,7 @@ const BUILTIN_SERVERS: &[BuiltinServer] = &[
 
 pub fn workspace_language_servers(root: impl AsRef<Path>) -> AppResult<Vec<LanguageServerInfo>> {
     let root = root.as_ref().canonicalize()?;
-    let detected_extensions = detect_extensions(&root)?;
+    let detected_extensions = detect_extensions(&root);
     let mut servers = Vec::new();
 
     for server in BUILTIN_SERVERS {
@@ -111,35 +111,91 @@ pub fn diagnostic_anchor_path(server: &LanguageServerInfo) -> std::path::PathBuf
     server.workspace_root.clone()
 }
 
-fn detect_extensions(root: &Path) -> AppResult<BTreeSet<String>> {
-    let mut extensions = BTreeSet::new();
+/// Set of every file extension any builtin server cares about. Once we've seen
+/// all of them we can stop walking — no point scanning a huge repo further.
+fn relevant_extensions() -> BTreeSet<&'static str> {
+    BUILTIN_SERVERS
+        .iter()
+        .flat_map(|server| server.extensions.iter().copied())
+        .collect()
+}
+
+/// Directory names that never contain workspace source we'd start a server for,
+/// and that are commonly enormous. Skipping them keeps discovery fast and bounded.
+fn is_ignored_dir(name: &str) -> bool {
+    matches!(
+        name,
+        "node_modules"
+            | "target"
+            | ".git"
+            | "dist"
+            | "build"
+            | "out"
+            | ".next"
+            | ".turbo"
+            | ".cache"
+            | "vendor"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+    )
+}
+
+/// Detects which builtin-relevant file extensions exist in the workspace.
+///
+/// Infallible (a bad entry is skipped, never aborts the scan) and **bounded**:
+/// it stops as soon as every extension a builtin server handles has been seen,
+/// and caps the total number of entries visited so a giant or pathological tree
+/// can never stall language-service startup. This is the dominant fix for the
+/// "language service hangs on load" symptom on large repos.
+fn detect_extensions(root: &Path) -> BTreeSet<String> {
+    // Cap on directory entries visited — generous for real projects, but a hard
+    // ceiling so discovery returns promptly no matter the repo size.
+    const MAX_ENTRIES: usize = 20_000;
+
+    let wanted = relevant_extensions();
+    let mut found: BTreeSet<String> = BTreeSet::new();
     let mut stack = vec![root.to_path_buf()];
+    let mut visited = 0_usize;
 
     while let Some(path) = stack.pop() {
         let Ok(children) = std::fs::read_dir(&path) else {
             continue;
         };
 
-        for child in children {
-            let child = child?;
+        for child in children.flatten() {
+            visited += 1;
+            if visited > MAX_ENTRIES {
+                return found;
+            }
+
             let file_name = child.file_name();
             let file_name = file_name.to_string_lossy();
-            if file_name == "node_modules" || file_name == "target" || file_name == ".git" {
+            if is_ignored_dir(&file_name) || file_name.starts_with('.') {
                 continue;
             }
 
-            let file_type = child.file_type()?;
+            let Ok(file_type) = child.file_type() else {
+                continue;
+            };
             if file_type.is_dir() {
                 stack.push(child.path());
             } else if file_type.is_file() {
                 if let Some(extension) = child.path().extension().and_then(|value| value.to_str()) {
-                    extensions.insert(extension.to_ascii_lowercase());
+                    let extension = extension.to_ascii_lowercase();
+                    if wanted.contains(extension.as_str()) {
+                        found.insert(extension);
+                        // Every server we could start is accounted for — stop early.
+                        if found.len() == wanted.len() {
+                            return found;
+                        }
+                    }
                 }
             }
         }
     }
 
-    Ok(extensions)
+    found
 }
 
 fn command_available(command: &str) -> bool {
@@ -234,5 +290,71 @@ mod tests {
         }];
 
         assert!(language_server_diagnostics(&servers).is_empty());
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let unique = format!(
+            "lux-lsp-disco-{tag}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = env::temp_dir().join(unique);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn detect_extensions_finds_relevant_and_skips_ignored_dirs() {
+        let root = temp_dir("relevant");
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/app.ts"), "export {}").unwrap();
+        // A relevant file buried in an ignored dir must NOT be detected — that's
+        // what keeps discovery from walking huge node_modules / target trees.
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::write(root.join("node_modules/pkg/index.js"), "module.exports={}").unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("target/debug/build.rs"), "fn main() {}").unwrap();
+
+        let found = detect_extensions(&root);
+        assert!(found.contains("rs"), "should detect rust source");
+        assert!(found.contains("ts"), "should detect typescript source");
+        // The .js only exists under node_modules, which is skipped.
+        assert!(
+            !found.contains("js"),
+            "ignored-dir files must not be detected"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn detect_extensions_skips_hidden_directories() {
+        let root = temp_dir("hidden");
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        std::fs::write(root.join(".hidden/buried.rs"), "fn main() {}").unwrap();
+
+        let found = detect_extensions(&root);
+        assert!(
+            !found.contains("rs"),
+            "hidden-dir files must not be detected"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn detect_extensions_is_empty_for_unrelated_files() {
+        let root = temp_dir("unrelated");
+        std::fs::write(root.join("notes.md"), "# notes").unwrap();
+        std::fs::write(root.join("data.bin"), [0_u8; 4]).unwrap();
+
+        // No builtin server handles .md/.bin, so nothing is detected.
+        assert!(detect_extensions(&root).is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

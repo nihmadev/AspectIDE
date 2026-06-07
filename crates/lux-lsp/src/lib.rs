@@ -163,12 +163,12 @@ impl LspManager {
             }
         }
 
-        let mut diagnostics = Vec::new();
+        // Shut down sessions whose definition changed (command/args/root) so they
+        // can be restarted with the new config.
         for server in servers {
             if server.status != LanguageServerStatus::Available {
                 continue;
             }
-
             let definition = LanguageServerDefinition::from(server);
             let should_restart = self
                 .sessions
@@ -179,22 +179,46 @@ impl LspManager {
                     session.shutdown().await;
                 }
             }
+        }
 
-            if self.sessions.contains_key(&server.language_id) {
+        // Start every missing server CONCURRENTLY. Each `initialize` handshake can
+        // take up to its 10s timeout; doing them sequentially made N servers stack
+        // their timeouts and freeze language-service startup. A JoinSet lets them
+        // race in parallel so total time is the slowest single server, not the sum.
+        let mut join_set = tokio::task::JoinSet::new();
+        for server in servers {
+            if server.status != LanguageServerStatus::Available
+                || self.sessions.contains_key(&server.language_id)
+            {
                 continue;
             }
+            let definition = LanguageServerDefinition::from(server);
+            let diagnostics_tx = self.diagnostics_tx.clone();
+            let language_id = server.language_id.clone();
+            let server_name = server.name.clone();
+            let anchor = discovery::diagnostic_anchor_path(server);
+            join_set.spawn(async move {
+                let result = LspSession::start(definition, diagnostics_tx).await;
+                (language_id, server_name, anchor, result)
+            });
+        }
 
-            match LspSession::start(definition, self.diagnostics_tx.clone()).await {
+        let mut diagnostics = Vec::new();
+        while let Some(joined) = join_set.join_next().await {
+            let Ok((language_id, server_name, anchor, result)) = joined else {
+                continue;
+            };
+            match result {
                 Ok(session) => {
-                    self.sessions.insert(server.language_id.clone(), session);
+                    self.sessions.insert(language_id, session);
                 }
                 Err(error) => diagnostics.push(WorkspaceDiagnostic {
-                    path: discovery::diagnostic_anchor_path(server),
+                    path: anchor,
                     line: 1,
                     column: 1,
                     severity: DiagnosticSeverity::Warning,
                     source: "lux-lsp".to_string(),
-                    message: format!("Failed to start {}: {error}", server.name),
+                    message: format!("Failed to start {server_name}: {error}"),
                 }),
             }
         }
@@ -1127,8 +1151,13 @@ impl LspSession {
         let request_id = self.next_request_id();
         self.write_message(&initialize_request(request_id, &self.definition))
             .await?;
+        // The `initialize` *handshake* reply is normally fast (heavy indexing
+        // happens asynchronously afterwards), but a cold or busy machine can be
+        // slow to even launch the server binary. Startup now runs in the
+        // background off the UI path, so a generous ceiling costs nothing and
+        // avoids dropping a server that was merely slow to wake up.
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
             self.wait_for_response(request_id),
         )
         .await

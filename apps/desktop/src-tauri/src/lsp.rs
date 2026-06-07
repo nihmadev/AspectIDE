@@ -23,20 +23,63 @@ pub async fn lsp_servers(
         .map(|workspace| workspace.root.clone())
         .ok_or_else(|| "no workspace is open".to_string())?;
 
+    // Discovery is fast and bounded; do it inline so the UI gets the server list
+    // (available/missing) immediately and can clear its "loading" state.
     let servers = tokio::task::spawn_blocking(move || lux_lsp::workspace_language_servers(root))
         .await
         .map_err(|error| error.to_string())?
         .map_err(String::from)?;
-    let mut diagnostics = lux_lsp::language_server_diagnostics(&servers);
-    diagnostics.extend(start_servers(&state, &servers).await?);
-    replace_diagnostics(&app, &state, diagnostics)?;
 
-    let open_documents = state.documents.lock().map_err(lock_error)?.snapshots();
-    for document in open_documents {
-        forward_document_open(&app, &state, &document).await?;
-    }
+    // Publish missing-server warnings right away.
+    let missing_diagnostics = lux_lsp::language_server_diagnostics(&servers);
+    replace_diagnostics(&app, &state, missing_diagnostics)?;
+
+    // Actually starting servers means running each `initialize` handshake (up to
+    // a 10s timeout apiece). Do it OFF the command path so the frontend never
+    // blocks on it — startup runs in the background and streams diagnostics +
+    // forwards open documents as servers come online. This is what keeps the
+    // language service from "hanging on load".
+    let background_state = state.inner().clone();
+    let background_app = app.clone();
+    let background_servers = servers.clone();
+    tokio::spawn(async move {
+        start_servers_background(&background_app, &background_state, &background_servers).await;
+    });
 
     Ok(servers)
+}
+
+/// Background startup: start available servers in parallel, merge any startup
+/// failures into the published diagnostics, then forward already-open documents
+/// to the freshly started servers. Runs detached from the `lsp_servers` command
+/// so the UI is never blocked on LSP `initialize` handshakes.
+async fn start_servers_background(
+    app: &AppHandle,
+    state: &SharedState,
+    servers: &[LanguageServerInfo],
+) {
+    let startup_diagnostics = {
+        let mut lsp = state.lsp.lock().await;
+        match lsp.as_mut() {
+            Some(manager) => manager.start_available_servers(servers).await,
+            None => return,
+        }
+    };
+
+    // Re-publish: keep the missing-server warnings and add any startup failures.
+    let mut diagnostics = lux_lsp::language_server_diagnostics(servers);
+    diagnostics.extend(startup_diagnostics);
+    let _ = replace_diagnostics_owned(app, state, diagnostics);
+
+    let open_documents = {
+        let Ok(documents) = state.documents.lock() else {
+            return;
+        };
+        documents.snapshots()
+    };
+    for document in open_documents {
+        forward_document_open_owned(app, state, &document).await;
+    }
 }
 
 #[tauri::command]
@@ -370,6 +413,47 @@ pub fn replace_diagnostics(
     Ok(())
 }
 
+/// Owned-state variant of [`replace_diagnostics`] for use from detached
+/// background tasks (which hold an `Arc<AppState>`, not a borrowed `State`).
+fn replace_diagnostics_owned(
+    app: &AppHandle,
+    state: &SharedState,
+    diagnostics: Vec<WorkspaceDiagnostic>,
+) -> Result<(), String> {
+    let mut by_path: BTreeMap<_, Vec<WorkspaceDiagnostic>> = BTreeMap::new();
+    for diagnostic in &diagnostics {
+        by_path
+            .entry(diagnostic.path.clone())
+            .or_default()
+            .push(diagnostic.clone());
+    }
+    let previous_paths = {
+        let mut current = state.diagnostics.lock().map_err(lock_error)?;
+        let paths = current
+            .iter()
+            .map(|diagnostic| diagnostic.path.clone())
+            .collect::<Vec<_>>();
+        *current = diagnostics;
+        paths
+    };
+
+    for path in previous_paths {
+        by_path.entry(path).or_default();
+    }
+
+    for (path, path_diagnostics) in by_path {
+        emit_event(
+            app,
+            LuxEvent::EditorDiagnosticsChanged {
+                path,
+                diagnostics: path_diagnostics,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
 pub fn clear_diagnostics(app: &AppHandle, state: &State<'_, SharedState>) -> Result<(), String> {
     let previous_paths = {
         let mut current = state.diagnostics.lock().map_err(lock_error)?;
@@ -434,6 +518,40 @@ pub async fn forward_document_open(
         publish_forwarding_error(app, state, document, error)?;
     }
     Ok(())
+}
+
+/// Owned-state variant of [`forward_document_open`] for background startup.
+/// Errors are surfaced as a diagnostic rather than propagated (the detached task
+/// has nowhere to return them).
+async fn forward_document_open_owned(
+    app: &AppHandle,
+    state: &SharedState,
+    document: &DocumentSnapshot,
+) {
+    let result = {
+        let mut lsp = state.lsp.lock().await;
+        let Some(manager) = lsp.as_mut() else {
+            return;
+        };
+        manager.open_document(document).await
+    };
+    if let (Err(error), Some(path)) = (result, document.path.clone()) {
+        let _ = apply_diagnostics_update(
+            app,
+            state,
+            lux_lsp::DiagnosticsUpdate {
+                path: path.clone(),
+                diagnostics: vec![WorkspaceDiagnostic {
+                    path,
+                    line: 1,
+                    column: 1,
+                    severity: lux_core::DiagnosticSeverity::Warning,
+                    source: "lux-lsp".to_string(),
+                    message: format!("Language server stopped: {error}"),
+                }],
+            },
+        );
+    }
 }
 
 pub async fn forward_document_update(
@@ -509,17 +627,6 @@ pub async fn forward_document_close(
         )?;
     }
     Ok(())
-}
-
-async fn start_servers(
-    state: &State<'_, SharedState>,
-    servers: &[LanguageServerInfo],
-) -> Result<Vec<WorkspaceDiagnostic>, String> {
-    let mut lsp = state.lsp.lock().await;
-    let manager = lsp
-        .as_mut()
-        .ok_or_else(|| "language service is not initialized".to_string())?;
-    Ok(manager.start_available_servers(servers).await)
 }
 
 fn publish_forwarding_error(
