@@ -1956,7 +1956,7 @@
   width: 5px;
   height: 5px;
   border-radius: 50%;
-  background: var(--ai-chat-accent);
+  background: var(--text-2);
   animation: ai-thinking-pulse 1s ease-in-out infinite;
 }
 
@@ -3790,9 +3790,15 @@
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
-  color: var(--success);
+  color: var(--text-1);
   font-size: 12px;
   font-weight: 650;
+}
+
+/* Keep only the check glyph tinted — a quiet success cue, Codex-style. */
+.ai-turn-summary-status svg {
+  color: var(--success);
+  opacity: 0.85;
 }
 
 .ai-turn-summary-status-row {
@@ -3811,22 +3817,25 @@
   height: 26px;
   padding: 0 12px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--accent-soft);
-  background: var(--accent-softer);
-  color: var(--accent);
+  border: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+  color: var(--text-1);
   font-size: 11.5px;
   font-weight: 650;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: border-color 120ms ease, background 120ms ease, color 120ms ease, box-shadow 120ms ease;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
 }
 
 .ai-turn-summary-review:hover {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-  box-shadow: 0 0 0 2px var(--accent-softer);
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-0);
+}
+
+.ai-turn-summary-review svg {
+  color: var(--icon-muted);
 }
 
 .ai-turn-summary-metrics {

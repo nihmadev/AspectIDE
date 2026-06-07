@@ -22,10 +22,13 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
   const fileSummary = useMemo(() => buildTurnFileSummary(message, workspaceRoot), [message, workspaceRoot]);
   const usage = message.turnUsage;
   const timing = message.responseTiming;
+  // The native turn-loop reports only responseDurationMs (no per-phase timing),
+  // so fall back to it for the total when responseTiming is absent.
+  const totalDurationMs = timing?.totalMs ?? message.responseDurationMs ?? 0;
 
   const hasFiles = Boolean(fileSummary && fileSummary.files.length > 0);
   const hasUsage = Boolean(usage && (usage.promptTokens > 0 || usage.completionTokens > 0));
-  const hasTiming = Boolean(timing && timing.totalMs > 0);
+  const hasTiming = totalDurationMs > 0;
   const hasCompaction = Boolean(compaction?.droppedItems && compaction.droppedItems.length > 0);
   const showReview = Boolean(onReview) && (hasFiles || hasUsage || hasTiming);
 
@@ -58,10 +61,12 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
           )}
         </div>
         <div className="ai-turn-summary-metrics">
-          {hasTiming && timing && (
-            <span title={t("aiChat.turnUsage.timing", { total: timing.totalMs, model: timing.modelMs, tools: timing.toolMs })}>
+          {hasTiming && (
+            <span title={timing
+              ? t("aiChat.turnUsage.timing", { total: timing.totalMs, model: timing.modelMs, tools: timing.toolMs })
+              : formatDuration(totalDurationMs)}>
               <Clock3 size={12} />
-              {formatDuration(timing.totalMs)}
+              {formatDuration(totalDurationMs)}
             </span>
           )}
           {hasUsage && usage && (
@@ -154,8 +159,22 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
   );
 }
 
+// Human-readable elapsed time. Scales the unit up as needed:
+//   <1s → ms, <60s → s, <60m → m s, <24h → h m, else → d h.
 function formatDuration(ms: number) {
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
+  const totalSeconds = Math.round(ms / 1000);
+  if (totalSeconds < 60) return `${(ms / 1000).toFixed(1)}s`;
+
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  if (totalMinutes < 60) return `${totalMinutes}m ${seconds}s`;
+
+  const minutes = totalMinutes % 60;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) return `${totalHours}h ${minutes}m`;
+
+  const hours = totalHours % 24;
+  const days = Math.floor(totalHours / 24);
+  return `${days}d ${hours}h`;
 }

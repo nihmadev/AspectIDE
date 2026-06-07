@@ -46,8 +46,8 @@
 }
 
 .ai-tool-calls-group[data-active] .ai-tool-calls-rail {
-  background: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--text-1);
+  box-shadow: 0 0 0 3px var(--hover);
 }
 
 .ai-tool-calls-summary-label {
@@ -227,7 +227,7 @@
 }
 
 .ai-tool-call[data-status="running"] .ai-tool-call-glyph {
-  color: var(--accent);
+  color: var(--text-1);
 }
 
 .ai-tool-call[data-status="success"] .ai-tool-call-glyph {
