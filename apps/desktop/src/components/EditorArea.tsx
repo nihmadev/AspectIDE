@@ -60,12 +60,16 @@ import {
 import { useLuxStore, type Activity, type EditorGroup } from "../lib/store";
 import { luxCommands } from "../lib/tauri";
 import type {
+  DebugResolvedBreakpoint,
+  DebugSourceBreakpoint,
   DocumentSnapshot,
   WorkspaceDiagnostic,
 } from "../lib/types";
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
 const noDiagnostics: WorkspaceDiagnostic[] = [];
+const noSourceBreakpoints: DebugSourceBreakpoint[] = [];
+const noResolvedBreakpoints: DebugResolvedBreakpoint[] = [];
 
 type EditorTabMenuAction = {
   label: string;
@@ -370,6 +374,8 @@ function EditorGroupPane({
   const breakpointGutterDisposableRef = useRef<MonacoDisposable | null>(null);
   const breakpointDecorationsRef = useRef<string[]>([]);
   const aiEditDecorationsRef = useRef<AiEditDecorationState>(createEmptyAiEditDecorationState());
+  const activeDocumentRef = useRef(activeDocument);
+  activeDocumentRef.current = activeDocument;
   const pendingReviews = useSyncExternalStore(
     subscribePendingFileReviews,
     getPendingFileReviewsSnapshot,
@@ -381,8 +387,8 @@ function EditorGroupPane({
   }, [activeDocument.path, pendingReviews]);
   const diagnostics = activeDocument.path ? diagnosticsByPath[normalizePath(activeDocument.path)] ?? noDiagnostics : noDiagnostics;
   const activeDocumentPath = activeDocument.path ? normalizePath(activeDocument.path) : null;
-  const sourceBreakpoints = activeDocumentPath ? debugSourceBreakpointsByPath[activeDocumentPath] ?? [] : [];
-  const resolvedBreakpoints = activeDocumentPath ? debugResolvedBreakpointsByPath[activeDocumentPath] ?? [] : [];
+  const sourceBreakpoints = activeDocumentPath ? debugSourceBreakpointsByPath[activeDocumentPath] ?? noSourceBreakpoints : noSourceBreakpoints;
+  const resolvedBreakpoints = activeDocumentPath ? debugResolvedBreakpointsByPath[activeDocumentPath] ?? noResolvedBreakpoints : noResolvedBreakpoints;
   const editorPaneKind = resolveEditorPaneKind(activeDocument);
   const isMonacoDocument = editorPaneKind === "monaco" || editorPaneKind === "markdown" || editorPaneKind === "diagram";
   const isEditableDocument = isEditableTextDocument(activeDocument);
@@ -403,23 +409,24 @@ function EditorGroupPane({
   }, []);
 
   useEffect(() => {
-    if (!isMonacoDocument) return;
+    if (editorPaneKind !== "monaco") return;
     applyDiagnosticsMarkers(editorRef.current, monacoRef.current, group.id, diagnostics);
-  }, [activeDocument.path, diagnostics, group.id, isMonacoDocument]);
+  }, [activeDocument.path, diagnostics, group.id, editorPaneKind]);
 
   useEffect(() => {
-    if (!isMonacoDocument) return;
+    if (editorPaneKind !== "monaco") return;
     breakpointDecorationsRef.current = applyDebugBreakpointDecorations(
       editorRef.current,
       monacoRef.current,
       breakpointDecorationsRef.current,
-      activeDocument,
+      activeDocumentRef.current,
       sourceBreakpoints,
       resolvedBreakpoints,
     );
-  }, [activeDocument, isMonacoDocument, resolvedBreakpoints, sourceBreakpoints]);
+  }, [activeDocument.path, editorPaneKind, resolvedBreakpoints, sourceBreakpoints]);
 
   useEffect(() => {
+    if (!editorRef.current) return;
     if (pendingEditorReveal?.documentId !== activeDocument.id) return;
     revealEditorTarget(editorRef.current, consumePendingEditorReveal(activeDocument.id));
   }, [activeDocument.id, consumePendingEditorReveal, pendingEditorReveal]);
@@ -435,11 +442,12 @@ function EditorGroupPane({
   }, [activeFileReview, activeDocument.text, isMonacoDocument]);
 
   useEffect(() => {
-    if (!isMonacoDocument) return;
+    if (editorPaneKind !== "monaco") return;
     if (!editorRef.current || !monacoRef.current) return;
+    const document = activeDocumentRef.current;
     disposeLspProviders(lspProviderDisposablesRef.current);
     lspProviderDisposablesRef.current = registerLspProviders({
-      document: activeDocument,
+      document,
       editor: editorRef.current,
       monaco: monacoRef.current,
       setPendingEditorReveal,
@@ -448,16 +456,8 @@ function EditorGroupPane({
       t,
     });
     breakpointGutterDisposableRef.current?.dispose();
-    breakpointGutterDisposableRef.current = registerDebugBreakpointGutter(editorRef.current, monacoRef.current, activeDocument, toggleDebugSourceBreakpoint);
-    breakpointDecorationsRef.current = applyDebugBreakpointDecorations(
-      editorRef.current,
-      monacoRef.current,
-      breakpointDecorationsRef.current,
-      activeDocument,
-      sourceBreakpoints,
-      resolvedBreakpoints,
-    );
-  }, [activeDocument, isMonacoDocument, resolvedBreakpoints, setPendingEditorReveal, sourceBreakpoints, toggleDebugSourceBreakpoint, updateOpenDocuments, upsertDocument, t]);
+    breakpointGutterDisposableRef.current = registerDebugBreakpointGutter(editorRef.current, monacoRef.current, document, toggleDebugSourceBreakpoint);
+  }, [activeDocument.id, activeDocument.path, activeDocument.language_id, editorPaneKind, setPendingEditorReveal, toggleDebugSourceBreakpoint, updateOpenDocuments, upsertDocument, t]);
 
   return (
     <>
@@ -663,9 +663,10 @@ function EditorGroupPane({
                   editorRef.current = editor;
                   monacoRef.current = monaco;
                   editor.onDidChangeCursorSelection(() => {
+                    const doc = activeDocumentRef.current;
                     const selection = editor.getSelection();
                     const model = editor.getModel();
-                    if (!selection || !model || !activeDocument.path) {
+                    if (!selection || !model || !doc.path) {
                       setEditorSelectionSnapshot(null);
                       return;
                     }
@@ -675,9 +676,9 @@ function EditorGroupPane({
                       return;
                     }
                     setEditorSelectionSnapshot({
-                      documentId: activeDocument.id,
-                      path: activeDocument.path,
-                      languageId: activeDocument.language_id,
+                      documentId: doc.id,
+                      path: doc.path,
+                      languageId: doc.language_id,
                       startLine: selection.startLineNumber,
                       endLine: selection.endLineNumber,
                       startColumn: selection.startColumn,

@@ -11,6 +11,8 @@ use serde::Deserialize;
 const CORE_PROMPT: &str = include_str!("prompts/core.txt");
 const CORE_PROMPT_READONLY: &str = include_str!("prompts/core_readonly.txt");
 const AUTOMATIC_ENFORCEMENT: &str = include_str!("prompts/automatic_enforcement.txt");
+const SAFETY_FLOOR: &str = include_str!("prompts/safety_floor.txt");
+const TOKEN_ECONOMY: &str = include_str!("prompts/token_economy.txt");
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +32,16 @@ pub struct SystemPromptInput {
     pub workspace_root: String,
     pub runtime_tools_available: bool,
     pub agent_browser_enabled: bool,
+    /// Token-economy mode: append the terse-output directive.
+    #[serde(default)]
+    pub token_economy: bool,
+    /// When true, `custom_prompt` replaces the built-in behavioral body (the safety
+    /// floor + runtime + tool map are still appended). Off → built-in core prompt.
+    #[serde(default)]
+    pub custom_prompt_enabled: bool,
+    /// User-authored behavioral body, used only when `custom_prompt_enabled` is on.
+    #[serde(default)]
+    pub custom_prompt: String,
 }
 
 #[tauri::command]
@@ -40,19 +52,32 @@ pub fn ai_build_system_prompt(input: SystemPromptInput) -> String {
 pub fn build_system_prompt(input: &SystemPromptInput) -> String {
     let read_only = is_read_only_mode(&input.agent_mode);
     let full_exec = is_full_execution_mode(&input.agent_mode);
-    let body = if read_only {
-        CORE_PROMPT_READONLY
-    } else {
-        CORE_PROMPT
-    };
+    // A non-empty custom prompt replaces the built-in behavioral body. The safety
+    // floor is appended right after so workspace scope, approvals, and evidence
+    // rules survive a user-authored core. Tool availability is still mode-filtered
+    // downstream, so read-only modes stay read-only regardless of the body text.
+    let custom = input.custom_prompt.trim();
+    let use_custom = input.custom_prompt_enabled && !custom.is_empty();
     let agent_name: &str = if input.agent_name.trim().is_empty() {
         &input.agent_mode
     } else {
         input.agent_name.trim()
     };
 
-    let mut sections: Vec<String> = Vec::with_capacity(8);
-    sections.push(body.to_string());
+    let mut sections: Vec<String> = Vec::with_capacity(10);
+    if use_custom {
+        sections.push(custom.to_string());
+        sections.push(SAFETY_FLOOR.to_string());
+    } else {
+        sections.push(
+            if read_only {
+                CORE_PROMPT_READONLY
+            } else {
+                CORE_PROMPT
+            }
+            .to_string(),
+        );
+    }
     sections.push(runtime_section(input, agent_name));
 
     if input.runtime_tools_available {
@@ -85,6 +110,10 @@ pub fn build_system_prompt(input: &SystemPromptInput) -> String {
 
     if input.agent_mode == "automatic" {
         sections.push(AUTOMATIC_ENFORCEMENT.to_string());
+    }
+
+    if input.token_economy {
+        sections.push(TOKEN_ECONOMY.to_string());
     }
 
     sections.join("\n\n")
@@ -142,14 +171,14 @@ fn tool_availability_section(
         ""
     };
 
-    let tool_map = tool_capability_map(full_exec, read_only, input.agent_browser_enabled);
+    let tool_map = tool_capability_map(&input.agent_mode, full_exec, read_only, input.agent_browser_enabled);
 
     format!(
         "Runtime tools are available in this request. Prefer tool calls over speculation whenever the task depends on workspace state, files, diagnostics, browser state, or external documentation. The callable Lux tools are the only actions you can actually perform; do not claim to use tools that are not provided.{browser_line}{terminal_line}\n\n{tool_map}"
     )
 }
 
-fn tool_capability_map(full_exec: bool, _read_only: bool, browser_enabled: bool) -> String {
+fn tool_capability_map(agent_mode: &str, full_exec: bool, _read_only: bool, browser_enabled: bool) -> String {
     let mut lines = vec![
         "Lux tool map — reach for the highest-signal tool first:".to_string(),
         "- Orient: ContextBudgeter, FastContext, WorkspaceIndex, RepoMap, ActiveContext. Rules/docs/memory: RulesContext, DocsContext, MemoryContext.".to_string(),
@@ -165,6 +194,18 @@ fn tool_capability_map(full_exec: bool, _read_only: bool, browser_enabled: bool)
             "- Browser: BrowserOpen → BrowserSnapshot (-i) → BrowserAct on @refs → re-snapshot."
                 .to_string(),
         );
+    }
+    // Interaction primitives — mode-aware so the model knows whether prompts block.
+    match agent_mode {
+        "automatic" => {
+            lines.push("- Interact: AskUser/PresentPlan never block — AskUser returns instantly (decide yourself); PresentPlan auto-starts.".to_string());
+        }
+        "plan" => {
+            lines.push("- Interact: PresentPlan(steps[, title, summary]) is your primary output — structured steps (title, optional detail/file), not prose; pins goal+tasks, user presses Start. AskUser(question[, options 0–10, multiSelect, allowCustom, htmlPreview]) for genuine decisions; options can be {label, description}; htmlPreview renders a sandboxed HTML5 doc for visual choices.".to_string());
+        }
+        _ => {
+            lines.push("- Interact: AskUser(question[, options 0–10, multiSelect, allowCustom, htmlPreview]) when a real decision can't be settled from evidence — give options ({label, description}) or an htmlPreview HTML5 doc for visual choices; user can type custom too. PresentPlan(steps[, title, summary]) to propose multi-step work first. Use sparingly.".to_string());
+        }
     }
     lines.join("\n")
 }
@@ -217,6 +258,9 @@ mod tests {
             workspace_root: "/home/user/project".to_string(),
             runtime_tools_available: true,
             agent_browser_enabled: false,
+            token_economy: false,
+            custom_prompt_enabled: false,
+            custom_prompt: String::new(),
         }
     }
 
@@ -263,6 +307,49 @@ mod tests {
             "automatic prompt too long: {}",
             auto_prompt.len()
         );
+    }
+
+    #[test]
+    fn token_economy_appends_terse_directive() {
+        let mut input = test_input();
+        assert!(!build_system_prompt(&input).contains("Token economy mode"));
+        input.token_economy = true;
+        let prompt = build_system_prompt(&input);
+        assert!(prompt.contains("Token economy mode"));
+        // Economy must not weaken the core: tool map and runtime still present.
+        assert!(prompt.contains("Lux tool map"));
+    }
+
+    #[test]
+    fn custom_prompt_replaces_body_but_keeps_safety_floor() {
+        let mut input = test_input();
+        input.custom_prompt_enabled = true;
+        input.custom_prompt = "You are a terse Rust specialist. Obey the user.".to_string();
+        let prompt = build_system_prompt(&input);
+        assert!(prompt.contains("terse Rust specialist"));
+        // Built-in behavioral body is gone…
+        assert!(!prompt.contains("You are Lux IDE AI"));
+        // …but the safety floor, runtime context, and tool map remain.
+        assert!(prompt.contains("Lux safety floor"));
+        assert!(prompt.contains("Runtime context"));
+        assert!(prompt.contains("Lux tool map"));
+    }
+
+    #[test]
+    fn custom_prompt_ignored_when_blank_or_disabled() {
+        let mut input = test_input();
+        input.custom_prompt = "   ".to_string();
+        input.custom_prompt_enabled = true;
+        // Blank custom prompt falls back to the built-in core.
+        assert!(build_system_prompt(&input).contains("You are Lux IDE AI"));
+
+        let mut disabled = test_input();
+        disabled.custom_prompt = "Custom body".to_string();
+        disabled.custom_prompt_enabled = false;
+        let prompt = build_system_prompt(&disabled);
+        assert!(prompt.contains("You are Lux IDE AI"));
+        assert!(!prompt.contains("Custom body"));
+        assert!(!prompt.contains("Lux safety floor"));
     }
 
     #[test]

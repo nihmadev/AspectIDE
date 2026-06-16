@@ -45,6 +45,21 @@ export type AiPreferences = {
   maxParallelSubagents: number;
   showResponseDuration: boolean;
   /**
+   * Token-economy ("caveman") mode. When on, a terse-output directive is appended
+   * to the system prompt: the model drops filler/pleasantries/hedging and answers
+   * compactly while keeping all technical substance, code, paths, and tool work
+   * intact. Trims OUTPUT tokens, not reasoning depth or correctness.
+   */
+  tokenEconomyEnabled: boolean;
+  /**
+   * When on, Lux's built-in behavioral core prompt is replaced by `customSystemPrompt`.
+   * The runtime context, tool map, and a minimal safety floor are still appended so the
+   * agent and tools keep working — only the behavioral body is swapped. Off → built-in core.
+   */
+  customSystemPromptEnabled: boolean;
+  /** User-authored system prompt body, used only when `customSystemPromptEnabled` is on. */
+  customSystemPrompt: string;
+  /**
    * Declarative tool permission rules, one per entry, format `[allow|deny|ask:]Tool(glob)`.
    * Examples: `allow:Bash(git *)`, `deny:Write(*.env)`, `ask:Bash(rm *)`. Evaluated in the
    * Rust permission engine before the approval prompt (deny > ask > allow).
@@ -110,6 +125,7 @@ export type AiProviderPresetId =
   | "openai"
   | "anthropic"
   | "openrouter"
+  | "opencode-zen"
   | "google"
   | "mistral"
   | "groq"
@@ -150,6 +166,10 @@ export type AiModelConfig = {
   alias: string;
   /** Max context tokens for this model. Omit or 0 to auto-detect from alias/id. */
   contextTokens?: number | null;
+  /** Manual price (USD per 1M input tokens) for cost estimation. Null/0 → fall back to alias-based rates. */
+  inputPricePerMillion?: number | null;
+  /** Manual price (USD per 1M output tokens) for cost estimation. Null/0 → fall back to alias-based rates. */
+  outputPricePerMillion?: number | null;
   effortLevels: AiEffortConfig[];
 };
 
@@ -185,6 +205,11 @@ const reasoningEfforts = [
   { id: "high", label: "High" },
   { id: "xhigh", label: "xHigh" },
 ] as const satisfies readonly AiEffortConfig[];
+
+/** Standard reasoning-effort levels, exported for dynamically-built model configs. */
+export function standardReasoningEfforts(): AiEffortConfig[] {
+  return reasoningEfforts.map((effort) => ({ ...effort }));
+}
 
 export const AI_PROVIDER_PRESETS = [
   {
@@ -223,6 +248,21 @@ export const AI_PROVIDER_PRESETS = [
       { id: "openrouter-claude-sonnet", name: "Claude Sonnet", alias: "anthropic/claude-sonnet-4.5" },
       { id: "openrouter-gemini-pro", name: "Gemini Pro", alias: "google/gemini-2.5-pro" },
       { id: "openrouter-deepseek-chat", name: "DeepSeek Chat", alias: "deepseek/deepseek-chat" },
+    ],
+  },
+  {
+    id: "opencode-zen",
+    name: "OpenCode Zen",
+    description: "Curated coding models from the OpenCode team. The full catalog is fetched live from /models (free “–free” models listed first) and refreshes automatically; nothing here is hardcoded.",
+    protocol: "openai-compatible",
+    baseUrl: "https://opencode.ai/zen/v1",
+    // Minimal offline bootstrap so the preset is structurally valid before the first
+    // live fetch (the normalizer requires models[0]) AND usable offline. The real,
+    // full catalog is pulled from GET /models (free-first) on activation/refresh —
+    // see aiProviderModels.ts. This single seed is a real free model id, so the
+    // provider works even if the live fetch is unavailable; it is not a fake entry.
+    models: [
+      { id: "opencode-zen-auto", name: "DeepSeek V4 Flash (Free)", alias: "deepseek-v4-flash-free", contextTokens: 1_000_000, effortLevels: reasoningEfforts },
     ],
   },
   {
@@ -374,12 +414,14 @@ export const defaultAiAgentProfiles: AiAgentProfile[] = [
     "Drive the task end to end inside the current workspace: inspect evidence first, make the needed scoped edits, then verify with the narrowest meaningful checks before reporting completion.",
     "Preserve unrelated user work, dirty files, and existing architecture. Prefer existing project patterns, typed APIs, focused modules, and small reversible changes over broad rewrites.",
     "Use tools whenever the answer depends on files, diagnostics, commands, browser state, docs, or current workspace facts. Batch independent read-only context, then act sequentially where results matter.",
+    "When a genuine decision can't be settled from evidence (product/UX, ambiguous scope, credentials), ask with AskUser — supply suggested options, and an htmlPreview HTML5 mockup for visual choices — rather than guessing. For multi-step work worth confirming first, propose it with PresentPlan.",
     "When changing code, keep behavior production-ready: handle errors explicitly, avoid silent fallbacks, avoid placeholder implementations, and surface real residual risk if verification cannot cover it.",
     "Final reports should be concise: what changed, what was verified, and what remains only if something genuinely remains.",
   ].join("\n") },
   { id: "plan", name: "Plan", mode: "plan", instructions: [
     "Stay read-only unless the user explicitly approves implementation. Gather only enough context to understand the task, constraints, affected files, and verification surface.",
-    "Return a concrete execution plan with assumptions, edit targets, ordering, risk points, and validation commands. Do not bury uncertainty; name the decision that needs confirmation.",
+    "Deliver the plan via the PresentPlan tool, not a prose checklist: give each step a clear title plus optional detail and the primary file it touches. PresentPlan pins the goal and task list and lets the user press Start to hand execution to Agent mode.",
+    "Front-load assumptions, ordering, risk points, and validation in the step details. When a real decision needs the user (product/UX choice, ambiguous scope), use AskUser with suggested options — and an htmlPreview HTML5 mockup when the choice is visual — instead of guessing silently.",
     "Prefer architecture-preserving plans: separate domain, runtime, infrastructure, and UI concerns; avoid hidden coupling, silent fallback behavior, and cosmetic extraction.",
     "Keep the plan compact and actionable so it can be executed without another discovery pass unless the user changes scope.",
   ].join("\n") },
@@ -405,6 +447,12 @@ export const defaultAiPreferences: AiPreferences = {
   toolRoundLimit: defaultAiToolRoundLimit,
   maxParallelSubagents: defaultMaxParallelSubagents,
   showResponseDuration: true,
+  // Token economy ships ON by default: terse "caveman" output that drops filler/
+  // pleasantries to save output tokens while keeping code, paths, errors, tool work,
+  // and reasoning depth exact. Users can turn it off in Settings → AI Usage.
+  tokenEconomyEnabled: true,
+  customSystemPromptEnabled: false,
+  customSystemPrompt: "",
   toolPermissionRules: [],
   globalInstructions: "",
   projectInstructionsByWorkspace: {},
@@ -482,6 +530,9 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     toolRoundLimit: normalizeToolRoundLimit(resolveToolRoundLimitSource(source)),
     maxParallelSubagents: clampInteger(source.maxParallelSubagents, maxParallelSubagentsMin, maxParallelSubagentsMax, defaultMaxParallelSubagents),
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
+    tokenEconomyEnabled: typeof source.tokenEconomyEnabled === "boolean" ? source.tokenEconomyEnabled : defaultAiPreferences.tokenEconomyEnabled,
+    customSystemPromptEnabled: typeof source.customSystemPromptEnabled === "boolean" ? source.customSystemPromptEnabled : defaultAiPreferences.customSystemPromptEnabled,
+    customSystemPrompt: normalizeEditableText(source.customSystemPrompt, defaultAiPreferences.customSystemPrompt, preserveText),
     toolPermissionRules: Array.isArray(source.toolPermissionRules)
       ? source.toolPermissionRules
           .filter((rule): rule is string => typeof rule === "string" && rule.trim().length > 0)
@@ -575,6 +626,8 @@ export function createAiModelConfig(existingModels: AiModelConfig[]): AiModelCon
     name: "New model",
     alias,
     contextTokens: inferContextTokensFromModelRef(alias),
+    inputPricePerMillion: null,
+    outputPricePerMillion: null,
     effortLevels: [],
   };
 }
@@ -725,8 +778,18 @@ function normalizeModelConfig(value: unknown, preserveText: boolean): AiModelCon
     name: normalizeEditableText(value.name, id, preserveText),
     alias,
     contextTokens,
+    inputPricePerMillion: normalizeModelPrice(value.inputPricePerMillion),
+    outputPricePerMillion: normalizeModelPrice(value.outputPricePerMillion),
     effortLevels: normalizeEffortLevels(value.effortLevels, preserveText),
   };
+}
+
+/** Manual per-million token price: a finite, non-negative number, else null (use fallback rates). */
+function normalizeModelPrice(value: unknown): number | null {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.round(parsed * 1_000_000) / 1_000_000;
 }
 
 function normalizeModelContextTokens(value: unknown, modelRef: string, preserveText: boolean) {
@@ -825,7 +888,10 @@ function normalizePortText(value: unknown, fallback: string) {
   if (typeof value !== "string" && typeof value !== "number") return fallback;
   const text = String(value).trim();
   if (!text) return typeof value === "string" ? "" : fallback;
-  if (/^\d{1,5}$/.test(text)) return text;
+  if (/^\d{1,5}$/.test(text)) {
+    const n = Number(text);
+    return n >= 1 && n <= 65535 ? text : fallback;
+  }
   return fallback;
 }
 
@@ -864,7 +930,7 @@ function normalizeIdentifier(value: unknown, fallbackPrefix: string) {
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return text || `${fallbackPrefix}-${Date.now().toString(36)}`;
+  return text || `${fallbackPrefix}-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
 }
 
 function normalizeAgentMode(value: unknown): AiAgentMode {
@@ -902,7 +968,7 @@ function resolveToolRoundLimitSource(source: Record<string, unknown>) {
 }
 
 function normalizeToolRoundLimit(value: unknown): AiToolRoundLimit {
-  if (value === undefined || value === null || value === "" || value === "unlimited" || value === "none" || value === 0) return defaultAiToolRoundLimit;
+  if (value === undefined || value === null || value === "" || value === "unlimited" || value === "none" || value === 0 || String(value).trim() === "0") return defaultAiToolRoundLimit;
   return clampInteger(value, aiToolRoundLimitMin, aiToolRoundLimitMax, defaultLimitedAiToolRoundLimit);
 }
 
@@ -956,6 +1022,8 @@ function cloneModelTemplates(models: readonly AiModelTemplate[]): AiModelConfig[
     name: model.name,
     alias: model.alias,
     contextTokens: model.contextTokens ?? inferContextTokensFromModelRef(model.alias || model.id),
+    inputPricePerMillion: null,
+    outputPricePerMillion: null,
     effortLevels: cloneEfforts(model.effortLevels ?? []),
   }));
 }

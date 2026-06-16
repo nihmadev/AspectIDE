@@ -44,6 +44,8 @@ export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspacePro
   const openBrowserPreview = () => {
     if (!activeSessionId) return;
     const session = chatSessions.find((entry) => entry.id === activeSessionId);
+    // Only open the preview pane — never launch Chromium on click. The live stream
+    // attaches automatically when the agent uses the browser.
     openAgentBrowserPreviewTab(activeSessionId, aiChatSessionTitle(session?.title ?? "New chat", t));
   };
 
@@ -198,7 +200,7 @@ function AgentChatRow({ active, onClose, onCreateChat, onDelete, onRename, onRes
 
   const rename = (nextTitle: string) => {
     const trimmed = nextTitle.trim();
-    if (trimmed && trimmed !== session.title) onRename(trimmed);
+    if (trimmed && trimmed !== title) onRename(trimmed);
     setRenaming(false);
   };
 

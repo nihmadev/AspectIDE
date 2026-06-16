@@ -103,7 +103,6 @@ fn detect_test_health_plans(root: &Path) -> Vec<TestHealthPlan> {
 
 #[derive(Debug, Clone)]
 struct RootTestHealthCapabilities {
-    cargo_workspace: bool,
     maven_multi_module: bool,
     gradle_multi_project: bool,
     dotnet: bool,
@@ -112,7 +111,6 @@ struct RootTestHealthCapabilities {
 impl RootTestHealthCapabilities {
     fn from_root(root: &Path) -> Self {
         Self {
-            cargo_workspace: cargo_manifest_has_workspace(root),
             maven_multi_module: maven_manifest_has_modules(root),
             gradle_multi_project: has_gradle_settings(root),
             dotnet: find_file_with_extension(root, "sln").is_some(),
@@ -143,7 +141,7 @@ fn add_test_health_plans_for_dir(
         add_package_validation_plans(directory, seen, plans);
     }
 
-    if directory.join("Cargo.toml").is_file() && (is_root || !root_caps.cargo_workspace) {
+    if directory.join("Cargo.toml").is_file() && !ancestor_is_cargo_workspace(root, directory) {
         let command = if cargo_manifest_has_workspace(directory) {
             "cargo test --workspace"
         } else {
@@ -385,7 +383,12 @@ fn add_test_health_plans_for_dir(
 
     if directory.join("Makefile.PL").is_file()
         || directory.join("cpanfile").is_file()
-        || directory.join("t").is_dir()
+        || (directory.join("t").is_dir()
+            && dir_has_extension_recursive(
+                &directory.join("t"),
+                "t",
+                AI_TEST_HEALTH_SCAN_MAX_DEPTH,
+            ))
     {
         push_test_health_command(
             seen,
@@ -588,7 +591,8 @@ fn is_meaningful_package_script(script: &str) -> bool {
     !script.is_empty()
         && !script.contains("no test specified")
         && !script.contains("echo \"error:")
-        && !script.contains("exit 1")
+        && script != "exit 1"
+        && !(script.starts_with("echo") && script.ends_with("exit 1"))
         && !is_package_watch_script(&script)
 }
 
@@ -598,7 +602,15 @@ fn is_package_watch_script(script: &str) -> bool {
         || script.contains("--watchall=false")
         || script.contains("--watchall false");
     !is_explicit_false
-        && (script.contains("--watch") || script.contains(" watch") || script.ends_with("watch"))
+        && (script.contains("--watch")
+            || script == "watch"
+            || script.starts_with("watch ")
+            || script.ends_with(" watch")
+            || script.contains(" watch ")
+            || script.contains(" watch:")
+            || script
+                .split_whitespace()
+                .any(|token| token.starts_with("watch:")))
 }
 
 fn has_package_test_script(directory: &Path) -> bool {
@@ -640,6 +652,14 @@ fn python_test_command(directory: &Path) -> String {
     }
 }
 
+fn ancestor_is_cargo_workspace(root: &Path, directory: &Path) -> bool {
+    directory
+        .ancestors()
+        .skip(1)
+        .take_while(|ancestor| ancestor.starts_with(root))
+        .any(cargo_manifest_has_workspace)
+}
+
 fn cargo_manifest_has_workspace(directory: &Path) -> bool {
     std::fs::read_to_string(directory.join("Cargo.toml"))
         .is_ok_and(|content| content.lines().any(|line| line.trim() == "[workspace]"))
@@ -676,11 +696,7 @@ fn package_manager_script_command(directory: &Path, script: &str) -> String {
         || nearest_parent_has_file(directory, "bun.lockb")
         || nearest_parent_has_file(directory, "bun.lock")
     {
-        if script == "test" {
-            "bun test".to_string()
-        } else {
-            format!("bun run {script}")
-        }
+        format!("bun run {script}")
     } else if script == "test" {
         "npm test".to_string()
     } else {
@@ -808,6 +824,28 @@ fn find_file_with_extension(directory: &Path, extension: &str) -> Option<PathBuf
         .collect::<Vec<_>>();
     matches.sort();
     matches.into_iter().next()
+}
+
+fn dir_has_extension_recursive(directory: &Path, extension: &str, max_depth: usize) -> bool {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return false;
+    };
+    let mut subdirs = Vec::new();
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.is_file() {
+            if path
+                .extension()
+                .is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case(extension))
+            {
+                return true;
+            }
+        } else if max_depth > 0 && path.is_dir() {
+            subdirs.push(path);
+        }
+    }
+    subdirs
+        .into_iter()
+        .any(|subdir| dir_has_extension_recursive(&subdir, extension, max_depth - 1))
 }
 
 fn nearest_parent_has_file(directory: &Path, file_name: &str) -> bool {

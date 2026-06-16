@@ -193,11 +193,24 @@ pub struct AgentBrowserSkillsResponse {
     pub data: serde_json::Value,
 }
 
+/// RAII guard that clears `STATUS_PROBE_IN_FLIGHT` on drop, so the in-flight flag is
+/// released even if `status_inner` panics or its future is cancelled before returning.
+/// A manual reset would be skipped on those paths, wedging every future probe.
+struct StatusProbeGuard;
+
+impl Drop for StatusProbeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut in_flight) = STATUS_PROBE_IN_FLIGHT.lock() {
+            *in_flight = false;
+        }
+    }
+}
+
 pub async fn status(
     request: AgentBrowserStatusRequest,
 ) -> Result<AgentBrowserStatusResponse, String> {
     let lightweight = request.lightweight == Some(true);
-    if lightweight {
+    let _probe_guard = if lightweight {
         let Ok(mut in_flight) = STATUS_PROBE_IN_FLIGHT.lock() else {
             return Err("agent-browser status probe lock poisoned".to_string());
         };
@@ -216,17 +229,12 @@ pub async fn status(
         }
         *in_flight = true;
         drop(in_flight);
-    }
+        Some(StatusProbeGuard)
+    } else {
+        None
+    };
 
-    let result = status_inner(request, lightweight).await;
-
-    if lightweight {
-        if let Ok(mut in_flight) = STATUS_PROBE_IN_FLIGHT.lock() {
-            *in_flight = false;
-        }
-    }
-
-    result
+    status_inner(request, lightweight).await
 }
 
 // Linear status-resolution flow (fetch latest, auto-upgrade, doctor, detail string); splitting it
@@ -250,12 +258,11 @@ async fn status_inner(
             if let Ok(path) = resolve_binary(None) {
                 if let Ok(current_raw) = read_version(&path).await {
                     let current = normalize_agent_browser_version(&current_raw);
-                    if version_is_older(&current, latest) && should_run_auto_upgrade() {
+                    if version_is_older(&current, latest) && try_begin_auto_upgrade() {
                         match upgrade_bundled_agent_browser().await {
                             Ok(detail) => {
                                 update_performed = true;
                                 update_detail = Some(detail);
-                                mark_auto_upgrade_attempt();
                             }
                             Err(error) => {
                                 update_detail = Some(format!("Auto-update failed: {error}"));
@@ -555,11 +562,22 @@ async fn run_json(
         return Err(stderr);
     }
 
-    let parsed = parse_cli_json(&stdout, &stderr);
-    let success = parsed
-        .get("success")
+    // Parse stdout once. Only trust an explicit JSON `success` field when the JSON
+    // actually parsed; otherwise (empty / non-JSON stdout) fall back to the process
+    // exit code rather than a synthesized hardcoded `false`, so a genuinely successful
+    // exit-0 run with non-JSON output is not mis-reported as failed.
+    let parsed_json = serde_json::from_str::<serde_json::Value>(&stdout).ok();
+    let success = parsed_json
+        .as_ref()
+        .and_then(|value| value.get("success"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or_else(|| output.status.success());
+    let parsed = parsed_json.unwrap_or_else(|| {
+        serde_json::json!({
+            "success": output.status.success(),
+            "data": { "stdout": stdout.as_str(), "stderr": stderr.as_str() },
+        })
+    });
     let data = parsed
         .get("data")
         .cloned()
@@ -574,16 +592,6 @@ async fn run_json(
         elapsed_ms: started.elapsed().as_millis(),
         truncated,
         exit_code,
-    })
-}
-
-fn parse_cli_json(stdout: &str, stderr: &str) -> serde_json::Value {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(stdout) {
-        return value;
-    }
-    serde_json::json!({
-        "success": false,
-        "data": { "stdout": stdout, "stderr": stderr },
     })
 }
 
@@ -649,10 +657,13 @@ fn truncate_text(text: String, max_chars: usize) -> (String, bool) {
 }
 
 async fn read_version(binary: &PathBuf) -> Result<String, String> {
-    let output = agent_browser_command(binary)
-        .arg("--version")
-        .output()
+    let mut command = agent_browser_command(binary);
+    command.arg("--version");
+    command.stdin(Stdio::null());
+    command.kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
         .await
+        .map_err(|_| "agent-browser --version timed out".to_string())?
         .map_err(|error| error.to_string())?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if text.is_empty() {
@@ -884,6 +895,14 @@ pub async fn read_image(
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|error| format!("Failed to read screenshot: {error}"))?;
+    let looks_like_image = bytes.starts_with(b"\x89PNG\r\n\x1a\n")
+        || bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        || bytes.starts_with(b"GIF87a")
+        || bytes.starts_with(b"GIF89a")
+        || (bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP");
+    if !looks_like_image {
+        return Err("File is not a recognized image format.".to_string());
+    }
     let byte_count = bytes.len();
     let mime_type = mime_type_for_path(&path);
     let encoded = BASE64_STANDARD.encode(bytes);
@@ -901,11 +920,12 @@ pub async fn stream_status(
     let binary = resolve_binary(request.command_path.as_deref())?;
     let session = sanitize_session(&request.session);
     let enable_stream = request.enable == Some(true);
-    let invoke_options = if enable_stream {
-        Some(session_invoke_options(session.clone(), DEFAULT_MAX_OUTPUT))
-    } else {
-        None
-    };
+    // Stream state is session-scoped: BOTH `stream enable` and `stream status` must
+    // target the chat's daemon via `--session`. Previously the status-only query passed
+    // no session, so it probed the default daemon (a different/absent session) and the
+    // live preview never found its WebSocket port — it sat in "waiting"/"disconnected"
+    // until a manual refresh (the only path that enabled, and thus scoped, the stream).
+    let invoke_options = session_invoke_options(session.clone(), DEFAULT_MAX_OUTPUT);
     if enable_stream {
         let mut enable_args = vec!["stream".to_string(), "enable".to_string()];
         if let Some(port) = request.port {
@@ -913,9 +933,9 @@ pub async fn stream_status(
             enable_args.push(port.to_string());
         }
         let enable_refs: Vec<&str> = enable_args.iter().map(String::as_str).collect();
-        let _ = run_json(&binary, invoke_options.clone(), &enable_refs, 45).await;
+        let _ = run_json(&binary, Some(invoke_options.clone()), &enable_refs, 45).await;
     }
-    let status = run_json(&binary, invoke_options, &["stream", "status"], 30).await?;
+    let status = run_json(&binary, Some(invoke_options), &["stream", "status"], 30).await?;
     let port = stream_port_from_data(&status.data);
     let enabled = status.success && port.is_some();
     let websocket_url = port.map(|value| format!("ws://127.0.0.1:{value}"));
@@ -1076,19 +1096,21 @@ fn version_is_older(current: &str, latest: &str) -> bool {
     }
 }
 
-fn should_run_auto_upgrade() -> bool {
-    let Ok(guard) = LAST_AUTO_UPGRADE.lock() else {
+/// Atomically claims the auto-upgrade cooldown slot: under a single lock, checks
+/// whether the cooldown has elapsed and, if so, stamps `Instant::now()` and returns
+/// `true`. This makes the check-then-act a single critical section so two concurrent
+/// `status()` calls cannot both pass the gate and launch simultaneous installs.
+fn try_begin_auto_upgrade() -> bool {
+    let Ok(mut guard) = LAST_AUTO_UPGRADE.lock() else {
         return true;
     };
-    guard
+    let allowed = guard
         .as_ref()
-        .is_none_or(|instant| instant.elapsed() >= AUTO_UPGRADE_COOLDOWN)
-}
-
-fn mark_auto_upgrade_attempt() {
-    if let Ok(mut guard) = LAST_AUTO_UPGRADE.lock() {
+        .is_none_or(|instant| instant.elapsed() >= AUTO_UPGRADE_COOLDOWN);
+    if allowed {
         *guard = Some(Instant::now());
     }
+    allowed
 }
 
 async fn upgrade_bundled_agent_browser() -> Result<String, String> {

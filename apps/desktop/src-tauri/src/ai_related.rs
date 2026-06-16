@@ -66,7 +66,7 @@ impl Desc {
                 .to_lowercase()
                 .starts_with(&format!("{}/", root.to_lowercase()))
         {
-            path[root.len() + 1..].to_string()
+            path.get(root.len() + 1..).unwrap_or(&path).to_string()
         } else {
             path.clone()
         };
@@ -81,8 +81,10 @@ impl Desc {
         } else {
             String::new()
         };
-        let extension = ai_semantic::file_extension_pub(&basename.to_lowercase());
-        let stem = basename[..basename.len().saturating_sub(extension.len())].to_string();
+        let basename_lower = basename.to_lowercase();
+        let extension = ai_semantic::file_extension_pub(&basename_lower);
+        let stem_lower =
+            basename_lower[..basename_lower.len().saturating_sub(extension.len())].to_string();
         let family_stem = ai_semantic::family_stem_pub(&basename);
         Self {
             lower: path.to_lowercase(),
@@ -91,10 +93,10 @@ impl Desc {
             relative_path,
             dir,
             relative_dir,
-            basename_lower: basename.to_lowercase(),
+            basename_lower,
             basename,
             extension,
-            stem_lower: stem.to_lowercase(),
+            stem_lower,
             family_stem_lower: family_stem.to_lowercase(),
         }
     }
@@ -126,7 +128,7 @@ pub async fn ai_related_files(
         tokio::task::spawn_blocking(move || lux_fs::list_files(root, file_cap))
             .await
             .map_err(|e| e.to_string())?
-            .unwrap_or_default()
+            .map_err(|e| e.to_string())?
     };
 
     let file_count = files
@@ -153,10 +155,11 @@ pub async fn ai_related_files(
         if score <= 0 {
             continue;
         }
-        let existing = matches.get(&desc.lower);
+        let key = desc.path.clone();
+        let existing = matches.get(&key);
         if existing.is_none_or(|e| e.score < score) {
             matches.insert(
-                desc.lower.clone(),
+                key,
                 RelatedFileResult {
                     path: desc.path,
                     relative_path: desc.relative_path,
@@ -232,6 +235,7 @@ fn score_related(
             score += 16;
         }
         if same_family {
+            relations.insert("same-family".to_string());
             score += 42;
         } else if same_dir && sibling_family {
             score += 24;

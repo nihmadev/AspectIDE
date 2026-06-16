@@ -66,7 +66,7 @@ export function createComposerMentionAttachment(candidate: {
 }): ComposerMentionAttachment {
   return {
     kind: "mention",
-    id: `mention:${candidate.mentionType}:${candidate.path ?? candidate.name}:${candidate.line ?? 0}`,
+    id: `mention:${candidate.mentionType}:${candidate.path ?? candidate.name}:${candidate.line ?? 0}:${candidate.symbolName ?? ""}:${candidate.column ?? 0}`,
     mentionType: candidate.mentionType,
     name: candidate.name,
     size: 0,
@@ -90,7 +90,7 @@ export function createComposerSelectionAttachment(selection: {
 }): ComposerSelectionAttachment {
   return {
     kind: "selection",
-    id: `selection:${selection.documentId}:${selection.startLine}:${selection.endLine}`,
+    id: `selection:${selection.documentId}:${selection.startLine}:${selection.startColumn}:${selection.endLine}:${selection.endColumn}`,
     documentId: selection.documentId,
     name: selection.name,
     path: selection.path,
@@ -174,6 +174,13 @@ export async function buildMessageDisplayAttachments(
           kind: "image",
           name: attachment.name,
           previewUrl,
+          size: attachment.size,
+        });
+      } else {
+        items.push({
+          id: attachment.id,
+          kind: "file",
+          name: attachment.name,
           size: attachment.size,
         });
       }

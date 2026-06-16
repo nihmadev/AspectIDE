@@ -175,9 +175,13 @@ function searchFolderMentions(query: string, fileEntries: FsEntry[], workspaceRo
   return results;
 }
 
-async function searchSymbolMentions(query: string) {
-  const symbols = await luxCommands.lspWorkspaceSymbols(query);
-  return symbols.slice(0, 16).map((symbol, index) => workspaceSymbolToCandidate(symbol, query, index));
+async function searchSymbolMentions(query: string): Promise<AiMentionCandidate[]> {
+  try {
+    const symbols = await luxCommands.lspWorkspaceSymbols(query);
+    return symbols.slice(0, 16).map((symbol, index) => workspaceSymbolToCandidate(symbol, query, index));
+  } catch {
+    return [];
+  }
 }
 
 function workspaceSymbolToCandidate(symbol: LspWorkspaceSymbol, query: string, index: number): AiMentionCandidate {

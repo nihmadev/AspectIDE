@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronRight, Clock3, Coins, FilePenLine, SearchCheck, Zap } from "lucide-react";
+import { Check, ChevronRight, Clock3, Coins, FilePenLine, SearchCheck, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { AiChatMessage } from "../../lib/aiChatTypes";
 import type { ContextCompactionState } from "../../lib/aiChatContextCompaction";
@@ -34,10 +34,9 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
 
   if (!hasFiles && !hasUsage && !hasTiming && !hasCompaction) return null;
 
-  const visibleFiles = fileSummary
-    ? (filesExpanded ? fileSummary.files : fileSummary.files.slice(0, maxVisibleFiles))
-    : [];
-  const hiddenFileCount = fileSummary ? Math.max(0, fileSummary.files.length - maxVisibleFiles) : 0;
+  // When few files, the list shows inline; when many, it is gated behind the
+  // collapsible header (filesExpanded) so the summary stays a single quiet line.
+  const visibleFiles = fileSummary?.files ?? [];
 
   return (
     <div className="ai-turn-summary-card" role="status">
@@ -97,7 +96,12 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
 
       {hasFiles && fileSummary && (
         <section className="ai-turn-summary-files">
-          <div className="ai-turn-summary-files-head">
+          <button
+            type="button"
+            className="ai-turn-summary-files-head"
+            onClick={() => setFilesExpanded((value) => !value)}
+            aria-expanded={filesExpanded}
+          >
             <FilePenLine size={13} />
             <span>
               {t("aiChat.turnSummary.filesChanged", {
@@ -106,7 +110,9 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
                 removed: fileSummary.totalLinesRemoved,
               })}
             </span>
-          </div>
+            <ChevronRight className="ai-turn-summary-files-caret" size={13} />
+          </button>
+          {(filesExpanded || fileSummary.files.length <= maxVisibleFiles) && (
           <ul>
             {visibleFiles.map((file) => (
               <li key={file.path}>
@@ -122,17 +128,6 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
               </li>
             ))}
           </ul>
-          {hiddenFileCount > 0 && !filesExpanded && (
-            <button type="button" className="ai-turn-summary-more" onClick={() => setFilesExpanded(true)}>
-              <ChevronDown size={13} />
-              {t("aiChat.turnSummary.moreFiles", { count: hiddenFileCount })}
-            </button>
-          )}
-          {filesExpanded && fileSummary.files.length > maxVisibleFiles && (
-            <button type="button" className="ai-turn-summary-more" onClick={() => setFilesExpanded(false)}>
-              <ChevronRight size={13} />
-              {t("aiChat.turnSummary.collapseFiles")}
-            </button>
           )}
         </section>
       )}

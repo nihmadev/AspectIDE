@@ -144,10 +144,15 @@ fn normalize_title(value: &str) -> String {
     if normalized.is_empty() {
         return DEFAULT_TITLE.to_string();
     }
-    let stripped = normalized
-        .trim_matches(|c| c == '"' || c == '\'' || c == '`')
-        .trim_end_matches(['.', '!', '?'])
-        .trim();
+    let dequoted = normalized.trim_matches(|c| matches!(c, '"' | '\'' | '`'));
+    let mut emph: &str = dequoted;
+    for pair in ["**", "__", "*", "_"] {
+        if emph.len() > 2 * pair.len() && emph.starts_with(pair) && emph.ends_with(pair) {
+            emph = &emph[pair.len()..emph.len() - pair.len()];
+            break;
+        }
+    }
+    let stripped = emph.trim_end_matches(['.', '!', '?']).trim();
     if stripped.is_empty() {
         return DEFAULT_TITLE.to_string();
     }

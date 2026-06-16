@@ -114,6 +114,13 @@ fn transcribe_media_file(request: &FileMediaAiContextRequest) -> Result<String, 
 }
 
 fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<String>, String> {
+    struct DirGuard(PathBuf);
+    impl Drop for DirGuard {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     let max_frames = max_frames.clamp(1, 6);
     let ffmpeg = env::var("LUX_FFMPEG_COMMAND")
         .ok()
@@ -121,6 +128,7 @@ fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<Stri
         .unwrap_or_else(|| "ffmpeg".to_string());
     let output_dir = env::temp_dir().join(format!("lux-media-frames-{}", Uuid::new_v4()));
     fs::create_dir_all(&output_dir).map_err(|error| error.to_string())?;
+    let _guard = DirGuard(output_dir.clone());
     let output_pattern = output_dir.join("frame-%02d.jpg");
     let status = ffmpeg_command(&ffmpeg)
         .arg("-hide_banner")
@@ -157,7 +165,6 @@ fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<Stri
             ));
         }
     }
-    let _ = fs::remove_dir_all(&output_dir);
     if !status.success() && frames.is_empty() {
         return Err(format!("ffmpeg exited with {status}"));
     }
@@ -167,7 +174,9 @@ fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<Stri
 fn ffmpeg_command(template: &str) -> Command {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
-    let mut command = if template.contains(' ') {
+    let mut command = if Path::new(template).is_file() {
+        Command::new(template)
+    } else if template.contains(' ') {
         let mut parts = template.split_whitespace();
         let mut command = Command::new(parts.next().unwrap_or("ffmpeg"));
         command.args(parts);

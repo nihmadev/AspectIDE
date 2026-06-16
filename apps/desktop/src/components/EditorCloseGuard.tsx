@@ -1,7 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AlertTriangle, FileCode2 } from "lucide-react";
-import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { documentDisplayPath, documentParentLabel, documentTitle } from "../lib/documents";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { useLuxStore } from "../lib/store";
@@ -33,6 +33,10 @@ export function EditorCloseGuardProvider({ children }: { children: ReactNode }) 
   const [pendingRequest, setPendingRequest] = useState<PendingCloseRequest | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const pendingRequestRef = useRef<PendingCloseRequest | null>(null);
+  useEffect(() => {
+    pendingRequestRef.current = pendingRequest;
+  }, [pendingRequest]);
 
   const requestCloseDocuments = useCallback<EditorCloseGuardApi["requestCloseDocuments"]>((documentIds, action, options) => {
     const uniqueDocumentIds = Array.from(new Set(Array.from(documentIds)));
@@ -46,14 +50,18 @@ export function EditorCloseGuardProvider({ children }: { children: ReactNode }) 
       return true;
     }
 
-    setError(null);
-    setPendingRequest({
+    if (pendingRequestRef.current) return false;
+
+    const newRequest: PendingCloseRequest = {
       action,
       documentIds: uniqueDocumentIds,
       documents: dirtyDocuments,
       title: options?.title ?? t("closeGuard.title"),
       message: options?.message ?? closeMessage(dirtyDocuments.length, t),
-    });
+    };
+    pendingRequestRef.current = newRequest;
+    setError(null);
+    setPendingRequest(newRequest);
     return false;
   }, [t]);
 

@@ -35,6 +35,7 @@ const TCP_CONNECT_ATTEMPTS: u32 = 40;
 const TCP_CONNECT_DELAY: Duration = Duration::from_millis(50);
 const DISCONNECT_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
 const DISCONNECT_POLL_DELAY: Duration = Duration::from_millis(25);
+const MAX_DAP_CONTENT_LENGTH: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DapFrame {
@@ -258,6 +259,11 @@ impl DebugSessionManager {
             .stderr
             .take()
             .ok_or_else(|| AppError::Service("debug adapter stderr is unavailable".into()))?;
+        let stderr_task = tokio::spawn(drain_debug_stderr(
+            stderr,
+            session_id,
+            self.update_tx.clone(),
+        ));
         let stream = match connect_tcp_debug_adapter(port).await {
             Ok(stream) => stream,
             Err(error) => {
@@ -272,11 +278,6 @@ impl DebugSessionManager {
             reader,
             session_id,
             message_tx,
-            self.update_tx.clone(),
-        ));
-        let stderr_task = tokio::spawn(drain_debug_stderr(
-            stderr,
-            session_id,
             self.update_tx.clone(),
         ));
 
@@ -400,11 +401,6 @@ impl DebugSessionManager {
     pub async fn scopes(&mut self, session_id: Uuid, frame_id: u64) -> AppResult<DebugFrameScopes> {
         self.drain_messages().await;
         self.ensure_paused(session_id, "scopes")?;
-        if frame_id == 0 {
-            return Err(AppError::Service(
-                "debug stack frame id must be positive".into(),
-            ));
-        }
         let scopes_seq = self.next_request_seq(session_id)?;
         self.send_request(session_id, scopes_request(scopes_seq, frame_id))
             .await?;
@@ -458,13 +454,6 @@ impl DebugSessionManager {
         let expression = non_empty_text(Some(&expression)).ok_or_else(|| {
             AppError::Service("debug evaluate expression must not be empty".into())
         })?;
-        if let Some(frame_id) = frame_id {
-            if frame_id == 0 {
-                return Err(AppError::Service(
-                    "debug evaluate frame id must be positive".into(),
-                ));
-            }
-        }
         let evaluate_seq = self.next_request_seq(session_id)?;
         self.send_request(
             session_id,
@@ -752,7 +741,9 @@ impl DebugSessionManager {
                 }
                 "stopped" => {
                     session.info.status = DebugSessionStatus::Paused;
-                    session.info.active_thread_id = stopped_event_thread_id(event.body.as_ref());
+                    if let Some(thread_id) = stopped_event_thread_id(event.body.as_ref()) {
+                        session.info.active_thread_id = Some(thread_id);
+                    }
                     None
                 }
                 "continued" => {
@@ -809,13 +800,6 @@ impl DebugSessionManager {
             session.info.last_event = Some(format!("{} response", response.command));
             if response.command == "setBreakpoints" {
                 return apply_breakpoints_response(session_id, session, response);
-            }
-            if !response.success {
-                session.info.status = DebugSessionStatus::Error;
-                session.info.stopped_at.get_or_insert_with(Utc::now);
-                session.info.error = Some(response.message.unwrap_or_else(|| {
-                    format!("debug adapter rejected {} request", response.command)
-                }));
             }
             None
         })?;
@@ -934,7 +918,9 @@ impl DebugSessionManager {
             match event.event.as_str() {
                 "stopped" => {
                     session.info.status = DebugSessionStatus::Paused;
-                    session.info.active_thread_id = stopped_event_thread_id(event.body.as_ref());
+                    if let Some(thread_id) = stopped_event_thread_id(event.body.as_ref()) {
+                        session.info.active_thread_id = Some(thread_id);
+                    }
                 }
                 "continued" => {
                     session.info.status = DebugSessionStatus::Running;
@@ -1552,8 +1538,15 @@ pub fn drain_dap_frames(buffer: &mut Vec<u8>) -> AppResult<Vec<DapFrame>> {
         let headers = std::str::from_utf8(&buffer[..header_end])
             .map_err(|error| AppError::Service(format!("invalid DAP header encoding: {error}")))?;
         let content_length = parse_content_length(headers)?;
+        if content_length > MAX_DAP_CONTENT_LENGTH {
+            return Err(AppError::Service(format!(
+                "DAP Content-Length {content_length} exceeds maximum"
+            )));
+        }
         let frame_start = header_end + 4;
-        let frame_end = frame_start + content_length;
+        let Some(frame_end) = frame_start.checked_add(content_length) else {
+            return Err(AppError::Service("DAP frame length overflow".into()));
+        };
 
         if buffer.len() < frame_end {
             break;
@@ -1587,7 +1580,7 @@ pub fn initialize_request(seq: u64, adapter_id: &str) -> Value {
             "columnsStartAt1": true,
             "supportsVariableType": true,
             "supportsVariablePaging": true,
-            "supportsRunInTerminalRequest": true,
+            "supportsRunInTerminalRequest": false,
             "supportsProgressReporting": true,
             "supportsInvalidatedEvent": true,
         }
@@ -1716,7 +1709,7 @@ pub fn set_breakpoints_request(
         "command": "setBreakpoints",
         "arguments": {
             "source": {
-                "path": path,
+                "path": path.to_string_lossy(),
             },
             "breakpoints": breakpoints.iter().map(source_breakpoint_argument).collect::<Vec<_>>(),
             "sourceModified": false,

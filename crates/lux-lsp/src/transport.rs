@@ -34,6 +34,7 @@ pub fn encode_lsp_message(value: &Value) -> AppResult<Vec<u8>> {
 }
 
 pub fn drain_lsp_frames(buffer: &mut Vec<u8>) -> AppResult<Vec<LspFrame>> {
+    const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
     let mut frames = Vec::new();
 
     while let Some(header_end) = find_header_end(buffer) {
@@ -41,7 +42,17 @@ pub fn drain_lsp_frames(buffer: &mut Vec<u8>) -> AppResult<Vec<LspFrame>> {
             .map_err(|error| AppError::Service(format!("invalid LSP header encoding: {error}")))?;
         let content_length = parse_content_length(headers)?;
         let frame_start = header_end + 4;
-        let frame_end = frame_start + content_length;
+        let frame_end = match frame_start.checked_add(content_length) {
+            Some(frame_end) if content_length <= MAX_FRAME_BYTES => frame_end,
+            // Oversized or overflowing Content-Length: the header is poisoned.
+            // Skip past it (resyncing to the next buffered header) instead of
+            // returning Err, which would discard frames already parsed in this
+            // batch and hang the callers awaiting their responses.
+            _ => {
+                resync_past_poisoned_header(buffer, header_end);
+                continue;
+            }
+        };
 
         if buffer.len() < frame_end {
             break;
@@ -99,7 +110,12 @@ pub async fn read_lsp_stdout<R>(
         buffer.extend_from_slice(&chunk[..read]);
 
         let Ok(frames) = drain_lsp_frames(&mut buffer) else {
-            buffer.clear();
+            const MARKER: &[u8] = b"content-length:";
+            let skip = buffer
+                .windows(MARKER.len())
+                .position(|window| window.eq_ignore_ascii_case(MARKER))
+                .map_or(buffer.len(), |pos| pos.max(1));
+            buffer.drain(..skip);
             continue;
         };
 
@@ -156,6 +172,20 @@ fn lsp_error_to_string(value: &Value) -> String {
 
 fn find_header_end(buffer: &[u8]) -> Option<usize> {
     buffer.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+/// Drops a poisoned header block (oversized/overflowing Content-Length),
+/// resyncing to the next buffered `Content-Length` header if one exists and
+/// otherwise clearing the buffer. Always advances by at least the header block,
+/// so the drain loop keeps making forward progress.
+fn resync_past_poisoned_header(buffer: &mut Vec<u8>, header_end: usize) {
+    const MARKER: &[u8] = b"content-length:";
+    let header_block_end = header_end + 4;
+    let skip = buffer[header_block_end..]
+        .windows(MARKER.len())
+        .position(|window| window.eq_ignore_ascii_case(MARKER))
+        .map_or(buffer.len(), |pos| header_block_end + pos);
+    buffer.drain(..skip);
 }
 
 fn parse_content_length(headers: &str) -> AppResult<usize> {

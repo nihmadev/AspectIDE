@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use serde::Serialize;
 use tauri::State;
+use tokio::io::AsyncReadExt;
 
 use crate::ai_semantic;
 use crate::{workspace_root, SharedState};
@@ -109,7 +110,7 @@ async fn context_source_tool(
         tokio::task::spawn_blocking(move || lux_fs::list_files(root, max_scan))
             .await
             .map_err(|e| e.to_string())?
-            .unwrap_or_default()
+            .map_err(|e| e.to_string())?
     };
 
     let mut candidates: Vec<(String, String, i64)> = entries
@@ -131,18 +132,35 @@ async fn context_source_tool(
 
     let mut files = Vec::with_capacity(candidates.len());
     for (path, rel, _) in &candidates {
-        let read = tokio::fs::read_to_string(path).await;
+        // Bounded read: cap the bytes pulled off disk at `MAX_FILE_BYTES` so a
+        // huge matching file can't be fully buffered into memory. `size` is the
+        // real on-disk length (from metadata), so truncation semantics are kept.
+        let read = async {
+            let file = tokio::fs::File::open(path).await?;
+            let size = file.metadata().await?.len();
+            let mut buf = Vec::new();
+            file.take(MAX_FILE_BYTES).read_to_end(&mut buf).await?;
+            std::io::Result::Ok((buf, size))
+        }
+        .await;
         match read {
-            Ok(text) => {
-                let truncated = text.len() as u64 > MAX_FILE_BYTES;
-                let clamped: String = text
-                    .chars()
-                    .take(usize::try_from(MAX_FILE_BYTES).unwrap_or(usize::MAX))
-                    .collect();
+            Ok((buf, size)) => {
+                let limit = MAX_FILE_BYTES as usize;
+                let truncated = size > MAX_FILE_BYTES;
+                let text = String::from_utf8_lossy(&buf).into_owned();
+                let clamped = if text.len() > limit {
+                    let mut end = limit;
+                    while end > 0 && !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    text[..end].to_string()
+                } else {
+                    text
+                };
                 files.push(ContextFile {
                     path: path.clone(),
                     relative_path: rel.clone(),
-                    size: text.len() as u64,
+                    size,
                     truncated,
                     text: clamped,
                     error: None,

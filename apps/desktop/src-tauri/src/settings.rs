@@ -43,7 +43,9 @@ pub fn settings_set(
         .as_mut()
         .ok_or_else(|| "settings store is not initialized".to_string())?;
     let setting = store.set(scope, key.clone(), value).map_err(String::from)?;
-    emit_settings_changed(&app, key)?;
+    if let Err(error) = emit_settings_changed(&app, key) {
+        tracing::warn!(%error, "failed to emit settings-changed");
+    }
     Ok(setting)
 }
 
@@ -77,7 +79,9 @@ pub fn keybindings_set(
     let profile = store
         .set_keybinding_profile(profile)
         .map_err(String::from)?;
-    emit_settings_changed(&app, "workbench.keybindings")?;
+    if let Err(error) = emit_settings_changed(&app, "workbench.keybindings") {
+        tracing::warn!(%error, "failed to emit settings-changed");
+    }
     Ok(profile)
 }
 

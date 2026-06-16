@@ -1,5 +1,5 @@
 import { Database, Play, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { documentDisplayPath } from "../lib/documents";
 import { useTranslation } from "../lib/i18n/useTranslation";
 import { luxCommands } from "../lib/tauri";
@@ -12,7 +12,8 @@ type TableView = {
   kind: string;
   columns: string[];
   rowids: number[];
-  rows: string[][];
+  /** A cell is `null` for SQL NULL, kept distinct from an empty-TEXT `""`. */
+  rows: (string | null)[][];
 };
 
 type DatabaseEditorPaneProps = {
@@ -29,6 +30,9 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
   const [resultMessage, setResultMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  // Cell value captured on focus, so blur can skip persisting untouched cells
+  // (otherwise visiting a NULL cell would overwrite it with an empty string).
+  const editStartValue = useRef<string | null>(null);
 
   const loadTables = useCallback(async () => {
     if (!path) return;
@@ -45,7 +49,7 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
     }
   }, [activeTable, path]);
 
-  const loadTableView = useCallback(async (tableName: string, tableKind = "table") => {
+  const loadTableView = useCallback(async (tableName: string, tableKind = "table", isStale?: () => boolean) => {
     if (!path) return;
     setLoading(true);
     setError(null);
@@ -54,8 +58,9 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
       const result = await luxCommands.databaseExecuteSql(path, {
         sql: `SELECT rowid, * FROM ${quoted} LIMIT ${dbOptions.maxRows}`,
       });
+      if (isStale?.()) return;
       const rowids: number[] = [];
-      const rows: string[][] = [];
+      const rows: (string | null)[][] = [];
       const columns = result.columns.filter((column) => column !== "rowid");
       for (const row of result.rows) {
         const rowid = Number(row[0]);
@@ -72,9 +77,10 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
       });
       setResultMessage(result.message);
     } catch (reason) {
+      if (isStale?.()) return;
       setError(readError(reason));
     } finally {
-      setLoading(false);
+      if (!isStale?.()) setLoading(false);
     }
   }, [path]);
 
@@ -84,8 +90,12 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
 
   useEffect(() => {
     if (!activeTable) return;
+    let cancelled = false;
     const kind = tables.find((table) => table.name === activeTable)?.kind ?? "table";
-    void loadTableView(activeTable, kind);
+    void loadTableView(activeTable, kind, () => cancelled);
+    return () => {
+      cancelled = true;
+    };
   }, [activeTable, loadTableView, tables]);
 
   const columnCount = useMemo(
@@ -110,7 +120,6 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
         });
       } else {
         await loadTables();
-        if (activeTable) await loadTableView(activeTable);
       }
     } catch (reason) {
       setError(readError(reason));
@@ -119,15 +128,24 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
     }
   };
 
-  const updateCell = async (rowIndex: number, columnIndex: number, value: string) => {
-    if (!path || !tableView || !activeTable || tableView.kind === "query") return;
+  const updateCellValue = (rowIndex: number, columnIndex: number, value: string) => {
+    setTableView((current) => {
+      if (!current || current.kind !== "table") return current;
+      const nextRows = current.rows.map((row, index) =>
+        index === rowIndex ? row.map((cell, col) => (col === columnIndex ? value : cell)) : row,
+      );
+      return { ...current, rows: nextRows };
+    });
+  };
+
+  const persistCell = async (rowIndex: number, columnIndex: number, value: string, original: string | null) => {
+    if (!path || !tableView || !activeTable || tableView.kind !== "table") return;
+    // Skip unchanged cells so a focus/blur over a NULL (or any untouched) cell
+    // never rewrites it as an empty string and destroys the NULL.
+    if (value === (original ?? "")) return;
     const rowid = tableView.rowids[rowIndex];
     const column = tableView.columns[columnIndex];
     if (!column || rowid === undefined) return;
-    const nextRows = tableView.rows.map((row, index) =>
-      index === rowIndex ? row.map((cell, col) => (col === columnIndex ? value : cell)) : row,
-    );
-    setTableView({ ...tableView, rows: nextRows });
     try {
       await luxCommands.databaseUpdateCell(path, {
         table: activeTable,
@@ -138,7 +156,8 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
       setResultMessage(t("databaseEditor.cellSaved"));
     } catch (reason) {
       setError(readError(reason));
-      await loadTableView(activeTable);
+      const kind = tables.find((tbl) => tbl.name === activeTable)?.kind ?? "table";
+      await loadTableView(activeTable, kind);
     }
   };
 
@@ -203,15 +222,24 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
                 <tbody>
                   {tableView.rows.map((row, rowIndex) => (
                     <tr key={rowIndex}>
-                      {Array.from({ length: columnCount }, (_, columnIndex) => (
-                        <td key={columnIndex}>
-                          <input
-                            value={row[columnIndex] ?? ""}
-                            readOnly={tableView.kind === "query"}
-                            onChange={(event) => void updateCell(rowIndex, columnIndex, event.target.value)}
-                          />
-                        </td>
-                      ))}
+                      {Array.from({ length: columnCount }, (_, columnIndex) => {
+                        const cell = row[columnIndex] ?? null;
+                        return (
+                          <td key={columnIndex}>
+                            <input
+                              className={cell === null ? "database-editor-cell-null" : undefined}
+                              value={cell ?? ""}
+                              placeholder={cell === null ? "NULL" : undefined}
+                              readOnly={tableView.kind !== "table"}
+                              onFocus={() => {
+                                editStartValue.current = cell;
+                              }}
+                              onChange={(event) => updateCellValue(rowIndex, columnIndex, event.target.value)}
+                              onBlur={(event) => void persistCell(rowIndex, columnIndex, event.target.value, editStartValue.current)}
+                            />
+                          </td>
+                        );
+                      })}
                     </tr>
                   ))}
                 </tbody>

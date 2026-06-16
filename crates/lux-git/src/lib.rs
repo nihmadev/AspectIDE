@@ -17,7 +17,13 @@ pub fn status(root: impl AsRef<Path>) -> AppResult<GitStatus> {
     let output = git_command()
         .arg("-C")
         .arg(root.as_ref())
-        .args(["status", "--porcelain=v1", "--branch"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v1",
+            "--branch",
+        ])
         .output()?;
 
     if !output.status.success() {
@@ -34,7 +40,15 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     let stat_output = git_command()
         .arg("-C")
         .arg(root)
-        .args(["diff", "--numstat", "--find-renames", "HEAD", "--"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--numstat",
+            "--find-renames",
+            "HEAD",
+            "--",
+        ])
         .output()?;
 
     if !stat_output.status.success() {
@@ -48,7 +62,15 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     let name_status_output = git_command()
         .arg("-C")
         .arg(root)
-        .args(["diff", "--name-status", "--find-renames", "HEAD", "--"])
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--name-status",
+            "--find-renames",
+            "HEAD",
+            "--",
+        ])
         .output()?;
 
     if !name_status_output.status.success() {
@@ -63,6 +85,8 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
         .arg("-C")
         .arg(root)
         .args([
+            "-c",
+            "core.quotePath=false",
             "diff",
             "--find-renames",
             "--patch",
@@ -151,10 +175,23 @@ fn parse_status(raw: &str) -> GitStatus {
         }
 
         if line.len() >= 4 {
+            let index_status = &line[0..1];
+            let worktree_status = &line[1..2];
+            let remainder = line[3..].trim();
+            // Porcelain v1 emits renames/copies as `ORIG -> NEW`; keep the new path.
+            let path = if index_status == "R"
+                || index_status == "C"
+                || worktree_status == "R"
+                || worktree_status == "C"
+            {
+                remainder.rsplit(" -> ").next().unwrap_or(remainder)
+            } else {
+                remainder
+            };
             files.push(GitFileStatus {
-                index_status: line[0..1].to_string(),
-                worktree_status: line[1..2].to_string(),
-                path: Path::new(line[3..].trim()).to_path_buf(),
+                index_status: index_status.to_string(),
+                worktree_status: worktree_status.to_string(),
+                path: Path::new(path).to_path_buf(),
             });
         }
     }

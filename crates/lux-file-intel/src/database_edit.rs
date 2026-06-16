@@ -21,7 +21,9 @@ pub struct DatabaseExecuteResult {
     pub rows_affected: usize,
     pub last_insert_rowid: i64,
     pub columns: Vec<String>,
-    pub rows: Vec<Vec<String>>,
+    /// Cell is `None` for SQL NULL, `Some(_)` otherwise, so the editor can tell
+    /// NULL apart from an empty-TEXT cell and preserve it on save.
+    pub rows: Vec<Vec<Option<String>>>,
     pub message: String,
 }
 
@@ -31,7 +33,9 @@ pub struct DatabaseCellUpdate {
     pub table: String,
     pub rowid: i64,
     pub column: String,
-    pub value: String,
+    /// `None` writes SQL NULL; `Some("")` writes an empty TEXT cell. This split
+    /// keeps NULL distinguishable from `''` on round-trip edits.
+    pub value: Option<String>,
 }
 
 pub fn database_execute(path: &Path, sql: &str) -> AppResult<DatabaseExecuteResult> {
@@ -75,7 +79,7 @@ pub fn database_execute(path: &Path, sql: &str) -> AppResult<DatabaseExecuteResu
     {
         let mut values = Vec::with_capacity(column_count);
         for index in 0..column_count {
-            values.push(sqlite_value_to_string(
+            values.push(sqlite_value_to_cell(
                 row.get_ref(index)
                     .map_err(|error| AppError::Service(error.to_string()))?,
             ));
@@ -100,9 +104,14 @@ pub fn database_update_cell(path: &Path, update: &DatabaseCellUpdate) -> AppResu
     let quoted_table = quote_sqlite_ident(&update.table);
     let quoted_column = quote_sqlite_ident(&update.column);
     let sql = format!("UPDATE {quoted_table} SET {quoted_column} = ?1 WHERE rowid = ?2");
-    connection
+    let affected = connection
         .execute(&sql, rusqlite::params![update.value, update.rowid])
         .map_err(|error| AppError::Service(error.to_string()))?;
+    if affected == 0 {
+        return Err(AppError::Service(
+            "no row matched the given rowid".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -188,8 +197,8 @@ fn table_rows(
 ) -> AppResult<(Vec<Vec<String>>, Option<usize>, bool)> {
     let quoted = quote_sqlite_ident(table);
     let sql = format!(
-        "SELECT rowid, * FROM {quoted} LIMIT {}",
-        options.max_rows + 1
+        "SELECT * FROM {quoted} LIMIT {}",
+        options.max_rows.saturating_add(1)
     );
     let mut statement = connection
         .prepare(&sql)
@@ -203,12 +212,15 @@ fn table_rows(
         .next()
         .map_err(|error| AppError::Service(error.to_string()))?
     {
-        let mut values = Vec::with_capacity(column_count.saturating_sub(1));
-        for index in 1..column_count {
-            values.push(sqlite_value_to_string(
-                row.get_ref(index)
-                    .map_err(|error| AppError::Service(error.to_string()))?,
-            ));
+        let mut values = Vec::with_capacity(column_count);
+        for index in 0..column_count {
+            values.push(
+                sqlite_value_to_cell(
+                    row.get_ref(index)
+                        .map_err(|error| AppError::Service(error.to_string()))?,
+                )
+                .unwrap_or_default(),
+            );
         }
         rows.push(values);
         if rows.len() > options.max_rows {
@@ -223,13 +235,13 @@ fn table_rows(
     Ok((rows, Some(row_count), truncated))
 }
 
-fn sqlite_value_to_string(value: ValueRef<'_>) -> String {
+fn sqlite_value_to_cell(value: ValueRef<'_>) -> Option<String> {
     match value {
-        ValueRef::Null => String::new(),
-        ValueRef::Integer(number) => number.to_string(),
-        ValueRef::Real(number) => number.to_string(),
-        ValueRef::Text(text) => String::from_utf8_lossy(text).into_owned(),
-        ValueRef::Blob(bytes) => format!("<blob {} bytes>", bytes.len()),
+        ValueRef::Null => None,
+        ValueRef::Integer(number) => Some(number.to_string()),
+        ValueRef::Real(number) => Some(number.to_string()),
+        ValueRef::Text(text) => Some(String::from_utf8_lossy(text).into_owned()),
+        ValueRef::Blob(bytes) => Some(format!("<blob {} bytes>", bytes.len())),
     }
 }
 

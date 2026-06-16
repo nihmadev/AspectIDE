@@ -30,15 +30,18 @@ import { isTauriRuntime, luxCommands } from "./tauri";
 import type { FileInspection, LspDocumentSymbol, LspLocation } from "./types";
 
 export async function globFiles(pattern: string, maxResults: number): Promise<ToolResult> {
-  const files = await luxCommands.fsListFiles(Math.max(clamp(maxResults, 1, 500) * 4, 200));
+  const cap = clamp(maxResults, 1, 500);
+  const limit = Math.max(cap * 4, 200);
+  const files = await luxCommands.fsListFiles(limit);
   const needle = pattern.trim().toLowerCase();
-  const matched = files
+  const allMatched = files
     .filter((entry) => entry.kind === "file")
-    .filter((entry) => !needle || entry.path.toLowerCase().includes(needle))
-    .slice(0, clamp(maxResults, 1, 500));
+    .filter((entry) => !needle || entry.path.toLowerCase().includes(needle));
+  const matched = allMatched.slice(0, cap);
   return toolJson("Glob", {
     pattern,
     count: matched.length,
+    truncated: allMatched.length > cap || files.length >= limit,
     files: matched.map((entry) => ({ path: entry.path, size: entry.size })),
   });
 }

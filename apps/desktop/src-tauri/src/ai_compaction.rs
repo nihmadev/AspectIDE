@@ -22,6 +22,11 @@ pub struct CompactionSummaryInput {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    /// Provider reasoning payload (reasoning_effort + reasoning.effort), or absent/`{}`
+    /// when the active model has no effort levels. Merged into the request so the
+    /// checkpoint summary is produced with the selected reasoning depth.
+    #[serde(default)]
+    pub reasoning: Option<serde_json::Value>,
 }
 
 /// Summarize a transcript into a checkpoint. Errors if the model returns nothing
@@ -65,7 +70,7 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
         truncate(&input.transcript, MAX_TRANSCRIPT_CHARS),
     ));
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "model": input.model,
         "messages": [
             { "role": "system", "content": system },
@@ -73,7 +78,9 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
         ],
         "temperature": 0.2,
         "stream": false,
+        "max_tokens": max_tokens,
     });
+    crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
 
     let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
         input.base_url.clone(),

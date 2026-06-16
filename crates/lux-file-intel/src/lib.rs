@@ -35,6 +35,12 @@ pub use delimited_edit::{
 const BINARY_SAMPLE_BYTES: usize = 512;
 const OFFICE_TEXT_LIMIT: usize = 80_000;
 const PDF_TEXT_LIMIT: usize = 120_000;
+/// Hard ceiling on bytes decompressed from a single office archive entry, to
+/// stop a crafted docx/pptx (zip bomb) from expanding to gigabytes. Generously
+/// above `OFFICE_TEXT_LIMIT` so legitimate `document.xml` text still extracts.
+const OFFICE_ENTRY_BYTE_CEILING: u64 = 8 * 1024 * 1024;
+/// Maximum on-disk size of a notebook we will read+JSON-parse for preview.
+const NOTEBOOK_BYTE_CEILING: u64 = 32 * 1024 * 1024;
 
 #[must_use]
 pub fn supported_formats() -> Vec<FileFormatSupport> {
@@ -196,10 +202,10 @@ fn text_preview(
 ) -> AppResult<FilePreview> {
     let metadata = fs::metadata(path)?;
     let limit = usize::try_from(options.max_text_bytes.min(metadata.len())).unwrap_or(usize::MAX);
-    let mut file = fs::File::open(path)?;
-    let mut buffer = vec![0; limit];
-    let read = file.read(&mut buffer)?;
-    buffer.truncate(read);
+    let mut buffer = Vec::with_capacity(limit);
+    fs::File::open(path)?
+        .take(limit as u64)
+        .read_to_end(&mut buffer)?;
     let text = String::from_utf8_lossy(&buffer).into_owned();
     Ok(FilePreview::Text {
         language_id: monaco_language_id_for_path(path),
@@ -371,10 +377,13 @@ fn office_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<Fil
             && office_xml_is_content_part(&name)
             && text.len() < OFFICE_TEXT_LIMIT
         {
-            let mut xml = String::new();
+            let mut raw = Vec::new();
             entry
-                .read_to_string(&mut xml)
+                .by_ref()
+                .take(OFFICE_ENTRY_BYTE_CEILING)
+                .read_to_end(&mut raw)
                 .map_err(|error| AppError::Service(error.to_string()))?;
+            let xml = String::from_utf8_lossy(&raw);
             text.push_str(&extract_xml_text(
                 &xml,
                 OFFICE_TEXT_LIMIT.saturating_sub(text.len()),
@@ -418,7 +427,10 @@ fn image_preview(path: &Path, descriptor: &lux_core::FileViewDescriptor) -> File
         "The IDE renders this file visually in the image editor pane.".to_string(),
     ];
     if ext == "svg" {
-        if let Ok(markup) = fs::read_to_string(path) {
+        if let Ok(file) = fs::File::open(path) {
+            let mut raw = Vec::new();
+            file.take(64 * 1024).read_to_end(&mut raw).ok();
+            let markup = String::from_utf8_lossy(&raw);
             lines.push("SVG markup excerpt:".to_string());
             lines.push(truncate_chars(markup.trim(), 12_000));
         }
@@ -471,6 +483,12 @@ fn external_preview(path: &Path, descriptor: &lux_core::FileViewDescriptor) -> F
 }
 
 fn notebook_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
+    let len = fs::metadata(path)?.len();
+    if len > NOTEBOOK_BYTE_CEILING {
+        return Ok(FilePreview::External {
+            reason: format!("Notebook is {len} bytes; too large to parse for preview."),
+        });
+    }
     let text = fs::read_to_string(path)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
     let cells_value = value

@@ -10,7 +10,7 @@ import { TitleBar } from "./components/TitleBar";
 import { UpdateNoticeHost } from "./components/UpdateNoticeHost";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { saveChatCheckpointStore } from "./lib/aiChatCheckpointStore";
-import { loadAiChatHistory, saveAiChatHistory } from "./lib/aiChatHistory";
+import { loadAiChatHistory, resetAiChatPersistDigest, saveAiChatHistory } from "./lib/aiChatHistory";
 import { ensureBundledAgentBrowserLatest } from "./lib/agentBrowserAutoUpdate";
 import { AI_PREFERENCES_KEY, normalizeAiPreferences } from "./lib/aiPreferences";
 import { buildAiProjectIndexSnapshot } from "./lib/aiProjectIndex";
@@ -193,7 +193,11 @@ export function App() {
     aiChatHistoryLoadedRef.current = true;
     let cancelled = false;
     void loadAiChatHistory().then((history) => {
-      if (!cancelled && history && history.sessions.length > 0) setAiChatSessions(history);
+      if (cancelled) return;
+      // Loaded state is the new persistence baseline — force the next save to write so
+      // the digest can't carry over a stale value and skip the first real change.
+      resetAiChatPersistDigest();
+      if (history && history.sessions.length > 0) setAiChatSessions(history);
     }).catch((error) => {
       if (cancelled) return;
       const store = useLuxStore.getState();
@@ -311,7 +315,7 @@ export function App() {
 
   useEffect(() => {
     if (!workspace || projectLoad.stage !== "indexing") return;
-    if (aiIndex.status === "ready") {
+    if (aiIndex.status !== "indexing") {
       setProjectLoad({
         active: false,
         progress: 100,
@@ -354,7 +358,7 @@ export function App() {
           if (useLuxStore.getState().projectLoad.stage !== "error") setProjectLoad({ progress: 56, root: workspace.root, stage: "services", workspaceName: workspace.name });
         }
       });
-    luxCommands.gitStatus().then(setGitStatus).catch(() => setGitStatus(null));
+    luxCommands.gitStatus().then((s) => { if (!cancelled) setGitStatus(s); }).catch(() => { if (!cancelled) setGitStatus(null); });
     setLanguageServersLoading(true);
     luxCommands.lspServers()
       .then((servers) => {
@@ -398,6 +402,7 @@ export function App() {
   }, [aiPreferences.projectIndexingEnabled, clearDiagnostics, setDiagnosticsForPath, setFileEntries, setFileTreeDirectories, setFileTreeError, setFileTreeLoading, setGitStatus, setLanguageServers, setLanguageServersLoading, setProjectLoad, workspace]);
 
   useEffect(() => {
+    let active = true;
     let dispose: (() => void) | undefined;
     let fsRefreshTimer: number | undefined;
     let aiIndexRefreshTimer: number | undefined;
@@ -471,9 +476,11 @@ export function App() {
         void luxCommands.keybindingsGet().then(setKeybindingProfile).catch(() => undefined);
       }
     }).then((unlisten) => {
-      dispose = unlisten;
+      if (!active) unlisten();
+      else dispose = unlisten;
     });
     return () => {
+      active = false;
       if (fsRefreshTimer !== undefined) window.clearTimeout(fsRefreshTimer);
       if (aiIndexRefreshTimer !== undefined) window.clearTimeout(aiIndexRefreshTimer);
       dispose?.();

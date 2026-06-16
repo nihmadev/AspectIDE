@@ -9,8 +9,9 @@ use serde_json::json;
 
 /// Produce the full tool-definitions array filtered by mode and settings.
 pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<serde_json::Value> {
-    let read_only = matches!(agent_mode, "plan" | "ask");
     let full_exec = matches!(agent_mode, "agent" | "automatic");
+    // Plan mode is read-only for files but still presents plans; full-exec modes do too.
+    let plan_capable = full_exec || matches!(agent_mode, "plan");
 
     let mut tools = Vec::with_capacity(48);
 
@@ -223,9 +224,34 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             opt("limit", "number", "Max read."),
         ],
     ));
+    tools.push(tool(
+        "AskUser",
+        "Ask the user a question and wait for their answer. Use sparingly — only for genuine decisions you cannot resolve from evidence (product/UX choices, ambiguous scope, credentials). Provide 0–10 suggested `options`; the user can also type a custom answer unless allowCustom is false. Optionally render a self-contained HTML5 document via `htmlPreview` for visual choices (mockups, color/layout comparisons). In Automatic mode this returns immediately telling you to decide yourself — never blocks.",
+        &[
+            req("question", "string", "The question to ask."),
+            opt("detail", "string", "Optional clarifying context shown under the question."),
+            opt_arr("options", "0–10 suggested answers: strings or { label, description } objects."),
+            opt("multiSelect", "boolean", "Allow selecting more than one option."),
+            opt("allowCustom", "boolean", "Offer a free-form answer field (default true)."),
+            opt("htmlPreview", "string", "Optional self-contained HTML5 document rendered in a sandboxed preview pane."),
+        ],
+    ));
 
-    // ── Edit / execute / orchestrate (blocked in plan/ask) ──
-    if !read_only {
+    // ── Plan presentation (plan + agent + automatic) ──
+    if plan_capable {
+        tools.push(tool(
+            "PresentPlan",
+            "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution (do not edit before that). In Automatic mode execution auto-starts. Prefer this over a plain prose checklist when proposing multi-step work.",
+            &[
+                req_arr("steps", "Ordered steps: strings or { title, detail, file } objects."),
+                opt("title", "string", "Short plan title."),
+                opt("summary", "string", "One-paragraph summary of the goal/approach."),
+            ],
+        ));
+    }
+
+    // ── Edit / execute / orchestrate (agent/automatic only; unknown modes fail safe) ──
+    if full_exec {
         tools.push(tool(
             "Write",
             "Create or rewrite a file.",
@@ -352,15 +378,16 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                     opt("allSkills", "boolean", ""),
                 ],
             ));
-            tools.push(tool(
-                "BrowserDoctor",
-                "Diagnostics.",
-                &[
-                    opt("fix", "boolean", ""),
-                    opt("offline", "boolean", ""),
-                    opt("quick", "boolean", ""),
-                ],
-            ));
+            // `fix` triggers a side-effecting repair, so expose it only when execute-capable;
+            // diagnostics-only params stay available in read-only modes.
+            let mut doctor_params = vec![
+                opt("offline", "boolean", ""),
+                opt("quick", "boolean", ""),
+            ];
+            if browser_write {
+                doctor_params.push(opt("fix", "boolean", ""));
+            }
+            tools.push(tool("BrowserDoctor", "Diagnostics.", &doctor_params));
         }
         if browser_write {
             tools.push(tool(
@@ -455,6 +482,15 @@ const fn req_arr(name: &'static str, desc: &'static str) -> Param {
         kind: "array",
         desc,
         required: true,
+        is_array: true,
+    }
+}
+const fn opt_arr(name: &'static str, desc: &'static str) -> Param {
+    Param {
+        name,
+        kind: "array",
+        desc,
+        required: false,
         is_array: true,
     }
 }

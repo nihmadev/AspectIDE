@@ -3104,6 +3104,7 @@ version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "dunce",
  "futures-util",
  "image",
  "lux-core",
@@ -3142,6 +3143,7 @@ name = "lux-editor"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dunce",
  "lux-core",
  "tokio",
 ]

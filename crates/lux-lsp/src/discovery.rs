@@ -211,9 +211,29 @@ fn command_available(command: &str) -> bool {
     env::split_paths(&paths).any(|path| command_exists_in_dir(&path, command))
 }
 
+/// Whether `path` points at a file we could actually execute. On Unix this
+/// requires at least one execute bit to be set, so a same-named *non-executable*
+/// data file sitting in PATH is not mistaken for an available server. On other
+/// platforms executability is conferred by the extension, so `is_file()` alone
+/// is the right check (the Windows PATHEXT loop handles extensions separately).
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.is_file()
+        && path
+            .metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
+}
+
 fn command_exists_in_dir(dir: &Path, command: &str) -> bool {
     let direct = dir.join(command);
-    if direct.is_file() {
+    if is_executable_file(&direct) {
         return true;
     }
 

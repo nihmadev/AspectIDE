@@ -109,6 +109,7 @@ pub async fn ai_checkpoint(
         "diff" | "compare" => "diff",
         "delete" | "remove" | "drop" => "delete",
         "restore" | "rollback" | "revert" => "restore",
+        "augment" | "extend" | "add" => "augment",
         _ => return Err(format!("Unsupported checkpoint action: {action}")),
     };
 
@@ -201,7 +202,7 @@ pub async fn ai_checkpoint(
                     (true, false) | (false, true) => true, // restore re-creates or deletes
                     (false, false) => false,
                 };
-                if !changed || current.truncated {
+                if !changed {
                     continue;
                 }
                 if file.existed {
@@ -237,6 +238,64 @@ pub async fn ai_checkpoint(
             Ok(
                 serde_json::json!({ "status": if dry { "preview" } else { "restored" }, "operations": op_count, "result": result }),
             )
+        }
+        "augment" => {
+            // Capture pre-edit snapshots for files the model is about to create/edit that were not
+            // open at turn start and are not already in this checkpoint, so a later restore can
+            // revert the edit or delete the newly created file. snapshot_file is async, so we read
+            // the checkpoint's byte budget + existing paths under the lock, snapshot without holding
+            // it, then re-acquire to push (re-checking each path in case of a concurrent augment).
+            let want_id = id
+                .as_ref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| "Checkpoint augment requires an id.".to_string())?;
+            let requested = paths.unwrap_or_default();
+            let (max_bytes, existing) = {
+                let guard = store().lock().map_err(lock_error)?;
+                let cp = guard
+                    .get(&ws_key(&root_str))
+                    .and_then(|list| list.iter().find(|c| c.id == want_id))
+                    .ok_or_else(|| format!("Checkpoint not found: {want_id}"))?;
+                let existing: std::collections::HashSet<String> = cp
+                    .files
+                    .iter()
+                    .map(|f| ai_semantic::normalize_slashes_pub(&f.path).to_lowercase())
+                    .collect();
+                (cp.max_bytes_per_file, existing)
+            };
+            let mut missing: Vec<String> = Vec::new();
+            for raw in &requested {
+                if let Some(resolved) = resolve_in_workspace(raw, &root_str) {
+                    let key = resolved.to_lowercase();
+                    if !existing.contains(&key)
+                        && !missing.iter().any(|m: &String| m.to_lowercase() == key)
+                    {
+                        missing.push(resolved);
+                    }
+                }
+            }
+            let mut snapshots = Vec::with_capacity(missing.len());
+            for path in &missing {
+                snapshots.push(snapshot_file(&state, &root_str, path, max_bytes).await);
+            }
+            let mut guard = store().lock().map_err(lock_error)?;
+            let cp = guard
+                .get_mut(&ws_key(&root_str))
+                .and_then(|list| list.iter_mut().find(|c| c.id == want_id))
+                .ok_or_else(|| format!("Checkpoint not found: {want_id}"))?;
+            let mut added = 0usize;
+            for snap in snapshots {
+                let key = ai_semantic::normalize_slashes_pub(&snap.path).to_lowercase();
+                if !cp.files.iter().any(|f| {
+                    ai_semantic::normalize_slashes_pub(&f.path).to_lowercase() == key
+                }) {
+                    cp.files.push(snap);
+                    added += 1;
+                }
+            }
+            let summary = summarize(cp);
+            Ok(serde_json::json!({ "status": "augmented", "added": added, "checkpoint": summary }))
         }
         _ => unreachable!(),
     }
@@ -335,7 +394,8 @@ fn resolve_in_workspace(path: &str, root: &str) -> Option<String> {
 fn relative_to(path: &str, root: &str) -> String {
     let root_lower = root.to_lowercase();
     if path.to_lowercase().starts_with(&format!("{root_lower}/")) {
-        path[root.len() + 1..].to_string()
+        path.get(root.len() + 1..)
+            .map_or_else(|| path.to_string(), str::to_string)
     } else {
         path.to_string()
     }
@@ -350,7 +410,7 @@ async fn snapshot_file(
     let relative_path = relative_to(path, root);
     // Editor buffer first.
     if let Some(snap) = editor_snapshot(state, path) {
-        let truncated = snap.text.len() as u64 > max_bytes;
+        let truncated = snap.text.chars().count() as u64 > max_bytes;
         let text: String = snap
             .text
             .chars()
@@ -370,7 +430,7 @@ async fn snapshot_file(
     // Disk.
     match tokio::fs::read_to_string(path).await {
         Ok(text) => {
-            let truncated = text.len() as u64 > max_bytes;
+            let truncated = text.chars().count() as u64 > max_bytes;
             let clamped: String = text
                 .chars()
                 .take(usize::try_from(max_bytes).unwrap_or(usize::MAX))
@@ -416,7 +476,7 @@ async fn read_current(
     let _ = root;
     if let Some(snap) = editor_snapshot(state, path) {
         let disk_exists = tokio::fs::metadata(path).await.is_ok();
-        let truncated = snap.text.len() as u64 > max_bytes;
+        let truncated = snap.text.chars().count() as u64 > max_bytes;
         return CurrentFile {
             existed: true,
             disk_exists,
@@ -438,7 +498,7 @@ async fn read_current(
             source: "missing".into(),
         },
         |text| {
-            let truncated = text.len() as u64 > max_bytes;
+            let truncated = text.chars().count() as u64 > max_bytes;
             CurrentFile {
                 existed: true,
                 disk_exists: true,

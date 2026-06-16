@@ -1,4 +1,4 @@
-import { requestChatCompletion } from "./aiChatTransport";
+import { reasoningPayload, requestChatCompletion } from "./aiChatTransport";
 import type { AiChatMessage, AiChatToolCall } from "./aiChatTypes";
 import type { AiModelConfig, AiProviderConfig } from "./aiPreferences";
 import { normalizeVisibleReasoning } from "./aiChatReasoning";
@@ -24,6 +24,8 @@ const MIN_TOKEN_REDUCTION_RATIO = 0.08;
 const COMPACTION_COOLDOWN_MS = 12_000;
 const MAX_TRANSCRIPT_CHARS = 48_000;
 const MAX_SUMMARY_CHARS = 12_000;
+const COMPACTION_CHECKPOINT_INSTRUCTION =
+  "Continue the same task from this checkpoint. Older turns were compressed; use tools if you need exact file contents or command output.";
 
 export type ContextCompactionDroppedItem = {
   kind: "message" | "tool-output" | "reasoning";
@@ -71,14 +73,25 @@ export function estimateTokens(value: string) {
   return Math.ceil(trimmed.length / 4);
 }
 
+// Per-message token estimate cache. Messages are immutable (every edit produces a
+// new object via spread), so the object identity is a safe cache key and a WeakMap
+// lets entries GC with the message. compaction/context-usage hot paths call
+// estimateMessageTokens across the whole history many times per keystroke; without
+// this each call re-walks content + reasoning + every tool payload.
+const messageTokenCache = new WeakMap<AiChatMessage, number>();
+
 export function estimateMessageTokens(message: AiChatMessage) {
+  const cached = messageTokenCache.get(message);
+  if (cached !== undefined) return cached;
   const reasoning = normalizeVisibleReasoning(message.reasoning) ?? "";
   const toolTokens = message.toolCalls?.reduce((sum, call) => sum
     + estimateTokens(call.tool)
     + estimateTokens(call.input ?? "")
     + estimateTokens(call.output ?? "")
     + estimateTokens(call.error ?? ""), 0) ?? 0;
-  return estimateTokens(message.content) + estimateTokens(reasoning) + toolTokens;
+  const total = estimateTokens(message.content) + estimateTokens(reasoning) + toolTokens;
+  messageTokenCache.set(message, total);
+  return total;
 }
 
 export function estimateHistoryTokens(messages: AiChatMessage[]) {
@@ -255,7 +268,8 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
       selectedEffortId: input.selectedEffortId,
       abortSignal: input.abortSignal,
     });
-  } catch {
+  } catch (err) {
+    if (input.abortSignal?.aborted) throw err;
     summary = buildDeterministicCompactionSummary(older, previousSummary, input.chatSessionId);
   }
 
@@ -276,9 +290,16 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
 
   if (!force && tokensBefore > 0 && tokensAfter >= tokensBefore * (1 - MIN_TOKEN_REDUCTION_RATIO)) {
     const onlyPruned = prunedMessages !== input.messages;
+    // Summarization ran but didn't beat the reduction ratio. Record a cooldown so the
+    // expensive summarizeCompactionTranscript call isn't re-run on every subsequent
+    // over-threshold send (critical when input.compactionState is null, where the
+    // fingerprint/cooldown guards above are skipped entirely).
+    const throttledState: ContextCompactionState = input.compactionState
+      ? { ...input.compactionState, fingerprint, lastCompactedAt: now, tokensBefore, tokensAfter }
+      : { generation: 0, fingerprint, lastCompactedAt: now, tokensBefore, tokensAfter };
     return {
       messages: onlyPruned ? prunedMessages : input.messages,
-      compactionState: input.compactionState,
+      compactionState: throttledState,
       compacted: onlyPruned,
       reason: onlyPruned ? undefined : "no-reduction",
     };
@@ -303,7 +324,7 @@ function formatCompactionCheckpointContent(summary: string, coveredCount: number
   return [
     COMPACTION_CHECKPOINT_MARKER,
     `covered_messages=${coveredCount}`,
-    "Continue the same task from this checkpoint. Older turns were compressed; use tools if you need exact file contents or command output.",
+    COMPACTION_CHECKPOINT_INSTRUCTION,
     "",
     summary.trim(),
   ].join("\n");
@@ -311,7 +332,7 @@ function formatCompactionCheckpointContent(summary: string, coveredCount: number
 
 function extractCheckpointSummary(content: string) {
   const lines = content.split("\n");
-  const start = lines.findIndex((line) => line.trim() && !line.startsWith(COMPACTION_CHECKPOINT_MARKER) && !line.startsWith("covered_messages=") && !line.startsWith("Continue "));
+  const start = lines.findIndex((line) => line.trim() && !line.startsWith(COMPACTION_CHECKPOINT_MARKER) && !line.startsWith("covered_messages=") && line.trim() !== COMPACTION_CHECKPOINT_INSTRUCTION);
   if (start < 0) return content.trim();
   return lines.slice(start).join("\n").trim();
 }
@@ -322,15 +343,17 @@ function estimateCheckpointCoveredCount(content: string) {
 }
 
 function buildCompactionTranscript(messages: AiChatMessage[]) {
+  // Fill the char budget from the tail so the most-recent pre-checkpoint turns
+  // (the context most needed to continue) survive and the oldest are truncated.
   const parts: string[] = [];
   let used = 0;
-  for (const message of messages) {
+  for (const message of [...messages].reverse()) {
     const block = formatTranscriptMessage(message);
     if (used + block.length > MAX_TRANSCRIPT_CHARS) {
-      parts.push("[... earlier turns truncated for summarization ...]");
+      parts.unshift("[... earlier turns truncated for summarization ...]");
       break;
     }
-    parts.push(block);
+    parts.unshift(block);
     used += block.length;
   }
   return parts.join("\n\n");
@@ -431,6 +454,7 @@ async function summarizeCompactionTranscript(input: {
       baseUrl: input.provider.baseUrl,
       apiKey: input.provider.apiKey || null,
       model: input.model.alias || input.model.id,
+      reasoning: reasoningPayload(input.selectedEffortId, input.provider),
     });
     return truncateText(summary, MAX_SUMMARY_CHARS);
   }

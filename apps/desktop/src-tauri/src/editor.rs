@@ -15,7 +15,7 @@ pub async fn editor_open_file(
     state: State<'_, SharedState>,
     path: PathBuf,
 ) -> Result<DocumentSnapshot, String> {
-    let canonical = tokio::task::spawn_blocking(move || path.canonicalize())
+    let canonical = tokio::task::spawn_blocking(move || dunce::canonicalize(&path))
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
@@ -198,6 +198,37 @@ pub async fn apply_workspace_edit(
     let mut edited_documents = Vec::new();
     let mut changed_paths = Vec::new();
 
+    // Apply each file edit, accumulating already-committed results. On a mid-loop
+    // error we must still flush the batched UI event below so the editor view
+    // matches the in-memory documents already forwarded to the LSP.
+    let outcome =
+        apply_workspace_edit_files(app, state, edit, &mut edited_documents, &mut changed_paths)
+            .await;
+
+    if !edited_documents.is_empty() {
+        emit_event(
+            app,
+            LuxEvent::EditorDocumentsChanged {
+                documents: edited_documents.clone(),
+            },
+        )?;
+    }
+
+    outcome?;
+
+    Ok(WorkspaceEditResult {
+        edited_documents,
+        changed_paths,
+    })
+}
+
+async fn apply_workspace_edit_files(
+    app: &AppHandle,
+    state: &State<'_, SharedState>,
+    edit: LspWorkspaceEdit,
+    edited_documents: &mut Vec<DocumentSnapshot>,
+    changed_paths: &mut Vec<PathBuf>,
+) -> Result<(), String> {
     for file_edit in edit.files {
         let path = file_edit.path;
         let text_edits = file_edit
@@ -244,19 +275,7 @@ pub async fn apply_workspace_edit(
         changed_paths.push(path);
     }
 
-    if !edited_documents.is_empty() {
-        emit_event(
-            app,
-            LuxEvent::EditorDocumentsChanged {
-                documents: edited_documents.clone(),
-            },
-        )?;
-    }
-
-    Ok(WorkspaceEditResult {
-        edited_documents,
-        changed_paths,
-    })
+    Ok(())
 }
 
 async fn save_document_to_path(
@@ -297,7 +316,10 @@ async fn save_document_to_path(
         let mut documents = state.documents.lock().map_err(lock_error)?;
         Some(
             documents
-                .attach_path_with_previous(buffer_id, save_path.clone())
+                .attach_path_with_previous(
+                    buffer_id,
+                    migrated_path.clone().unwrap_or_else(|| save_path.clone()),
+                )
                 .map_err(String::from)?,
         )
     } else if let Some(migrated_save_path) = migrated_path.clone() {
@@ -349,10 +371,10 @@ async fn save_document_to_path(
             },
         )?;
     }
+    if path_attachment.is_some() {
+        lsp::forward_document_open(&app, &state, &document).await?;
+    }
     if saved_current_version {
-        if path_attachment.is_some() {
-            lsp::forward_document_open(&app, &state, &document).await?;
-        }
         lsp::forward_document_save(&app, &state, &document).await?;
     }
     Ok(document)

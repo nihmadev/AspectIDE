@@ -16,6 +16,7 @@ import {
   createBrowserOpenApproval,
 } from "./aiRuntimeApprovals";
 import { booleanArg, clamp, numberArg, stringArg, stringArrayArg, toolJson, type ToolResult, type UnknownRecord } from "./aiRuntimeShared";
+import { isReadOnlyAgentMode } from "./aiRuntimeTools";
 import { encodeVisionImageFromDataUrl } from "./aiFileContext";
 import { resolveVisionImageFormatFromPreferences } from "./aiVisionFormat";
 import { luxCommands } from "./tauri";
@@ -92,6 +93,10 @@ async function streamPortAfterAction(input: AiChatSendInput) {
   if (!input.preferences.agentBrowserAutoStreamPreview) return null;
   try {
     const status = await ensureBrowserStream(sessionFor(input), commandPath(input));
+    // The agent just navigated/acted — nudge any open live preview to (re)attach its
+    // stream so the user sees the page the agent is driving, with the activity dot.
+    const { bumpBrowserStreamRefresh } = await import("./aiChatTurnRuntime");
+    bumpBrowserStreamRefresh();
     return status.port;
   } catch {
     return null;
@@ -312,7 +317,10 @@ export async function browserInvokeTool(
 
 export async function browserDoctorTool(args: UnknownRecord, input: AiChatSendInput): Promise<ToolResult> {
   ensureBrowserEnabled(input);
-  const fix = booleanArg(args, "fix", false);
+  // Defense-in-depth: Plan/Ask modes strip `fix` from the advertised schema, but a model
+  // could still emit it. Force the destructive `--fix` off in read-only modes so the
+  // "no mutating commands" guarantee cannot fail open at execution time.
+  const fix = isReadOnlyAgentMode(input.preferences.agentMode) ? false : booleanArg(args, "fix", false);
   const offline = booleanArg(args, "offline", true);
   const quick = booleanArg(args, "quick", true);
   const doctorArgs = ["doctor", "--json"];

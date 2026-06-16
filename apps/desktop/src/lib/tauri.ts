@@ -88,7 +88,8 @@ export type DatabaseExecuteResult = {
   rowsAffected: number;
   lastInsertRowid: number;
   columns: string[];
-  rows: string[][];
+  /** Cell is `null` for SQL NULL, distinguishing it from an empty-TEXT `""`. */
+  rows: (string | null)[][];
   message: string;
 };
 
@@ -96,7 +97,8 @@ export type DatabaseCellUpdate = {
   table: string;
   rowid: number;
   column: string;
-  value: string;
+  /** `null` writes SQL NULL; `""` writes empty TEXT. */
+  value: string | null;
 };
 
 export type AgentBrowserStatusRequest = {
@@ -623,10 +625,17 @@ export const luxCommands = {
     selectedEffortId: string; selectedModelAlias: string;
     providerName: string; providerProtocol: string;
     workspaceRoot: string; runtimeToolsAvailable: boolean; agentBrowserEnabled: boolean;
+    tokenEconomy: boolean; customPromptEnabled: boolean; customPrompt: string;
   }) => invokeRequired<string>("ai_build_system_prompt", { input }),
   aiRunTurn: (input: AiRunTurnInput) => invokeRequired<null>("ai_run_turn", { input }),
+  /** Fetch a provider's available model ids from its OpenAI-compatible /models endpoint. */
+  aiListProviderModels: (baseUrl: string, apiKey: string | null) =>
+    invokeRequired<string[]>("ai_list_provider_models", { baseUrl, apiKey }),
   aiResolveTurnApproval: (turnId: string, requestId: string, decision: "approved" | "rejected") =>
     invokeRequired<null>("ai_resolve_turn_approval", { turnId, requestId, decision }),
+  /** Deliver a human answer to a pending AskUser question (UI → Rust). */
+  aiResolveTurnQuestion: (turnId: string, requestId: string, answer: { answer: string; cancelled: boolean }) =>
+    invokeRequired<null>("ai_resolve_turn_question", { turnId, requestId, answer }),
   aiCancelTurn: (turnId: string) => invokeRequired<null>("ai_cancel_turn", { turnId }),
   aiGenerateSessionTitle: (input: {
     firstUserMessage: string; baseUrl: string; apiKey: string | null;
@@ -634,11 +643,11 @@ export const luxCommands = {
   }) => invokeRequired<string>("ai_generate_session_title", { input }),
   aiGoalEvalVerdict: (input: {
     condition: string; transcript: string; openTodoSummaries: string[];
-    baseUrl: string; apiKey: string | null; model: string;
+    baseUrl: string; apiKey: string | null; model: string; reasoning: Record<string, unknown>;
   }) => invokeRequired<{ satisfied: boolean; blocked: boolean; reason: string; source: string } | null>("ai_goal_eval_verdict", { input }),
   aiCompactionSummary: (input: {
     transcript: string; previousSummary: string; pinnedGoal: string; openTasks: string[];
-    baseUrl: string; apiKey: string | null; model: string;
+    baseUrl: string; apiKey: string | null; model: string; reasoning: Record<string, unknown>;
   }) => invokeRequired<string>("ai_compaction_summary", { input }),
   aiCheckpoint: (action: string, options: {
     id?: string; label?: string; paths?: string[]; maxFiles?: number;
@@ -885,6 +894,12 @@ export type AiRunTurnInput = {
   agentMode: string;
   toolRoundLimit: number | null;
   toolApprovalMode: string;
+  /** Provider reasoning payload (reasoning_effort + reasoning.effort), or {} when
+   *  the model has no effort levels. Merged into the outgoing request by the native turn-loop. */
+  reasoning: Record<string, unknown>;
+  /** True for Claude-family models: the native turn-loop tags the system prompt with a
+   *  cache_control breakpoint for Anthropic prompt caching. */
+  anthropicCache: boolean;
   promptInput: {
     agentMode: string; agentName: string; agentInstructions: string;
     globalInstructions: string; projectInstructions: string; projectAgentsSnip: string;
@@ -892,12 +907,18 @@ export type AiRunTurnInput = {
     selectedEffortId: string; selectedModelAlias: string;
     providerName: string; providerProtocol: string;
     workspaceRoot: string; runtimeToolsAvailable: boolean; agentBrowserEnabled: boolean;
+    tokenEconomy: boolean; customPromptEnabled: boolean; customPrompt: string;
   };
   agentBrowserEnabled: boolean;
   activeDocumentPath: string | null;
   openDocumentPaths: string[];
   terminalContext: unknown | null;
 };
+
+/** One suggested answer to an AskUser question. */
+export type AiTurnQuestionOption = { label: string; description: string };
+/** One step of a PresentPlan proposal. */
+export type AiTurnPlanStep = { title: string; detail: string; file: string };
 
 /** Native turn-loop events emitted by the Rust `ai_run_turn` command. */
 export type AiTurnEvent =
@@ -907,7 +928,9 @@ export type AiTurnEvent =
   | { kind: "toolCallStarted"; turnId: string; callId: string; tool: string; input: string }
   | { kind: "toolCallCompleted"; turnId: string; callId: string; status: string; output: string; error: string | null }
   | { kind: "approvalRequired"; turnId: string; requestId: string; tool: string; title: string; summary: string; preview: string; risk: string }
-  | { kind: "turnUsage"; turnId: string; promptTokens: number; completionTokens: number; totalTokens: number }
+  | { kind: "questionRequired"; turnId: string; requestId: string; question: string; detail: string; options: AiTurnQuestionOption[]; multiSelect: boolean; allowCustom: boolean; htmlPreview: string }
+  | { kind: "planProposed"; turnId: string; planId: string; title: string; summary: string; steps: AiTurnPlanStep[]; autoStart: boolean }
+  | { kind: "turnUsage"; turnId: string; promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number }
   | { kind: "turnDone"; turnId: string; messageId: string; content: string; durationMs: number }
   | { kind: "turnError"; turnId: string; error: string }
   | { kind: "turnCancelled"; turnId: string };

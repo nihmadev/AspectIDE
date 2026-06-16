@@ -166,10 +166,10 @@ async function requestChatCompletionWithRetry(
       return await run();
     } catch (error) {
       lastError = error;
-      if (isAbortErrorLike(error) || attempt >= maxProviderRetries || !isRetryableProviderError(error)) {
+      if (isAbortErrorLike(error) || hasStreamingStarted(error) || attempt >= maxProviderRetries || !isRetryableProviderError(error)) {
         throw enrichProviderRetryError(error, attempt);
       }
-      await delay(350 * (attempt + 1));
+      await abortableDelay(350 * (attempt + 1), abortSignal);
     }
   }
   throw enrichProviderRetryError(lastError, maxProviderRetries);
@@ -197,9 +197,22 @@ function isRetryableProviderError(error: unknown) {
     || text.includes("overloaded");
 }
 
-function delay(ms: number) {
-  return new Promise<void>((resolve) => {
-    window.setTimeout(resolve, ms);
+function abortableDelay(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("AI request was cancelled", "AbortError"));
+      return;
+    }
+    let timer = 0;
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(new DOMException("AI request was cancelled", "AbortError"));
+    };
+    timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -443,12 +456,12 @@ function applyPromptCacheBreakpoints(
   });
 }
 
-function isAnthropicCacheModel(model: AiModelConfig): boolean {
+export function isAnthropicCacheModel(model: AiModelConfig): boolean {
   const id = `${model.alias ?? ""} ${model.id ?? ""}`.toLowerCase();
   return id.includes("claude") || id.includes("anthropic");
 }
 
-function reasoningPayload(effortId: string, provider: AiProviderConfig) {
+export function reasoningPayload(effortId: string, provider: AiProviderConfig) {
   if (!effortId) return {};
   const normalizedEffort = effortId === "xhigh" && provider.protocol !== "local-proxy" ? "high" : effortId;
   return {

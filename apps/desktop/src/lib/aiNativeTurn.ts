@@ -1,7 +1,41 @@
 import type { AiChatMessage, AiChatSendInput, AiToolApprovalRequest } from "./aiChatTypes";
 import { createTurnTimeline } from "./aiChatTimeline";
+import { isAnthropicCacheModel, reasoningPayload } from "./aiChatTransport";
+import { attachTurnCostEstimate } from "./aiTurnUsage";
 import { buildUserContent } from "./aiRuntimePrompt";
+import { clearPendingQuestionsForSession, registerPendingQuestion } from "./aiPendingQuestion";
+import { clearPendingPlansForSession, getPendingPlanForSession, registerPendingPlan } from "./aiPendingPlan";
+import { browserSessionName, ensureBrowserStream } from "./agentBrowser";
+import { bumpBrowserStreamRefresh } from "./aiChatTurnRuntime";
 import { isTauriRuntime, luxCommands, subscribeAiTurn, type AiRunTurnInput, type AiTurnEvent } from "./tauri";
+
+/**
+ * Browser tools that change what's on screen. When one of these completes on the
+ * native turn loop, we enable the viewport stream and nudge the live preview to
+ * attach — so the user sees (with the blue activity dot) the browser the agent is
+ * driving, without having opened it manually.
+ */
+const NAVIGATIONAL_BROWSER_TOOLS = new Set([
+  "BrowserOpen",
+  "BrowserAct",
+  "BrowserChat",
+  "BrowserScreenshot",
+  "BrowserClose",
+]);
+
+async function reflectBrowserActivityInPreview(input: AiChatSendInput) {
+  if (!input.preferences.agentBrowserAutoStreamPreview) return;
+  try {
+    await ensureBrowserStream(
+      browserSessionName(input.chatSessionId),
+      input.preferences.agentBrowserCommand.trim() || undefined,
+    );
+  } catch {
+    // Stream enable is best-effort: the preview also polls, and a failure here
+    // must never break the turn. The bump still refreshes any open preview.
+  }
+  bumpBrowserStreamRefresh();
+}
 
 /**
  * Native turn-loop bridge (Stage 5).
@@ -59,12 +93,22 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
       if (resolved) return;
       resolved = true;
       cleanup();
+      // A question tied to this (now finished) turn can never be answered back into
+      // the loop, so drop it. An auto-started plan (Automatic mode) was a record of
+      // work already executed — clear it; a manual plan persists so its Start button
+      // survives the turn that proposed it.
+      clearPendingQuestionsForSession(input.chatSessionId);
+      const plan = getPendingPlanForSession(input.chatSessionId);
+      if (plan?.autoStart) clearPendingPlansForSession(input.chatSessionId);
       resolve(message);
     };
     const settleReject = (error: unknown) => {
       if (resolved) return;
       resolved = true;
       cleanup();
+      // The turn errored/aborted: both prompts are bound to a dead loop now.
+      clearPendingQuestionsForSession(input.chatSessionId);
+      clearPendingPlansForSession(input.chatSessionId);
       reject(error);
     };
 
@@ -107,14 +151,20 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             startTime: Date.now(),
           }]);
           break;
-        case "toolCallCompleted":
-          timeline.updateToolCall(event.callId, {
+        case "toolCallCompleted": {
+          const completed = timeline.updateToolCall(event.callId, {
             status: event.status === "error" ? "error" : "success",
             output: event.output,
             ...(event.error ? { error: event.error } : {}),
             endTime: Date.now(),
           });
+          // A successful navigational browser tool means the agent is driving a live
+          // page — reflect it in the preview (stream + blue activity dot) automatically.
+          if (event.status !== "error" && completed && NAVIGATIONAL_BROWSER_TOOLS.has(completed.tool)) {
+            void reflectBrowserActivityInPreview(input);
+          }
           break;
+        }
         case "approvalRequired": {
           const request: AiToolApprovalRequest = {
             id: event.requestId,
@@ -134,13 +184,50 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           });
           break;
         }
+        case "questionRequired":
+          // Park the question in the ephemeral store; the AiQuestionCard renders it
+          // and replies via aiResolveTurnQuestion (which unblocks the Rust loop).
+          registerPendingQuestion({
+            requestId: event.requestId,
+            turnId,
+            sessionId: input.chatSessionId,
+            question: event.question,
+            detail: event.detail,
+            options: event.options,
+            multiSelect: event.multiSelect,
+            allowCustom: event.allowCustom,
+            htmlPreview: event.htmlPreview,
+          });
+          break;
+        case "planProposed":
+          // Surface the plan card. Goal + task list were already pinned by Rust, so
+          // the rail reflects it instantly; the card adds the readable detail + Start.
+          registerPendingPlan({
+            planId: event.planId,
+            turnId,
+            sessionId: input.chatSessionId,
+            title: event.title,
+            summary: event.summary,
+            steps: event.steps,
+            autoStart: event.autoStart,
+          });
+          break;
         case "turnUsage":
-          assistantMessage.turnUsage = {
-            promptTokens: event.promptTokens,
-            completionTokens: event.completionTokens,
-            totalTokens: event.totalTokens,
-            estimatedCostUsd: null,
-          };
+          // Attach the cost estimate immediately so the turn summary shows price
+          // without waiting for the post-turn pass. Uses the model's manual price
+          // (Settings → Providers) when set, else alias-based defaults.
+          assistantMessage.turnUsage = attachTurnCostEstimate(
+            {
+              promptTokens: event.promptTokens,
+              completionTokens: event.completionTokens,
+              totalTokens: event.totalTokens,
+              estimatedCostUsd: null,
+              ...(event.cachedPromptTokens && event.cachedPromptTokens > 0
+                ? { cachedPromptTokens: event.cachedPromptTokens }
+                : {}),
+            },
+            input.selectedModel,
+          );
           break;
         case "turnDone": {
           // Finalize the last streamed round, then snapshot the ordered segments.
@@ -229,6 +316,15 @@ function buildRunTurnInput(input: AiChatSendInput, turnId: string, messageId: st
     agentMode: input.preferences.agentMode,
     toolRoundLimit: input.preferences.toolRoundLimit,
     toolApprovalMode: input.preferences.toolApprovalMode,
+    // Reasoning effort the TS path attaches via reasoningPayload() must also reach
+    // the native Rust turn-loop, otherwise desktop requests silently drop the
+    // effort on reasoning models. Empty object when the model has no effort levels.
+    reasoning: reasoningPayload(input.preferences.selectedEffortId, input.provider),
+    // Anthropic prompt caching: tag the (stable) system prompt with a cache_control
+    // breakpoint so Claude-family models cache it and re-read it cheaply each turn.
+    // The TS path does this via applyPromptCacheBreakpoints; the native path needs
+    // the flag so Rust applies the same breakpoint (otherwise desktop never caches).
+    anthropicCache: isAnthropicCacheModel(input.selectedModel),
     promptInput: {
       agentMode: input.preferences.agentMode,
       agentName: input.selectedAgentName,
@@ -245,6 +341,11 @@ function buildRunTurnInput(input: AiChatSendInput, turnId: string, messageId: st
       workspaceRoot: input.workspace?.root ?? "",
       runtimeToolsAvailable: true,
       agentBrowserEnabled: input.preferences.agentBrowserEnabled,
+      // Token-economy + custom-prompt overrides must reach the native Rust prompt
+      // builder, otherwise desktop turns silently ignore both settings.
+      tokenEconomy: input.preferences.tokenEconomyEnabled,
+      customPromptEnabled: input.preferences.customSystemPromptEnabled,
+      customPrompt: input.preferences.customSystemPrompt,
     },
     agentBrowserEnabled: input.preferences.agentBrowserEnabled,
     activeDocumentPath: input.activeDocument?.path ?? null,

@@ -28,6 +28,7 @@ base64 = "0.22"
 calamine = "0.35.0"
 chrono = { version = "0.4", features = ["serde"] }
 csv = "1.4.0"
+dunce = "1"
 ignore = "0.4"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
 lsp-types = "0.97"

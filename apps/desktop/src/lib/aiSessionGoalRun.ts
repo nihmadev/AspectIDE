@@ -156,6 +156,7 @@ export function resumeGoalRun(sessionId: string) {
   run.startedAt = Date.now();
   run.completedAt = null;
   run.noProgressTurns = 0;
+  stallSignals.delete(`${sessionId}:stall`);
   run.budgetWrapupSent = false;
   run.blockedReason = null;
   run.stopReason = null;
@@ -214,6 +215,7 @@ export function startGoalRun(
     "set",
     `Limits: ${limits.maxRounds} rounds, ${Math.round(limits.maxDurationMs / 1000)}s, ${limits.maxTokens.toLocaleString()} tokens.`,
   );
+  stallSignals.delete(`${sessionId}:stall`);
   goalRuns.set(sessionId, run);
   emit();
   return run;
@@ -238,9 +240,17 @@ function finishGoalRun(sessionId: string, phase: Exclude<GoalRunPhase, "running"
   run.progress = phase === "completed" ? 100 : run.progress;
   run.completionSummary = summary;
   run.lastEvaluatorReason = summary;
+  stallSignals.delete(`${sessionId}:stall`);
   goalRuns.set(sessionId, run);
   emit();
   return run;
+}
+
+/** Drop all state for a closed/deleted session so the maps don't grow unbounded. */
+export function disposeGoalRun(sessionId: string) {
+  goalRuns.delete(sessionId);
+  stallSignals.delete(`${sessionId}:stall`);
+  emit();
 }
 
 function resolveTurnUsage(
@@ -456,7 +466,11 @@ export type GoalEvaluation =
   | { status: "budget_wrapup"; reason: string }
   | { status: "continue"; reason: string };
 
-export function evaluateGoalCondition(sessionId: string, messages: AiChatMessage[]): GoalEvaluation {
+export function evaluateGoalCondition(
+  sessionId: string,
+  messages: AiChatMessage[],
+  agentMode?: AiAgentMode,
+): GoalEvaluation {
   const run = goalRuns.get(sessionId);
   if (!run || run.phase !== "running") return { status: "idle" };
 
@@ -470,6 +484,15 @@ export function evaluateGoalCondition(sessionId: string, messages: AiChatMessage
 
   if (detectGoalBlockedMarker(assistant)) {
     const reason = buildEvaluatorReason(refreshed, assistant, messages);
+    // Automatic mode is full autonomy: "blocked on the user" is not a valid stop —
+    // the agent must decide and push on. Convert the block into a continue with a
+    // self-decide nudge instead of pausing the run for human input.
+    if (agentMode === "automatic") {
+      refreshed.lastEvaluatorReason = `${AUTOMATIC_UNBLOCK_NUDGE} (was: ${reason})`;
+      goalRuns.set(sessionId, refreshed);
+      emit();
+      return { status: "continue", reason: refreshed.lastEvaluatorReason };
+    }
     refreshed.blockedReason = reason;
     finishGoalRun(sessionId, "blocked", reason);
     return { status: "blocked", reason };
@@ -502,6 +525,7 @@ export function evaluateGoalCondition(sessionId: string, messages: AiChatMessage
     return { status: "max_rounds", reason };
   }
 
+  let monitoring = false;
   if (assistant) {
     const outputTokens = assistant.turnUsage?.completionTokens ?? 0;
     const repeatedSnippet = refreshed.lastAssistantSnippet
@@ -517,6 +541,7 @@ export function evaluateGoalCondition(sessionId: string, messages: AiChatMessage
         return { status: "paused", reason };
       }
       refreshed.lastEvaluatorReason = `Low-output turn ${refreshed.noProgressTurns}/${refreshed.limits.noProgressTurnsBeforePause} — monitoring.`;
+      monitoring = true;
       goalRuns.set(sessionId, refreshed);
       emit();
     } else if (outputTokens > 0 || (assistant.toolCalls?.length ?? 0) > 0) {
@@ -545,7 +570,9 @@ export function evaluateGoalCondition(sessionId: string, messages: AiChatMessage
     return { status: "satisfied", reason };
   }
 
-  const reason = buildEvaluatorReason(refreshed, assistant, messages);
+  const reason = monitoring
+    ? refreshed.lastEvaluatorReason!
+    : buildEvaluatorReason(refreshed, assistant, messages);
   refreshed.lastEvaluatorReason = reason;
   goalRuns.set(sessionId, refreshed);
   emit();
@@ -559,6 +586,7 @@ export type GoalRunContinuationDecision =
 export function applyGoalEvaluatorVerdict(
   sessionId: string,
   verdict: { satisfied: boolean; blocked: boolean; reason: string; source?: string },
+  agentMode?: AiAgentMode,
 ): GoalEvaluation {
   const run = goalRuns.get(sessionId);
   if (!run || run.phase !== "running") return { status: "idle" };
@@ -567,6 +595,15 @@ export function applyGoalEvaluatorVerdict(
   const reason = verdict.reason.trim() || "Completion condition update.";
 
   if (verdict.blocked) {
+    // Full autonomy: an evaluator "blocked — needs user" verdict must not pause an
+    // Automatic run. Convert to continue with a self-decide nudge (parity with the
+    // marker path in evaluateGoalCondition).
+    if (agentMode === "automatic") {
+      run.lastEvaluatorReason = `${AUTOMATIC_UNBLOCK_NUDGE} (was: ${prefix}: ${reason})`;
+      goalRuns.set(sessionId, run);
+      emit();
+      return { status: "continue", reason: run.lastEvaluatorReason };
+    }
     finishGoalRun(sessionId, "blocked", `${prefix}: ${reason}`);
     return { status: "blocked", reason };
   }
@@ -598,11 +635,20 @@ export function goalEvaluationToContinuation(
   return { continue: false, reason: "idle" };
 }
 
+const EVALUATOR_PENDING_REASON = "Evaluating completion condition…";
+
 export function setGoalRunEvaluatorPending(sessionId: string, pending: boolean) {
   const run = goalRuns.get(sessionId);
   if (!run || run.phase !== "running") return;
   if (pending) {
-    run.lastEvaluatorReason = "Evaluating completion condition…";
+    run.lastEvaluatorReason = EVALUATOR_PENDING_REASON;
+    goalRuns.set(sessionId, run);
+    emit();
+  } else if (run.lastEvaluatorReason === EVALUATOR_PENDING_REASON) {
+    // Clear the transient placeholder so an aborted/no-verdict evaluation doesn't leave
+    // the run stuck showing "Evaluating…" forever. Only clears the placeholder — a real
+    // reason written by applyGoalEvaluatorVerdict on the success path is preserved.
+    run.lastEvaluatorReason = null;
     goalRuns.set(sessionId, run);
     emit();
   }
@@ -628,8 +674,12 @@ export function evaluateGoalRunContinuation(
     return { continue: false, reason: "mode" };
   }
 
-  return goalEvaluationToContinuation(evaluateGoalCondition(sessionId, messages));
+  return goalEvaluationToContinuation(evaluateGoalCondition(sessionId, messages, agentMode));
 }
+
+/** Nudge injected when Automatic mode overrides a "blocked — needs user" verdict. */
+const AUTOMATIC_UNBLOCK_NUDGE =
+  "Automatic mode: no user to unblock you. Choose the most reasonable option from the evidence, record it as an assumption, and continue toward the goal.";
 
 const stallSignals = new Map<string, number>();
 

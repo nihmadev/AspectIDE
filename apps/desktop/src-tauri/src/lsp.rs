@@ -1,5 +1,10 @@
-use std::{collections::BTreeMap, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    panic::AssertUnwindSafe,
+    path::Path,
+};
 
+use futures_util::FutureExt;
 use lux_core::{
     BufferId, DocumentSnapshot, LanguageServerInfo, LspCodeAction, LspCodeActionDiagnostic,
     LspCodeActionTrigger, LspCompletionList, LspDocumentSymbol, LspFoldingRange,
@@ -25,10 +30,12 @@ pub async fn lsp_servers(
 
     // Discovery is fast and bounded; do it inline so the UI gets the server list
     // (available/missing) immediately and can clear its "loading" state.
+    tracing::info!("lsp_servers: discovering language servers");
     let servers = tokio::task::spawn_blocking(move || lux_lsp::workspace_language_servers(root))
         .await
         .map_err(|error| error.to_string())?
         .map_err(String::from)?;
+    tracing::info!("lsp_servers: discovered {} server(s)", servers.len());
 
     // Publish missing-server warnings right away.
     let missing_diagnostics = lux_lsp::language_server_diagnostics(&servers);
@@ -42,10 +49,14 @@ pub async fn lsp_servers(
     let background_state = state.inner().clone();
     let background_app = app.clone();
     let background_servers = servers.clone();
-    tokio::spawn(async move {
+    // Use Tauri's async runtime (not bare `tokio::spawn`): a command may run on a
+    // thread without an entered tokio reactor, where `tokio::spawn` panics and the
+    // command never resolves — leaving the UI stuck on "Starting language services".
+    tauri::async_runtime::spawn(async move {
         start_servers_background(&background_app, &background_state, &background_servers).await;
     });
 
+    tracing::info!("lsp_servers: returning server list to frontend");
     Ok(servers)
 }
 
@@ -58,18 +69,52 @@ async fn start_servers_background(
     state: &SharedState,
     servers: &[LanguageServerInfo],
 ) {
-    let startup_diagnostics = {
+    // Take the manager OUT of the shared slot so the slow `initialize` handshakes
+    // (run in parallel, up to ~10s per server) happen WITHOUT holding the `lsp`
+    // mutex. Holding it across the whole startup window parked every feature
+    // command (hover, completion, definition, …) behind the same lock — the exact
+    // "load hang" this background path exists to avoid. While the manager is taken,
+    // feature commands observe `None` and return their existing empty default;
+    // they start serving the instant it is restored below.
+    let mut manager = {
         let mut lsp = state.lsp.lock().await;
-        match lsp.as_mut() {
-            Some(manager) => manager.start_available_servers(servers).await,
+        match lsp.take() {
+            Some(manager) => manager,
             None => return,
         }
     };
 
-    // Re-publish: keep the missing-server warnings and add any startup failures.
-    let mut diagnostics = lux_lsp::language_server_diagnostics(servers);
-    diagnostics.extend(startup_diagnostics);
-    let _ = replace_diagnostics_owned(app, state, diagnostics);
+    // Guard the handshake against an unwinding panic deep in `lux_lsp` (e.g. an
+    // `unwrap` on a malformed `initialize` response). Without this, a panic here
+    // would drop `manager` while the slot stays `None` for the rest of the
+    // session — stranding the LSP and orphaning any already-spawned child
+    // servers. `catch_unwind` lets us ALWAYS restore the manager below.
+    let result = AssertUnwindSafe(manager.start_available_servers(servers))
+        .catch_unwind()
+        .await;
+
+    // Restore the (possibly-panicked) manager before forwarding documents /
+    // serving requests. Unconditional: even on a caught panic the manager is a
+    // valid owned value here, and leaving the slot `None` would kill LSP for the
+    // session.
+    {
+        let mut lsp = state.lsp.lock().await;
+        *lsp = Some(manager);
+    }
+
+    // If startup panicked there are no diagnostics to merge; the manager is
+    // restored, so feature commands resume serving whatever the survivors offer.
+    let startup_diagnostics = match result {
+        Ok(diagnostics) => diagnostics,
+        Err(_) => return,
+    };
+
+    // Re-publish: keep the missing-server warnings and add any startup failures,
+    // WITHOUT clobbering real diagnostics a server may have published via the
+    // diagnostics channel during `initialize`.
+    let mut status_diagnostics = lux_lsp::language_server_diagnostics(servers);
+    status_diagnostics.extend(startup_diagnostics);
+    let _ = replace_status_diagnostics_owned(app, state, status_diagnostics);
 
     let open_documents = {
         let Ok(documents) = state.documents.lock() else {
@@ -413,35 +458,67 @@ pub fn replace_diagnostics(
     Ok(())
 }
 
-/// Owned-state variant of [`replace_diagnostics`] for use from detached
-/// background tasks (which hold an `Arc<AppState>`, not a borrowed `State`).
-fn replace_diagnostics_owned(
+/// Synthetic server-status entries (missing-server warnings + startup failures)
+/// all carry this source; real `publishDiagnostics` from a language server never
+/// do (they use the server's own source, falling back to `"lsp"`). Used to merge
+/// status updates without clobbering real diagnostics delivered concurrently.
+const STATUS_DIAGNOSTIC_SOURCE: &str = "lux-lsp";
+
+/// Synthetic per-document forwarding errors ("Language server stopped: …")
+/// carry this DISTINCT source so they are never swept up by the status-merge
+/// retain in [`replace_status_diagnostics_owned`] (which strips every
+/// `STATUS_DIAGNOSTIC_SOURCE` entry on each refresh). Sharing the status source
+/// let a later `lsp_servers` refresh silently delete a still-valid forwarding
+/// error. Source is only a display label, so this is purely a keying change.
+const FORWARDING_DIAGNOSTIC_SOURCE: &str = "lux-lsp-doc";
+
+/// Owned-state variant for detached background tasks (which hold an
+/// `Arc<AppState>`, not a borrowed `State`).
+///
+/// Unlike a wholesale replace, this MERGES: it swaps only the synthetic
+/// server-status entries (`source == "lux-lsp"`) and leaves any real per-path
+/// diagnostics already delivered by the concurrent diagnostics channel during
+/// `initialize` intact. A wholesale replace here produced a flash-then-vanish,
+/// dropping eager `publishDiagnostics` that landed mid-startup.
+fn replace_status_diagnostics_owned(
     app: &AppHandle,
     state: &SharedState,
-    diagnostics: Vec<WorkspaceDiagnostic>,
+    status_diagnostics: Vec<WorkspaceDiagnostic>,
 ) -> Result<(), String> {
-    let mut by_path: BTreeMap<_, Vec<WorkspaceDiagnostic>> = BTreeMap::new();
-    for diagnostic in &diagnostics {
-        by_path
-            .entry(diagnostic.path.clone())
-            .or_default()
-            .push(diagnostic.clone());
-    }
-    let previous_paths = {
+    // Compute the full per-path diagnostic lists for every affected path under a
+    // single lock, then emit after releasing it.
+    let affected = {
         let mut current = state.diagnostics.lock().map_err(lock_error)?;
-        let paths = current
+
+        // Paths that previously carried status entries must be re-emitted so any
+        // now-resolved status (e.g. a server that started successfully) is cleared.
+        let mut affected_paths = current
             .iter()
+            .filter(|diagnostic| diagnostic.source == STATUS_DIAGNOSTIC_SOURCE)
             .map(|diagnostic| diagnostic.path.clone())
-            .collect::<Vec<_>>();
-        *current = diagnostics;
-        paths
+            .collect::<BTreeSet<_>>();
+
+        // Replace only the status entries; preserve real diagnostics.
+        current.retain(|diagnostic| diagnostic.source != STATUS_DIAGNOSTIC_SOURCE);
+        for diagnostic in &status_diagnostics {
+            affected_paths.insert(diagnostic.path.clone());
+        }
+        current.extend(status_diagnostics);
+
+        // Snapshot the full (real + status) list for each affected path.
+        let mut by_path: BTreeMap<_, Vec<WorkspaceDiagnostic>> = BTreeMap::new();
+        for path in affected_paths {
+            by_path.insert(path, Vec::new());
+        }
+        for diagnostic in current.iter() {
+            if let Some(entry) = by_path.get_mut(&diagnostic.path) {
+                entry.push(diagnostic.clone());
+            }
+        }
+        by_path
     };
 
-    for path in previous_paths {
-        by_path.entry(path).or_default();
-    }
-
-    for (path, path_diagnostics) in by_path {
+    for (path, path_diagnostics) in affected {
         emit_event(
             app,
             LuxEvent::EditorDiagnosticsChanged {
@@ -546,7 +623,7 @@ async fn forward_document_open_owned(
                     line: 1,
                     column: 1,
                     severity: lux_core::DiagnosticSeverity::Warning,
-                    source: "lux-lsp".to_string(),
+                    source: FORWARDING_DIAGNOSTIC_SOURCE.to_string(),
                     message: format!("Language server stopped: {error}"),
                 }],
             },
@@ -620,7 +697,7 @@ pub async fn forward_document_close(
                     line: 1,
                     column: 1,
                     severity: lux_core::DiagnosticSeverity::Warning,
-                    source: "lux-lsp".to_string(),
+                    source: FORWARDING_DIAGNOSTIC_SOURCE.to_string(),
                     message: format!("Language server stopped: {error}"),
                 }],
             },
@@ -648,7 +725,7 @@ fn publish_forwarding_error(
                 line: 1,
                 column: 1,
                 severity: lux_core::DiagnosticSeverity::Warning,
-                source: "lux-lsp".to_string(),
+                source: FORWARDING_DIAGNOSTIC_SOURCE.to_string(),
                 message: format!("Language server stopped: {error}"),
             }],
         },

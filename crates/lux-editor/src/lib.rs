@@ -38,7 +38,7 @@ pub struct DocumentPathAttachment {
 
 impl DocumentStore {
     pub fn open_file(&mut self, path: &Path) -> AppResult<DocumentSnapshot> {
-        let canonical = path.canonicalize()?;
+        let canonical = dunce::canonicalize(path)?;
         if let Some(document) = self.snapshot_for_path(&canonical)? {
             return Ok(document);
         }
@@ -159,7 +159,7 @@ impl DocumentStore {
             return Ok(document.clone());
         }
 
-        let mut text = std::mem::take(&mut document.text);
+        let mut text = document.text.clone();
         apply_text_edits(&mut text, edits)?;
 
         document.text = text;
@@ -347,11 +347,11 @@ fn normalize_save_path(path: PathBuf) -> AppResult<PathBuf> {
     let Some(parent) = path.parent() else {
         return Ok(path);
     };
-    Ok(parent.canonicalize()?.join(file_name))
+    Ok(dunce::canonicalize(parent)?.join(file_name))
 }
 
 fn normalize_path_for_index(path: &Path) -> PathBuf {
-    path.canonicalize()
+    dunce::canonicalize(path)
         .or_else(|_| normalize_save_path(path.to_path_buf()))
         .unwrap_or_else(|_| path.to_path_buf())
 }

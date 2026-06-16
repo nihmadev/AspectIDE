@@ -3709,6 +3709,14 @@ kbd {
   padding: 6px 8px;
 }
 
+/* SQL NULL: render the "NULL" placeholder muted + italic so it reads
+   distinctly from an empty-TEXT cell (which shows a blank input). */
+.database-editor-grid td input.database-editor-cell-null::placeholder {
+  color: #6a6a6a;
+  font-style: italic;
+  opacity: 1;
+}
+
 .diagram-editor-preview {
   overflow: auto;
   padding: 16px;

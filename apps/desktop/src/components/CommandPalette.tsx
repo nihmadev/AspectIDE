@@ -21,7 +21,7 @@ import {
   PlugZap,
 } from "lucide-react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useEditorCloseGuard } from "./EditorCloseGuard";
 import { documentDisplayPath } from "../lib/documents";
@@ -94,6 +94,7 @@ export function CommandPalette() {
   const [symbolsError, setSymbolsError] = useState<string | null>(null);
   const [extensionCommandError, setExtensionCommandError] = useState<string | null>(null);
   const { requestCloseDocuments } = useEditorCloseGuard();
+  const latestSymbolQuery = useRef("");
 
   const fileIndexMutation = useMutation({
     mutationFn: () => luxCommands.fsListFiles(MAX_QUICK_OPEN_FILES),
@@ -106,12 +107,17 @@ export function CommandPalette() {
 
   const workspaceSymbolsMutation = useMutation({
     mutationFn: luxCommands.lspWorkspaceSymbols,
-    onSuccess: (symbols) => {
+    onSuccess: (symbols, variables) => {
+      if (variables !== latestSymbolQuery.current) return;
       setWorkspaceSymbols(symbols);
       setSymbolsError(null);
     },
-    onError: (error) => setSymbolsError(readErrorMessage(error, t)),
+    onError: (error, variables) => {
+      if (variables !== latestSymbolQuery.current) return;
+      setSymbolsError(readErrorMessage(error, t));
+    },
   });
+  const { mutate: searchSymbols } = workspaceSymbolsMutation;
 
   const extensionCommandsMutation = useMutation({
     mutationFn: luxCommands.extensionsCommandRoutes,
@@ -185,6 +191,11 @@ export function CommandPalette() {
   }, [setLanguageServers, setLanguageServersLoading]);
 
   useEffect(() => {
+    setFiles([]);
+    setIndexError(null);
+  }, [workspace?.root]);
+
+  useEffect(() => {
     if (open && workspace && files.length === 0 && !fileIndexMutation.isPending) {
       fileIndexMutation.mutate();
     }
@@ -202,14 +213,18 @@ export function CommandPalette() {
   useEffect(() => {
     if (!open || !workspace || !symbolMode) return;
     if (query.length < 2) {
+      latestSymbolQuery.current = query;
       setWorkspaceSymbols([]);
       setSymbolsError(null);
       return;
     }
 
-    const handle = window.setTimeout(() => workspaceSymbolsMutation.mutate(query), 160);
+    const handle = window.setTimeout(() => {
+      latestSymbolQuery.current = query;
+      searchSymbols(query);
+    }, 160);
     return () => window.clearTimeout(handle);
-  }, [open, query, symbolMode, workspace, workspaceSymbolsMutation]);
+  }, [open, query, symbolMode, workspace, searchSymbols]);
 
   const commands = useMemo<PaletteCommand[]>(
     () => [
@@ -593,7 +608,7 @@ export function CommandPalette() {
                   {visibleWorkspaceSymbols.map((symbol, index) => (
                     <Command.Item
                       key={`${symbol.location.path}:${symbol.location.range.start_line}:${symbol.location.range.start_column}:${symbol.name}:${index}`}
-                      value={`symbol:${symbol.name}:${symbol.location.path}`}
+                      value={`symbol:${symbol.name}:${symbol.location.path}:${symbol.location.range.start_line}:${symbol.location.range.start_column}`}
                       onSelect={() => openSymbolMutation.mutate(symbol)}
                     >
                       <ListTree size={16} />

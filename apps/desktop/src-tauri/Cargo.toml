@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+dunce.workspace = true
 lux-core = { path = "../../../crates/lux-core" }
 lux-dap = { path = "../../../crates/lux-dap" }
 lux-editor = { path = "../../../crates/lux-editor" }

@@ -9,7 +9,9 @@ use serde::Serialize;
 /// Estimate tokens from text length (same heuristic as the TS `estimateTokens`).
 #[must_use]
 pub fn estimate_tokens(value: &str) -> usize {
-    let trimmed_len = value.trim().len();
+    // Match JS `String.length` (UTF-16 code units), not UTF-8 byte length, so
+    // non-ASCII input (CJK, emoji, accented Latin) yields the same estimate as TS.
+    let trimmed_len = value.trim().encode_utf16().count();
     if trimmed_len == 0 {
         return 0;
     }

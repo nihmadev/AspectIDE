@@ -38,8 +38,8 @@ importers:
         specifier: ^6.0.0
         version: 6.0.0
       agent-browser:
-        specifier: 0.27.1
-        version: 0.27.1
+        specifier: ^0.27.3
+        version: 0.27.3
       cmdk:
         specifier: latest
         version: 1.1.1(@types/react-dom@19.2.3(@types/react@19.2.15))(@types/react@19.2.15)(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
@@ -960,8 +960,8 @@ packages:
   '@xterm/xterm@6.0.0':
     resolution: {integrity: sha512-TQwDdQGtwwDt+2cgKDLn0IRaSxYu1tSUjgKarSDkUM0ZNiSRXFpjxEsvc/Zgc5kq5omJ+V0a8/kIM2WD3sMOYg==}
 
-  agent-browser@0.27.1:
-    resolution: {integrity: sha512-lLzpWDV7nlVsA5km7yMCH1wppvnLLNx160hLwLdDUkCst9x38UhhxoiTmmJ2qreOnCa/Hp4/Gm6Adkahhtb6Hg==}
+  agent-browser@0.27.3:
+    resolution: {integrity: sha512-isQ1xWoYOnfR8BigYRlYmkFOrqw71tKEmUEMmFJGStQFOyCrLSsKoOAZEu8TjPZdmjD1nPQ/hLLYlxTwdHnA0Q==}
     engines: {node: '>=24.0.0', pnpm: '>=11.0.0'}
     hasBin: true
 
@@ -2291,7 +2291,7 @@ snapshots:
 
   '@xterm/xterm@6.0.0': {}
 
-  agent-browser@0.27.1: {}
+  agent-browser@0.27.3: {}
 
   aria-hidden@1.2.6:
     dependencies:

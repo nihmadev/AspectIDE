@@ -28,9 +28,17 @@ export function AgentBrowserPreview({ chatSessionId, onOpenDashboard, preference
   const [dashboardUrl, setDashboardUrl] = useState<string | null>(null);
   const [dashboardError, setDashboardError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // "Live activity" = a fresh frame arrived recently (agent driving the page, or the
+  // user interacting with it). Drives the blue dot top-right. Auto-decays after a beat
+  // of no frames so it reads as a real-time pulse, not a permanent badge.
+  const [active, setActive] = useState(false);
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const clientRef = useRef<AgentBrowserStreamClient | null>(null);
+  const streamUrlRef = useRef<string | null>(null);
+  const isOpenRef = useRef(false);
   const hasFrameRef = useRef(false);
+  const syncGenRef = useRef(0);
+  const activityTimerRef = useRef<number | null>(null);
   const metadataRef = useRef<{ deviceWidth?: number; deviceHeight?: number }>({});
   const streamRefreshToken = useSyncExternalStore(
     subscribeAiChatTurnRuntime,
@@ -54,17 +62,25 @@ export function AgentBrowserPreview({ chatSessionId, onOpenDashboard, preference
   const sessionName = browserSessionName(chatSessionId);
 
   const attachStreamClient = useCallback((url: string) => {
-    if (streamUrl === url && clientRef.current) return;
+    if (streamUrlRef.current === url && clientRef.current) return;
+    streamUrlRef.current = url;
+    isOpenRef.current = false;
     setStreamUrl(url);
     clientRef.current?.disconnect();
     const client = new AgentBrowserStreamClient({
       url,
-      onOpen: () => setConnection(hasFrameRef.current ? "live" : "connecting"),
+      onOpen: () => {
+        isOpenRef.current = true;
+        setConnection(hasFrameRef.current ? "live" : "connecting");
+      },
       onClose: () => {
-        if (hasFrameRef.current) setConnection("disconnected");
-        else setConnection("waiting");
+        if (clientRef.current !== client) return;
+        isOpenRef.current = false;
+        streamUrlRef.current = null;
+        setConnection(hasFrameRef.current ? "disconnected" : "waiting");
       },
       onError: (message) => {
+        isOpenRef.current = false;
         setError(message);
         setConnection("error");
       },
@@ -73,14 +89,20 @@ export function AgentBrowserPreview({ chatSessionId, onOpenDashboard, preference
         hasFrameRef.current = true;
         setConnection("live");
         setFrameSrc(`data:image/jpeg;base64,${frame.data}`);
+        // Pulse the activity indicator: a new frame means something is happening on
+        // the page right now. Re-arm a decay timer so the dot fades when frames stop.
+        setActive(true);
+        if (activityTimerRef.current !== null) window.clearTimeout(activityTimerRef.current);
+        activityTimerRef.current = window.setTimeout(() => setActive(false), 1500);
       },
     });
     clientRef.current = client;
     client.connect();
-  }, [streamUrl]);
+  }, []);
 
   const syncLiveStream = useCallback(async (activate: boolean) => {
     if (!browserEnabled || view !== "live") return;
+    const gen = syncGenRef.current;
     setRefreshing(true);
     setError(null);
     if (!hasFrameRef.current) setConnection(activate ? "connecting" : "waiting");
@@ -88,9 +110,12 @@ export function AgentBrowserPreview({ chatSessionId, onOpenDashboard, preference
       const status = activate
         ? await ensureBrowserStream(sessionName, commandPath)
         : await queryBrowserStream(sessionName, commandPath);
+      if (syncGenRef.current !== gen) return;
       const url = status.websocketUrl;
       if (!url) {
         if (!hasFrameRef.current) {
+          streamUrlRef.current = null;
+          isOpenRef.current = false;
           setStreamUrl(null);
           setFrameSrc(null);
           setConnection("waiting");
@@ -150,14 +175,23 @@ export function AgentBrowserPreview({ chatSessionId, onOpenDashboard, preference
   }, [view, ensureDashboard]);
 
   useEffect(() => {
+    syncGenRef.current += 1;
     clientRef.current?.disconnect();
+    streamUrlRef.current = null;
+    isOpenRef.current = false;
     hasFrameRef.current = false;
     setFrameSrc(null);
     setStreamUrl(null);
     setConnection("waiting");
     setError(null);
+    setActive(false);
     if (view === "live") void syncLiveStream(false);
   }, [chatSessionId, syncLiveStream, view]);
+
+  // Clear the activity decay timer on unmount so it can't fire into a dead component.
+  useEffect(() => () => {
+    if (activityTimerRef.current !== null) window.clearTimeout(activityTimerRef.current);
+  }, []);
 
   const sendPointer = (event: React.MouseEvent<HTMLImageElement>, eventType: "mousePressed" | "mouseReleased") => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -170,9 +204,13 @@ export function AgentBrowserPreview({ chatSessionId, onOpenDashboard, preference
       event.preventDefault();
     }
     clientRef.current?.sendKey("keyDown", event.key, event.code);
-    if (event.key.length === 1 || event.key === "Enter" || event.key === "Backspace") {
-      clientRef.current?.sendKey("keyUp", event.key, event.code);
+  };
+
+  const sendKeyboardUp = (event: React.KeyboardEvent<HTMLImageElement>) => {
+    if (event.key === "Tab" || event.key.startsWith("Arrow") || event.key === " ") {
+      event.preventDefault();
     }
+    clientRef.current?.sendKey("keyUp", event.key, event.code);
   };
 
   const showLivePlaceholder = view === "live" && !frameSrc && !error;
@@ -275,8 +313,20 @@ export function AgentBrowserPreview({ chatSessionId, onOpenDashboard, preference
                       clientRef.current?.sendWheel(event.deltaY, event.deltaX);
                     }}
                     onKeyDown={sendKeyboard}
+                    onKeyUp={sendKeyboardUp}
                     tabIndex={0}
                   />
+                  {/* Blue activity dot, top-right: pulses while frames are flowing,
+                      i.e. the agent (or user) is actively driving this page. */}
+                  <div
+                    className="agent-browser-activity-dot"
+                    data-active={active || undefined}
+                    title={t("aiChat.browserPreview.activeAgent")}
+                    aria-label={t("aiChat.browserPreview.activeAgent")}
+                    role="status"
+                  >
+                    <span className="agent-browser-activity-pulse" aria-hidden="true" />
+                  </div>
                   {refreshing && (
                     <div className="agent-browser-preview-frame-overlay" aria-hidden="true">
                       <Loader2 size={18} className="spin-icon" />

@@ -24,12 +24,20 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
   const bufferTextRef = useRef(bufferText);
   const renderedSessionIdRef = useRef<string | null>(null);
   const webPromptWrittenRef = useRef(false);
+  const onSessionCreatedRef = useRef(onSessionCreated);
   const upsertTerminalSession = useLuxStore((state) => state.upsertTerminalSession);
   const appendTerminalOutput = useLuxStore((state) => state.appendTerminalOutput);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  // Hold the callback in a ref so its identity churn can't re-trigger session
+  // creation: a parent passing an inline onSessionCreated would otherwise re-run
+  // the create effect before `session` updates and spawn a duplicate PTY.
+  useEffect(() => {
+    onSessionCreatedRef.current = onSessionCreated;
+  }, [onSessionCreated]);
 
   useEffect(() => {
     bufferTextRef.current = bufferText;
@@ -164,7 +172,7 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
       const created = await luxCommands.terminalCreate(undefined, undefined, terminal.cols, terminal.rows);
       if (!disposed) {
         upsertTerminalSession(created, true);
-        onSessionCreated?.(created);
+        onSessionCreatedRef.current?.(created);
       } else {
         void luxCommands.terminalClose(created.id).catch(() => undefined);
       }
@@ -173,21 +181,26 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
     return () => {
       disposed = true;
     };
-  }, [onSessionCreated, session, upsertTerminalSession]);
+  }, [session, upsertTerminalSession]);
 
   useEffect(() => {
+    let disposed = false;
     let dispose: (() => void) | undefined;
     void subscribeLuxEvents((event) => {
       if (event.type !== "terminalOutput") return;
       if (event.session_id !== sessionRef.current?.id) return;
       terminalRef.current?.write(event.data);
     }).then((unlisten) => {
-      dispose = unlisten;
+      if (disposed) unlisten();
+      else dispose = unlisten;
     }).catch((error: unknown) => {
       terminalRef.current?.write(`\r\n${readErrorMessage(error)}\r\n`);
     });
 
-    return () => dispose?.();
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
   }, []);
 
   useEffect(() => {

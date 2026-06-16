@@ -74,7 +74,11 @@ export function buildBrowserInvokeRequest(
 
 export function browserActArgs(command: string, batch?: string[]) {
   if (batch && batch.length > 0) {
-    return ["batch", "--json", JSON.stringify(batch.map((entry) => tokenizeBrowserCommand(entry)))];
+    // agent-browser `batch` argument mode: each positional is a FULL command
+    // string that the CLI tokenizes itself (e.g. `batch "open x" "snapshot -i"`).
+    // We pass the entries verbatim. (The JSON-array shape is stdin-only, and the
+    // native runner spawns with stdin=null, so it cannot be used here.)
+    return ["batch", "--json", ...batch.map((entry) => entry.trim()).filter(Boolean)];
   }
   const tokens = tokenizeBrowserCommand(command);
   if (tokens.length === 0) throw new Error("BrowserAct requires a command.");

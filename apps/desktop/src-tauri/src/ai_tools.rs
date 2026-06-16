@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    process::Stdio,
 };
 
 use chrono::Utc;
@@ -189,6 +190,7 @@ pub async fn ai_file_write(
         }
         Some(document)
     } else {
+        let mut newly_opened = false;
         let existing = {
             let mut documents = state.documents.lock().map_err(lock_error)?;
             let existing = documents.snapshot_for_path(&path).map_err(String::from)?;
@@ -198,7 +200,20 @@ pub async fn ai_file_write(
                         .update_text(document.id, text)
                         .map_err(String::from)?,
                 ),
-                None => None,
+                // Staged (save_to_disk=false) write to a not-yet-open path: open an
+                // in-memory doc and dirty-mark it so the new content is preserved
+                // instead of being silently discarded while we report "file created".
+                None => {
+                    newly_opened = true;
+                    let opened = documents
+                        .open_loaded_file(&path, String::new())
+                        .map_err(String::from)?;
+                    Some(
+                        documents
+                            .update_text(opened.id, text)
+                            .map_err(String::from)?,
+                    )
+                }
             }
         };
         if let Some(document) = &existing {
@@ -208,7 +223,14 @@ pub async fn ai_file_write(
                     document: document.clone(),
                 },
             )?;
-            lsp::forward_document_update(&app, &state, document).await?;
+            // A never-before-opened staged doc needs a didOpen first; sending
+            // didChange (forward_document_update) for an unknown document would
+            // be dropped or rejected by the language server. Mirror ai_file_patch.
+            if newly_opened {
+                lsp::forward_document_open(&app, &state, document).await?;
+            } else {
+                lsp::forward_document_update(&app, &state, document).await?;
+            }
         }
         existing
     };
@@ -345,7 +367,20 @@ pub async fn ai_file_patch(
                                 .map_err(String::from)?,
                             true,
                         ),
-                        None => continue,
+                        // Staged (save_to_disk=false) Create/Rewrite on a not-yet-open
+                        // path: open an in-memory doc and dirty-mark it so the content
+                        // takes effect instead of being skipped while reported applied.
+                        None => {
+                            let opened = documents
+                                .open_loaded_file(&operation.path, String::new())
+                                .map_err(String::from)?;
+                            (
+                                documents
+                                    .update_text(opened.id, after_text)
+                                    .map_err(String::from)?,
+                                true,
+                            )
+                        }
                     };
                     document_events.push((document.clone(), is_new_document));
                     edited_documents.push(document);
@@ -446,11 +481,37 @@ pub async fn ai_file_delete(
         files_created: 0,
         files_deleted: 1,
     };
-    let closed_document = {
+    let closed_documents = {
         let mut documents = state.documents.lock().map_err(lock_error)?;
-        documents.close_path(&path).map_err(String::from)?
+        if metadata.is_dir() {
+            // remove_dir_all wiped a whole subtree: close every open document that
+            // lived under the deleted directory, otherwise those tabs linger with
+            // stale content and their LSP sessions / diagnostics are never cleared.
+            let descendants: Vec<PathBuf> = documents
+                .snapshots()
+                .into_iter()
+                .filter_map(|document| {
+                    document
+                        .path
+                        .filter(|doc_path| doc_path.starts_with(&path))
+                })
+                .collect();
+            let mut closed = Vec::new();
+            for descendant in descendants {
+                if let Some(document) = documents.close_path(&descendant).map_err(String::from)? {
+                    closed.push(document);
+                }
+            }
+            closed
+        } else {
+            documents
+                .close_path(&path)
+                .map_err(String::from)?
+                .into_iter()
+                .collect()
+        }
     };
-    if let Some(document) = &closed_document {
+    for document in &closed_documents {
         emit_event(
             &app,
             LuxEvent::EditorDocumentClosed {
@@ -458,15 +519,31 @@ pub async fn ai_file_delete(
             },
         )?;
     }
-    lsp::forward_document_close(&app, &state, &path).await?;
-    lsp::apply_diagnostics_update(
-        &app,
-        state.inner(),
-        lux_lsp::DiagnosticsUpdate {
-            path: path.clone(),
-            diagnostics: Vec::new(),
-        },
-    )?;
+    if metadata.is_dir() {
+        for document in &closed_documents {
+            if let Some(doc_path) = &document.path {
+                lsp::forward_document_close(&app, &state, doc_path).await?;
+                lsp::apply_diagnostics_update(
+                    &app,
+                    state.inner(),
+                    lux_lsp::DiagnosticsUpdate {
+                        path: doc_path.clone(),
+                        diagnostics: Vec::new(),
+                    },
+                )?;
+            }
+        }
+    } else {
+        lsp::forward_document_close(&app, &state, &path).await?;
+        lsp::apply_diagnostics_update(
+            &app,
+            state.inner(),
+            lux_lsp::DiagnosticsUpdate {
+                path: path.clone(),
+                diagnostics: Vec::new(),
+            },
+        )?;
+    }
     emit_event(&app, LuxEvent::FsChanged { path: path.clone() })?;
     Ok(AiFileOperationResult {
         operation: "delete".to_string(),
@@ -538,35 +615,114 @@ pub async fn ai_shell(
     let started = std::time::Instant::now();
     let mut process = shell_command(&command);
     process.current_dir(&cwd);
-    let output_result = timeout(Duration::from_secs(timeout_secs), process.output()).await;
+    process.stdin(Stdio::null());
+    process.stdout(Stdio::piped());
+    process.stderr(Stdio::piped());
+    // Backstop only: if this future is dropped (cancel/panic) the immediate shell
+    // child is killed. On timeout we additionally tree-kill below, because
+    // kill_on_drop issues a single-PID TerminateProcess/SIGKILL that leaves any
+    // grandchildren spawned by `cmd /C` / `sh -c` running orphaned.
+    process.kill_on_drop(true);
+    // Make the child its own process-group leader (pgid == child pid) so the
+    // timeout group-kill on Unix takes down the whole subtree at once.
+    #[cfg(unix)]
+    process.process_group(0);
+
+    let mut child = match process.spawn() {
+        Ok(child) => child,
+        Err(error) => return Err(format!("Failed to start shell command: {error}")),
+    };
+    let child_pid = child.id();
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+
+    // Own the child explicitly (rather than `process.output()`, which hides the
+    // PID): drain both pipes concurrently to avoid a full-buffer deadlock, then
+    // reap. Borrowing `child` here means a timeout drops only this future's
+    // borrow, leaving the child alive so the tree-kill below can target it.
+    let collect = async {
+        use tokio::io::AsyncReadExt;
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let read_stdout = async {
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut stdout_buf).await;
+            }
+        };
+        let read_stderr = async {
+            if let Some(pipe) = stderr_pipe.as_mut() {
+                let _ = pipe.read_to_end(&mut stderr_buf).await;
+            }
+        };
+        tokio::join!(read_stdout, read_stderr);
+        let status = child.wait().await;
+        (status, stdout_buf, stderr_buf)
+    };
+
+    let output_result = timeout(Duration::from_secs(timeout_secs), collect).await;
     let duration_ms = started.elapsed().as_millis();
 
     match output_result {
-        Ok(Ok(output)) => Ok(AiShellResponse {
+        Ok((Ok(status), stdout_buf, stderr_buf)) => Ok(AiShellResponse {
             workspace_root: root,
             cwd,
             command,
-            exit_code: output.status.code(),
+            exit_code: status.code(),
             duration_ms,
-            stdout: truncate_shell_output(&String::from_utf8_lossy(&output.stdout)),
-            stderr: truncate_shell_output(&String::from_utf8_lossy(&output.stderr)),
+            stdout: truncate_shell_output(&String::from_utf8_lossy(&stdout_buf)),
+            stderr: truncate_shell_output(&String::from_utf8_lossy(&stderr_buf)),
             timed_out: false,
             warnings: safety.warnings,
             read_only: safety.read_only,
         }),
-        Ok(Err(error)) => Err(format!("Failed to start shell command: {error}")),
-        Err(_) => Ok(AiShellResponse {
-            workspace_root: root,
-            cwd,
-            command,
-            exit_code: None,
-            duration_ms,
-            stdout: String::new(),
-            stderr: format!("Shell command timed out after {timeout_secs} seconds"),
-            timed_out: true,
-            warnings: safety.warnings,
-            read_only: safety.read_only,
-        }),
+        Ok((Err(error), _, _)) => Err(format!("Failed to run shell command: {error}")),
+        Err(_) => {
+            // Timed out: `child` is still alive (only the borrow held by `collect`
+            // was dropped). Kill the whole process tree before returning so no
+            // grandchild keeps running orphaned; start_kill backstops the shell.
+            kill_process_tree(child_pid).await;
+            let _ = child.start_kill();
+            Ok(AiShellResponse {
+                workspace_root: root,
+                cwd,
+                command,
+                exit_code: None,
+                duration_ms,
+                stdout: String::new(),
+                stderr: format!("Shell command timed out after {timeout_secs} seconds"),
+                timed_out: true,
+                warnings: safety.warnings,
+                read_only: safety.read_only,
+            })
+        }
+    }
+}
+
+/// Best-effort kill of a timed-out shell command's entire process tree.
+/// `kill_on_drop` only terminates the immediate `cmd.exe`/`sh` child, so any
+/// grandchildren it spawned would otherwise keep running orphaned.
+async fn kill_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        let pid_str = pid.to_string();
+        let mut command = tokio::process::Command::new("taskkill");
+        command
+            .args(["/T", "/F", "/PID", &pid_str])
+            .creation_flags(CREATE_NO_WINDOW);
+        let _ = command.output().await;
+    }
+    #[cfg(not(windows))]
+    {
+        // The child is its own process-group leader (process_group(0)), so its
+        // pgid equals its pid; the leading '-' targets the whole group.
+        let _ = tokio::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid}"))
+            .output()
+            .await;
     }
 }
 
@@ -585,11 +741,15 @@ pub async fn ai_read_file(
             return Err("path is not a file".to_string());
         }
         let size = metadata.len();
-        let limit = usize::try_from(max_bytes.min(size)).unwrap_or(usize::MAX);
-        let mut file = std::fs::File::open(&path).map_err(|e| e.to_string())?;
-        let mut buffer = vec![0; limit];
-        let read = file.read(&mut buffer).map_err(|e| e.to_string())?;
-        buffer.truncate(read);
+        // Bound the read with Take + read_to_end so a short read() can't silently
+        // truncate the content; read_to_end loops until the capped EOF.
+        let limit = max_bytes.min(size);
+        let mut buffer = Vec::new();
+        std::fs::File::open(&path)
+            .map_err(|e| e.to_string())?
+            .take(limit)
+            .read_to_end(&mut buffer)
+            .map_err(|e| e.to_string())?;
         let text = String::from_utf8_lossy(&buffer).into_owned();
         Ok(AiReadFileResult {
             path,
@@ -619,21 +779,30 @@ pub async fn ai_glob(
 ) -> Result<AiGlobResult, String> {
     let root = workspace_root(&state)?;
     let max = max_results.unwrap_or(80).clamp(1, 500);
-    let pattern = pattern.trim().to_lowercase();
-    let entries = tokio::task::spawn_blocking(move || lux_fs::list_files(root, 10_000))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
-    let files: Vec<PathBuf> = entries
-        .into_iter()
-        .filter(|e| matches!(e.kind, lux_core::FsEntryKind::File))
-        .filter(|e| {
-            let path = e.path.to_string_lossy().to_lowercase().replace('\\', "/");
-            path.contains(&pattern)
-        })
-        .take(max)
-        .map(|e| e.path)
-        .collect();
+    let pattern = pattern.trim().to_lowercase().replace('\\', "/");
+    // Push the substring filter into the walk and stop once `max` files match.
+    // This finds matches anywhere in the tree (no pre-filter file-count cap that
+    // would drop late-sorting matches as a misleading "file not found") while
+    // never materializing the entire workspace — only the matched subset.
+    let scan_pattern = pattern.clone();
+    let files: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+        lux_fs::list_files_matching(
+            root,
+            move |path| {
+                path.to_string_lossy()
+                    .to_lowercase()
+                    .replace('\\', "/")
+                    .contains(&scan_pattern)
+            },
+            max,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?
+    .into_iter()
+    .map(|e| e.path)
+    .collect();
     Ok(AiGlobResult {
         pattern: pattern.clone(),
         count: files.len(),
@@ -1082,24 +1251,25 @@ fn filter_symbol_with_budget(
     if *remaining == 0 {
         return None;
     }
-    let children = symbol
-        .children
-        .iter()
-        .filter_map(|child| filter_symbol_with_budget(child, needle, remaining))
-        .collect::<Vec<_>>();
     let matches = symbol.name.to_ascii_lowercase().contains(needle)
         || symbol
             .detail
             .as_deref()
             .is_some_and(|detail| detail.to_ascii_lowercase().contains(needle));
-
-    if !matches && children.is_empty() {
-        return None;
-    }
-    if *remaining == 0 {
-        return None;
-    }
+    // Reserve this node's slot up-front so matched children cannot consume the
+    // budget that retains their parent (which would discard the parent and the
+    // already-matched descendants, and starve later siblings).
     *remaining -= 1;
+    let children = symbol
+        .children
+        .iter()
+        .filter_map(|child| filter_symbol_with_budget(child, needle, remaining))
+        .collect::<Vec<_>>();
+    if !matches && children.is_empty() {
+        // Node is not emitted; return its reserved slot to the pool.
+        *remaining += 1;
+        return None;
+    }
     let mut filtered = symbol.clone();
     filtered.children = children;
     Some(filtered)

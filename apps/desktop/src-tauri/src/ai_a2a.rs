@@ -106,7 +106,8 @@ pub fn ai_blackboard_post(
     Ok(entry)
 }
 
-/// Read messages from a session's blackboard, newest first.
+/// Read messages from a session's blackboard: returns the most recent `limit`
+/// matching entries in chronological (oldest-first) order, so the newest is last.
 /// Optional `topic` filters to a single channel; `limit` caps the result count.
 #[tauri::command]
 pub fn ai_blackboard_read(

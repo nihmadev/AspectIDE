@@ -19,6 +19,10 @@ const HISTORY_SCHEMA_VERSION: u32 = 1;
 /// phase (before any token is emitted) so partial output is never replayed.
 const MAX_TRANSIENT_RETRIES: u32 = 2;
 const MAX_RETRY_DELAY_SECS: u64 = 20;
+/// Hard cap on the SSE reassembly buffer. A server that streams bytes without an
+/// event delimiter (`\n\n`) could otherwise grow this without bound; cutting at
+/// 8 MiB bounds memory against a misbehaving or malicious provider.
+const MAX_SSE_BUFFER: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +126,102 @@ pub struct AiProviderDiagnosticResponse {
     base_url: String,
 }
 
+/// Merge a frontend-provided reasoning payload (e.g. `reasoning_effort` and
+/// `reasoning.effort`) into an outgoing request payload. No-op when reasoning is
+/// absent, null, or not an object — non-reasoning models send `{}`, so the request
+/// shape is unchanged for models that don't support reasoning effort. Canonical
+/// home for this so every native call site (turn loop, compaction, goal eval)
+/// honors the selected effort identically.
+pub fn merge_reasoning(payload: &mut Value, reasoning: Option<&Value>) {
+    let (Some(Value::Object(extra)), Some(target)) = (reasoning, payload.as_object_mut()) else {
+        return;
+    };
+    for (key, value) in extra {
+        target.insert(key.clone(), value.clone());
+    }
+}
+
+/// Build the `/models` listing endpoint from a provider base URL (OpenAI shape),
+/// mirroring `completion_endpoint` so trailing-slash and `/chat/completions` bases
+/// both resolve correctly.
+fn models_endpoint(base_url: &str) -> Result<String, String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err("AI provider base URL is empty".to_string());
+    }
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|error| format!("Invalid AI provider URL: {error}"))?;
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("Unsupported AI provider URL scheme: {scheme}")),
+    }
+    let text = url.as_str().trim_end_matches('/');
+    // Accept a base that already points at chat/completions and rewrite it to /models.
+    let root = text.strip_suffix("/chat/completions").unwrap_or(text);
+    Ok(format!("{root}/models"))
+}
+
+/// Fetch a provider's available model ids from its OpenAI-compatible `/models`
+/// endpoint. Returns the raw `id` strings exactly as the provider reports them —
+/// the frontend decides naming, ordering (e.g. free-first), and context. Nothing
+/// is hardcoded; this is the single source of truth for dynamic model discovery.
+#[tauri::command]
+pub async fn ai_list_provider_models(
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<Vec<String>, String> {
+    let endpoint = models_endpoint(&base_url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let mut builder = client
+        .get(&endpoint)
+        .header(reqwest::header::ACCEPT, "application/json");
+    if let Some(key) = key {
+        builder = builder.bearer_auth(key);
+    }
+    let response = builder
+        .send()
+        .await
+        .map_err(|error| format!("Failed to reach {endpoint}: {error}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Invalid models response: {error}"))?;
+    if !status.is_success() {
+        let detail = body
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("provider returned an error");
+        return Err(format!("Models request failed ({status}): {detail}"));
+    }
+    // OpenAI shape: { data: [ { id, ... } ] }. Some providers return a bare array.
+    let items = body
+        .get("data")
+        .and_then(Value::as_array)
+        .or_else(|| body.as_array())
+        .ok_or_else(|| "Models response had no `data` array".to_string())?;
+    let ids: Vec<String> = items
+        .iter()
+        .filter_map(|item| {
+            item.get("id")
+                .or_else(|| item.get("name"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(ToString::to_string)
+        })
+        .collect();
+    Ok(ids)
+}
+
 pub async fn completion(
     request: AiChatCompletionRequest,
 ) -> Result<AiChatCompletionResponse, String> {
@@ -197,12 +297,20 @@ pub async fn completion(
 /// `choices[0].message` matches the non-streaming shape — so the caller parses
 /// it identically. Connection-phase failures retry; once tokens flow the request
 /// is never replayed.
-pub async fn completion_streaming<F>(
+///
+/// `should_cancel` is polled once per received SSE chunk: when it returns true the
+/// loop stops and the response (and its underlying HTTP connection) is dropped, so
+/// a Stop pressed mid-stream truly aborts the in-flight request instead of draining
+/// the model's full generation. The partial body is returned so the caller's own
+/// post-stream cancellation check can finalize the turn as cancelled.
+pub async fn completion_streaming<F, C>(
     request: AiChatCompletionRequest,
     mut on_delta: F,
+    should_cancel: C,
 ) -> Result<AiChatCompletionResponse, String>
 where
     F: FnMut(&str, &str),
+    C: Fn() -> bool,
 {
     let endpoint = completion_endpoint(&request.base_url)?;
     let client = reqwest::Client::builder()
@@ -268,10 +376,55 @@ where
     let mut accumulator = StreamAccumulator::default();
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    // Carry an incomplete trailing UTF-8 sequence across chunks: bytes_stream()
+    // splits on arbitrary byte boundaries, so decoding each chunk independently
+    // would mangle multibyte code points (Cyrillic/CJK/emoji) into U+FFFD.
+    let mut byte_tail: Vec<u8> = Vec::new();
     'outer: while let Some(chunk) = stream.next().await {
+        // A Stop pressed mid-stream: bail before processing this chunk so the
+        // response (and its in-flight HTTP connection) is dropped instead of
+        // draining the model's full generation. The accumulated-so-far body is
+        // returned; the caller's post-stream cancellation check finalizes it.
+        if should_cancel() {
+            break 'outer;
+        }
         let bytes = chunk.map_err(|error| error.to_string())?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        byte_tail.extend_from_slice(&bytes);
+        // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
+        // invalid byte (e.g. a stray 0xFF from a misbehaving provider) is replaced
+        // with U+FFFD like the old from_utf8_lossy and skipped, instead of pinning
+        // valid_up_to at 0 forever (which would stall emission and grow byte_tail
+        // without bound past MAX_SSE_BUFFER). Looping means valid content *after*
+        // an invalid byte is appended to `buffer` now rather than deferred a chunk
+        // or dropped at end-of-stream, so byte_tail only ever retains an incomplete
+        // trailing code point (<= 3 bytes) carried to the next chunk.
+        loop {
+            let (valid_up_to, invalid_len) = match std::str::from_utf8(&byte_tail) {
+                Ok(text) => {
+                    buffer.push_str(text);
+                    byte_tail.clear();
+                    break;
+                }
+                Err(error) => (error.valid_up_to(), error.error_len()),
+            };
+            if valid_up_to > 0 {
+                buffer.push_str(std::str::from_utf8(&byte_tail[..valid_up_to]).unwrap());
+            }
+            match invalid_len {
+                Some(invalid_len) => {
+                    buffer.push('\u{FFFD}');
+                    byte_tail.drain(..valid_up_to + invalid_len);
+                }
+                None => {
+                    byte_tail.drain(..valid_up_to);
+                    break;
+                }
+            }
+        }
         normalize_sse_buffer_newlines(&mut buffer);
+        if buffer.len() > MAX_SSE_BUFFER {
+            return Err("AI stream buffer exceeded limit".to_string());
+        }
         while let Some(index) = buffer.find("\n\n") {
             let event = buffer[..index].to_string();
             buffer.drain(..index + 2);
@@ -284,6 +437,27 @@ where
             if let Ok(value) = serde_json::from_str::<Value>(&data) {
                 accumulator.ingest(&value, &mut on_delta);
             }
+        }
+    }
+
+    // Flush any trailing bytes (a truncated final code point becomes U+FFFD) so a
+    // final event that ends without a `\n\n` delimiter is still processed below,
+    // instead of being silently dropped when the accumulator is returned.
+    if !byte_tail.is_empty() {
+        buffer.push_str(&String::from_utf8_lossy(&byte_tail));
+    }
+    normalize_sse_buffer_newlines(&mut buffer);
+    while let Some(index) = buffer.find("\n\n") {
+        let event = buffer[..index].to_string();
+        buffer.drain(..index + 2);
+        let Some(data) = sse_event_data(&event) else {
+            continue;
+        };
+        if data.trim() == "[DONE]" {
+            break;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(&data) {
+            accumulator.ingest(&value, &mut on_delta);
         }
     }
 
@@ -688,8 +862,12 @@ async fn stream_completion(
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> Result<StreamCompletion, String> {
     let endpoint = completion_endpoint(&request.base_url)?;
+    // No total request timeout here: a long agent turn may actively stream for
+    // longer than CHAT_TIMEOUT_SECS and must not be aborted mid-generation. The
+    // connection phase is bounded by connect_timeout (and the wrapping send
+    // timeout); genuine stalls are caught by the per-chunk idle timeout below.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
         .build()
         .map_err(|error| error.to_string())?;
     let payload = stream_payload(request.payload);
@@ -757,23 +935,71 @@ async fn stream_completion(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    // Carry an incomplete trailing UTF-8 sequence across chunks: bytes_stream()
+    // splits on arbitrary byte boundaries, so decoding each chunk independently
+    // would mangle multibyte code points (Cyrillic/CJK/emoji) into U+FFFD.
+    let mut byte_tail: Vec<u8> = Vec::new();
     loop {
+        // Per-chunk idle timeout: cuts only stalls (no bytes for CHAT_TIMEOUT_SECS),
+        // never long-but-actively-streaming generations.
         let chunk = tokio::select! {
             _ = &mut cancel_rx => return Ok(StreamCompletion::Cancelled),
-            chunk = stream.next() => chunk,
+            chunk = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS), stream.next()) => match chunk {
+                Ok(chunk) => chunk,
+                Err(_) => return Err("AI stream stalled".to_string()),
+            },
         };
 
         let Some(chunk) = chunk else {
             break;
         };
         let bytes = chunk.map_err(|error| error.to_string())?;
-        buffer.push_str(&String::from_utf8_lossy(&bytes));
+        byte_tail.extend_from_slice(&bytes);
+        // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
+        // invalid byte (e.g. a stray 0xFF from a misbehaving provider) is replaced
+        // with U+FFFD like the old from_utf8_lossy and skipped, instead of pinning
+        // valid_up_to at 0 forever (which would stall emission and grow byte_tail
+        // without bound past MAX_SSE_BUFFER). Looping means valid content *after*
+        // an invalid byte is appended to `buffer` now rather than deferred a chunk
+        // or dropped at end-of-stream, so byte_tail only ever retains an incomplete
+        // trailing code point (<= 3 bytes) carried to the next chunk.
+        loop {
+            let (valid_up_to, invalid_len) = match std::str::from_utf8(&byte_tail) {
+                Ok(text) => {
+                    buffer.push_str(text);
+                    byte_tail.clear();
+                    break;
+                }
+                Err(error) => (error.valid_up_to(), error.error_len()),
+            };
+            if valid_up_to > 0 {
+                buffer.push_str(std::str::from_utf8(&byte_tail[..valid_up_to]).unwrap());
+            }
+            match invalid_len {
+                Some(invalid_len) => {
+                    buffer.push('\u{FFFD}');
+                    byte_tail.drain(..valid_up_to + invalid_len);
+                }
+                None => {
+                    byte_tail.drain(..valid_up_to);
+                    break;
+                }
+            }
+        }
         normalize_sse_buffer_newlines(&mut buffer);
+        if buffer.len() > MAX_SSE_BUFFER {
+            return Err("AI stream buffer exceeded limit".to_string());
+        }
         if emit_stream_sse_events(app, stream_id, &mut buffer)? {
             return Ok(StreamCompletion::Done);
         }
     }
 
+    // Flush any trailing bytes (a truncated final code point becomes U+FFFD) so a
+    // final event that ends without a `\n\n` delimiter is still processed below.
+    if !byte_tail.is_empty() {
+        buffer.push_str(&String::from_utf8_lossy(&byte_tail));
+    }
     normalize_sse_buffer_newlines(&mut buffer);
     if emit_stream_sse_events(app, stream_id, &mut buffer)? {
         return Ok(StreamCompletion::Done);
@@ -851,8 +1077,15 @@ fn emit_stream_sse_event(app: &AppHandle, stream_id: &str, event: &str) -> Resul
         return Ok(true);
     }
 
-    let value = serde_json::from_str::<Value>(&data)
-        .map_err(|error| format!("Invalid AI stream JSON chunk: {error}"))?;
+    // Empty keep-alive (`data:` with no payload) and malformed non-JSON data lines
+    // must be skipped, not propagated: a single bad line would otherwise `?`-abort
+    // the whole turn and discard every token already streamed.
+    if data.trim().is_empty() {
+        return Ok(false);
+    }
+    let Ok(value) = serde_json::from_str::<Value>(&data) else {
+        return Ok(false);
+    };
     emit_stream_event(
         app,
         AiChatStreamEvent {

@@ -503,6 +503,7 @@
 .settings-stepper input {
   width: 100%;
   height: 100%;
+  min-width: 0;
   border: 0;
   border-right: 1px solid var(--border-subtle);
   border-left: 1px solid var(--border-subtle);
@@ -511,6 +512,19 @@
   color: var(--text-0);
   font: 12px/1 var(--font-mono);
   text-align: center;
+  /* Hide the native number-input spinners: the custom +/- buttons replace them.
+     Without this the OS arrows render on top of the +/- column — the visible
+     "кривизна" (doubled/overlapping arrows, squeezed value). */
+  appearance: none;
+  -moz-appearance: textfield;
+  box-sizing: border-box;
+}
+
+.settings-stepper input::-webkit-outer-spin-button,
+.settings-stepper input::-webkit-inner-spin-button {
+  appearance: none;
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .settings-toggle-field {
@@ -933,9 +947,35 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border-subtle);
+}
+
+/* Title must be allowed to shrink so the action buttons never spill past the
+   rounded card edge in the narrow left column. */
+.provider-model-list-head > strong {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.provider-model-list-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.provider-model-refresh-error {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--danger, #e5534b);
+  font-size: 11.5px;
+  line-height: 1.4;
 }
 
 .provider-model-rows {
@@ -976,6 +1016,14 @@
 
 .provider-model-detail {
   padding-bottom: 12px;
+}
+
+/* The head and the effort editor are self-padded; the fields grid sits flush
+   against the card otherwise, so its labels hug the left edge. Inset the grid to
+   match (effort-editor already has its own 12px padding — don't double it). */
+.provider-model-detail > .settings-control-grid {
+  padding-left: 12px;
+  padding-right: 12px;
 }
 
 .provider-model-detail-title {
@@ -1210,4 +1258,101 @@
   .provider-model-manager {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+/* AI Usage */
+.ai-usage-project-list {
+  display: grid;
+  gap: 6px;
+}
+
+.ai-usage-project-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-1);
+}
+
+.ai-usage-project-row[data-active="true"] {
+  border-color: var(--accent);
+  background: var(--accent-softer);
+}
+
+.ai-usage-project-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-usage-project-main strong {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-usage-project-main small {
+  color: var(--text-3);
+  font-size: 11px;
+}
+
+.ai-usage-project-stats {
+  display: flex;
+  gap: 12px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ai-usage-table {
+  display: grid;
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--border-subtle);
+}
+
+.ai-usage-table-head,
+.ai-usage-table-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.9fr) minmax(0, 0.8fr);
+  gap: 10px;
+  align-items: center;
+  padding: 7px 10px;
+  background: var(--bg-0);
+}
+
+.ai-usage-table-head {
+  background: var(--bg-1);
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.ai-usage-table-row {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-usage-table-row .ai-usage-model {
+  overflow: hidden;
+  color: var(--text-1);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-usage-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
 }

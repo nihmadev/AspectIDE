@@ -419,7 +419,7 @@
 .ai-chat-body[data-orchestration-rail] .ai-chat-main {
   position: relative;
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
   overflow: visible;
@@ -2010,6 +2010,25 @@
   }
 }
 
+/* Inside a turn timeline, the thinking indicator is a flat node (no box) so it
+   matches the reasoning/tool nodes and sits on the same left rail. */
+.ai-turn-flow .ai-thinking-indicator {
+  padding: 2px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.ai-turn-flow-pending {
+  margin-top: 2px;
+}
+.ai-turn-flow-pending::before {
+  top: 13px;
+  bottom: 4px;
+}
+.ai-turn-flow-pending > .ai-thinking-indicator::before {
+  top: 7px;
+}
+
 /* AI tool-call cards are styled in ai-tool-calls.css (compact Codex-style design). */
 
 .ai-chat-error,
@@ -3097,6 +3116,281 @@
   }
 }
 
+/* ============================================================================
+   Agent turn timeline — a single connected Codex-style flow.
+   Reasoning, tool calls and the answer become nodes on one left rail, so a
+   turn reads as one continuous stream instead of separate boxed cards.
+   ============================================================================ */
+.ai-turn-flow {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding-left: 19px;
+}
+
+/* The single rail connecting every node of the turn. */
+.ai-turn-flow::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 12px;
+  bottom: 10px;
+  width: 1.5px;
+  background: var(--border-subtle);
+  border-radius: 1px;
+}
+.ai-turn-flow[data-streaming="true"]::before {
+  background: linear-gradient(var(--border-strong), var(--border-subtle));
+}
+
+/* Each direct child is a node; a dot marks it on the rail. */
+.ai-turn-flow > * {
+  position: relative;
+  min-width: 0;
+}
+.ai-turn-flow > *::before {
+  content: "";
+  position: absolute;
+  left: -16.5px;
+  top: 9px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--bg-1);
+  border: 1.5px solid var(--border-strong);
+  z-index: 1;
+}
+
+/* Per-node vertical alignment of the dot with the node's first line. */
+.ai-turn-flow > .ai-reasoning::before { top: 12px; }
+.ai-turn-flow > .ai-tool-calls-group::before { top: 10px; }
+.ai-turn-flow > .ai-chat-message-content::before { top: 7px; }
+
+/* The answer is the turn's result — a solid, filled node. */
+.ai-turn-flow > .ai-chat-message-content::before {
+  background: var(--text-2);
+  border-color: var(--text-2);
+}
+
+/* Active work pulses its node. */
+.ai-turn-flow > .ai-reasoning[data-streaming="true"]::before,
+.ai-turn-flow > .ai-tool-calls-group[data-active]::before {
+  background: var(--text-1);
+  border-color: var(--text-1);
+  box-shadow: 0 0 0 3px var(--hover);
+}
+
+/* ---- Reasoning node: flat line, no box ---- */
+.ai-turn-flow .ai-reasoning {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
+}
+.ai-turn-flow .ai-reasoning-header {
+  padding: 3px 0;
+  gap: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+  font: 600 12px/1.35 var(--font-ui);
+  color: var(--text-2);
+}
+.ai-turn-flow .ai-reasoning-header:hover {
+  background: transparent;
+  color: var(--text-0);
+}
+/* The rail dot replaces the inline brain glyph; keep only the caret. */
+.ai-turn-flow .ai-reasoning-header svg:not(.ai-reasoning-caret) {
+  display: none;
+}
+.ai-turn-flow .ai-reasoning-body {
+  padding: 3px 0 2px;
+  border-top: 0;
+}
+.ai-turn-flow .ai-reasoning-body .ai-chat-message-content {
+  color: var(--text-3);
+  font-style: italic;
+}
+
+/* ---- Tool group node: drop the inner rail dot + uppercase chrome ---- */
+.ai-turn-flow .ai-tool-calls-group {
+  margin: 0;
+  gap: 2px;
+}
+.ai-turn-flow .ai-tool-calls-rail {
+  display: none;
+}
+.ai-turn-flow .ai-tool-calls-summary {
+  padding: 3px 4px 3px 0;
+  text-transform: none;
+  letter-spacing: 0.01em;
+  font-size: 11px;
+}
+
+/* ---- Answer node ---- */
+.ai-turn-flow > .ai-chat-message-content {
+  padding-top: 1px;
+}
+
+/* ============================================================================
+   Turn summary as a quiet footer line (not a card).
+   ============================================================================ */
+.ai-turn-summary-card {
+  margin-top: 6px;
+  margin-left: 19px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  gap: 5px;
+}
+.ai-turn-summary-head {
+  align-items: center;
+  gap: 4px 10px;
+}
+.ai-turn-summary-status {
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.ai-turn-summary-files-head {
+  width: 100%;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.ai-turn-summary-files-head:hover {
+  color: var(--text-0);
+}
+.ai-turn-summary-files-head .ai-turn-summary-files-caret {
+  margin-left: 2px;
+  color: var(--icon-muted);
+  transition: transform 160ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.ai-turn-summary-files-head[aria-expanded="true"] .ai-turn-summary-files-caret {
+  transform: rotate(90deg);
+}
+.ai-turn-summary-files {
+  gap: 4px;
+}
+
+/* ============================================================================
+   Agent orchestration — docked as a slim full-width strip at the top of the
+   chat, in the flow (not a floating island). Goal/progress + tasks + subagents
+   read as one quiet header band above the timeline.
+   ============================================================================ */
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) {
+  position: relative;
+  top: auto;
+  right: auto;
+  width: 100%;
+  max-width: 100%;
+  max-height: 196px;
+  display: grid;
+  grid-template-columns: clamp(220px, 30%, 300px) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: var(--chrome);
+  box-shadow: none;
+  overflow: hidden;
+}
+
+/* The live "now" status spans the full width across the top of the strip. */
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-now-bar {
+  grid-column: 1 / -1;
+  grid-row: 1;
+  border-radius: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  padding-right: 34px;
+}
+
+/* Goal dock anchors the left column below the now-bar. */
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-goal-dock {
+  grid-column: 1;
+  grid-row: 2;
+  border-right: 1px solid var(--border-subtle);
+  padding: 9px 12px;
+  overflow-y: auto;
+}
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-goal-island {
+  text-align: left;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-goal-island-text {
+  text-align: left;
+  -webkit-line-clamp: 2;
+}
+
+/* Tasks / reviews / subagents flow horizontally across the right column. */
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-scroll {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-block {
+  flex: 1 1 0;
+  min-width: 172px;
+  padding: 9px 12px;
+  border-right: 1px solid var(--border-subtle);
+  overflow-y: auto;
+}
+/* Collapse button pins to the strip's top-right. */
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-collapse {
+  top: 6px;
+  right: 6px;
+}
+/* A selected subagent transcript becomes the last horizontal panel. */
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-transcript {
+  flex: 1 1 240px;
+  min-width: 240px;
+  border-left: 1px solid var(--border-subtle);
+  overflow-y: auto;
+}
+
+/* Collapsed strip: a slim full-width bar, not a floating chip. */
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail.ai-agent-rail-collapsed {
+  position: relative;
+  top: auto;
+  right: auto;
+  width: 100%;
+  max-height: none;
+  height: 30px;
+  flex-direction: row;
+  justify-content: flex-start;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: var(--chrome);
+  box-shadow: none;
+}
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail.ai-agent-rail-collapsed .ai-agent-rail-mini {
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+}
+.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail.ai-agent-rail-collapsed .ai-agent-mini-expand {
+  margin-left: auto;
+}
+
 .agent-browser-preview {
   --browser-preview-bg: #1e1e1e;
   --browser-preview-surface: #252525;
@@ -3324,6 +3618,50 @@
   pointer-events: none;
 }
 
+/* Activity indicator — blue dot, top-right of the live frame. Idle = dim/static;
+   active (frames flowing) = bright blue with an expanding pulse ring. */
+.agent-browser-activity-dot {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #3a3f47;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  transition: background 0.25s ease, box-shadow 0.25s ease;
+  z-index: 2;
+}
+
+.agent-browser-activity-dot[data-active] {
+  background: #2f9bff;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.35), 0 0 10px rgba(47, 155, 255, 0.7);
+}
+
+.agent-browser-activity-pulse {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: #2f9bff;
+  opacity: 0;
+}
+
+.agent-browser-activity-dot[data-active] .agent-browser-activity-pulse {
+  animation: agent-browser-activity-ping 1.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+@keyframes agent-browser-activity-ping {
+  0% { transform: scale(1); opacity: 0.55; }
+  80%, 100% { transform: scale(2.6); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-browser-activity-dot[data-active] .agent-browser-activity-pulse {
+    animation: none;
+  }
+}
+
 .agent-browser-preview-dashboard {
   width: 100%;
   height: 100%;
@@ -3507,6 +3845,61 @@
   word-break: break-word;
 }
 
+/* Review-request badge: replaces the raw review prompt in the transcript. */
+.ai-chat-review-request {
+  background: transparent;
+}
+
+.ai-chat-review-badge {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: var(--surface-0);
+}
+
+.ai-chat-review-badge-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--accent-softer, rgba(126, 168, 216, 0.16));
+  color: var(--accent, #7ea8d8);
+}
+
+.ai-chat-review-badge-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ai-chat-review-badge-copy strong {
+  color: var(--text-1);
+  font: 600 12.5px/1.3 var(--font-ui);
+}
+
+.ai-chat-review-badge-copy small {
+  overflow: hidden;
+  color: var(--text-3);
+  font: 11px/1.35 var(--font-ui);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-chat-review-badge time {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font: 10.5px/1 var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
 .ai-mention-menu {
   position: absolute;
   right: 0;
@@ -3653,6 +4046,457 @@
 
 .ai-plan-handoff .primary {
   flex-shrink: 0;
+}
+
+/* ── Proposed plan card (PresentPlan) ── */
+.ai-plan-card {
+  margin: 4px 12px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-0);
+  overflow: hidden;
+}
+
+.ai-plan-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 13px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ai-plan-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--accent-softer, rgba(126, 168, 216, 0.16));
+  color: var(--accent, #7ea8d8);
+}
+
+.ai-plan-card-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-plan-card-copy strong {
+  color: var(--text-1);
+  font: 600 13px/1.3 var(--font-ui);
+}
+
+.ai-plan-card-copy p {
+  margin: 0;
+  color: var(--text-3);
+  font: 11.5px/1.45 var(--font-ui);
+}
+
+.ai-plan-card-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--text-2);
+  font: 600 11px/1 var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-plan-steps {
+  margin: 0;
+  padding: 6px;
+  list-style: none;
+  counter-reset: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-plan-step {
+  border-radius: 8px;
+}
+
+.ai-plan-step[data-open] {
+  background: var(--surface-1);
+}
+
+.ai-plan-step-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.ai-plan-step-head[data-static] {
+  cursor: default;
+}
+
+.ai-plan-step-head:not([data-static]):hover {
+  background: var(--surface-1);
+}
+
+.ai-plan-step-index {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--surface-1);
+  color: var(--text-2);
+  font: 600 10.5px/1 var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-plan-step[data-open] .ai-plan-step-index {
+  background: var(--accent-softer, rgba(126, 168, 216, 0.16));
+  color: var(--accent, #7ea8d8);
+}
+
+.ai-plan-step-title {
+  flex: 1;
+  min-width: 0;
+  font: 12px/1.4 var(--font-ui);
+}
+
+.ai-plan-step-chevron {
+  display: flex;
+  flex-shrink: 0;
+  color: var(--text-3);
+  transition: transform 0.15s ease;
+}
+
+.ai-plan-step[data-open] .ai-plan-step-chevron {
+  transform: rotate(90deg);
+}
+
+.ai-plan-step-body {
+  padding: 0 10px 9px 36px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-plan-step-body p {
+  margin: 0;
+  color: var(--text-2);
+  font: 11.5px/1.5 var(--font-ui);
+}
+
+.ai-plan-step-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  align-self: flex-start;
+  padding: 3px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--surface-0);
+  color: var(--text-2);
+  font: 10.5px/1 var(--font-mono, monospace);
+  cursor: pointer;
+}
+
+.ai-plan-step-file:hover {
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+.ai-plan-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ai-plan-card-tip {
+  flex: 1;
+  color: var(--text-3);
+  font: 11px/1.35 var(--font-ui);
+}
+
+.ai-plan-card-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  color: var(--accent, #7ea8d8);
+  font: 600 11.5px/1 var(--font-ui);
+}
+
+.ai-plan-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 6px 13px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent, #7ea8d8);
+  color: var(--accent-contrast, #0c0c0c);
+  font: 600 12px/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.ai-plan-start:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ai-plan-start:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Interactive question card (AskUser) ── */
+.ai-question-card {
+  margin: 4px 12px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  background: var(--surface-0);
+  overflow: hidden;
+}
+
+.ai-question-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 12px 10px;
+}
+
+.ai-question-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 7px;
+  background: var(--accent-softer, rgba(126, 168, 216, 0.16));
+  color: var(--accent, #7ea8d8);
+}
+
+.ai-question-card-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-question-card-copy strong {
+  color: var(--text-1);
+  font: 600 13px/1.35 var(--font-ui);
+}
+
+.ai-question-card-copy p {
+  margin: 0;
+  color: var(--text-3);
+  font: 11.5px/1.45 var(--font-ui);
+}
+
+.ai-question-card-dismiss {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.ai-question-card-dismiss:hover {
+  background: var(--surface-1);
+  color: var(--text-1);
+}
+
+.ai-question-preview {
+  margin: 0 12px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  overflow: hidden;
+  background: var(--surface-1);
+}
+
+.ai-question-preview-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--text-2);
+  font: 600 11px/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.ai-question-preview-hint {
+  margin-left: auto;
+  color: var(--text-3);
+  font-weight: 400;
+}
+
+.ai-question-preview-frame {
+  display: block;
+  width: 100%;
+  height: 260px;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: #fff;
+}
+
+.ai-question-options {
+  margin: 0;
+  padding: 0 12px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-question-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 9px;
+  background: var(--surface-0);
+  color: var(--text-1);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.ai-question-option:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+}
+
+.ai-question-option[data-selected] {
+  border-color: var(--accent-soft, rgba(126, 168, 216, 0.5));
+  background: var(--accent-softer, rgba(126, 168, 216, 0.14));
+}
+
+.ai-question-option-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 50%;
+  color: var(--accent-contrast, #0c0c0c);
+}
+
+.ai-question-option-marker[data-multi] {
+  border-radius: 5px;
+}
+
+.ai-question-option[data-selected] .ai-question-option-marker {
+  border-color: var(--accent, #7ea8d8);
+  background: var(--accent, #7ea8d8);
+}
+
+.ai-question-option-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ai-question-option-label {
+  font: 12px/1.4 var(--font-ui);
+}
+
+.ai-question-option-desc {
+  color: var(--text-3);
+  font: 11px/1.4 var(--font-ui);
+}
+
+.ai-question-custom {
+  padding: 10px 12px 0;
+}
+
+.ai-question-custom-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--surface-1);
+  color: var(--text-1);
+  font: 12px/1.5 var(--font-ui);
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.ai-question-custom-input:focus {
+  outline: none;
+  border-color: var(--accent-soft, rgba(126, 168, 216, 0.5));
+}
+
+.ai-question-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px 12px;
+}
+
+.ai-question-card-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  color: var(--text-3);
+  font: 11px/1 var(--font-ui);
+}
+
+.ai-question-send {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: 7px;
+  background: var(--accent, #7ea8d8);
+  color: var(--accent-contrast, #0c0c0c);
+  font: 600 12px/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.ai-question-send:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.ai-question-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .ai-file-review-bar {

@@ -18,6 +18,9 @@ export type PersistedPendingFileReview = {
   acceptedHunkIds: string[];
   createdAt: number;
   status: PendingFileReviewStatus;
+  /** True when before/afterText was clipped by persistence; the body is no longer
+   *  faithful so it must never be written back to disk on accept/reject. */
+  textTruncated?: boolean;
 };
 
 export type PendingFileReview = {
@@ -35,12 +38,48 @@ export type PendingFileReview = {
   acceptedHunkIds: string[];
   createdAt: number;
   status: PendingFileReviewStatus;
+  /** Carried from persistence: when true the stored text was clipped and is unsafe to write back. */
+  textTruncated?: boolean;
 };
 
 type PendingFileReviewListener = () => void;
 
+/** Max retained pending reviews per session. Scoped per-session so a flood in one
+ *  session can never silently evict another session's un-reviewed edits. */
+const MAX_REVIEWS_PER_SESSION = 48;
+
 let reviews: PendingFileReview[] = [];
 const listeners = new Set<PendingFileReviewListener>();
+/** Reviews currently mid IPC write; blocks a concurrent accept+reject on the same id from racing the disk write. */
+const reviewsInFlight = new Set<string>();
+/** Per-path write chains. The reviewId guard above only stops same-id double-processing, but two
+ *  distinct reviews can target the SAME path (registerPendingFileReview dedups per session+path,
+ *  so cross-session same-path reviews coexist). Serializing writes by normalized path stops their
+ *  aiFilePatch rewrites from racing and clobbering each other. */
+const pathWriteChains = new Map<string, Promise<unknown>>();
+
+/** Run `task` only after any in-flight write to the same `path` settles, so concurrent
+ *  accept/reject rewrites of distinct reviews targeting one file cannot clobber each other.
+ *  The chain swallows errors for sequencing purposes while the original result still surfaces
+ *  to the caller; the map entry is cleared once this task is the settled tail. */
+function serializeByPath<T>(path: string, task: () => Promise<T>): Promise<T> {
+  // Key on the normalized path so two reviews targeting the same file via different
+  // representations (case / backslash-vs-slash) still share one chain. register dedups
+  // and listPendingFileReviewsForPath match on normalizePathKey, so cross-session same-path
+  // reviews can store differing raw `path` strings; a raw-path key would let them race.
+  const key = normalizePathKey(path);
+  const prev = pathWriteChains.get(key) ?? Promise.resolve();
+  const run = prev.then(task, task);
+  const chain = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  pathWriteChains.set(key, chain);
+  void chain.finally(() => {
+    if (pathWriteChains.get(key) === chain) pathWriteChains.delete(key);
+  });
+  return run;
+}
 
 export function subscribePendingFileReviews(listener: PendingFileReviewListener) {
   listeners.add(listener);
@@ -77,20 +116,26 @@ export function hydratePendingFileReviews(entries: PersistedPendingFileReview[])
 export function exportPendingFileReviewsForPersistence(maxTextChars = 12_000): PersistedPendingFileReview[] {
   return reviews
     .filter((review) => review.status === "pending")
-    .map((review) => ({
-      id: review.id,
-      sessionId: review.sessionId,
-      path: review.path,
-      relativePath: review.relativePath,
-      toolName: review.toolName,
-      toolCallId: review.toolCallId,
-      beforeText: truncateForPersist(review.beforeText, maxTextChars),
-      afterText: truncateForPersist(review.afterText, maxTextChars),
-      previewOnly: review.previewOnly,
-      acceptedHunkIds: review.acceptedHunkIds,
-      createdAt: review.createdAt,
-      status: review.status,
-    }));
+    .map((review) => {
+      const beforeText = truncateForPersist(review.beforeText, maxTextChars);
+      const afterText = truncateForPersist(review.afterText, maxTextChars);
+      const textTruncated = beforeText !== review.beforeText || afterText !== review.afterText;
+      return {
+        id: review.id,
+        sessionId: review.sessionId,
+        path: review.path,
+        relativePath: review.relativePath,
+        toolName: review.toolName,
+        toolCallId: review.toolCallId,
+        beforeText,
+        afterText,
+        previewOnly: review.previewOnly,
+        acceptedHunkIds: review.acceptedHunkIds,
+        createdAt: review.createdAt,
+        status: review.status,
+        textTruncated,
+      };
+    });
 }
 
 export function registerPendingFileReview(input: Omit<PendingFileReview, "id" | "createdAt" | "status" | "hunks" | "acceptedHunkIds"> & {
@@ -112,7 +157,13 @@ export function registerPendingFileReview(input: Omit<PendingFileReview, "id" | 
     createdAt: Date.now(),
     status: "pending",
   };
-  reviews = [entry, ...reviews].slice(0, 48);
+  const perSessionCount = new Map<string, number>();
+  reviews = [entry, ...reviews].filter((review) => {
+    const count = perSessionCount.get(review.sessionId) ?? 0;
+    if (count >= MAX_REVIEWS_PER_SESSION) return false;
+    perSessionCount.set(review.sessionId, count + 1);
+    return true;
+  });
   const todos = listAiSessionTodos(input.sessionId);
   const activeTodo = todos.find((todo) => todo.status === "in_progress") ?? todos.find((todo) => todo.status === "pending");
   if (activeTodo && !activeTodo.linkedFilePath) {
@@ -125,17 +176,32 @@ export function registerPendingFileReview(input: Omit<PendingFileReview, "id" | 
 export async function acceptPendingFileReview(reviewId: string) {
   const review = reviews.find((entry) => entry.id === reviewId);
   if (!review || review.status !== "pending") return;
-  const mergedText = applyAcceptedHunks(review.beforeText, review.afterText, new Set(review.acceptedHunkIds));
-  if (review.previewOnly || mergedText !== review.afterText) {
-    await luxCommands.aiFilePatch([{
-      action: "rewrite",
-      path: review.path,
-      text: mergedText,
-      overwrite: true,
-    }], true, false);
+  if (reviewsInFlight.has(reviewId)) return;
+  reviewsInFlight.add(reviewId);
+  try {
+    await serializeByPath(review.path, async () => {
+      // A persistence-truncated body is no longer faithful to the real file; rewriting it
+      // would destroy content past the clip point. Discard the review without writing.
+      if (review.textTruncated) {
+        reviews = reviews.filter((entry) => entry.id !== reviewId);
+        emit();
+        throw new Error("This review was truncated when the session was saved and can no longer be applied safely. Re-run the edit.");
+      }
+      const mergedText = applyAcceptedHunks(review.beforeText, review.afterText, new Set(review.acceptedHunkIds));
+      if (review.previewOnly || mergedText !== review.afterText) {
+        await luxCommands.aiFilePatch([{
+          action: "rewrite",
+          path: review.path,
+          text: mergedText,
+          overwrite: true,
+        }], true, false);
+      }
+      reviews = reviews.filter((entry) => entry.id !== reviewId);
+      emit();
+    });
+  } finally {
+    reviewsInFlight.delete(reviewId);
   }
-  reviews = reviews.filter((entry) => entry.id !== reviewId);
-  emit();
 }
 
 export async function acceptPendingFileReviewHunk(reviewId: string, hunkId: string) {
@@ -161,14 +227,27 @@ export async function rejectPendingFileReviewHunk(reviewId: string, hunkId: stri
 export async function rejectPendingFileReview(reviewId: string) {
   const review = reviews.find((entry) => entry.id === reviewId);
   if (!review || review.status !== "pending") return;
-  await luxCommands.aiFilePatch([{
-    action: "rewrite",
-    path: review.path,
-    text: review.beforeText,
-    overwrite: true,
-  }], true, false);
-  reviews = reviews.filter((entry) => entry.id !== reviewId);
-  emit();
+  if (reviewsInFlight.has(reviewId)) return;
+  reviewsInFlight.add(reviewId);
+  try {
+    await serializeByPath(review.path, async () => {
+      // previewOnly reviews never touched disk, so there is nothing to revert.
+      // Truncated reviews carry an unfaithful beforeText that must not be written back —
+      // restoring it would corrupt the file, so drop the review without rewriting.
+      if (!review.previewOnly && !review.textTruncated) {
+        await luxCommands.aiFilePatch([{
+          action: "rewrite",
+          path: review.path,
+          text: review.beforeText,
+          overwrite: true,
+        }], true, false);
+      }
+      reviews = reviews.filter((entry) => entry.id !== reviewId);
+      emit();
+    });
+  } finally {
+    reviewsInFlight.delete(reviewId);
+  }
 }
 
 export function removePendingFileReviewsForSession(sessionId: string) {
@@ -182,7 +261,11 @@ export async function acceptAllPendingFileReviews(sessionId?: string) {
     ? reviews.filter((review) => review.sessionId === sessionId && review.status === "pending")
     : reviews.filter((review) => review.status === "pending");
   for (const review of pending) {
-    await acceptPendingFileReview(review.id);
+    try {
+      await acceptPendingFileReview(review.id);
+    } catch {
+      // keep processing remaining reviews; a single fs error must not strand the rest
+    }
   }
 }
 
@@ -191,7 +274,11 @@ export async function rejectAllPendingFileReviews(sessionId?: string) {
     ? [...reviews].filter((review) => review.sessionId === sessionId && review.status === "pending")
     : [...reviews].filter((review) => review.status === "pending");
   for (const review of pending) {
-    await rejectPendingFileReview(review.id);
+    try {
+      await rejectPendingFileReview(review.id);
+    } catch {
+      // keep processing remaining reviews; a single fs error must not strand the rest
+    }
   }
 }
 

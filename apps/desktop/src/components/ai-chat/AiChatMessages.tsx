@@ -1,4 +1,4 @@
-import { Brain, ChevronRight, Copy } from "lucide-react";
+import { Brain, ChevronRight, Copy, SearchCheck } from "lucide-react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import { Fragment, memo, useEffect, useMemo, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -13,7 +13,7 @@ import { AiTurnSummaryCard } from "./AiTurnSummaryCard";
 import { AiThinkingIndicator, isPendingAssistantShell } from "./AiThinkingIndicator";
 import type { AiChatSessionStatus } from "../../lib/store";
 import * as chatDisplayText from "../../lib/aiChatDisplayText";
-import type { AiChatMessage, AiChatMessageAttachment, AiChatResponseTiming, AiMessageSegment, AiToolApprovalDecision } from "../../lib/aiChatTypes";
+import { isReviewRequestMessage, type AiChatMessage, type AiChatMessageAttachment, type AiChatResponseTiming, type AiMessageSegment, type AiToolApprovalDecision } from "../../lib/aiChatTypes";
 
 const coerceChatMessageText =
   chatDisplayText.coerceChatMessageText
@@ -66,12 +66,6 @@ export function AiChatMessages({
     overscan: 5,
   });
   const virtualItems = virtualizer.getVirtualItems();
-
-  useEffect(() => {
-    if (!streamingMessageId || messages.length < 40) return;
-    const index = messages.findIndex((entry) => entry.id === streamingMessageId);
-    if (index >= 0) virtualizer.measure();
-  }, [messages, streamingMessageId, virtualizer]);
 
   const lastAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -173,6 +167,20 @@ const AiChatMessageView = memo(function AiChatMessageView({
   onReview?: () => void;
 }) {
   const pendingShell = isPendingAssistantShell(message, streaming);
+  if (isReviewRequestMessage(message)) {
+    return (
+      <article className="ai-chat-message ai-chat-review-request" data-role="user">
+        <div className="ai-chat-review-badge" role="note">
+          <span className="ai-chat-review-badge-icon" aria-hidden="true"><SearchCheck size={15} /></span>
+          <span className="ai-chat-review-badge-copy">
+            <strong>{t("aiChat.review.requestTitle")}</strong>
+            <small>{t("aiChat.review.requestSubtitle")}</small>
+          </span>
+          <time>{formatMessageTime(message.timestamp)}</time>
+        </div>
+      </article>
+    );
+  }
   if (isCompactionCheckpointMessage(message)) {
     return (
       <article className="ai-chat-message ai-chat-compaction-checkpoint" data-role="system">
@@ -190,11 +198,7 @@ const AiChatMessageView = memo(function AiChatMessageView({
   return (
     <article className="ai-chat-message" data-role={message.role} data-pending={pendingShell || undefined}>
       {pendingShell ? (
-        <div className="ai-chat-message-pending-row">
-          <div className="ai-chat-message-meta">
-            <span>{t("aiChat.role.assistant")}</span>
-            <time>{formatMessageTime(message.timestamp)}</time>
-          </div>
+        <div className="ai-turn-flow ai-turn-flow-pending" data-streaming="true">
           <AiThinkingIndicator status={sessionStatus} t={t} compact />
         </div>
       ) : (
@@ -238,7 +242,37 @@ const AiChatMessageView = memo(function AiChatMessageView({
       )}
     </article>
   );
-});
+}, areMessageViewPropsEqual);
+
+// Custom memo comparator. The parent re-renders on every streamed token and passes
+// fresh handler closures + a new `messages` array each time; a shallow compare would
+// then re-render EVERY row per token. Message objects are immutable (new ref on any
+// change), so identity-comparing `message` plus the few primitives that actually alter
+// this row's output lets unchanged rows bail out — only the streaming message re-renders
+// while tokens arrive. Handler props are intentionally excluded: they are behavior-stable
+// (same effect regardless of closure identity).
+function areMessageViewPropsEqual(
+  prev: Readonly<{ message: AiChatMessage; streaming: boolean; showResponseDuration: boolean; canMutateHistory: boolean; canRestoreUserMessage: (id: string) => boolean; canStopAfterTool?: boolean; sessionStatus: AiChatSessionStatus; contextCompaction?: ContextCompactionState | null; workspaceRoot: string | null; t: TranslateFn; onReview?: () => void }>,
+  next: Readonly<{ message: AiChatMessage; streaming: boolean; showResponseDuration: boolean; canMutateHistory: boolean; canRestoreUserMessage: (id: string) => boolean; canStopAfterTool?: boolean; sessionStatus: AiChatSessionStatus; contextCompaction?: ContextCompactionState | null; workspaceRoot: string | null; t: TranslateFn; onReview?: () => void }>,
+) {
+  return (
+    prev.message === next.message
+    && prev.streaming === next.streaming
+    && prev.showResponseDuration === next.showResponseDuration
+    && prev.canMutateHistory === next.canMutateHistory
+    // Restore-eligibility is read during render via canRestoreUserMessage(message.id);
+    // compare its identity so a turn-checkpoint change still refreshes the row. The
+    // panel memoizes it (useCallback), so this stays a cheap reference check.
+    && prev.canRestoreUserMessage === next.canRestoreUserMessage
+    && prev.canStopAfterTool === next.canStopAfterTool
+    && prev.sessionStatus === next.sessionStatus
+    && prev.contextCompaction === next.contextCompaction
+    && prev.workspaceRoot === next.workspaceRoot
+    && prev.t === next.t
+    // onReview only affects the last assistant row; presence (not identity) is what matters.
+    && Boolean(prev.onReview) === Boolean(next.onReview)
+  );
+}
 
 function formatResponseDuration(durationMs: number, t: TranslateFn) {
   return t("aiChat.responseDuration", {
@@ -284,52 +318,59 @@ function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
     <AiMessageAttachmentGallery attachments={message.attachments} t={t} />
   ) : null;
   const segments = message.segments;
+
+  const flowNodes: ReactNode[] = [];
   if (!segments || segments.length === 0) {
-    return (
-      <>
-        {attachmentGallery}
-        {message.reasoning && message.reasoning.trim().length > 0 && (
-          <AiReasoningBlock text={coerceChatMessageText(message.reasoning)} streaming={streaming} hasAnswer={Boolean(coerceChatMessageText(message.content).trim())} t={t} />
-        )}
-        {message.toolCalls && message.toolCalls.length > 0 && <AiToolCallsGroup onApprovalDecision={onApprovalDecision} t={t} toolCalls={message.toolCalls} />}
-        {message.content ? <MarkdownMessage content={message.content} t={t} /> : null}
-      </>
-    );
+    if (message.reasoning && message.reasoning.trim().length > 0) {
+      flowNodes.push(
+        <AiReasoningBlock key="reasoning" text={coerceChatMessageText(message.reasoning)} streaming={streaming} hasAnswer={Boolean(coerceChatMessageText(message.content).trim())} t={t} />,
+      );
+    }
+    if (message.toolCalls && message.toolCalls.length > 0) {
+      flowNodes.push(<AiToolCallsGroup key="tools" onApprovalDecision={onApprovalDecision} t={t} toolCalls={message.toolCalls} />);
+    }
+    if (message.content) {
+      flowNodes.push(<MarkdownMessage key="answer" content={message.content} t={t} />);
+    }
+  } else {
+    let toolBatch: AiMessageSegment[] = [];
+    const flushTools = (key: string) => {
+      if (toolBatch.length === 0) return;
+      const toolCalls = toolBatch.map((segment) => segment.kind === "tool" ? segment.toolCall : null).filter((call): call is NonNullable<typeof call> => Boolean(call));
+      flowNodes.push(<AiToolCallsGroup key={`tools-${key}`} onApprovalDecision={onApprovalDecision} t={t} toolCalls={toolCalls} />);
+      toolBatch = [];
+    };
+
+    segments.forEach((segment, index) => {
+      if (segment.kind === "tool") {
+        toolBatch.push(segment);
+        return;
+      }
+      flushTools(`${index}`);
+      if (segment.kind === "reasoning") {
+        if (segment.text.trim().length === 0) return;
+        const isLast = index === segments.length - 1;
+        const followedByAnswer = segments.slice(index + 1).some((entry) => entry.kind === "text" && entry.text.trim().length > 0);
+        flowNodes.push(
+          <AiReasoningBlock key={segment.id} text={coerceChatMessageText(segment.text)} streaming={streaming && isLast} hasAnswer={followedByAnswer} t={t} />,
+        );
+        return;
+      }
+      if (segment.text.trim().length === 0) return;
+      flowNodes.push(<MarkdownMessage key={segment.id} content={coerceChatMessageText(segment.text)} t={t} />);
+    });
+    flushTools("tail");
   }
 
-  const blocks: ReactNode[] = [];
-  let toolBatch: AiMessageSegment[] = [];
-  const flushTools = (key: string) => {
-    if (toolBatch.length === 0) return;
-    const toolCalls = toolBatch.map((segment) => segment.kind === "tool" ? segment.toolCall : null).filter((call): call is NonNullable<typeof call> => Boolean(call));
-    blocks.push(<AiToolCallsGroup key={`tools-${key}`} onApprovalDecision={onApprovalDecision} t={t} toolCalls={toolCalls} />);
-    toolBatch = [];
-  };
-
-  segments.forEach((segment, index) => {
-    if (segment.kind === "tool") {
-      toolBatch.push(segment);
-      return;
-    }
-    flushTools(`${index}`);
-    if (segment.kind === "reasoning") {
-      if (segment.text.trim().length === 0) return;
-      const isLast = index === segments.length - 1;
-      const followedByAnswer = segments.slice(index + 1).some((entry) => entry.kind === "text" && entry.text.trim().length > 0);
-      blocks.push(
-        <AiReasoningBlock key={segment.id} text={coerceChatMessageText(segment.text)} streaming={streaming && isLast} hasAnswer={followedByAnswer} t={t} />,
-      );
-      return;
-    }
-    if (segment.text.trim().length === 0) return;
-    blocks.push(<MarkdownMessage key={segment.id} content={coerceChatMessageText(segment.text)} t={t} />);
-  });
-  flushTools("tail");
-
+  // Assistant turns render as a single connected timeline (reasoning → tools →
+  // answer), tied together by one left rail. User messages stay a plain bubble.
+  if (message.role === "assistant") {
+    return <div className="ai-turn-flow" data-streaming={streaming || undefined}>{flowNodes}</div>;
+  }
   return (
     <>
       {attachmentGallery}
-      {blocks}
+      {flowNodes}
     </>
   );
 }

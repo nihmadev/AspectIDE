@@ -124,6 +124,10 @@ function registerReviewFromFileOperation(
   previewOnly: boolean,
 ) {
   if (!path || !result.changedPaths.includes(path)) return;
+  // Automatic mode is full autonomy: edits are already written to disk and there is
+  // no user to Accept/Reject, so a pending-review queue would only accumulate
+  // unactionable entries. Turn checkpoints still cover rollback. Skip registration.
+  if (input.preferences.agentMode === "automatic") return;
   const edited = result.editedDocuments.find((document) => document.path && normalizePathForCompare(document.path) === normalizePathForCompare(path));
   const afterText = edited?.text ?? beforeText;
   if (beforeText === afterText) return;

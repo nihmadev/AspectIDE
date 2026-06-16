@@ -26,6 +26,12 @@ export type SubagentRun = {
   endedAt: number | null;
   summary: string;
   transcript: SubagentTranscriptEntry[];
+  /** Monotonic count of transcript entries ever appended. Unlike transcript.length
+   *  (capped at 48) this never decreases, so it yields collision-free entry ids. */
+  transcriptSeq: number;
+  /** Bumped on every mutation (append/status/summary). The rail's value-stable
+   *  signature reads this so live updates keep flowing past the 48-entry cap. */
+  revision: number;
 };
 
 type SubagentListener = () => void;
@@ -72,6 +78,8 @@ export function registerSubagentRun(input: {
     endedAt: null,
     summary: "",
     transcript: [],
+    transcriptSeq: 0,
+    revision: 0,
   });
   abortControllers.set(input.id, input.abortController);
   emit();
@@ -80,14 +88,17 @@ export function registerSubagentRun(input: {
 export function appendSubagentTranscript(id: string, content: string, role: SubagentTranscriptEntry["role"] = "assistant") {
   const run = runs.get(id);
   if (!run || !content.trim()) return;
+  const seq = run.transcriptSeq + 1;
   const entry: SubagentTranscriptEntry = {
-    id: `${id}-${run.transcript.length}`,
+    // Monotonic seq, not transcript.length: the latter pins at 48 once capped and would
+    // recycle ids, producing duplicate React keys in the transcript panel.
+    id: `${id}-${seq}`,
     role,
     content: content.trim(),
     at: Date.now(),
   };
   const transcript = [...run.transcript, entry].slice(-48);
-  runs.set(id, { ...run, transcript });
+  runs.set(id, { ...run, transcript, transcriptSeq: seq, revision: run.revision + 1 });
   emit();
 }
 
@@ -100,7 +111,7 @@ const MAX_RUNS_PER_SESSION = 32;
 export function completeSubagentRun(id: string, summary: string, status: SubagentRunStatus = "completed") {
   const run = runs.get(id);
   if (!run) return;
-  runs.set(id, { ...run, status, summary, endedAt: Date.now() });
+  runs.set(id, { ...run, status, summary, endedAt: Date.now(), revision: run.revision + 1 });
   abortControllers.delete(id);
   pruneSubagentRuns(run.sessionId);
   emit();
@@ -122,7 +133,7 @@ export function cancelSubagentRun(id: string) {
   controller?.abort();
   const run = runs.get(id);
   if (run) {
-    runs.set(id, { ...run, status: "cancelled", endedAt: Date.now(), summary: "Cancelled" });
+    runs.set(id, { ...run, status: "cancelled", endedAt: Date.now(), summary: "Cancelled", revision: run.revision + 1 });
   }
   abortControllers.delete(id);
   emit();

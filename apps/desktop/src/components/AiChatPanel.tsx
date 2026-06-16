@@ -7,6 +7,8 @@ import { AiChatHistoryPopover } from "./ai-chat/AiChatHistoryPopover";
 import { AiChatMessages } from "./ai-chat/AiChatMessages";
 
 import { AiAgentOrchestrationRail } from "./ai-chat/AiAgentOrchestrationRail";
+import { AiQuestionCard } from "./ai-chat/AiQuestionCard";
+import { AiPlanCard } from "./ai-chat/AiPlanCard";
 import { AiSubagentPanel } from "./ai-chat/AiSubagentPanel";
 import { AiAutomaticChecklist } from "./ai-chat/AiAutomaticChecklist";
 import { buildContextDropSummary } from "../lib/aiChatContextReport";
@@ -96,10 +98,13 @@ import {
 import { buildMentionRuntimeAttachments, collectMentionHints } from "../lib/aiChatMentionAttachments";
 import { applyMentionSelection, mentionMenuVisible, parseMentionQuery, searchMentionCandidates, type AiMentionCandidate } from "../lib/aiChatMentions";
 import { buildPlanHandoffUserMessage, extractPlanHandoffPayload } from "../lib/aiChatPlanHandoff";
+import { clearPendingPlan, getPendingPlanForSession, getPendingPlansSnapshot, subscribePendingPlans } from "../lib/aiPendingPlan";
+import { getPendingQuestionForSession, getPendingQuestionsSnapshot, settlePendingQuestion, subscribePendingQuestions } from "../lib/aiPendingQuestion";
 import { readEditorDocumentAttachment, readSelectionAttachment } from "../lib/aiChatDocumentAttachment";
 import { formatSelectionLabel, getEditorSelectionSnapshot } from "../lib/editorSelectionBridge";
 import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
 import { runNativeChatTurn } from "../lib/aiNativeTurn";
+import { appendAiUsageLogEntry } from "../lib/aiUsageLog";
 import { dragEventHasEditorTab, readEditorTabDrop } from "../lib/editorChatBridge";
 import {
   abortAiChatTurn,
@@ -133,6 +138,34 @@ type AiChatPanelProps = {
   presentation?: "panel" | "agent";
   showCloseButton?: boolean;
 };
+
+/**
+ * Append a completed assistant turn to the persisted usage log (model, project,
+ * speed, tokens, cost). Reads provider/model/workspace fresh from the store so it
+ * is closure-safe inside the turn `finally` block. Best-effort: never throws into
+ * the turn lifecycle.
+ */
+function recordAiUsageLogEntry(assistant: AiChatMessage | null | undefined) {
+  const usage = assistant?.turnUsage;
+  if (!usage) return;
+  const state = useLuxStore.getState();
+  const prefs = state.aiPreferences;
+  const provider = getAiProvider(prefs.providers, prefs.selectedProviderId) ?? prefs.providers[0] ?? null;
+  const model = getAiModel(provider, prefs.selectedModelId) ?? provider?.models[0] ?? null;
+  void appendAiUsageLogEntry({
+    workspaceRoot: state.workspace?.root,
+    workspaceName: state.workspace?.name,
+    model: model?.alias || model?.id || prefs.selectedModelId,
+    provider: provider?.name ?? "",
+    agentMode: prefs.agentMode,
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens,
+    totalTokens: usage.totalTokens,
+    cachedPromptTokens: usage.cachedPromptTokens,
+    estimatedCostUsd: usage.estimatedCostUsd,
+    durationMs: assistant?.responseTiming?.totalMs ?? assistant?.responseDurationMs ?? 0,
+  });
+}
 
 export function AiChatPanel({ embedded = false, presentation = "panel", showCloseButton = true }: AiChatPanelProps) {
   const activeDocumentId = useLuxStore((state) => state.activeDocumentId);
@@ -184,7 +217,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const pinnedToBottomRef = useRef(true);
-  const goalContinuationTimerRef = useRef<{ sessionId: string; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const goalContinuationTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const runtimeSnapshot = useSyncExternalStore(subscribeAiChatTurnRuntime, getAiChatTurnRuntimeSnapshot, getAiChatTurnRuntimeSnapshot);
   const messages = activeChatSession?.messages ?? [];
@@ -230,6 +263,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     const title = activeChatSession
       ? `${t("aiChat.browserPreview.title")} · ${aiChatSessionTitle(activeChatSession.title, t)}`
       : t("aiChat.browserPreview.title");
+    // Only open the preview pane. It does NOT launch Chromium — the live stream
+    // attaches automatically when the agent actually uses the browser (or when the
+    // user starts a session from the dashboard). Opening a browser on click was wrong.
     openAgentBrowserPreviewTab(activeAiChatSessionId, title);
   }, [activeAiChatSessionId, activeChatSession, aiPreferences.agentBrowserEnabled, t]);
 
@@ -340,6 +376,14 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     if (selectedAgent?.mode !== "plan") return null;
     return extractPlanHandoffPayload(messages);
   }, [messages, selectedAgent?.mode]);
+
+  // Interactive AskUser / PresentPlan prompts, driven by the native turn loop.
+  useSyncExternalStore(subscribePendingQuestions, getPendingQuestionsSnapshot, getPendingQuestionsSnapshot);
+  useSyncExternalStore(subscribePendingPlans, getPendingPlansSnapshot, getPendingPlansSnapshot);
+  const pendingQuestion = activeAiChatSessionId ? getPendingQuestionForSession(activeAiChatSessionId) : null;
+  const pendingPlan = activeAiChatSessionId ? getPendingPlanForSession(activeAiChatSessionId) : null;
+  // A structured PresentPlan card supersedes the heuristic prose-checklist handoff.
+  const showLegacyPlanHandoff = planHandoff && !pendingPlan;
   const contextTitle = t("aiChat.context.tooltip", {
     percent: contextUsage.percent,
     totalTokens: formatCompactTokens(contextUsage.totalTokens),
@@ -460,7 +504,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   }, [activeAiChatSessionId]);
 
   useEffect(() => () => {
-    if (goalContinuationTimerRef.current) clearTimeout(goalContinuationTimerRef.current.timer);
+    const timers = goalContinuationTimersRef.current;
+    for (const timer of timers.values()) clearTimeout(timer);
+    timers.clear();
   }, []);
 
   const resolveComposerSessionId = useCallback(() => {
@@ -497,13 +543,22 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       });
       if (result.compacted) {
         replaceAiChatMessages(activeChatSession.id, result.messages, { contextCompaction: result.compactionState });
-      } else if (force) {
-        const reasonKey = result.reason === "too-few-messages"
-          ? "aiChat.compact.skippedFewMessages"
-          : result.reason === "no-reduction" || result.reason === "same-fingerprint"
-            ? "aiChat.compact.skippedNoGain"
-            : "aiChat.compact.skippedBelowThreshold";
-        setSendError(aiChatErrorFromMessage(t(reasonKey as Parameters<typeof t>[0]), t));
+      } else {
+        // Persist the cooldown/throttle state even when nothing was compacted: the
+        // "no-reduction" path returns a fresh state carrying lastCompactedAt so the
+        // expensive summarization isn't re-run on every subsequent over-threshold send.
+        // Skip the write when the state is unchanged (other skip reasons return it as-is).
+        if (result.compactionState && result.compactionState !== (activeChatSession.contextCompaction ?? null)) {
+          replaceAiChatMessages(activeChatSession.id, result.messages, { contextCompaction: result.compactionState });
+        }
+        if (force) {
+          const reasonKey = result.reason === "too-few-messages"
+            ? "aiChat.compact.skippedFewMessages"
+            : result.reason === "no-reduction" || result.reason === "same-fingerprint"
+              ? "aiChat.compact.skippedNoGain"
+              : "aiChat.compact.skippedBelowThreshold";
+          setSendError(aiChatErrorFromMessage(t(reasonKey as Parameters<typeof t>[0]), t));
+        }
       }
       return result.compacted;
     } catch (error) {
@@ -594,10 +649,13 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
   const attachFiles = (files: FileList | File[] | null) => {
     if (!files || files.length === 0) return;
+    // Mint each blob preview URL exactly once in the event handler, never inside
+    // the updater — React may invoke an updater more than once (StrictMode/dev or
+    // a discarded concurrent render), which would leak the discarded URL.
+    const incoming = Array.from(files).map((file) => createComposerFileAttachment(file));
     setAttachments((current) => {
       const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
-      for (const file of Array.from(files)) {
-        const next = createComposerFileAttachment(file);
+      for (const next of incoming) {
         const existing = byId.get(next.id);
         if (existing?.kind === "file") revokeComposerAttachmentPreview(existing);
         byId.set(next.id, next);
@@ -703,9 +761,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     const sessionId = sendingSessionId
       ?? (isAiChatSessionBusyStatus(activeStatus) ? activeAiChatSessionId : null);
     if (!sessionId) return;
-    if (goalContinuationTimerRef.current) {
-      clearTimeout(goalContinuationTimerRef.current.timer);
-      goalContinuationTimerRef.current = null;
+    const pendingContinuation = goalContinuationTimersRef.current.get(sessionId);
+    if (pendingContinuation !== undefined) {
+      clearTimeout(pendingContinuation);
+      goalContinuationTimersRef.current.delete(sessionId);
     }
     abortAiChatTurn(sessionId);
     stopGoalRun(sessionId);
@@ -735,6 +794,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       sessionId?: string;
       /** Goal kickoff / continuation — skip slash re-parse and busy gate on active tab. */
       internalSend?: boolean;
+      /** Review-request turn: render a badge instead of the raw prompt, and leave the
+       *  composer draft/attachments untouched (the prompt is system-authored, not typed). */
+      reviewRequest?: boolean;
     },
   ) => {
     const isInternalSend = options?.internalSend === true;
@@ -1002,13 +1064,17 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       const userMessage: AiChatMessage = {
         id: userMessageId,
         role: "user",
+        kind: options?.reviewRequest ? "review-request" : undefined,
         content: displayMessage,
         attachments: messageAttachments.length > 0 ? messageAttachments : undefined,
         turnCheckpointId,
         timestamp: Date.now(),
       };
       appendAiChatMessage(sessionId, userMessage);
-      if (selectedProvider && selectedModel) {
+      // A review request is a system-authored prompt, not user-typed text: skip the
+      // title refresh (the long instruction must not become the chat title) and the
+      // draft bookkeeping below.
+      if (selectedProvider && selectedModel && !options?.reviewRequest) {
         scheduleChatSessionTitleRefresh({
           sessionId,
           firstUserMessage: displayMessage,
@@ -1022,16 +1088,20 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           },
         });
       }
-      setLastUserDraft(displayMessage);
       pinnedToBottomRef.current = true;
       setShowScrollDown(false);
-      setComposerDraft(sessionId, "");
-      setComposerAttachments(sessionId, []);
-      setMessage("");
-      setAttachments((current) => {
-        revokeComposerAttachmentPreviews(current);
-        return [];
-      });
+      // Review requests don't originate from the composer, so leave the user's draft and
+      // pending attachments intact instead of clearing them.
+      if (!options?.reviewRequest) {
+        setLastUserDraft(displayMessage);
+        setComposerDraft(sessionId, "");
+        setComposerAttachments(sessionId, []);
+        setMessage("");
+        setAttachments((current) => {
+          revokeComposerAttachmentPreviews(current);
+          return [];
+        });
+      }
     }
     setSendError(null);
     setAiChatSessionStatus(sessionId, "thinking");
@@ -1133,13 +1203,14 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       };
       replaceAiChatMessages(sessionId, replaceEmptyAssistantTail(useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId)?.messages ?? [], assistantError));
       setAiChatSessionStatus(sessionId, isAbortError(error) ? "idle" : "error", errorMessage);
-      setSendError(errorPresentation);
+      if (useLuxStore.getState().activeAiChatSessionId === sessionId) setSendError(errorPresentation);
     } finally {
       finishAiChatTurn(sessionId, abortController);
       requestAnimationFrame(() => resizeComposerTextarea());
-      if (goalContinuationTimerRef.current?.sessionId === sessionId) {
-        clearTimeout(goalContinuationTimerRef.current.timer);
-        goalContinuationTimerRef.current = null;
+      const pendingContinuation = goalContinuationTimersRef.current.get(sessionId);
+      if (pendingContinuation !== undefined) {
+        clearTimeout(pendingContinuation);
+        goalContinuationTimersRef.current.delete(sessionId);
       }
       if (abortController.signal.aborted) {
         stopGoalRun(sessionId);
@@ -1152,6 +1223,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           const historyAfterTurn = sessionAfterTurn?.messages ?? [];
           const assistantTail = completedAssistantMessage ?? lastAssistantMessage(historyAfterTurn);
           recordGoalRunTurnUsage(sessionId, assistantTail?.turnUsage, assistantTail);
+          recordAiUsageLogEntry(assistantTail);
           syncGoalRunFromAssistantMessage(sessionId, assistantTail);
           const continuation = await evaluateGoalRunContinuationAfterTurn({
             sessionId,
@@ -1164,28 +1236,26 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           });
           if (continuation.continue) {
             const continuationSessionId = sessionId;
-            goalContinuationTimerRef.current = {
-              sessionId: continuationSessionId,
-              timer: window.setTimeout(() => {
-                if (goalContinuationTimerRef.current?.sessionId !== continuationSessionId) return;
-                goalContinuationTimerRef.current = null;
-                const live = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === continuationSessionId);
-                if (!live || isAiChatSessionBusyStatus(live.status) || live.status === "error") return;
-                if (getAiChatTurnRuntimeSnapshot().sendingSessionId === continuationSessionId) return;
-                if (!getActiveGoalRun(continuationSessionId)) return;
-                void handleSend(
-                  buildGoalContinuationDirective(continuationSessionId, { budgetWrapup: continuation.budgetWrapup }),
-                  undefined,
-                  {
-                    skipGoalSlash: true,
-                    goalOrchestration: "continuation",
-                    sessionId: continuationSessionId,
-                    internalSend: true,
-                    force: true,
-                  },
-                );
-              }, resolveGoalContinuationDelayMs(continuationSessionId)),
-            };
+            const handle = window.setTimeout(() => {
+              if (goalContinuationTimersRef.current.get(continuationSessionId) !== handle) return;
+              goalContinuationTimersRef.current.delete(continuationSessionId);
+              const live = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === continuationSessionId);
+              if (!live || isAiChatSessionBusyStatus(live.status) || live.status === "error") return;
+              if (getAiChatTurnRuntimeSnapshot().sendingSessionId === continuationSessionId) return;
+              if (!getActiveGoalRun(continuationSessionId)) return;
+              void handleSendRef.current(
+                buildGoalContinuationDirective(continuationSessionId, { budgetWrapup: continuation.budgetWrapup }),
+                undefined,
+                {
+                  skipGoalSlash: true,
+                  goalOrchestration: "continuation",
+                  sessionId: continuationSessionId,
+                  internalSend: true,
+                  force: true,
+                },
+              );
+            }, resolveGoalContinuationDelayMs(continuationSessionId));
+            goalContinuationTimersRef.current.set(continuationSessionId, handle);
           } else if (
             continuation.reason === "completed"
             || continuation.reason === "max_rounds"
@@ -1220,6 +1290,12 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       }
     }
   }, [activeChatSession?.id, activeDocument, activeSessionBusy, activeSessionClosed, activeTerminalId, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, projectInstructions, replaceAiChatMessages, requestToolApproval, resizeComposerTextarea, runCompaction, selectedAgent, selectedModel, selectedProvider, setAiChatSessionContextBudgetReport, setAiChatSessionStatus, t, terminal, terminalOutputBuffers, terminalSessions, updateAiChatMessage, updateMessage, workspace]);
+
+  // Keep the freshest handleSend instance reachable from the deferred goal-continuation
+  // timer so a delayed continuation turn picks up current provider/model/openDocuments/
+  // terminal context instead of the closure frozen when the timer was scheduled.
+  const handleSendRef = useRef(handleSend);
+  handleSendRef.current = handleSend;
 
   const buildRestoreInput = useCallback(() => {
     if (!workspace || !selectedProvider || !selectedModel) return null;
@@ -1296,13 +1372,13 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
   const handleReviewAction = useCallback((messageId: string) => {
     if (!activeChatSession || activeSessionBusy || activeSessionClosed) return;
-    // Fill the composer with the review prompt so the user can edit before sending.
+    // Send the review instruction straight to the agent as a review-request turn. The
+    // full prompt reaches the model as the message content, but the chat renders a badge
+    // (not the raw text) and the composer draft is left untouched. messageId scopes the
+    // review to "the turn whose Review button was clicked" for the model's benefit.
     const prompt = t("aiChat.review.prompt");
-    updateMessage(prompt);
-    requestAnimationFrame(() => {
-      textareaRef.current?.focus();
-    });
-  }, [activeChatSession, activeSessionBusy, activeSessionClosed, t, updateMessage]);
+    void handleSend(prompt, undefined, { reviewRequest: true, force: true });
+  }, [activeChatSession, activeSessionBusy, activeSessionClosed, handleSend, t]);
 
   const handleMentionSelect = useCallback((candidate: AiMentionCandidate) => {
     const parsed = parseMentionQuery(message);
@@ -1332,7 +1408,50 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     void handleSend(handoffMessage, messages, { force: true });
   }, [activeChatSession?.id, aiPreferences.agentProfiles, createAiChatSession, handleSend, messages, planHandoff, selectedModel, selectedProvider, updateAiPreference, updateMessage, workspace?.root]);
 
+  // Deliver a human answer to a pending AskUser question. settlePendingQuestion
+  // resolves the browser/dev waiter (no-op on native); the command unblocks the
+  // native Rust loop (no-op/ignored on the dev path). Calling both keeps one
+  // handler correct for either turn-loop.
+  const handleQuestionAnswer = useCallback((answer: string) => {
+    if (!pendingQuestion) return;
+    settlePendingQuestion(pendingQuestion.requestId, { answer, cancelled: false });
+    if (isTauriRuntime()) {
+      void luxCommands
+        .aiResolveTurnQuestion(pendingQuestion.turnId, pendingQuestion.requestId, { answer, cancelled: false })
+        .catch(() => undefined);
+    }
+  }, [pendingQuestion]);
+
+  const handleQuestionDismiss = useCallback(() => {
+    if (!pendingQuestion) return;
+    settlePendingQuestion(pendingQuestion.requestId, { answer: "", cancelled: true });
+    if (isTauriRuntime()) {
+      void luxCommands
+        .aiResolveTurnQuestion(pendingQuestion.turnId, pendingQuestion.requestId, { answer: "", cancelled: true })
+        .catch(() => undefined);
+    }
+  }, [pendingQuestion]);
+
+  // Start a proposed plan: switch to Agent mode, clear the card, and hand the
+  // plan to execution. Goal + task list were already pinned by the PresentPlan
+  // tool, so the rail already reflects it.
+  const handlePlanStart = useCallback(() => {
+    if (!pendingPlan || activeSessionBusy || activeSessionClosed) return;
+    const sessionId = pendingPlan.sessionId;
+    clearPendingPlan(pendingPlan.planId);
+    const agentProfile = aiPreferences.agentProfiles.find((profile) => profile.mode === "agent")
+      ?? aiPreferences.agentProfiles[0];
+    if (agentProfile) updateAiPreference({ selectedAgentId: agentProfile.id, agentMode: "agent" });
+    const handoffMessage = buildPlanHandoffUserMessage(pendingPlan.steps.map((step) => step.title));
+    void handleSend(handoffMessage, undefined, { force: true });
+    void sessionId;
+  }, [pendingPlan, activeSessionBusy, activeSessionClosed, aiPreferences.agentProfiles, updateAiPreference, handleSend]);
+
   const handleComposerKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // While an IME is composing (CJK candidate selection), let the IME consume
+    // every key — Enter/Tab/arrows confirm the candidate, they must not submit
+    // the message or pick a mention/slash command.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (mentionMenuOpen && mentionCandidates.length > 0) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
@@ -1516,6 +1635,17 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         data-agent-island-collapsed={showOrchestrationRail && isAgentIslandCollapsed ? "" : undefined}
       >
         <div className="ai-chat-main">
+        {showOrchestrationRail && activeChatSession && (
+          <AiAgentOrchestrationRail
+            sessionId={activeChatSession.id}
+            agentMode={aiPreferences.agentMode}
+            sessionStatus={activeStatus}
+            preferences={aiPreferences}
+            t={t}
+            collapsed={isAgentIslandCollapsed}
+            onToggleCollapsed={() => setIsAgentIslandCollapsed((v) => !v)}
+          />
+        )}
         <div className="ai-chat-scroll" ref={scrollRef} onScroll={handleBodyScroll}>
           {!showOrchestrationRail && activeChatSession && (
             <AiSubagentPanel sessionId={activeChatSession.id} t={t} />
@@ -1540,13 +1670,29 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                 contextCompaction={activeChatSession?.contextCompaction}
                 workspaceRoot={workspace?.root ?? null}
                 onApprovalDecision={resolveToolApproval}
-                onEditUserMessage={(messageId, nextContent) => void handleEditUserMessage(messageId, nextContent)}
+                onEditUserMessage={handleEditUserMessage}
                 onStopAfterTool={requestStopAfterToolRound}
                 canStopAfterTool={activeSessionBusy}
                 t={t}
                 onReviewAction={handleReviewAction}
               />
-              {planHandoff && !activeSessionBusy && (
+              {pendingPlan && (
+                <AiPlanCard
+                  plan={pendingPlan}
+                  onStart={handlePlanStart}
+                  busy={activeSessionBusy || activeSessionClosed}
+                  t={t}
+                />
+              )}
+              {pendingQuestion && (
+                <AiQuestionCard
+                  question={pendingQuestion}
+                  onAnswer={handleQuestionAnswer}
+                  onDismiss={handleQuestionDismiss}
+                  t={t}
+                />
+              )}
+              {showLegacyPlanHandoff && !activeSessionBusy && (
                 <div className="ai-plan-handoff" role="region" aria-label={t("aiChat.planHandoff.aria")}>
                   <div>
                     <strong>{t("aiChat.planHandoff.title")}</strong>
@@ -1630,17 +1776,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           >
             <ArrowDown size={15} />
           </button>
-        )}
-        {showOrchestrationRail && activeChatSession && (
-          <AiAgentOrchestrationRail
-            sessionId={activeChatSession.id}
-            agentMode={aiPreferences.agentMode}
-            sessionStatus={activeStatus}
-            preferences={aiPreferences}
-            t={t}
-            collapsed={isAgentIslandCollapsed}
-            onToggleCollapsed={() => setIsAgentIslandCollapsed((v) => !v)}
-          />
         )}
         </div>
       </div>
@@ -1732,7 +1867,13 @@ function trimCancelledAssistantShell(
 
 function replaceEmptyAssistantTail(messages: AiChatMessage[], assistantError: AiChatMessage) {
   const last = messages[messages.length - 1];
-  if (last?.role === "assistant" && !last.content.trim() && (!last.toolCalls || last.toolCalls.length === 0)) {
+  if (
+    last?.role === "assistant"
+    && !last.content.trim()
+    && !last.reasoning?.trim()
+    && (last.toolCalls?.length ?? 0) === 0
+    && (last.segments?.length ?? 0) === 0
+  ) {
     return [...messages.slice(0, -1), { ...last, content: assistantError.content, timestamp: assistantError.timestamp }];
   }
   return [...messages, assistantError];

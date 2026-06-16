@@ -205,26 +205,41 @@ pub fn parse_workspace_edit_result(value: &Value) -> Option<LspWorkspaceEdit> {
     }
 
     let mut files = BTreeMap::<PathBuf, Vec<LspTextEdit>>::new();
-    if let Some(changes) = value.get("changes").and_then(Value::as_object) {
-        for (uri, edits) in changes {
-            let Ok(uri) = uri.parse::<Uri>() else {
-                continue;
-            };
-            let Some(path) = uri_to_path(&uri) else {
-                continue;
-            };
-            let Some(edits) = edits.as_array() else {
-                continue;
-            };
-            files
-                .entry(path)
-                .or_default()
-                .extend(edits.iter().filter_map(lsp_text_edit_from_value));
+    // Per the LSP spec, when `documentChanges` is present the `changes` map MUST
+    // be ignored. Servers frequently populate both for backward compatibility, so
+    // processing both would double-apply every edit and corrupt the file.
+    if value.get("documentChanges").and_then(Value::as_array).is_none() {
+        if let Some(changes) = value.get("changes").and_then(Value::as_object) {
+            for (uri, edits) in changes {
+                let Ok(uri) = uri.parse::<Uri>() else {
+                    continue;
+                };
+                let Some(path) = uri_to_path(&uri) else {
+                    continue;
+                };
+                let Some(edits) = edits.as_array() else {
+                    continue;
+                };
+                files
+                    .entry(path)
+                    .or_default()
+                    .extend(edits.iter().filter_map(lsp_text_edit_from_value));
+            }
         }
     }
 
     if let Some(document_changes) = value.get("documentChanges").and_then(Value::as_array) {
         for change in document_changes {
+            // File operations (create/rename/delete) cannot be represented by
+            // LspWorkspaceEdit. Applying only the sibling text edits would leave
+            // the workspace partially modified, so abort the whole edit instead.
+            if change
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| matches!(kind, "create" | "rename" | "delete"))
+            {
+                return None;
+            }
             let Some(text_document) = change.get("textDocument") else {
                 continue;
             };
@@ -709,14 +724,10 @@ fn signature_parameter_label(value: &Value, signature_label: &str) -> Option<Str
     }
     let start = usize::try_from(range[0].as_u64()?).ok()?;
     let end = usize::try_from(range[1].as_u64()?).ok()?;
-    if start > end
-        || end > signature_label.len()
-        || !signature_label.is_char_boundary(start)
-        || !signature_label.is_char_boundary(end)
-    {
-        return None;
-    }
-    Some(signature_label[start..end].to_string())
+    // Per the LSP spec, ParameterInformation.label tuple offsets are UTF-16
+    // code units, not UTF-8 byte offsets, so slice over the UTF-16 encoding.
+    let units: Vec<u16> = signature_label.encode_utf16().collect();
+    units.get(start..end).map(String::from_utf16_lossy)
 }
 
 fn parse_completion_text_edit(value: &Value) -> Option<(LspRange, String)> {

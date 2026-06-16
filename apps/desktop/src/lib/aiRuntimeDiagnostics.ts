@@ -308,7 +308,7 @@ function extractFailureFindings(source: string, text: string): FailureFinding[] 
     const line = lines[index].trimEnd();
     if (!isFailureSignalLine(line)) continue;
     const context = compactFailureContext(lines, index);
-    const location = firstFailureLocation(context) ?? firstFailureLocation(line);
+    const location = firstFailureLocation(lines.slice(index, index + 5).join("\n"));
     findings.push({
       source,
       kind: classifyFailureLine(line),
@@ -330,7 +330,7 @@ function isFailureSignalLine(line: string) {
 
 function classifyFailureLine(line: string) {
   if (/traceback|exception|typeerror|referenceerror|syntaxerror/i.test(line)) return "runtime-exception";
-  if (/assert|expected|received|mismatch|should|failed/i.test(line)) return "test-assertion";
+  if (/assert|expected|received|mismatch|should/i.test(line) || (/failed/i.test(line) && !/compilation failed/i.test(line))) return "test-assertion";
   if (/cannot find|not found|undefined|missing module|module not found/i.test(line)) return "missing-reference";
   if (/timed out|timeout/i.test(line)) return "timeout";
   if (/panic|error\[E\d+\]|compilation failed|ts\d{4}/i.test(line)) return "compiler-error";
@@ -338,7 +338,7 @@ function classifyFailureLine(line: string) {
 }
 
 function compactFailureMessage(line: string) {
-  return truncateText(line.trim().replace(/^\s*(FAIL|FAILED|ERROR|E)\s*:?\s*/i, ""), 260);
+  return truncateText(line.trim().replace(/^\s*(?:(?:FAILED|FAIL|ERROR)\s*:?\s*|E\s+)/i, ""), 260);
 }
 
 function compactFailureContext(lines: string[], index: number) {
@@ -351,8 +351,8 @@ function firstFailureLocation(text: string) {
   const patterns = [
     /([A-Za-z]:[\\/][^\s:()<>"']+):(\d+):(\d+)/,
     /([A-Za-z]:[\\/][^\s:()<>"']+):(\d+)/,
-    /([./]?[\w@~ -][\w@~./\\ -]+\.[A-Za-z][\w]+):(\d+):(\d+)/,
-    /([./]?[\w@~ -][\w@~./\\ -]+\.[A-Za-z][\w]+):(\d+)/,
+    /([./]?[\w@~-][\w@~./\\-]+\.[A-Za-z][\w]+):(\d+):(\d+)/,
+    /([./]?[\w@~-][\w@~./\\-]+\.[A-Za-z][\w]+):(\d+)/,
   ];
   for (const pattern of patterns) {
     const match = text.match(pattern);

@@ -126,7 +126,7 @@ export function RunDebugPanel() {
         setWatchExpressions((items) => items.map((item) => item.id === variables.watchId ? { ...item, result, error: null } : item));
         return;
       }
-      setEvaluateResults((current) => [result, ...current.filter((item) => item.expression !== result.expression)].slice(0, 30));
+      setEvaluateResults((current) => [result, ...current.filter((item) => item.expression !== result.expression || item.session_id !== result.session_id)].slice(0, 30));
     },
     onError: (error, variables) => {
       const message = readErrorMessage(error, t);
@@ -151,19 +151,23 @@ export function RunDebugPanel() {
       setEvaluateResults([]);
       return;
     }
+    let cancelled = false;
     debugMutation.mutate();
-    void luxCommands.debugSessions().then(setSessions).catch(() => setSessions([]));
+    void luxCommands.debugSessions().then((next) => { if (!cancelled) setSessions(next); }).catch(() => { if (!cancelled) setSessions([]); });
+    return () => { cancelled = true; };
   }, [workspace?.root]);
 
   useEffect(() => {
+    let active = true;
     let dispose: (() => void) | undefined;
     void subscribeLuxEvents((event) => {
       if (event.type === "debugSessionChanged") upsertSession(setSessions, event.session);
       if (event.type === "debugBreakpointsChanged") setDebugResolvedBreakpoints(event.update);
     }).then((unlisten) => {
-      dispose = unlisten;
+      if (!active) unlisten();
+      else dispose = unlisten;
     });
-    return () => dispose?.();
+    return () => { active = false; dispose?.(); };
   }, [setDebugResolvedBreakpoints]);
 
   const selectedConfiguration = debugInfo?.configurations.find((configuration) => configuration.name === selectedConfigName) ?? debugInfo?.configurations[0] ?? null;
@@ -247,7 +251,7 @@ export function RunDebugPanel() {
             stackTrace={activeStackTrace}
             stackTraceLoading={stackTraceMutation.isPending}
             variablesByReference={variablesByReference}
-            variablesLoadingReference={variablesMutation.variables?.variablesReference ?? null}
+            variablesLoadingReference={variablesMutation.isPending ? variablesMutation.variables?.variablesReference ?? null : null}
             watchExpressions={watchExpressions}
             setWatchExpressions={setWatchExpressions}
             setSelectedConfigName={setSelectedConfigName}
@@ -498,8 +502,8 @@ function DebugVariablesBlock({
         <span>{t("sidebar.runDebug.variables.heading")}</span>
         {isLoading ? <Loader2 size={13} className="spin-icon" /> : null}
       </div>
-      {!selectedFrameId ? <div className="debug-stack-empty">{t("sidebar.runDebug.variables.noFrame")}</div> : null}
-      {selectedFrameId && !scopesMatchFrame && !isLoading ? <div className="debug-stack-empty">{t("sidebar.runDebug.variables.selectFrame")}</div> : null}
+      {selectedFrameId === null ? <div className="debug-stack-empty">{t("sidebar.runDebug.variables.noFrame")}</div> : null}
+      {selectedFrameId !== null && !scopesMatchFrame && !isLoading ? <div className="debug-stack-empty">{t("sidebar.runDebug.variables.selectFrame")}</div> : null}
       {scopesMatchFrame && frameScopes.scopes.length === 0 ? <div className="debug-stack-empty">{t("sidebar.runDebug.variables.emptyScopes")}</div> : null}
       {scopesMatchFrame && frameScopes.scopes.length > 0 ? (
         <div className="debug-variable-scope-list">

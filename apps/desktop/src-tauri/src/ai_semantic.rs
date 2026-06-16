@@ -105,7 +105,10 @@ pub async fn ai_semantic_search(
             .await
             .map_err(|error| error.to_string())?
             .map(|response| response.hits)
-            .unwrap_or_default()
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "ai_semantic_search: indexed search backend failed");
+                Default::default()
+            })
     };
 
     // 3. Workspace file candidates.
@@ -114,7 +117,10 @@ pub async fn ai_semantic_search(
         tokio::task::spawn_blocking(move || lux_fs::list_files(root, file_cap))
             .await
             .map_err(|error| error.to_string())?
-            .unwrap_or_default()
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "ai_semantic_search: file listing backend failed");
+                Default::default()
+            })
     };
 
     let mut results: BTreeMap<String, AiSemanticResult> = BTreeMap::new();
@@ -261,15 +267,12 @@ impl Descriptor {
                 .to_lowercase()
                 .starts_with(&format!("{}/", root.to_lowercase()))
         {
-            path[root.len() + 1..].to_string()
+            path.get(root.len() + 1..).unwrap_or(&path).to_string()
         } else {
             path.clone()
         };
         let basename = path.rsplit('/').next().unwrap_or(&path).to_string();
-        let extension = file_extension(&basename.to_lowercase());
-        let stem = basename[..basename.len().saturating_sub(extension.len())].to_string();
         let family_stem = family_stem(&basename);
-        let _ = stem;
         Self {
             path,
             relative_lower: relative_path.to_lowercase(),
@@ -651,7 +654,17 @@ fn family_stem(basename: &str) -> String {
     // Strip a trailing `.d`-aware extension, then up to two known `[-_.]suffix` segments.
     let lower = basename.to_lowercase();
     let ext = file_extension(&lower);
-    let mut stem = basename[..basename.len().saturating_sub(ext.len())].to_string();
+    // Preserve the original-case stem (TS parity: `familyStemFromBasename` does not
+    // lowercase its result) by slicing `basename` when its byte length matches `lower`
+    // — the common ASCII case, where `ext` (a suffix of `lower`) maps to a valid char
+    // boundary in `basename`. When lowercasing changes byte length (e.g. 'İ' -> 'i' +
+    // combining dot) fall back to slicing `lower`, which is always boundary-safe.
+    let src: &str = if basename.len() == lower.len() {
+        basename
+    } else {
+        &lower
+    };
+    let mut stem = src[..src.len().saturating_sub(ext.len())].to_string();
     for _ in 0..2 {
         let stem_lower = stem.to_lowercase();
         let mut stripped = false;

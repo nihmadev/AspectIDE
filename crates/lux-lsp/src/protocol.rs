@@ -26,7 +26,7 @@ pub fn initialize_request(id: u64, definition: &LanguageServerDefinition) -> Val
         "id": id,
         "method": "initialize",
         "params": {
-            "processId": null,
+            "processId": std::process::id(),
             "rootUri": root_uri,
             "capabilities": initialize_capabilities(),
             "workspaceFolders": [{

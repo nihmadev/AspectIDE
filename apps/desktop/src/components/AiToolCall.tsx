@@ -17,10 +17,12 @@ import {
   Loader2,
   Minus,
   MapPin,
+  MessageCircleQuestion,
   Network,
   Pencil,
   Search,
   Shield,
+  Sparkles,
   Target,
   Terminal,
   Trash2,
@@ -72,6 +74,8 @@ const toolIcons: Record<string, LucideIcon> = {
   Goal: Target,
   Task: Network,
   AgentMessage: Network,
+  AskUser: MessageCircleQuestion,
+  PresentPlan: Sparkles,
   WebFetch: Network,
   BrowserStatus: Globe,
   BrowserOpen: Globe,
@@ -266,7 +270,7 @@ export function AiToolCallsGroup({ onApprovalDecision, t, toolCalls }: AiToolCal
             transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
           >
             {groupedBatches.map((batch) => (
-              <ToolCallBatch key={batch.id} batch={batch} onApprovalDecision={onApprovalDecision} t={t} />
+              <ToolCallBatch key={batch.toolCalls[0]?.id ?? batch.id} batch={batch} onApprovalDecision={onApprovalDecision} t={t} />
             ))}
           </motion.div>
         )}
@@ -287,21 +291,18 @@ function ToolCallBatch({ batch, onApprovalDecision, t }: { batch: ToolCallBatchM
   useEffect(() => {
     if (active) setUserToggled(null);
   }, [active]);
-  const open = userToggled ?? (active || batch.toolCalls.length <= 2);
-
-  if (batch.toolCalls.length <= 2) {
-    return batch.toolCalls.map((toolCall) => (
-      <AiToolCall key={toolCall.id} onApprovalDecision={onApprovalDecision} t={t} toolCall={toolCall} />
-    ));
-  }
+  const collapsible = batch.toolCalls.length > 2;
+  const open = collapsible ? (userToggled ?? active) : true;
 
   return (
     <div className="ai-tool-call-batch" data-open={open || undefined} data-active={active || undefined}>
-      <button type="button" className="ai-tool-call-batch-head" onClick={() => setUserToggled(!open)} aria-expanded={open}>
-        <ChevronRight className="ai-tool-call-batch-caret" data-expanded={open} size={13} />
-        <span>{batch.tool ?? t("aiTools.summary.mixedGroup")}</span>
-        <strong>{batch.toolCalls.length}</strong>
-      </button>
+      {collapsible && (
+        <button type="button" className="ai-tool-call-batch-head" onClick={() => setUserToggled(!open)} aria-expanded={open}>
+          <ChevronRight className="ai-tool-call-batch-caret" data-expanded={open} size={13} />
+          <span>{batch.tool ?? t("aiTools.summary.mixedGroup")}</span>
+          <strong>{batch.toolCalls.length}</strong>
+        </button>
+      )}
       <AnimatePresence initial={false}>
         {open && (
           <motion.div

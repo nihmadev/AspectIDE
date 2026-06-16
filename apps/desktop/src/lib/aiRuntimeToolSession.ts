@@ -129,6 +129,121 @@ export function goalWrite(args: UnknownRecord, input: AiChatSendInput): ToolResu
   });
 }
 
+/** Normalize an options/steps entry that may be a bare string or a structured object. */
+function normalizeLabeledEntry(value: unknown, labelKey: string): { label: string; description: string; file: string } | null {
+  if (typeof value === "string") {
+    const label = value.trim();
+    return label ? { label, description: "", file: "" } : null;
+  }
+  if (!isRecord(value)) return null;
+  const label = stringArg(value, labelKey, "").trim();
+  if (!label) return null;
+  return {
+    label,
+    description: stringArg(value, "description", "").trim() || stringArg(value, "detail", "").trim(),
+    file: stringArg(value, "file", "").trim(),
+  };
+}
+
+/**
+ * AskUser (browser/dev TS turn-loop). Registers the question card and suspends on
+ * a resolver until the user answers or dismisses. In Automatic mode it never
+ * blocks — it returns immediately telling the model to self-decide, matching the
+ * native Rust behavior.
+ */
+export async function askUserTool(args: UnknownRecord, input: AiChatSendInput, callId: string): Promise<ToolResult> {
+  const question = stringArg(args, "question", "").trim();
+  if (!question) throw new Error("AskUser requires a non-empty question.");
+  const detail = stringArg(args, "detail", "").trim();
+  const htmlPreview = stringArg(args, "htmlPreview", "");
+  const multiSelect = booleanArg(args, "multiSelect", false);
+  const allowCustom = booleanArg(args, "allowCustom", true);
+  const options = (Array.isArray(args.options) ? args.options : [])
+    .map((entry) => normalizeLabeledEntry(entry, "label"))
+    .filter((entry): entry is { label: string; description: string; file: string } => Boolean(entry))
+    .slice(0, 10)
+    .map((entry) => ({ label: entry.label, description: entry.description }));
+
+  if (input.preferences.agentMode === "automatic") {
+    const list = options.length > 0
+      ? `\nOptions:\n${options.map((o) => (o.description ? `- ${o.label} — ${o.description}` : `- ${o.label}`)).join("\n")}`
+      : "";
+    return toolJson("AskUser", {
+      autoAnswered: true,
+      answer: `Automatic mode: no user is available to answer. Pick the best option for this repository, state the choice as an assumption, and continue.${list}`,
+    });
+  }
+
+  const { registerPendingQuestion, waitForQuestionAnswer } = await import("./aiPendingQuestion");
+  registerPendingQuestion({
+    requestId: callId,
+    turnId: callId,
+    sessionId: input.chatSessionId,
+    question,
+    detail,
+    options,
+    multiSelect,
+    allowCustom,
+    htmlPreview,
+  });
+  const result = await waitForQuestionAnswer(callId);
+  if (result.cancelled || !result.answer.trim()) {
+    return toolJson("AskUser", {
+      answer: "",
+      dismissed: true,
+      note: "User dismissed the question without answering. Proceed with your best judgment or ask again only if truly blocked.",
+    });
+  }
+  return toolJson("AskUser", { answer: result.answer });
+}
+
+/**
+ * PresentPlan (browser/dev TS turn-loop). Pins the plan as goal + task list and
+ * registers the plan card. In Plan/Agent mode the user presses Start to execute;
+ * in Automatic mode the card auto-starts (the model proceeds immediately).
+ */
+export async function presentPlanTool(args: UnknownRecord, input: AiChatSendInput, callId: string): Promise<ToolResult> {
+  const title = stringArg(args, "title", "").trim() || "Plan";
+  const summary = stringArg(args, "summary", "").trim();
+  const steps = (Array.isArray(args.steps) ? args.steps : [])
+    .map((entry) => normalizeLabeledEntry(entry, "title"))
+    .filter((entry): entry is { label: string; description: string; file: string } => Boolean(entry))
+    .slice(0, 40)
+    .map((entry) => ({ title: entry.label, detail: entry.description, file: entry.file }));
+  if (steps.length === 0) {
+    throw new Error("PresentPlan requires at least one step (array of strings or { title, detail, file }).");
+  }
+
+  setAiSessionGoal(input.chatSessionId, summary || title);
+  replaceAiSessionTodos(input.chatSessionId, steps.map((step, index) => ({
+    id: `plan-${index + 1}`,
+    content: step.title,
+    status: index === 0 ? "in_progress" as const : "pending" as const,
+    priority: "medium" as const,
+    source: "agent" as const,
+    notes: step.detail || undefined,
+  })));
+
+  const autoStart = input.preferences.agentMode === "automatic";
+  const { registerPendingPlan } = await import("./aiPendingPlan");
+  registerPendingPlan({
+    planId: `plan-${callId}`,
+    turnId: callId,
+    sessionId: input.chatSessionId,
+    title,
+    summary,
+    steps,
+    autoStart,
+  });
+  return toolJson("PresentPlan", {
+    stepCount: steps.length,
+    autoStart,
+    guidance: autoStart
+      ? "Plan presented and auto-started (Automatic mode). Begin executing step 1 now; do not wait for confirmation."
+      : "Plan presented to the user. Stop here and wait — the user will press Start to hand the plan to Agent mode. Do not begin editing yet.",
+  });
+}
+
 export async function taskSubagentTool(args: UnknownRecord, input: AiChatSendInput, session: RuntimeToolSession): Promise<ToolResult> {
   const description = stringArg(args, "description", "").trim();
   const prompt = stringArg(args, "prompt", "").trim();
@@ -190,6 +305,10 @@ export async function agentMessageTool(
         ? ["No agent messages on this board yet for the requested topic."]
         : undefined,
     });
+  }
+
+  if (action && action !== "post") {
+    throw new Error(`Unknown AgentMessage action: ${action}. Use "post" or "read".`);
   }
 
   const content = stringArg(args, "content", "").trim();

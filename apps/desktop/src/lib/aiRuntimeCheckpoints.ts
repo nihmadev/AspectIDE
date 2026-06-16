@@ -200,7 +200,19 @@ async function restoreCheckpoint(args: UnknownRecord, input: AiChatSendInput, ui
 
   const approval = createCheckpointRestoreApproval(input.locale, checkpoint, operations, saveToDisk, dryRun);
   await ui.requireApproval(approval);
-  return ui.applyPatch(operations, saveToDisk, dryRun);
+  // The approval await is open-ended; files may have changed since the diff above. Recompute against
+  // the post-approval disk/editor state so unchanged-at-diff-time files edited during the wait are
+  // still reverted and the patch reflects what is actually on disk now.
+  const currentAfterApproval = await Promise.all(files.map((file) => diffCheckpointFile(file, workspaceRoot, openByPath, checkpoint.maxBytesPerFile)));
+  const operationsAfterApproval = checkpointRestoreOperations(files, currentAfterApproval);
+  if (operationsAfterApproval.length === 0) {
+    return toolJson("Checkpoint", {
+      status: "unchanged",
+      checkpoint: checkpointSummary(checkpoint),
+      summary: checkpointDiffSummary(currentAfterApproval),
+    });
+  }
+  return ui.applyPatch(operationsAfterApproval, saveToDisk, dryRun);
 }
 
 function normalizeCheckpointAction(value: string): CheckpointAction | "" {
@@ -378,6 +390,25 @@ export async function ensurePathsInFileCheckpoint(
   input: AiChatSendInput,
 ) {
   if (paths.length === 0) return;
+  // Native turn checkpoints are owned by the Rust store and never inserted into the TS store; their
+  // snapshots also never cross IPC (text is #[serde(skip)]). Route augmentation through the native
+  // `augment` action so pre-edit snapshots for files the model is about to create/edit — files that
+  // were neither open at turn start nor already in the native snapshot — are captured in the Rust
+  // store and stay restorable. Without this, a later restore has no pre-edit state for those paths,
+  // so the edit cannot be reverted and newly created files cannot be deleted (silent data loss).
+  if (isTauriRuntime() && !hasTsCheckpoint(workspaceRoot, checkpointId)) {
+    const nativePaths = paths
+      .map((path) => resolveWorkspacePath(path, workspaceRoot))
+      .filter((path) => isPathInsideWorkspace(path, workspaceRoot))
+      .map((path) => normalizePathSlashes(path));
+    if (nativePaths.length === 0) return;
+    await luxCommands.aiCheckpoint("augment", {
+      id: checkpointId,
+      paths: nativePaths,
+      nowMs: Date.now(),
+    });
+    return;
+  }
   const checkpoint = selectCheckpointById(workspaceRoot, checkpointId);
   const existing = new Set(checkpoint.files.map((file) => normalizePathSlashes(file.path).toLowerCase()));
   const missing = paths
@@ -404,6 +435,20 @@ export async function restoreFileCheckpointById(
   input: AiChatSendInput,
   applyPatch: CheckpointToolUi["applyPatch"],
 ) {
+  // Native turn checkpoints live in the Rust store and are never inserted into the TS store, so an
+  // id absent from the TS store is a native id. Route the restore through the native command, which
+  // already diffs each snapshot against the current state and applies the guarded file patch.
+  if (isTauriRuntime() && !hasTsCheckpoint(workspaceRoot, checkpointId)) {
+    const response = (await luxCommands.aiCheckpoint("restore", {
+      id: checkpointId,
+      saveToDisk: true,
+      dryRun: false,
+      nowMs: Date.now(),
+    })) as { status?: string; operations?: number; result?: { changedPaths?: string[] } };
+    const restoredPaths = (response.result?.changedPaths ?? []).map((path) => normalizePathSlashes(path));
+    return { restoredPaths, operations: response.operations ?? restoredPaths.length, result: response.result };
+  }
+
   const checkpoint = selectCheckpointById(workspaceRoot, checkpointId);
   const openByPath = openDocumentByAbsolutePath(input, workspaceRoot);
   const files = checkpoint.files;
@@ -434,6 +479,10 @@ function selectCheckpointById(workspaceRoot: string, id: string) {
   const checkpoint = store.find((candidate) => candidate.id === id);
   if (!checkpoint) throw new Error(`Checkpoint not found: ${id}`);
   return checkpoint;
+}
+
+function hasTsCheckpoint(workspaceRoot: string, id: string) {
+  return checkpointStore(workspaceRoot).some((candidate) => candidate.id === id);
 }
 
 function persistRuntimeCheckpoint(checkpoint: RuntimeCheckpoint) {

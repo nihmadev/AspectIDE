@@ -1,6 +1,6 @@
 import type { AiChatMessage } from "./aiChatTypes";
 import { filterVisibleChatMessages } from "./aiChatGoalOrchestration";
-import { requestChatCompletion, type ChatCompletionMessage } from "./aiChatTransport";
+import { reasoningPayload, requestChatCompletion, type ChatCompletionMessage } from "./aiChatTransport";
 import type { AiAgentMode, AiModelConfig, AiProviderConfig } from "./aiPreferences";
 import { truncateText } from "./aiRuntimeShared";
 import { listAiSessionTodos } from "./aiSessionTodos";
@@ -57,6 +57,9 @@ export async function requestGoalEvaluatorVerdict(input: {
 
   // Native Rust path: verdict runs through the Rust transport.
   if (isTauriRuntime()) {
+    // Skip an already-aborted request: the result would be discarded anyway, and
+    // Tauri IPC has no mid-flight cancellation, so at least avoid the wasted call.
+    if (input.abortSignal.aborted) return null;
     try {
       const verdict = await luxCommands.aiGoalEvalVerdict({
         condition: input.condition,
@@ -65,6 +68,7 @@ export async function requestGoalEvaluatorVerdict(input: {
         baseUrl: input.provider.baseUrl,
         apiKey: input.provider.apiKey || null,
         model: input.model.alias || input.model.id,
+        reasoning: reasoningPayload(input.selectedEffortId, input.provider),
       });
       if (!verdict) return null;
       return { satisfied: verdict.satisfied, blocked: verdict.blocked, reason: verdict.reason, source: "model" };
@@ -158,11 +162,13 @@ export async function evaluateGoalRunContinuationAfterTurn(input: {
     openTodoSummaries,
   });
 
-  if (!getActiveGoalRun(input.sessionId)) return sync;
-  if (input.abortSignal?.aborted) return sync;
-  if (!verdict) return sync;
+  // Clear the "Evaluating…" placeholder on every exit that does NOT apply a verdict,
+  // otherwise the run is left displaying pending state indefinitely.
+  if (!getActiveGoalRun(input.sessionId)) { setGoalRunEvaluatorPending(input.sessionId, false); return sync; }
+  if (input.abortSignal?.aborted) { setGoalRunEvaluatorPending(input.sessionId, false); return sync; }
+  if (!verdict) { setGoalRunEvaluatorPending(input.sessionId, false); return sync; }
 
-  return goalEvaluationToContinuation(applyGoalEvaluatorVerdict(input.sessionId, verdict));
+  return goalEvaluationToContinuation(applyGoalEvaluatorVerdict(input.sessionId, verdict, input.agentMode));
 }
 
 function extractAssistantText(body: unknown) {

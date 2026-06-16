@@ -63,8 +63,13 @@ export async function requireToolApproval(
     throw new ToolApprovalRejectedError(`${approval.tool} is blocked by a permission rule.`);
   }
 
-  // Full Access or an explicit allow rule → run without prompting.
-  if (input.preferences.toolApprovalMode === "full-access" || ruleDecision === "allow") {
+  // Automatic mode is full autonomy: never prompt for approval (deny rules above
+  // still block). Full Access or an explicit allow rule also run without prompting.
+  if (
+    input.preferences.agentMode === "automatic"
+    || input.preferences.toolApprovalMode === "full-access"
+    || ruleDecision === "allow"
+  ) {
     ui.setRunning({ ...approval, decision: "approved" });
     return;
   }

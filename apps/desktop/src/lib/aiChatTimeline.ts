@@ -86,10 +86,15 @@ export function createTurnTimeline(emit: (patch: Partial<AiChatMessage>) => void
       }
       flush();
     },
-    updateToolCall(id: string, patch: Partial<AiChatToolCall>) {
+    updateToolCall(id: string, patch: Partial<AiChatToolCall>): AiChatToolCall | undefined {
       const segment = segments.find((entry) => entry.kind === "tool" && entry.toolCall.id === id);
-      if (segment && segment.kind === "tool") segment.toolCall = { ...segment.toolCall, ...patch };
+      if (segment && segment.kind === "tool") {
+        segment.toolCall = { ...segment.toolCall, ...patch };
+        flush();
+        return segment.toolCall;
+      }
       flush();
+      return undefined;
     },
     toolCalls() {
       return deriveSegmentToolCalls(segments);

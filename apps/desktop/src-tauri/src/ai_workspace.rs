@@ -108,12 +108,12 @@ struct FileDesc {
 impl FileDesc {
     fn new(path: &str, root: &str, size: u64) -> Self {
         let path = ai_semantic::normalize_slashes_pub(path);
-        let root_lower =
-            ai_semantic::normalize_slashes_pub(root.trim_end_matches('/')).to_lowercase();
-        let relative_path = if !root_lower.is_empty()
+        let root_norm = ai_semantic::normalize_slashes_pub(root.trim_end_matches('/'));
+        let root_lower = root_norm.to_lowercase();
+        let relative_path = if !root_norm.is_empty()
             && path.to_lowercase().starts_with(&format!("{root_lower}/"))
         {
-            path[root_lower.len() + 1..].to_string()
+            path.get(root_norm.len() + 1..).unwrap_or(&path).to_string()
         } else {
             path.clone()
         };
@@ -259,15 +259,14 @@ pub async fn ai_workspace_index(
     let descs: Vec<FileDesc> = entries
         .iter()
         .filter(|e| matches!(e.kind, lux_core::FsEntryKind::File))
-        .map(|e| ai_semantic::normalize_slashes_pub(&e.path.to_string_lossy()))
-        .filter(|p| !ai_semantic::is_low_signal_path_pub(p))
-        .map(|p| {
-            let size = entries
-                .iter()
-                .find(|e| ai_semantic::normalize_slashes_pub(&e.path.to_string_lossy()) == p)
-                .map_or(0, |e| e.size);
-            FileDesc::new(&p, &root_str, size)
+        .map(|e| {
+            (
+                ai_semantic::normalize_slashes_pub(&e.path.to_string_lossy()),
+                e.size,
+            )
         })
+        .filter(|(p, _)| !ai_semantic::is_low_signal_path_pub(p))
+        .map(|(p, size)| FileDesc::new(&p, &root_str, size))
         .collect();
 
     let by_language = top_counts(descs.iter().map(FileDesc::language), 20);

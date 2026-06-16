@@ -97,7 +97,7 @@ export function parseSlashQuery(message: string) {
   const trimmed = message.trimStart();
   if (!trimmed.startsWith("/")) return null;
   const body = trimmed.slice(1);
-  const space = body.indexOf(" ");
+  const space = body.search(/\s/);
   const commandPart = (space === -1 ? body : body.slice(0, space)).toLowerCase();
   const args = space === -1 ? "" : body.slice(space + 1).trim();
   return { commandPart, args, raw: trimmed };

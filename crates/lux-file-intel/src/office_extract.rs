@@ -45,7 +45,7 @@ fn odf_zip_office_preview(path: &Path, options: &FileInspectionOptions) -> AppRe
     let mut text = String::new();
     let mut parts = Vec::new();
     for index in 0..archive.len() {
-        let mut entry = archive
+        let entry = archive
             .by_index(index)
             .map_err(|error| AppError::Service(error.to_string()))?;
         let name = entry.name().to_string();
@@ -58,14 +58,14 @@ fn odf_zip_office_preview(path: &Path, options: &FileInspectionOptions) -> AppRe
             });
         }
         if name == "content.xml" && text.len() < OFFICE_TEXT_LIMIT {
-            let mut xml = String::new();
+            let cap = OFFICE_TEXT_LIMIT.saturating_sub(text.len());
+            let mut raw = Vec::new();
             entry
-                .read_to_string(&mut xml)
+                .take((cap as u64) + 4096)
+                .read_to_end(&mut raw)
                 .map_err(|error| AppError::Service(error.to_string()))?;
-            text.push_str(&extract_xml_text(
-                &xml,
-                OFFICE_TEXT_LIMIT.saturating_sub(text.len()),
-            ));
+            let xml = String::from_utf8_lossy(&raw);
+            text.push_str(&extract_xml_text(xml.as_ref(), cap));
         }
     }
     let truncated = text.len() >= OFFICE_TEXT_LIMIT || archive.len() > parts.len();
@@ -128,10 +128,11 @@ fn extract_ole_utf16_stream(path: &Path, stream_name: &str) -> String {
         return String::new();
     };
     let mut buffer = Vec::new();
-    let Ok(mut stream) = comp.open_stream(stream_name) else {
+    let Ok(stream) = comp.open_stream(stream_name) else {
         return String::new();
     };
-    if stream.read_to_end(&mut buffer).is_err() {
+    let cap = (OFFICE_TEXT_LIMIT as u64).saturating_mul(4);
+    if stream.take(cap).read_to_end(&mut buffer).is_err() {
         return String::new();
     }
     utf16_le_lossy_text(&buffer)
@@ -165,6 +166,18 @@ fn strip_rtf(raw: &str) -> String {
             }
             if token == "par" || token == "line" {
                 output.push('\n');
+            }
+            if !token.is_empty() {
+                if chars.peek() == Some(&'-') {
+                    chars.next();
+                }
+                while let Some(&d) = chars.peek() {
+                    if d.is_ascii_digit() {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
             }
             if chars.peek() == Some(&' ') {
                 chars.next();

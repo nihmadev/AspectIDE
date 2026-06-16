@@ -1,6 +1,6 @@
 import type { AiAgentMode } from "./aiPreferences";
 
-function isReadOnlyAgentMode(agentMode?: AiAgentMode) {
+export function isReadOnlyAgentMode(agentMode?: AiAgentMode) {
   return agentMode === "plan" || agentMode === "ask";
 }
 
@@ -25,6 +25,8 @@ export type RuntimeToolName =
   | "TodoWrite"
   | "Task"
   | "AgentMessage"
+  | "AskUser"
+  | "PresentPlan"
   | "WebFetch"
   | "BrowserStatus"
   | "BrowserOpen"
@@ -109,6 +111,13 @@ export function readOnlyAgentModeToolDenyReason(
   agentMode?: AiAgentMode,
 ): string | null {
   if (!isReadOnlyAgentMode(agentMode)) return null;
+  // PresentPlan is the primary output of Plan mode (and allowed in Agent/Automatic),
+  // but Ask mode answers without proposing executable plans.
+  if (toolName === "PresentPlan") {
+    return agentMode === "ask"
+      ? `Tool "${toolName}" is disabled in Ask mode. Switch to Plan, Agent, or Automatic to propose an executable plan.`
+      : null;
+  }
   if (readOnlyBlockedToolNames.has(toolName)) {
     return agentMode === "plan"
       ? `Tool "${toolName}" is disabled in Plan mode. Switch to Agent or Automatic to edit files or run commands.`
@@ -140,7 +149,36 @@ export function resolveRuntimeTools(preferences: {
   agentBrowserEnabled: boolean;
   agentMode?: AiAgentMode;
 }): RuntimeToolDefinition[] {
-  return runtimeTools.filter((tool) => isRuntimeToolAllowed(tool.function.name, preferences));
+  const readOnly = isReadOnlyAgentMode(preferences.agentMode);
+  return runtimeTools
+    .filter((tool) => isRuntimeToolAllowed(tool.function.name, preferences))
+    .map((tool) =>
+      readOnly && tool.function.name === "BrowserDoctor"
+        ? browserDoctorReadOnlyDefinition(tool)
+        : tool,
+    );
+}
+
+/**
+ * In read-only modes (Plan/Ask) BrowserDoctor stays available for diagnostics, but the
+ * destructive `fix` flag (`doctor --fix`, which runs repair/install subprocesses) is stripped
+ * from the schema the model sees so it cannot opt into command execution, preserving the
+ * no-command guarantee. Returns a shallow clone; the shared `runtimeTools` definition is
+ * never mutated.
+ */
+function browserDoctorReadOnlyDefinition(tool: RuntimeToolDefinition): RuntimeToolDefinition {
+  const params = tool.function.parameters as { properties?: Record<string, unknown> };
+  const properties = { ...(params.properties ?? {}) };
+  delete properties.fix;
+  return {
+    type: "function",
+    function: {
+      name: tool.function.name,
+      description:
+        "Run agent-browser doctor diagnostics (install, Chrome, daemon, providers). Read-only diagnostics only; repairs (--fix) are disabled in Plan and Ask modes.",
+      parameters: { ...tool.function.parameters, properties },
+    },
+  };
 }
 
 export const runtimeTools: RuntimeToolDefinition[] = [
@@ -492,6 +530,33 @@ export const runtimeTools: RuntimeToolDefinition[] = [
         content: stringSchema("Message body for post: the finding, decision, or hand-off note for other agents."),
         limit: numberSchema("For read: maximum messages to return, newest first, default 30."),
       }),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "AskUser",
+      description: "Ask the user a question and wait for their answer. Use sparingly — only for genuine decisions you cannot resolve from evidence (product/UX choices, ambiguous scope, credentials). Provide 0–10 suggested options; the user can also type a custom answer unless allowCustom is false. Optionally render a self-contained HTML5 document via htmlPreview for visual choices. In Automatic mode this returns immediately telling you to decide yourself — it never blocks.",
+      parameters: objectSchema({
+        question: stringSchema("The question to ask the user."),
+        detail: stringSchema("Optional clarifying context shown under the question."),
+        options: arraySchema("0–10 suggested answers: strings or { label, description } objects."),
+        multiSelect: booleanSchema("Allow selecting more than one option."),
+        allowCustom: booleanSchema("Offer a free-form answer field (default true)."),
+        htmlPreview: stringSchema("Optional self-contained HTML5 document rendered in a sandboxed preview pane."),
+      }, ["question"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "PresentPlan",
+      description: "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution; in Automatic mode execution auto-starts. Prefer this over a plain prose checklist when proposing multi-step work.",
+      parameters: objectSchema({
+        steps: arraySchema("Ordered steps: strings or { title, detail, file } objects."),
+        title: stringSchema("Short plan title."),
+        summary: stringSchema("One-paragraph summary of the goal/approach."),
+      }, ["steps"]),
     },
   },
   {

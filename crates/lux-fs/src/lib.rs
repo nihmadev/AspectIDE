@@ -203,6 +203,89 @@ pub fn list_files(root: impl AsRef<Path>, max_results: usize) -> AppResult<Vec<F
     Ok(entries)
 }
 
+/// Like [`list_files`] but applies `predicate` to each file path during the walk
+/// and stops once `max_matches` files have matched. Non-matching files are never
+/// materialized, so callers that only need a bounded set of matches (e.g. a glob
+/// substring filter) do not heap-allocate every path in the workspace first.
+///
+/// The result is sorted by path. When the workspace contains more than
+/// `max_matches` matching files, the returned subset is walk-order dependent (the
+/// walk short-circuits early); when it contains fewer, every match is returned.
+pub fn list_files_matching(
+    root: impl AsRef<Path>,
+    predicate: impl Fn(&Path) -> bool + Send + Sync,
+    max_matches: usize,
+) -> AppResult<Vec<FsEntry>> {
+    let root = root.as_ref().to_path_buf();
+    if max_matches == 0 {
+        return Ok(Vec::new());
+    }
+    let mut builder = WalkBuilder::new(&root);
+    builder
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .parents(true)
+        .threads(scan_threads());
+
+    let collected: Arc<Mutex<Vec<FsEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    builder.build_parallel().run(|| {
+        let collected = Arc::clone(&collected);
+        let predicate = &predicate;
+        Box::new(move |result| {
+            let Ok(entry) = result else {
+                return WalkState::Continue;
+            };
+            let Some(file_type) = entry.file_type() else {
+                return WalkState::Continue;
+            };
+            if !file_type.is_file() {
+                return WalkState::Continue;
+            }
+            let path = entry.into_path();
+            if !predicate(&path) {
+                return WalkState::Continue;
+            }
+            let Ok(metadata) = fs::metadata(&path) else {
+                return WalkState::Continue;
+            };
+            let Some(name) = path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+            else {
+                return WalkState::Continue;
+            };
+            let record = FsEntry {
+                is_hidden: path
+                    .components()
+                    .any(|component| component.as_os_str().to_string_lossy().starts_with('.')),
+                name,
+                path,
+                kind: FsEntryKind::File,
+                size: metadata.len(),
+                modified_at: metadata.modified().ok().map(DateTime::<Utc>::from),
+            };
+            if let Ok(mut buffer) = collected.lock() {
+                buffer.push(record);
+                // Enough matches gathered: tell every worker to stop walking so
+                // we never enumerate the rest of the tree.
+                if buffer.len() >= max_matches {
+                    return WalkState::Quit;
+                }
+            }
+            WalkState::Continue
+        })
+    });
+
+    let mut entries = Arc::try_unwrap(collected)
+        .ok()
+        .and_then(|mutex| mutex.into_inner().ok())
+        .unwrap_or_default();
+    entries.sort_by(|left, right| left.path.cmp(&right.path));
+    entries.truncate(max_matches);
+    Ok(entries)
+}
+
 pub fn create_file(path: impl AsRef<Path>) -> AppResult<()> {
     fs::OpenOptions::new()
         .create_new(true)
@@ -233,7 +316,20 @@ pub fn copy_path(from: impl AsRef<Path>, to: impl AsRef<Path>) -> AppResult<()> 
     }
 
     if from.is_dir() {
-        if to.starts_with(from) {
+        // Reject copying a directory into itself. The lexical `starts_with`
+        // catches the common direct-nesting case; we additionally compare
+        // canonicalized paths so a destination reached via `..` or a symlink
+        // into `from` cannot slip past and drive `copy_dir_recursive` into
+        // unbounded recursion. `to` must not exist yet, so we canonicalize its
+        // parent and re-append the final component; any canonicalize failure
+        // falls back to the raw path (preserving the cheap lexical guard).
+        let from_real = fs::canonicalize(from).unwrap_or_else(|_| from.to_path_buf());
+        let to_real = to
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok())
+            .map(|parent| parent.join(to.file_name().unwrap_or_default()))
+            .unwrap_or_else(|| to.to_path_buf());
+        if to.starts_with(from) || to_real.starts_with(&from_real) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "cannot copy a directory into itself",
@@ -277,7 +373,14 @@ pub fn reveal_in_file_explorer(path: impl AsRef<Path>) -> AppResult<()> {
 
     #[cfg(target_os = "macos")]
     {
-        Command::new("open").arg("-R").arg(path).spawn()?;
+        // The launcher exits almost immediately; a dropped `Child` is never
+        // waited on, so on Unix it lingers as a zombie until the IDE exits.
+        // Reap it on a detached thread so each reveal call cleans up after
+        // itself.
+        let mut child = Command::new("open").arg("-R").arg(path).spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         Ok(())
     }
 
@@ -290,7 +393,13 @@ pub fn reveal_in_file_explorer(path: impl AsRef<Path>) -> AppResult<()> {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."))
         };
-        Command::new("xdg-open").arg(target).spawn()?;
+        // Reap the short-lived launcher on a detached thread; otherwise the
+        // dropped `Child` is never waited on and lingers as a zombie until the
+        // IDE exits, accumulating across reveal calls.
+        let mut child = Command::new("xdg-open").arg(target).spawn()?;
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
         Ok(())
     }
 }
@@ -301,12 +410,44 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> AppResult<()> {
         let entry = entry?;
         let source = entry.path();
         let target = to.join(entry.file_name());
-        let metadata = entry.metadata()?;
-        if metadata.is_dir() {
+        // Classify with the no-follow `DirEntry::file_type` so a symlink is
+        // detected *as a symlink* rather than resolved to its target. Following
+        // links here is unsafe during recursion: a link pointing at `from`
+        // itself or an ancestor would drive this function without bound
+        // (stack-overflow abort / endless nested dirs), and a link to an
+        // external tree (e.g. `/` or `/etc`) would be duplicated wholesale into
+        // the destination — neither is caught by the one-shot canonicalize guard
+        // in `copy_path`. We therefore recreate symlinks verbatim and only
+        // recurse into / copy *real* directories and files.
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            copy_symlink(&source, &target)?;
+        } else if file_type.is_dir() {
             copy_dir_recursive(&source, &target)?;
-        } else if metadata.is_file() {
+        } else if file_type.is_file() {
             fs::copy(source, target)?;
         }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_symlink(source: &Path, target: &Path) -> AppResult<()> {
+    let link_target = fs::read_link(source)?;
+    std::os::unix::fs::symlink(link_target, target)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn copy_symlink(source: &Path, target: &Path) -> AppResult<()> {
+    let link_target = fs::read_link(source)?;
+    // Windows needs the matching constructor for directory vs file links.
+    // Resolve the link from its real location to decide; a dangling link (whose
+    // target cannot be stat-ed) falls back to a file symlink.
+    if fs::metadata(source).is_ok_and(|meta| meta.is_dir()) {
+        std::os::windows::fs::symlink_dir(link_target, target)?;
+    } else {
+        std::os::windows::fs::symlink_file(link_target, target)?;
     }
     Ok(())
 }

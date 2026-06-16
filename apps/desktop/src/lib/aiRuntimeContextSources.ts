@@ -186,10 +186,41 @@ function packageDependencySummary(parsed: UnknownRecord) {
 function summarizeCargoToml(relativePath: string, text: string) {
   const packageName = text.match(/^name\s*=\s*"([^"]+)"/m)?.[1] ?? null;
   const version = text.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? null;
-  const dependencies = Array.from(text.matchAll(/^([A-Za-z0-9_-]+)\s*=\s*(.+)$/gm))
-    .filter((match) => !["name", "version", "edition", "license", "authors"].includes(match[1]))
-    .slice(0, 80)
-    .map((match) => ({ name: match[1], spec: truncateText(match[2].trim(), 180) }));
+  const reservedKeys = new Set(["name", "version", "edition", "license", "authors"]);
+  const isDependencyTable = (section: string) =>
+    /^(?:dependencies|dev-dependencies|build-dependencies)$/.test(section) ||
+    /^target\..+\.(?:dependencies|dev-dependencies|build-dependencies)$/.test(section) ||
+    /^workspace\.dependencies$/.test(section);
+  const dependencySubTable = (section: string): string | null =>
+    /^(?:dependencies|dev-dependencies|build-dependencies)\.(.+)$/.exec(section)?.[1] ??
+    /^target\..+\.(?:dependencies|dev-dependencies|build-dependencies)\.(.+)$/.exec(section)?.[1] ??
+    /^workspace\.dependencies\.(.+)$/.exec(section)?.[1] ??
+    null;
+  const dependencies: Array<{ name: string; spec: string }> = [];
+  const seen = new Set<string>();
+  const addDependency = (name: string, spec: string) => {
+    if (seen.has(name) || dependencies.length >= 80) return;
+    seen.add(name);
+    dependencies.push({ name, spec: truncateText(spec.trim(), 180) });
+  };
+  let section = "";
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const header = /^\[\[?\s*([^\]]+?)\s*\]\]?/.exec(line);
+    if (header) {
+      section = header[1].trim();
+      const sub = dependencySubTable(section);
+      if (sub) addDependency(sub, "(table)");
+      continue;
+    }
+    // Inside [dependencies.foo] the key=value lines are foo's attributes (version/features/path/...),
+    // not new dependencies, so skip them. Only flat dependency tables emit deps directly.
+    if (dependencySubTable(section) || !isDependencyTable(section)) continue;
+    const kv = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/.exec(line);
+    if (!kv || reservedKeys.has(kv[1])) continue;
+    addDependency(kv[1], kv[2]);
+  }
   return { path: relativePath, kind: "Cargo.toml", name: packageName, version, dependencies };
 }
 

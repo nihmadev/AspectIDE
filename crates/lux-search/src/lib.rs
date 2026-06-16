@@ -16,6 +16,9 @@ use regex::{Regex, RegexBuilder};
 
 const SEARCH_PREVIEW_MAX_CHARS: usize = 240;
 const SEARCH_PREVIEW_CONTEXT_BEFORE_CHARS: usize = 80;
+// Skip files larger than this cap so a handful of multi-GB files can't be read
+// fully into memory at once across the worker pool (matches ripgrep's default).
+const MAX_SEARCH_FILE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn query(
     root: impl AsRef<Path>,
@@ -80,11 +83,21 @@ pub fn query(
     // honors the "reserve a core for the UI" policy instead of grabbing every
     // core via rayon's default global pool.
     let match_files = |files: &[PathBuf]| -> Vec<SearchHit> {
+        // Cap per-file hits so one pathological file (e.g. a broad regex over a huge
+        // file) can't allocate millions of SearchHit before the global truncate.
+        // `max_results + 1` preserves both the result ordering and the `truncated`
+        // flag computed after the sort below.
+        let per_file_limit = options.max_results.saturating_add(1);
         files
             .par_iter()
             .flat_map_iter(|path| {
-                std::fs::read_to_string(path)
-                    .map_or_else(|_| Vec::new(), |text| collect_hits(path, &text, &matcher))
+                if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_SEARCH_FILE_BYTES) {
+                    return Vec::new();
+                }
+                std::fs::read_to_string(path).map_or_else(
+                    |_| Vec::new(),
+                    |text| collect_hits(path, &text, &matcher, per_file_limit),
+                )
             })
             .collect()
     };
@@ -182,7 +195,7 @@ struct SearchPreview {
     match_length: usize,
 }
 
-fn collect_hits(path: &Path, text: &str, matcher: &SearchMatcher) -> Vec<SearchHit> {
+fn collect_hits(path: &Path, text: &str, matcher: &SearchMatcher, limit: usize) -> Vec<SearchHit> {
     text.lines()
         .enumerate()
         .flat_map(|(line_index, line)| {
@@ -203,6 +216,7 @@ fn collect_hits(path: &Path, text: &str, matcher: &SearchMatcher) -> Vec<SearchH
                     }
                 })
         })
+        .take(limit)
         .collect()
 }
 

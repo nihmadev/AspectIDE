@@ -47,7 +47,7 @@ import { secretGuard as runSecretGuard } from "./aiRuntimeSecretGuard";
 import { shellTool, terminalContextTool, terminalWriteTool } from "./aiRuntimeShellTools";
 import { requireToolApproval, type ToolExecutionUi } from "./aiRuntimeToolApproval";
 import { parseToolArguments } from "./aiRuntimeToolBridge";
-import { agentMessageTool, goalWrite, taskSubagentTool, todoWrite, type RuntimeToolSession } from "./aiRuntimeToolSession";
+import { agentMessageTool, askUserTool, goalWrite, presentPlanTool, taskSubagentTool, todoWrite, type RuntimeToolSession } from "./aiRuntimeToolSession";
 import { clamp, numberArg, stringArg, type ToolResult } from "./aiRuntimeShared";
 import { isRuntimeToolAllowed, readOnlyAgentModeToolDenyReason, type RuntimeToolName } from "./aiRuntimeTools";
 import { luxCommands } from "./tauri";
@@ -131,6 +131,10 @@ export async function runRuntimeTool(
       return taskSubagentTool(args, input, session);
     case "AgentMessage":
       return agentMessageTool(args, input, session);
+    case "AskUser":
+      return askUserTool(args, input, call.id ?? `ask-${Date.now()}`);
+    case "PresentPlan":
+      return presentPlanTool(args, input, call.id ?? `plan-${Date.now()}`);
     case "WebFetch":
       return webFetchTool(args);
     case "SymbolContext":

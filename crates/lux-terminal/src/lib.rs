@@ -36,7 +36,7 @@ pub fn session_info(shell: Option<String>, cwd: PathBuf) -> TerminalSessionInfo 
 }
 
 pub struct TerminalService {
-    sessions: Mutex<HashMap<Uuid, Arc<TerminalSession>>>,
+    sessions: Arc<Mutex<HashMap<Uuid, Arc<TerminalSession>>>>,
     output_handler: TerminalOutputHandler,
 }
 
@@ -49,7 +49,7 @@ struct TerminalSession {
 impl TerminalService {
     pub fn new(output_handler: TerminalOutputHandler) -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             output_handler,
         }
     }
@@ -90,7 +90,15 @@ impl TerminalService {
 
         let session_id = info.id;
         let handler = Arc::clone(&self.output_handler);
-        thread::spawn(move || read_pty_loop(session_id, &mut reader, &handler));
+        let sessions = Arc::clone(&self.sessions);
+        thread::spawn(move || {
+            read_pty_loop(session_id, &mut reader, &handler);
+            // Shell exited on its own (e.g. user typed `exit`): drop the session so
+            // its PTY handles close and the dead child is reaped via Drop. Take the
+            // entry out under the lock, then drop it after releasing the lock.
+            let removed = sessions.lock().ok().and_then(|mut s| s.remove(&session_id));
+            drop(removed);
+        });
 
         self.sessions.lock().map_err(lock_error)?.insert(
             info.id,
@@ -130,15 +138,27 @@ impl TerminalService {
     }
 
     pub fn close(&self, session_id: Uuid) -> AppResult<()> {
-        self.sessions
+        // Drop the removed session AFTER releasing the lock: TerminalSession::drop
+        // runs a blocking child.wait(), which must not execute while the sessions
+        // Mutex is held or a slow-dying child would hang every other terminal op.
+        let removed = self
+            .sessions
             .lock()
             .map_err(lock_error)?
             .remove(&session_id);
+        drop(removed);
         Ok(())
     }
 
     pub fn close_all(&self) -> AppResult<()> {
-        self.sessions.lock().map_err(lock_error)?.clear();
+        // Drain under the lock, then drop the sessions after releasing it so the
+        // blocking child.wait() in TerminalSession::drop never runs while holding
+        // the sessions Mutex (.clear() would drop every child serially under it).
+        let drained: Vec<_> = {
+            let mut guard = self.sessions.lock().map_err(lock_error)?;
+            guard.drain().map(|(_, session)| session).collect()
+        };
+        drop(drained);
         Ok(())
     }
 
@@ -155,6 +175,8 @@ impl TerminalService {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        // Reap the child so a SIGKILL-fallback exit does not leave a zombie.
+        let _ = self.child.wait();
     }
 }
 

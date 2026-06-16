@@ -1,5 +1,5 @@
 import { Check, ChevronRight, Circle, FileDiff, ListChecks, Loader2, Minus, Network, Square, X } from "lucide-react";
-import { useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
 import {
   cancelSubagentRun,
   getSubagentRun,
@@ -73,10 +73,14 @@ function AiAgentOrchestrationRailBody({
   useSyncExternalStore(subscribeAiSessionGoals, getAiSessionGoalsSnapshot, getAiSessionGoalsSnapshot);
   useSyncExternalStore(subscribeAiSessionGoalRuns, getAiSessionGoalRunsSnapshot, getAiSessionGoalRunsSnapshot);
   useSyncExternalStore(subscribeAiSessionTodos, getAiSessionTodosSnapshot, getAiSessionTodosSnapshot);
-  useSyncExternalStore(subscribeSubagentRuns, () => 0, () => 0);
+  const subagentRunsSnapshot = useCallback(() => subagentRunsSignature(sessionId), [sessionId]);
+  useSyncExternalStore(subscribeSubagentRuns, subagentRunsSnapshot, subagentRunsSnapshot);
   useSyncExternalStore(subscribePendingFileReviews, getPendingFileReviewsSnapshot, getPendingFileReviewsSnapshot);
 
   const [selectedSubagentId, setSelectedSubagentId] = useState<string | null>(null);
+  useEffect(() => {
+    setSelectedSubagentId(null);
+  }, [sessionId]);
   const maxParallelSubagents = resolveMaxParallelSubagents(preferences);
 
   const goal = getAiSessionGoal(sessionId);
@@ -89,7 +93,30 @@ function AiAgentOrchestrationRailBody({
   );
   const runningSubagents = subagentRuns.filter((run) => run.status === "running").length;
   const completedTodos = todos.filter((todo) => todo.status === "completed").length;
-  const selectedSubagent = selectedSubagentId ? getSubagentRun(selectedSubagentId) : null;
+
+  // Finished subagents are hidden once older than the 5-min window (see filter above), but that
+  // boundary is only evaluated at render time. Schedule a refresh at the soonest expiry so the row
+  // disappears on time instead of lingering until an unrelated re-render. Keyed on a stable string
+  // (not the rebuilt array) to avoid a render loop.
+  const [, forceExpiryTick] = useState(0);
+  const finishedExpiryKey = subagentRuns
+    .filter((run) => run.status !== "running")
+    .map((run) => run.endedAt ?? run.startedAt)
+    .join(",");
+  useEffect(() => {
+    if (!finishedExpiryKey) return;
+    const timestamps = finishedExpiryKey.split(",").map(Number);
+    const soonest = Math.min(...timestamps.map((at) => 300_000 - (Date.now() - at)));
+    if (soonest <= 0) {
+      forceExpiryTick((tick) => tick + 1);
+      return;
+    }
+    const timer = setTimeout(() => forceExpiryTick((tick) => tick + 1), soonest + 50);
+    return () => clearTimeout(timer);
+  }, [finishedExpiryKey]);
+  const selectedSubagentCandidate = selectedSubagentId ? getSubagentRun(selectedSubagentId) : null;
+  const selectedSubagent =
+    selectedSubagentCandidate && selectedSubagentCandidate.sessionId === sessionId ? selectedSubagentCandidate : null;
 
   if (collapsed) {
     const busy = sessionStatus !== "idle" && sessionStatus !== "error";
@@ -316,6 +343,18 @@ function SubagentRailRow({
       )}
     </li>
   );
+}
+
+/**
+ * Value-stable snapshot of this session's subagent runs for useSyncExternalStore.
+ * Returns a primitive string that changes on spawn/status/transcript-append/complete/cancel,
+ * so React value-compares it and re-renders on live subagent updates (but stays equal when
+ * nothing changed, avoiding an infinite re-render loop).
+ */
+function subagentRunsSignature(sessionId: string): string {
+  return listSubagentRunsForSession(sessionId)
+    .map((run) => `${run.id}:${run.status}:${run.revision}:${run.endedAt ?? ""}`)
+    .join("|");
 }
 
 function buildSubagentTree(runs: SubagentRun[]): SubagentTreeNode[] {

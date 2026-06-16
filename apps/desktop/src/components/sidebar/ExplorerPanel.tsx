@@ -89,8 +89,10 @@ export function ExplorerPanel() {
     onError: (error) => setOperationError(readErrorMessage(error, t)),
   });
 
+  const refreshSeq = useRef(0);
   const refreshTree = useCallback(async () => {
     if (!workspace) return;
+    const seq = ++refreshSeq.current;
     setFileTreeLoading(true);
     setFileTreeError(null);
     setOperationError(null);
@@ -100,29 +102,32 @@ export function ExplorerPanel() {
         ...merged,
         ...buildDirectories(folder.root, entries),
       }), {});
+      if (refreshSeq.current !== seq) return;
       setFileTreeDirectories(directories);
       setFileEntries(directories[normalizePath(workspace.root)] ?? []);
     } catch (error) {
-      setFileTreeError(readErrorMessage(error, t));
+      if (refreshSeq.current === seq) setFileTreeError(readErrorMessage(error, t));
     } finally {
-      setFileTreeLoading(false);
+      if (refreshSeq.current === seq) setFileTreeLoading(false);
     }
   }, [setFileEntries, setFileTreeDirectories, setFileTreeError, setFileTreeLoading, t, workspace, workspaceRoots]);
 
   const loadWorkspaceRoot = useCallback(async (folder: typeof workspaceRoots[number]) => {
+    const seq = ++refreshSeq.current;
     setFileTreeLoading(true);
     setFileTreeError(null);
     setOperationError(null);
     try {
       const entries = await luxCommands.fsReadTree(folder.root);
       const directories = buildDirectories(folder.root, entries);
+      if (refreshSeq.current !== seq) return;
       setFileTreeDirectories({ ...useLuxStore.getState().fileTreeDirectories, ...directories });
       if (workspace?.root === folder.root) setFileEntries(directories[normalizePath(folder.root)] ?? []);
       ensureExplorerExpandedPath(folder.root);
     } catch (error) {
-      setFileTreeError(readErrorMessage(error, t));
+      if (refreshSeq.current === seq) setFileTreeError(readErrorMessage(error, t));
     } finally {
-      setFileTreeLoading(false);
+      if (refreshSeq.current === seq) setFileTreeLoading(false);
     }
   }, [ensureExplorerExpandedPath, setFileEntries, setFileTreeDirectories, setFileTreeError, setFileTreeLoading, t, workspace?.root]);
 
@@ -252,6 +257,14 @@ export function ExplorerPanel() {
   const pasteInto = useCallback(
     async (targetDirectory: string) => {
       if (!clipboardEntry) return;
+      if (clipboardEntry.entry.kind === "directory") {
+        const source = normalizePath(clipboardEntry.entry.path);
+        const target = normalizePath(targetDirectory);
+        if (target === source || target.startsWith(`${source}/`)) {
+          setOperationError(t("sidebar.explorer.move.cannotMoveFolderIntoItself"));
+          return;
+        }
+      }
       const destination = uniqueDestinationPath(targetDirectory, clipboardEntry.entry.name, fileTreeDirectories, t);
       try {
         setOperationError(null);
@@ -307,13 +320,16 @@ export function ExplorerPanel() {
   }, [t]);
 
   const copyRelativePath = useCallback(async (entry: FsEntry) => {
-    if (!workspace) return;
+    const owningRoot = workspaceRoots
+      .filter((folder) => pathIsInsideEntry(folder.root, entry.path))
+      .sort((a, b) => normalizePath(b.root).length - normalizePath(a.root).length)[0] ?? workspace;
+    if (!owningRoot) return;
     try {
-      await luxCommands.clipboardWriteText(relativePath(workspace.root, entry.path));
+      await luxCommands.clipboardWriteText(relativePath(owningRoot.root, entry.path));
     } catch (error) {
       setOperationError(readErrorMessage(error, t));
     }
-  }, [t, workspace]);
+  }, [t, workspace, workspaceRoots]);
 
   const openEntryTerminal = useCallback(
     async (entry: FsEntry) => {
@@ -938,6 +954,12 @@ function RenameRow({ depth, entry, onCancel, rename }: { depth: number; entry: F
   const [name, setName] = useState(entry.name);
   const iconMeta = fileIconForName(name);
   const Icon = entry.kind === "directory" ? Folder : iconMeta.Icon;
+  const committedRef = useRef(false);
+  const commit = () => {
+    if (committedRef.current) return;
+    committedRef.current = true;
+    void rename(entry, name);
+  };
 
   return (
     <form
@@ -945,7 +967,7 @@ function RenameRow({ depth, entry, onCancel, rename }: { depth: number; entry: F
       style={{ "--tree-depth": depth } as CSSProperties}
       onSubmit={(event) => {
         event.preventDefault();
-        void rename(entry, name);
+        commit();
       }}
     >
       <span className="tree-chevron" />
@@ -953,7 +975,7 @@ function RenameRow({ depth, entry, onCancel, rename }: { depth: number; entry: F
       <input
         autoFocus
         value={name}
-        onBlur={() => void rename(entry, name)}
+        onBlur={commit}
         onChange={(event) => setName(event.target.value)}
         onFocus={(event) => event.currentTarget.select()}
         onKeyDown={(event) => {

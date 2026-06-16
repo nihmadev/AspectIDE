@@ -81,7 +81,11 @@ export function buildUserContent(input: AiChatSendInput): string | ChatContentPa
         remainingAttachmentChars = Math.max(0, remainingAttachmentChars - summary.length);
         return `### ${attachment.name} (${attachment.size} bytes)\n${summary}`;
       }
-      const text = truncateText(attachment.text, Math.max(1_000, remainingAttachmentChars));
+      const allowance = Math.max(0, remainingAttachmentChars);
+      if (allowance <= 0) {
+        return `### ${attachment.name} (${attachment.size} bytes)\n(omitted — attachment budget exhausted)`;
+      }
+      const text = truncateText(attachment.text, allowance);
       remainingAttachmentChars = Math.max(0, remainingAttachmentChars - text.length);
       return `### ${attachment.name} (${attachment.size} bytes)\n\`\`\`\n${text}\n\`\`\``;
     });
@@ -128,19 +132,24 @@ function compactHistoryMessages(history: AiChatMessage[], budgetChars: number): 
   const selected: ChatCompletionMessage[] = [];
   let used = 0;
   const recent = history.slice(-maxHistoryMessages).reverse();
-  for (const message of recent) {
+  let omitted = Math.max(0, history.length - recent.length);
+  for (let i = 0; i < recent.length; i++) {
+    const message = recent[i];
     const content = compactHistoryMessageContent(message);
     if (!content.trim()) continue;
     const cost = content.length + 64;
-    if (selected.length > 0 && used + cost > budgetChars) break;
+    if (selected.length > 0 && used + cost > budgetChars) {
+      omitted += recent.length - i;
+      break;
+    }
     selected.push({ role: message.role, content });
     used += cost;
   }
   selected.reverse();
-  if (history.length > selected.length) {
+  if (omitted > 0) {
     selected.unshift({
       role: "system",
-      content: `Earlier conversation compacted: ${history.length - selected.length} older message(s) were omitted to keep the current request responsive. Use tools/context if exact older details are needed.`,
+      content: `Earlier conversation compacted: ${omitted} earlier message(s) were omitted to keep the current request responsive. Use tools/context if exact details are needed.`,
     });
   }
   return selected;

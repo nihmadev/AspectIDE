@@ -36,18 +36,18 @@ type SecretPattern = {
 const secretPreviewMask = "[REDACTED]";
 
 const secretPatterns: SecretPattern[] = [
-  { kind: "openai-api-key", label: "OpenAI API key", severity: "critical", confidence: "high", regex: /\b(sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,})\b/g, secretGroup: 1 },
-  { kind: "github-token", label: "GitHub token", severity: "critical", confidence: "high", regex: /\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{30,})\b/g, secretGroup: 1 },
-  { kind: "github-fine-grained-token", label: "GitHub fine-grained token", severity: "critical", confidence: "high", regex: /\b(github_pat_[A-Za-z0-9_]{40,})\b/g, secretGroup: 1 },
-  { kind: "slack-token", label: "Slack token", severity: "critical", confidence: "high", regex: /\b(xox[baprs]-[A-Za-z0-9-]{20,})\b/g, secretGroup: 1 },
-  { kind: "aws-access-key", label: "AWS access key", severity: "critical", confidence: "high", regex: /\b((?:AKIA|ASIA)[A-Z0-9]{16})\b/g, secretGroup: 1 },
-  { kind: "google-api-key", label: "Google API key", severity: "critical", confidence: "high", regex: /\b(AIza[0-9A-Za-z_-]{35})\b/g, secretGroup: 1 },
-  { kind: "stripe-key", label: "Stripe key", severity: "critical", confidence: "high", regex: /\b((?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,})\b/g, secretGroup: 1 },
-  { kind: "jwt", label: "JWT", severity: "high", confidence: "medium", regex: /\b(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/g, secretGroup: 1 },
-  { kind: "private-key-block", label: "Private key block", severity: "critical", confidence: "high", regex: /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/g },
-  { kind: "connection-string-password", label: "Connection string password", severity: "high", confidence: "medium", regex: /\b((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s:@/]+:)([^\s@/]{8,})(@[^\s]*)/gi, secretGroup: 2 },
-  { kind: "assigned-secret", label: "Assigned secret value", severity: "high", confidence: "medium", regex: /\b([A-Z0-9_.-]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE[_-]?KEY|AUTH|CREDENTIAL)[A-Z0-9_.-]*\s*[:=]\s*["']?)([^"'\s]{12,})/gi, secretGroup: 2, labelGroup: 1 },
-  { kind: "bearer-token", label: "Bearer token", severity: "high", confidence: "medium", regex: /\b(Bearer\s+)([A-Za-z0-9._~+/=-]{20,})\b/g, secretGroup: 2, labelGroup: 1 },
+  { kind: "openai-api-key", label: "OpenAI API key", severity: "critical", confidence: "high", regex: /\b(sk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{20,})\b/gd, secretGroup: 1 },
+  { kind: "github-token", label: "GitHub token", severity: "critical", confidence: "high", regex: /\b((?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{30,})\b/gd, secretGroup: 1 },
+  { kind: "github-fine-grained-token", label: "GitHub fine-grained token", severity: "critical", confidence: "high", regex: /\b(github_pat_[A-Za-z0-9_]{40,})\b/gd, secretGroup: 1 },
+  { kind: "slack-token", label: "Slack token", severity: "critical", confidence: "high", regex: /\b(xox[baprs]-[A-Za-z0-9-]{20,})\b/gd, secretGroup: 1 },
+  { kind: "aws-access-key", label: "AWS access key", severity: "critical", confidence: "high", regex: /\b((?:AKIA|ASIA)[A-Z0-9]{16})\b/gd, secretGroup: 1 },
+  { kind: "google-api-key", label: "Google API key", severity: "critical", confidence: "high", regex: /\b(AIza[0-9A-Za-z_-]{35})\b/gd, secretGroup: 1 },
+  { kind: "stripe-key", label: "Stripe key", severity: "critical", confidence: "high", regex: /\b((?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,})\b/gd, secretGroup: 1 },
+  { kind: "jwt", label: "JWT", severity: "high", confidence: "medium", regex: /\b(eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/gd, secretGroup: 1 },
+  { kind: "private-key-block", label: "Private key block", severity: "critical", confidence: "high", regex: /-----BEGIN (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |DSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/gd },
+  { kind: "connection-string-password", label: "Connection string password", severity: "high", confidence: "medium", regex: /\b((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis):\/\/[^\s:@/]+:)([^\s@/]{8,})(@[^\s]*)/gid, secretGroup: 2 },
+  { kind: "assigned-secret", label: "Assigned secret value", severity: "high", confidence: "medium", regex: /\b([A-Z0-9_.-]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE[_-]?KEY|AUTH|CREDENTIAL)[A-Z0-9_.-]*\s*[:=]\s*["']?)([^"'\s]{12,})/gid, secretGroup: 2, labelGroup: 1 },
+  { kind: "bearer-token", label: "Bearer token", severity: "high", confidence: "medium", regex: /\b(Bearer\s+)([A-Za-z0-9._~+/=-]{20,})\b/gd, secretGroup: 2, labelGroup: 1 },
 ];
 
 export async function secretGuard(args: UnknownRecord): Promise<ToolResult> {
@@ -97,9 +97,11 @@ export function scanSecrets(text: string, source: string) {
       const secret = pattern.secretGroup ? match[pattern.secretGroup] ?? rawMatch : rawMatch;
       if (!secret || !isLikelySecretValue(secret, pattern.kind)) continue;
       const matchIndex = match.index ?? 0;
-      const relativeSecretIndex = rawMatch.indexOf(secret);
-      const start = matchIndex + Math.max(relativeSecretIndex, 0);
-      const end = start + secret.length;
+      const groupSpan = pattern.secretGroup
+        ? (match as unknown as { indices?: Array<[number, number] | undefined> }).indices?.[pattern.secretGroup]
+        : undefined;
+      const start = groupSpan ? groupSpan[0] : matchIndex + Math.max(rawMatch.indexOf(secret), 0);
+      const end = groupSpan ? groupSpan[1] : start + secret.length;
       if (rangeHasOccupiedIndex(occupied, start, end)) continue;
       for (let index = start; index < end; index += 1) occupied.add(index);
       const position = offsetToLineColumn(text, start);

@@ -236,9 +236,7 @@ impl LspManager {
         };
         let result = session.did_open(document).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -253,9 +251,7 @@ impl LspManager {
         };
         let result = session.did_change(document).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -274,9 +270,7 @@ impl LspManager {
         };
         let result = session.did_change_edits(document, edits).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -291,23 +285,37 @@ impl LspManager {
         };
         let result = session.did_save(document).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
 
     pub async fn close_document(&mut self, path: &Path) -> AppResult<()> {
-        let language_id = session_language_id(&language_id_for_path(path)).to_string();
+        // `close_document` only has a `&Path`, so it cannot reuse the editor's
+        // `document.language_id` the way open/update/save do. Re-deriving a key
+        // from the extension (the old `language_id_for_path`) diverges from the
+        // richer map that keyed the open (e.g. user-overridden languages, or
+        // `mts`/`scss`/`vue`/`typescriptreact` paths), so `get_mut` missed and
+        // `didClose` never fired — leaking client + server open-file state.
+        // Find the session that actually holds the path instead.
+        let Some(language_id) = self
+            .sessions
+            .iter()
+            .find_map(|(language_id, session)| {
+                session
+                    .opened_documents
+                    .contains_key(path)
+                    .then(|| language_id.clone())
+            })
+        else {
+            return Ok(());
+        };
         let Some(session) = self.sessions.get_mut(&language_id) else {
             return Ok(());
         };
         let result = session.did_close(path).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -327,9 +335,7 @@ impl LspManager {
         };
         let result = session.hover(path, line, column).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -349,9 +355,7 @@ impl LspManager {
         };
         let result = session.definition(path, line, column).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -371,9 +375,7 @@ impl LspManager {
         };
         let result = session.references(path, line, column).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -391,9 +393,7 @@ impl LspManager {
         };
         let result = session.document_symbols(path).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -411,9 +411,7 @@ impl LspManager {
             };
             let result = session.workspace_symbols(&query).await;
             if result.is_err() {
-                if let Some(session) = self.sessions.remove(&language_id) {
-                    session.shutdown().await;
-                }
+                self.teardown_if_dead(&language_id).await;
                 continue;
             }
             symbols.extend(result?);
@@ -441,9 +439,7 @@ impl LspManager {
         };
         let result = session.folding_ranges(path).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -462,9 +458,7 @@ impl LspManager {
         };
         let result = session.inlay_hints(path, range).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -482,9 +476,7 @@ impl LspManager {
         };
         let result = session.semantic_tokens(path).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -505,9 +497,7 @@ impl LspManager {
         };
         let result = session.rename(path, line, column, new_name).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -527,9 +517,7 @@ impl LspManager {
         };
         let result = session.completion(path, line, column).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -553,9 +541,7 @@ impl LspManager {
             .code_actions(path, range, diagnostics, only, trigger)
             .await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -574,9 +560,7 @@ impl LspManager {
         };
         let result = session.format_document(path, options).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -596,9 +580,7 @@ impl LspManager {
         };
         let result = session.format_range(path, range, options).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -618,9 +600,7 @@ impl LspManager {
         };
         let result = session.signature_help(path, line, column).await;
         if result.is_err() {
-            if let Some(session) = self.sessions.remove(&language_id) {
-                session.shutdown().await;
-            }
+            self.teardown_if_dead(&language_id).await;
         }
         result
     }
@@ -629,6 +609,32 @@ impl LspManager {
         let sessions = std::mem::take(&mut self.sessions);
         for (_, session) in sessions {
             session.shutdown().await;
+        }
+    }
+
+    /// Tear down a session only when it is genuinely dead: either the child
+    /// process has exited (or `try_wait` errored on a broken handle), or the
+    /// stdout reader task has ended — which drops `response_tx` and makes every
+    /// future request fail forever even though the OS process may briefly linger.
+    ///
+    /// A recoverable per-request failure (a timeout against a busy-but-alive
+    /// server, or a single server error-response) surfaces as the same
+    /// `AppError::Service` as genuine transport death, so an error-variant check
+    /// cannot distinguish them. Removing the session on every `Err` would
+    /// silently disable diagnostics, completion and every other feature for all
+    /// files of that language until the servers are restarted. Liveness of both
+    /// the process and its transport is the source of truth: only reap when one
+    /// of them is actually gone. A still-running reader plus a live process
+    /// (`try_wait() == Ok(None)`) is preserved so a busy server is not dropped
+    /// mid-request.
+    async fn teardown_if_dead(&mut self, language_id: &str) {
+        let dead = self.sessions.get_mut(language_id).is_none_or(|session| {
+            session.read_task.is_finished() || !matches!(session.child.try_wait(), Ok(None))
+        });
+        if dead {
+            if let Some(session) = self.sessions.remove(language_id) {
+                session.shutdown().await;
+            }
         }
     }
 }
@@ -1255,26 +1261,6 @@ fn session_language_id(language_id: &str) -> &str {
         "javascript" => "typescript",
         other => other,
     }
-}
-
-fn language_id_for_path(path: &Path) -> String {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-    {
-        "rs" => "rust",
-        "ts" | "tsx" => "typescript",
-        "js" | "jsx" => "javascript",
-        "json" => "json",
-        "toml" => "toml",
-        "md" => "markdown",
-        "css" => "css",
-        "html" => "html",
-        other if !other.is_empty() => other,
-        _ => "plaintext",
-    }
-    .to_string()
 }
 
 #[cfg(test)]

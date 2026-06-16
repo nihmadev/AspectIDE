@@ -46,7 +46,7 @@ export function FilePreviewPane({ document, variant = "editor" }: FilePreviewPan
     return () => {
       cancelled = true;
     };
-  }, [document, path, reloadToken]);
+  }, [path, reloadToken]);
 
   const title = inspection?.title ?? document.title;
   const descriptor = inspection?.descriptor ?? document.view;
@@ -101,7 +101,7 @@ function PreviewBody({ fallbackPath, inspection, reloadKey }: { fallbackPath: st
     case "database":
       return <DatabasePreview preview={inspection.preview} />;
     case "pdf":
-      return <PdfPreview path={inspection.path} preview={inspection.preview} />;
+      return <PdfPreview path={inspection.path} preview={inspection.preview} reloadKey={reloadKey} />;
     case "office":
       return <OfficePreview preview={inspection.preview} />;
     case "image":
@@ -187,9 +187,9 @@ function DatabasePreview({ preview }: { preview: Extract<FilePreview, { kind: "d
   );
 }
 
-function PdfPreview({ path, preview }: { path: string; preview: Extract<FilePreview, { kind: "pdf" }> }) {
+function PdfPreview({ path, preview, reloadKey = 0 }: { path: string; preview: Extract<FilePreview, { kind: "pdf" }>; reloadKey?: number }) {
   const { t } = useTranslation();
-  const { error, loading, url } = useFileAssetUrl(path);
+  const { error, loading, url } = useFileAssetUrl(path, reloadKey);
   return (
     <div className="file-preview-pdf">
       {url ? <iframe title={t("filePreview.pdf.title")} src={url} /> : null}
@@ -225,8 +225,8 @@ function ArchiveEntryList({ entries }: { entries: Array<{ path: string; compress
   const { t } = useTranslation();
   return (
     <div className="file-preview-entry-list">
-      {entries.map((entry) => (
-        <div className="file-preview-entry" key={entry.path}>
+      {entries.map((entry, index) => (
+        <div className="file-preview-entry" key={`${index}:${entry.path}`}>
           <span>{entry.path}</span>
           <small>{entry.isDir ? t("filePreview.archive.folder") : formatBytes(entry.uncompressedSize)}</small>
         </div>

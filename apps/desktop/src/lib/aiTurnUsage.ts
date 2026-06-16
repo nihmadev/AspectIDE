@@ -103,19 +103,39 @@ export function resolveAssistantTurnUsage(
   return estimateTurnUsageFromAssistant(assistant) ?? undefined;
 }
 
+/**
+ * Resolve effective per-million token rates for a model: a manual price set on the
+ * model config wins (either field independently), otherwise the alias-based default.
+ * Returns null only when there is no signal at all (never, since the fallback is total).
+ */
+export function resolveTurnCostRates(model: AiModelConfig): { inputPerMillion: number; outputPerMillion: number } {
+  const fallback = resolveModelCostRates((model.alias || model.id).toLowerCase());
+  const manualInput = positivePrice(model.inputPricePerMillion);
+  const manualOutput = positivePrice(model.outputPricePerMillion);
+  return {
+    inputPerMillion: manualInput ?? fallback.inputPerMillion,
+    outputPerMillion: manualOutput ?? fallback.outputPerMillion,
+  };
+}
+
+/**
+ * Populate `estimatedCostUsd` on a usage record. Uses the model's manual price when
+ * set (Settings → Providers → model), else alias-based defaults. Cache-read prompt
+ * tokens bill at a steep discount (~0.1x) across providers. Idempotent: recomputes
+ * deterministically, so re-attaching is safe.
+ */
 export function attachTurnCostEstimate(usage: AiChatTurnTokenUsage, model: AiModelConfig): AiChatTurnTokenUsage {
-  const alias = (model.alias || model.id).toLowerCase();
-  const rates = resolveModelCostRates(alias);
-  if (!rates) return usage;
-  // Cache-read prompt tokens are billed at a steep discount (~0.1x) across providers.
+  const rates = resolveTurnCostRates(model);
   const cached = Math.min(usage.cachedPromptTokens ?? 0, usage.promptTokens);
   const uncachedPrompt = Math.max(0, usage.promptTokens - cached);
   const inputCost = ((uncachedPrompt + cached * 0.1) / 1_000_000) * rates.inputPerMillion;
   const outputCost = (usage.completionTokens / 1_000_000) * rates.outputPerMillion;
-  return {
-    ...usage,
-    estimatedCostUsd: Math.round((inputCost + outputCost) * 10_000) / 10_000,
-  };
+  const estimatedCostUsd = Math.round((inputCost + outputCost) * 10_000) / 10_000;
+  return { ...usage, estimatedCostUsd: estimatedCostUsd > 0 ? estimatedCostUsd : null };
+}
+
+function positivePrice(value: number | null | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 export function mergeTurnTokenUsage(left: AiChatTurnTokenUsage | null, right: AiChatTurnTokenUsage | null): AiChatTurnTokenUsage | null {

@@ -7,5 +7,6 @@ authors.workspace = true
 
 [dependencies]
 chrono.workspace = true
+dunce.workspace = true
 lux-core = { path = "../lux-core" }
 tokio.workspace = true

@@ -623,13 +623,22 @@ pub fn monaco_language_id_for_path(path: &Path) -> String {
     if descriptor.category == FileViewCategory::Markdown {
         return "markdown".to_string();
     }
+    let lower_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(lower_name.as_str(), "dockerfile" | "containerfile") {
+        return "dockerfile".to_string();
+    }
     match file_extension_for_path(path).as_str() {
         "rs" => "rust",
         "ts" | "tsx" | "mts" | "cts" | "d.ts" | "d.mts" | "d.cts" => "typescript",
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "json" | "jsonc" | "json5" | "jsonl" | "ndjson" | "webmanifest" | "geojson" | "npmrc"
-        | "yarnrc" | "prettierrc" | "eslintrc" | "babelrc" | "browserslistrc" | "excalidraw"
-        | "dot" | "gv" => "json",
+        | "yarnrc" | "prettierrc" | "eslintrc" | "babelrc" | "browserslistrc" | "excalidraw" => {
+            "json"
+        }
         "toml" | "tml" => "toml",
         "yaml" | "yml" => "yaml",
         "css" | "scss" | "sass" | "less" => "css",
@@ -672,9 +681,8 @@ pub fn monaco_language_id_for_path(path: &Path) -> String {
         "ini" | "cfg" | "conf" | "config" | "properties" | "props" | "editorconfig"
         | "gitignore" | "gitattributes" | "gitmodules" => "ini",
         "env" => "properties",
-        "puml" | "plantuml" | "log" | "out" | "err" | "diff" | "patch" | "lock" | "sum" => {
-            "plaintext"
-        }
+        "dot" | "gv" | "puml" | "plantuml" | "log" | "out" | "err" | "diff" | "patch" | "lock"
+        | "sum" => "plaintext",
         other if !other.is_empty() => other,
         _ => "plaintext",
     }

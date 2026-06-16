@@ -75,7 +75,7 @@ export type AiMessageSegment =
   | { kind: "text"; id: string; text: string }
   | { kind: "tool"; id: string; toolCall: AiChatToolCall };
 
-export type AiChatMessageKind = "default" | "compaction-checkpoint" | "goal-orchestration";
+export type AiChatMessageKind = "default" | "compaction-checkpoint" | "goal-orchestration" | "review-request";
 
 export type AiChatMessageVisibility = "visible" | "internal";
 
@@ -165,6 +165,16 @@ export type AiChatSendInput = {
   onContextBudgetReport?: (report: AiChatContextBudgetReport) => void;
   onFilePathsEdited?: (paths: string[]) => void;
 };
+
+/**
+ * A review-request turn. Its `content` carries the full review instruction sent to the
+ * model, but the chat UI renders a compact badge instead of the raw prompt text (so the
+ * long instruction never clutters the transcript). Mirrors the compaction-checkpoint
+ * pattern: real content for the model, custom card in the view.
+ */
+export function isReviewRequestMessage(message: AiChatMessage): boolean {
+  return message.kind === "review-request";
+}
 
 export function deriveSegmentContent(segments: AiMessageSegment[]): string {
   return segments

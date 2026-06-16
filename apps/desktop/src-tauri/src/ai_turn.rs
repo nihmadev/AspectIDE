@@ -17,7 +17,7 @@
 //! `ai_resolve_turn_approval(turn_id, request_id, decision)` which sends the
 //! decision through the channel, unblocking the loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,91 @@ fn approval_channels() -> &'static Mutex<HashMap<String, oneshot::Sender<Approva
     static CHANNELS: OnceLock<Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>> =
         OnceLock::new();
     CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Channels the `AskUser` tool suspends on while waiting for the UI to deliver a
+/// human answer. Same oneshot pattern as approvals, but the payload is the chosen
+/// answer text (free-form, possibly multi-select joined) rather than a yes/no.
+fn question_channels() -> &'static Mutex<HashMap<String, oneshot::Sender<QuestionAnswer>>> {
+    static CHANNELS: OnceLock<Mutex<HashMap<String, oneshot::Sender<QuestionAnswer>>>> =
+        OnceLock::new();
+    CHANNELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registry of turn ids the UI has asked to cancel. The model↔tool loop checks
+/// this at every round boundary and after each tool call so a Stop actually
+/// halts streaming + side-effecting tools instead of letting the turn run on.
+fn cancelled_turns() -> &'static Mutex<HashSet<String>> {
+    static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    CANCELLED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Mark a turn cancelled so the loop (and any running subagent) stops ASAP.
+fn mark_turn_cancelled(turn_id: &str) {
+    if let Ok(mut set) = cancelled_turns().lock() {
+        // A running loop consumes a genuine cancel within milliseconds; only
+        // stale/late/never-run ids accumulate. Bound the set so a stream of
+        // spurious late cancels can't leak unbounded for the process lifetime.
+        if set.len() >= 128 {
+            set.clear();
+        }
+        set.insert(turn_id.to_string());
+    }
+}
+
+/// True if the turn has been cancelled. Subagents share the parent turn id, so
+/// this also halts an in-flight Task tool.
+fn is_turn_cancelled(turn_id: &str) -> bool {
+    cancelled_turns()
+        .lock()
+        .map(|set| set.contains(turn_id))
+        .unwrap_or(false)
+}
+
+/// Drop the cancellation flag for a finished turn so the set never grows
+/// unbounded (also lets a future turn reusing the id start clean).
+fn clear_turn_cancelled(turn_id: &str) {
+    if let Ok(mut set) = cancelled_turns().lock() {
+        set.remove(turn_id);
+    }
+}
+
+/// Build the system message. When `anthropic_cache` is set, the content is the
+/// structured `[{type:text, cache_control:{type:ephemeral}}]` form Anthropic needs
+/// to cache the prompt; otherwise a plain string (which other providers cache
+/// automatically and won't reject for an unknown field).
+fn build_system_message(system: &str, anthropic_cache: bool) -> serde_json::Value {
+    if anthropic_cache {
+        serde_json::json!({
+            "role": "system",
+            "content": [{
+                "type": "text",
+                "text": system,
+                "cache_control": { "type": "ephemeral" },
+            }],
+        })
+    } else {
+        serde_json::json!({ "role": "system", "content": system })
+    }
+}
+
+/// Extract cache-read prompt tokens from a usage object across provider shapes:
+/// OpenAI/OpenRouter `prompt_tokens_details.cached_tokens`, Anthropic
+/// `cache_read_input_tokens`, or a top-level `cached_tokens`.
+fn parse_cached_prompt_tokens(usage: &serde_json::Value) -> u64 {
+    let direct = usage
+        .get("cache_read_input_tokens")
+        .or_else(|| usage.get("cached_tokens"))
+        .and_then(serde_json::Value::as_u64);
+    if let Some(value) = direct {
+        return value;
+    }
+    usage
+        .get("prompt_tokens_details")
+        .or_else(|| usage.get("input_tokens_details"))
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0)
 }
 
 // ── Event types (Rust → UI) ──
@@ -81,6 +166,41 @@ pub enum TurnEvent {
         risk: String,
     },
 
+    /// The agent asked the user a question (AskUser tool). UI renders an
+    /// interactive card and replies via `ai_resolve_turn_question`. In Automatic
+    /// mode this event never fires — the model self-answers inline instead.
+    #[serde(rename_all = "camelCase")]
+    QuestionRequired {
+        turn_id: String,
+        request_id: String,
+        /// The question text.
+        question: String,
+        /// Optional clarifying detail shown under the question.
+        detail: String,
+        /// Suggested answers the user can pick (0..=10). May be empty (free-form only).
+        options: Vec<QuestionOption>,
+        /// True → the user may pick more than one option.
+        multi_select: bool,
+        /// True → a free-form "write your own answer" field is offered.
+        allow_custom: bool,
+        /// Optional self-contained HTML5 document to render as a sandboxed preview.
+        html_preview: String,
+    },
+
+    /// The agent proposed a structured plan (PresentPlan tool). UI renders an
+    /// expandable plan card with a "Start" button that hands the plan to Agent
+    /// mode. In Automatic mode the plan is shown but execution auto-starts.
+    #[serde(rename_all = "camelCase")]
+    PlanProposed {
+        turn_id: String,
+        plan_id: String,
+        title: String,
+        summary: String,
+        steps: Vec<PlanStep>,
+        /// True when the turn-loop will proceed to execute without waiting (Automatic).
+        auto_start: bool,
+    },
+
     /// Token usage reported for the turn.
     #[serde(rename_all = "camelCase")]
     TurnUsage {
@@ -88,6 +208,7 @@ pub enum TurnEvent {
         prompt_tokens: u64,
         completion_tokens: u64,
         total_tokens: u64,
+        cached_prompt_tokens: u64,
     },
 
     /// Turn completed successfully.
@@ -104,6 +225,31 @@ pub enum TurnEvent {
     TurnError { turn_id: String, error: String },
 }
 
+// ── Interactive question / plan payloads ──
+
+/// One suggested answer to an `AskUser` question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionOption {
+    /// Short label shown on the option chip.
+    pub label: String,
+    /// Optional one-line explanation of the trade-off.
+    #[serde(default)]
+    pub description: String,
+}
+
+/// One step of a `PresentPlan` proposal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanStep {
+    pub title: String,
+    #[serde(default)]
+    pub detail: String,
+    /// Optional file path this step primarily touches (drives the rail link).
+    #[serde(default)]
+    pub file: String,
+}
+
 // ── Approval types (UI → Rust) ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +257,17 @@ pub enum TurnEvent {
 pub enum ApprovalDecision {
     Approved,
     Rejected,
+}
+
+/// Answer delivered from the UI for a pending `AskUser` question.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionAnswer {
+    /// The final answer text the model receives (selected labels and/or custom text).
+    pub answer: String,
+    /// True when the user dismissed the question without answering.
+    #[serde(default)]
+    pub cancelled: bool,
 }
 
 /// Register a pending approval and return a receiver the tool loop can await.
@@ -158,6 +315,55 @@ pub fn cancel_approvals_for_turn(turn_id: &str) {
     }
 }
 
+/// Register a pending question and return a receiver the AskUser tool awaits.
+pub fn register_question(turn_id: &str, request_id: &str) -> oneshot::Receiver<QuestionAnswer> {
+    let (tx, rx) = oneshot::channel();
+    let key = format!("{turn_id}:{request_id}");
+    if let Ok(mut map) = question_channels().lock() {
+        map.insert(key, tx);
+    }
+    rx
+}
+
+/// Resolve a pending question from the UI side (delivers the human answer).
+#[tauri::command]
+pub fn ai_resolve_turn_question(
+    turn_id: String,
+    request_id: String,
+    answer: QuestionAnswer,
+) -> Result<(), String> {
+    let key = format!("{turn_id}:{request_id}");
+    let sender = question_channels()
+        .lock()
+        .map_err(|_| "question lock poisoned".to_string())?
+        .remove(&key)
+        .ok_or_else(|| format!("no pending question for {key}"))?;
+    sender
+        .send(answer)
+        .map_err(|_| "question receiver dropped".to_string())
+}
+
+/// Cancel all pending questions for a turn (e.g. on abort): unblock the tool
+/// loop with a cancelled answer so it stops cleanly instead of hanging.
+pub fn cancel_questions_for_turn(turn_id: &str) {
+    if let Ok(mut map) = question_channels().lock() {
+        let prefix = format!("{turn_id}:");
+        let keys: Vec<String> = map
+            .keys()
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        for key in keys {
+            if let Some(sender) = map.remove(&key) {
+                let _ = sender.send(QuestionAnswer {
+                    answer: String::new(),
+                    cancelled: true,
+                });
+            }
+        }
+    }
+}
+
 /// Emit a turn event to the frontend.
 pub fn emit_turn_event(app: &tauri::AppHandle, event: &TurnEvent) -> Result<(), String> {
     use tauri::Emitter;
@@ -192,6 +398,17 @@ pub struct TurnInput {
     pub agent_mode: String,
     pub tool_round_limit: Option<u32>,
     pub tool_approval_mode: String,
+    /// Provider reasoning payload (e.g. `{"reasoning_effort":"high","reasoning":{"effort":"high"}}`),
+    /// computed on the frontend per provider/model. Empty object when the model has no
+    /// effort levels. Its keys are merged into every outgoing request payload so the
+    /// native turn-loop honors the selected reasoning effort like the TS path does.
+    #[serde(default)]
+    pub reasoning: Option<serde_json::Value>,
+    /// True for Claude-family models: tag the system message with an Anthropic
+    /// `cache_control` breakpoint so the (stable) system prompt is cached and
+    /// re-read cheaply each turn. Parity with the TS applyPromptCacheBreakpoints.
+    #[serde(default)]
+    pub anthropic_cache: bool,
     pub prompt_input: crate::ai_prompt::SystemPromptInput,
     /// Whether agent-browser tools are enabled.
     #[serde(default)]
@@ -221,7 +438,9 @@ pub async fn ai_run_turn(
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let started_at = std::time::Instant::now();
-    let max_rounds = input.tool_round_limit.unwrap_or(32).min(128) as usize;
+    // Clamp to [1, 128]: a limit of 0 would skip the loop entirely and emit a
+    // fake "Done." success with no model call, so guarantee at least one round.
+    let max_rounds = input.tool_round_limit.unwrap_or(32).min(128).max(1) as usize;
 
     let _ = emit_turn_event(
         &app,
@@ -241,9 +460,12 @@ pub async fn ai_run_turn(
     // Build system prompt natively.
     let system = crate::ai_prompt::build_system_prompt(&input.prompt_input);
 
-    // Assemble messages array.
+    // Assemble messages array. For Claude-family models, tag the (stable) system
+    // prompt with an Anthropic `cache_control` breakpoint so it is cached and
+    // re-read cheaply each turn; other providers get a plain string they cache
+    // automatically (and which avoids them rejecting the unknown field).
     let mut messages: Vec<serde_json::Value> = Vec::new();
-    messages.push(serde_json::json!({ "role": "system", "content": system }));
+    messages.push(build_system_message(&system, input.anthropic_cache));
     for entry in &input.history {
         messages.push(entry.clone());
     }
@@ -266,9 +488,22 @@ pub async fn ai_run_turn(
     let mut usage_prompt: u64 = 0;
     let mut usage_completion: u64 = 0;
     let mut usage_total: u64 = 0;
+    let mut usage_cached: u64 = 0;
 
     // ── Model ↔ tool loop ──
     for _round in 0..max_rounds {
+        // Honor a Stop pressed between rounds: abort before another model call.
+        if is_turn_cancelled(&turn_id) {
+            clear_turn_cancelled(&turn_id);
+            let _ = emit_turn_event(
+                &app,
+                &TurnEvent::TurnError {
+                    turn_id: turn_id.clone(),
+                    error: "cancelled".to_string(),
+                },
+            );
+            return Ok(());
+        }
         // Every round starts in "thinking": the frontend uses this as the round
         // boundary to open fresh ordered reasoning/text segments (so round 2+
         // after tools appends in order instead of overwriting earlier blocks).
@@ -280,14 +515,19 @@ pub async fn ai_run_turn(
             },
         );
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "model": input.model,
             "messages": messages,
             "temperature": 0.2,
             "stream": true,
+            // OpenAI-compatible providers only emit the final usage chunk when
+            // include_usage is set; without it TurnUsage would never fire.
+            "stream_options": { "include_usage": true },
             "tools": tools,
             "tool_choice": "auto",
         });
+        // Honor the user's selected reasoning effort (parity with the TS turn path).
+        crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
 
         let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
             input.base_url.clone(),
@@ -301,10 +541,17 @@ pub async fn ai_run_turn(
         // so the indicator reflects what's actually happening.
         let stream_app = app.clone();
         let stream_turn_id = turn_id.clone();
+        let cancel_turn_id = turn_id.clone();
         let mut announced_streaming = false;
         let response = match crate::ai_chat_backend::completion_streaming(
             request,
             move |content, reasoning| {
+                // A Stop pressed mid-stream stops tokens reaching the UI here; the
+                // should_cancel hook below also drops the in-flight socket, and the
+                // post-stream cancellation check then finalizes the turn.
+                if is_turn_cancelled(&stream_turn_id) {
+                    return;
+                }
                 if content.is_empty() && reasoning.is_empty() {
                     return;
                 }
@@ -327,11 +574,18 @@ pub async fn ai_run_turn(
                     },
                 );
             },
+            // Polled once per SSE chunk: a Stop drops the in-flight stream
+            // immediately instead of waiting for the model's full generation.
+            move || is_turn_cancelled(&cancel_turn_id),
         )
         .await
         {
             Ok(r) => r,
             Err(error) => {
+                // Drop any cancellation flag for this id so a Stop racing the
+                // model-call failure doesn't leak a stale entry (consistent with
+                // the clear-on-finish path below).
+                clear_turn_cancelled(&turn_id);
                 let _ = emit_turn_event(
                     &app,
                     &TurnEvent::TurnError {
@@ -359,6 +613,7 @@ pub async fn ai_run_turn(
                 .get("total_tokens")
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0);
+            usage_cached += parse_cached_prompt_tokens(usage);
         }
 
         let assistant = parse_assistant_message(&response.body);
@@ -367,6 +622,23 @@ pub async fn ai_run_turn(
         // above; just record the final text (the frontend accumulated the deltas).
         if !assistant.content.is_empty() {
             final_content = assistant.content.clone();
+        }
+
+        // A Stop pressed while the model was streaming sets the flag but cannot
+        // interrupt the in-flight stream. Check it the moment the stream returns,
+        // BEFORE the tool-less `break` (which would otherwise finish as TurnDone
+        // and report success) and BEFORE executing the first — possibly
+        // destructive — tool call below.
+        if is_turn_cancelled(&turn_id) {
+            clear_turn_cancelled(&turn_id);
+            let _ = emit_turn_event(
+                &app,
+                &TurnEvent::TurnError {
+                    turn_id: turn_id.clone(),
+                    error: "cancelled".to_string(),
+                },
+            );
+            return Ok(());
         }
 
         // No tool calls → turn is done.
@@ -405,7 +677,7 @@ pub async fn ai_run_turn(
                 },
             );
 
-            let result = execute_tool(&app, &state, &input, &turn_id, tc).await;
+            let result = execute_tool(&app, &state, &input, &turn_id, true, tc).await;
 
             let (status, output, error) = match result {
                 Ok(output) => ("success".to_string(), output, None),
@@ -433,6 +705,20 @@ pub async fn ai_run_turn(
                     output
                 },
             }));
+
+            // A Stop pressed during tool execution: stop before the next tool /
+            // round so we don't keep running side-effecting tools post-abort.
+            if is_turn_cancelled(&turn_id) {
+                clear_turn_cancelled(&turn_id);
+                let _ = emit_turn_event(
+                    &app,
+                    &TurnEvent::TurnError {
+                        turn_id: turn_id.clone(),
+                        error: "cancelled".to_string(),
+                    },
+                );
+                return Ok(());
+            }
         }
     }
 
@@ -452,9 +738,12 @@ pub async fn ai_run_turn(
                 } else {
                     usage_prompt + usage_completion
                 },
+                cached_prompt_tokens: usage_cached,
             },
         );
     }
+    // Turn finished normally — drop any stale cancellation flag for this id.
+    clear_turn_cancelled(&turn_id);
     let _ = emit_turn_event(
         &app,
         &TurnEvent::TurnDone {
@@ -468,10 +757,14 @@ pub async fn ai_run_turn(
     Ok(())
 }
 
-/// Cancel a running native turn — aborts pending approvals and signals stop.
+/// Cancel a running native turn — signals stop and aborts pending approvals.
 #[tauri::command]
 pub fn ai_cancel_turn(turn_id: String) {
+    // Flag the turn first so the loop sees the cancellation even if the abort
+    // lands between rounds (no pending approval to reject).
+    mark_turn_cancelled(&turn_id);
     cancel_approvals_for_turn(&turn_id);
+    cancel_questions_for_turn(&turn_id);
 }
 
 // ── Response parsing ──
@@ -565,10 +858,23 @@ async fn execute_tool(
     state: &tauri::State<'_, crate::SharedState>,
     input: &TurnInput,
     turn_id: &str,
+    interactive: bool,
     tc: &ParsedToolCall,
 ) -> Result<String, String> {
     let args: serde_json::Value =
         serde_json::from_str(&tc.arguments).unwrap_or_else(|_| serde_json::json!({}));
+
+    // Automatic mode is full autonomy: every side-effecting tool runs without a
+    // human approval prompt (catastrophic-shell and path guards still apply, and
+    // deny permission rules are enforced separately). Treating it as full-access
+    // here means Write/StrReplace/PatchEngine/Delete/Shell/Browser/Checkpoint never
+    // suspend the loop waiting for the user. Other modes keep the user's setting.
+    let is_automatic = input.agent_mode == "automatic";
+    let effective_approval_mode: &str = if is_automatic {
+        "full-access"
+    } else {
+        input.tool_approval_mode.as_str()
+    };
 
     match tc.name.as_str() {
         // ── Natively ported tools (Stage 1) ──
@@ -688,12 +994,15 @@ async fn execute_tool(
             if overwrite.unwrap_or(false) {
                 require_file_read_before_edit(state, &input.session_id, "Write", &path)?;
             }
-            let save = args.get("saveToDisk").and_then(serde_json::Value::as_bool);
+            // Automatic mode always persists to disk: staging an edit off-disk would leave
+            // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
+            let save = if is_automatic { Some(true) } else { args.get("saveToDisk").and_then(serde_json::Value::as_bool) };
             require_tool_approval(
                 app,
                 turn_id,
                 tc,
-                &input.tool_approval_mode,
+                effective_approval_mode,
+                interactive,
                 "Write",
                 &format!("Write to {path}"),
                 &text.chars().take(400).collect::<String>(),
@@ -730,12 +1039,15 @@ async fn execute_tool(
                 .get("expectedReplacements")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|v| usize::try_from(v).ok());
-            let save = args.get("saveToDisk").and_then(serde_json::Value::as_bool);
+            // Automatic mode always persists to disk: staging an edit off-disk would leave
+            // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
+            let save = if is_automatic { Some(true) } else { args.get("saveToDisk").and_then(serde_json::Value::as_bool) };
             require_tool_approval(
                 app,
                 turn_id,
                 tc,
-                &input.tool_approval_mode,
+                effective_approval_mode,
+                interactive,
                 "StrReplace",
                 &format!("Replace in {path}"),
                 &format!(
@@ -769,7 +1081,8 @@ async fn execute_tool(
                 app,
                 turn_id,
                 tc,
-                &input.tool_approval_mode,
+                effective_approval_mode,
+                interactive,
                 "Delete",
                 &format!("Delete {path}"),
                 &path,
@@ -853,17 +1166,63 @@ async fn execute_tool(
                 .get("operations")
                 .cloned()
                 .unwrap_or(serde_json::json!([]));
+            // Read-before-edit guard: PatchEngine mutates existing files just like
+            // Write/StrReplace, so enforce the same invariant here instead of
+            // letting the model clobber content it never read. Inspect the raw
+            // operations (the typed struct's fields are private to ai_tools) and
+            // guard every action that touches an EXISTING file; pure "create" ops
+            // are exempt — the guard already no-ops on non-existent paths.
+            let mut guarded_paths: Vec<String> = Vec::new();
+            if let Some(ops) = operations_raw.as_array() {
+                for op in ops {
+                    let action = op
+                        .get("action")
+                        .or_else(|| op.get("kind"))
+                        .or_else(|| op.get("operation"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim()
+                        .to_ascii_lowercase();
+                    let mutates_existing = matches!(
+                        action.as_str(),
+                        "write"
+                            | "rewrite"
+                            | "replacefile"
+                            | "replace_file"
+                            | "strreplace"
+                            | "str_replace"
+                            | "replace"
+                            | "delete"
+                            | "remove"
+                    );
+                    if !mutates_existing {
+                        continue;
+                    }
+                    if let Some(path) = op.get("path").and_then(|v| v.as_str()) {
+                        require_file_read_before_edit(
+                            state,
+                            &input.session_id,
+                            "PatchEngine",
+                            path,
+                        )?;
+                        guarded_paths.push(path.to_string());
+                    }
+                }
+            }
             let operations: Vec<crate::ai_tools::AiFilePatchOperation> =
                 serde_json::from_value(operations_raw)
                     .map_err(|e| format!("Invalid patch operations: {e}"))?;
-            let save = args.get("saveToDisk").and_then(serde_json::Value::as_bool);
+            // Automatic mode always persists to disk: staging an edit off-disk would leave
+            // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
+            let save = if is_automatic { Some(true) } else { args.get("saveToDisk").and_then(serde_json::Value::as_bool) };
             let dry_run = args.get("dryRun").and_then(serde_json::Value::as_bool);
             if !dry_run.unwrap_or(false) {
                 require_tool_approval(
                     app,
                     turn_id,
                     tc,
-                    &input.tool_approval_mode,
+                    effective_approval_mode,
+                    interactive,
                     "PatchEngine",
                     &format!("{} operations", operations.len()),
                     "multi-file patch",
@@ -879,6 +1238,17 @@ async fn execute_tool(
                 dry_run,
             )
             .await?;
+            // After a real (non-dry-run) patch the touched files' contents are now
+            // known to this turn; refresh their read markers like StrReplace does.
+            if !dry_run.unwrap_or(false) {
+                for path in &guarded_paths {
+                    if let Ok(resolved) =
+                        crate::resolve_workspace_path(state, std::path::Path::new(path))
+                    {
+                        crate::ai_session::mark_file_read(&input.session_id, &resolved);
+                    }
+                }
+            }
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "InspectFile" => {
@@ -946,7 +1316,8 @@ async fn execute_tool(
                     app,
                     turn_id,
                     tc,
-                    &input.tool_approval_mode,
+                    effective_approval_mode,
+                    interactive,
                     &tc.name,
                     &tc.name,
                     &browser_args.join(" "),
@@ -954,6 +1325,16 @@ async fn execute_tool(
                 )
                 .await?;
             }
+            // Per-tool timeout: first Chromium boot (especially --headed) and live
+            // navigation/automation routinely exceed 30s. Matching the TS path's
+            // generous budgets stops BrowserOpen from spuriously "failing" while the
+            // browser actually opens (the bug: 30s here vs ~35s real first-launch).
+            let timeout_secs = match tc.name.as_str() {
+                "BrowserInstall" => 600,
+                "BrowserOpen" | "BrowserAct" | "BrowserChat" => 120,
+                "BrowserScreenshot" | "BrowserDoctor" => 90,
+                _ => 60,
+            };
             let result =
                 crate::agent_browser::invoke(crate::agent_browser::AgentBrowserInvokeRequest {
                     session: input.session_id.clone(),
@@ -961,7 +1342,7 @@ async fn execute_tool(
                     headed: None,
                     allowed_domains: None,
                     max_output: Some(24_000),
-                    timeout_secs: Some(30),
+                    timeout_secs: Some(timeout_secs),
                     command_path: None,
                     session_name: None,
                     profile: None,
@@ -1038,10 +1419,221 @@ async fn execute_tool(
             Ok(serde_json::json!({ "count": items.len(), "todos": items }).to_string())
         }
 
+        // Ask the user a question with optional suggested answers, an HTML5 preview,
+        // and a free-form fallback. Suspends the loop until the UI replies — except
+        // in Automatic mode, where the model is told to self-decide (full autonomy).
+        "AskUser" => {
+            let question = json_str(&args, "question");
+            if question.trim().is_empty() {
+                return Err("AskUser requires a non-empty question.".to_string());
+            }
+            let detail = json_str_opt(&args, "detail").unwrap_or_default();
+            let html_preview = json_str_opt(&args, "htmlPreview").unwrap_or_default();
+            let multi_select = args
+                .get("multiSelect")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            // Custom answers are allowed by default; the model opts out only for
+            // strict pick-from-list questions.
+            let allow_custom = args
+                .get("allowCustom")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let options: Vec<QuestionOption> = args
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            // Accept both bare strings and { label, description } objects.
+                            if let Some(label) = v.as_str() {
+                                let label = label.trim();
+                                if label.is_empty() {
+                                    return None;
+                                }
+                                return Some(QuestionOption {
+                                    label: label.to_string(),
+                                    description: String::new(),
+                                });
+                            }
+                            let label = v.get("label")?.as_str()?.trim().to_string();
+                            if label.is_empty() {
+                                return None;
+                            }
+                            Some(QuestionOption {
+                                label,
+                                description: v
+                                    .get("description")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string(),
+                            })
+                        })
+                        // The model decides how many options (the contract caps at 10).
+                        .take(10)
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Automatic mode = full autonomy: never block on a human. Tell the model
+            // to choose the best answer itself and keep going. Non-interactive
+            // subagents likewise have no UI, so they self-decide too.
+            if input.agent_mode == "automatic" || !interactive {
+                let rendered = if options.is_empty() {
+                    "Automatic mode: no user is available to answer. Decide the best course yourself using the evidence, state the assumption briefly, and continue.".to_string()
+                } else {
+                    let list = options
+                        .iter()
+                        .map(|o| {
+                            if o.description.is_empty() {
+                                format!("- {}", o.label)
+                            } else {
+                                format!("- {} — {}", o.label, o.description)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("Automatic mode: no user is available to answer. Pick the single best option for this repository, state the choice as an assumption, and continue.\nOptions:\n{list}")
+                };
+                return Ok(serde_json::json!({ "autoAnswered": true, "answer": rendered }).to_string());
+            }
+
+            // Interactive: emit the question and suspend on the oneshot channel.
+            let rx = register_question(turn_id, &tc.id);
+            let _ = emit_turn_event(
+                app,
+                &TurnEvent::StatusChange {
+                    turn_id: turn_id.to_string(),
+                    phase: "waiting-approval".to_string(),
+                },
+            );
+            let _ = emit_turn_event(
+                app,
+                &TurnEvent::QuestionRequired {
+                    turn_id: turn_id.to_string(),
+                    request_id: tc.id.clone(),
+                    question,
+                    detail,
+                    options,
+                    multi_select,
+                    allow_custom,
+                    html_preview,
+                },
+            );
+            match rx.await {
+                Ok(answer) if !answer.cancelled && !answer.answer.trim().is_empty() => {
+                    Ok(serde_json::json!({ "answer": answer.answer }).to_string())
+                }
+                Ok(_) => Ok(serde_json::json!({
+                    "answer": "",
+                    "dismissed": true,
+                    "note": "User dismissed the question without answering. Proceed with your best judgment or ask again only if truly blocked."
+                })
+                .to_string()),
+                Err(_) => Err("AskUser channel closed before an answer arrived.".to_string()),
+            }
+        }
+
+        // Present a structured, reviewable plan. The UI renders an expandable plan
+        // card; in Agent/Plan mode a "Start" button hands it to execution, in
+        // Automatic mode execution auto-starts (the model proceeds immediately).
+        "PresentPlan" => {
+            let title = json_str_opt(&args, "title").unwrap_or_else(|| "Plan".to_string());
+            let summary = json_str_opt(&args, "summary").unwrap_or_default();
+            let steps: Vec<PlanStep> = args
+                .get("steps")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            if let Some(title) = v.as_str() {
+                                let title = title.trim();
+                                if title.is_empty() {
+                                    return None;
+                                }
+                                return Some(PlanStep {
+                                    title: title.to_string(),
+                                    detail: String::new(),
+                                    file: String::new(),
+                                });
+                            }
+                            let title = v.get("title")?.as_str()?.trim().to_string();
+                            if title.is_empty() {
+                                return None;
+                            }
+                            Some(PlanStep {
+                                title,
+                                detail: v
+                                    .get("detail")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string(),
+                                file: v
+                                    .get("file")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string(),
+                            })
+                        })
+                        .take(40)
+                        .collect()
+                })
+                .unwrap_or_default();
+            if steps.is_empty() {
+                return Err("PresentPlan requires at least one step (array of strings or { title, detail, file }).".to_string());
+            }
+            // Pin the plan as the session goal + task list so the rail reflects it
+            // immediately, regardless of mode.
+            if !summary.trim().is_empty() {
+                crate::ai_session::set_goal(&input.session_id, &summary);
+            } else {
+                crate::ai_session::set_goal(&input.session_id, &title);
+            }
+            let todos: Vec<crate::ai_session::SessionTodo> = steps
+                .iter()
+                .enumerate()
+                .map(|(i, step)| crate::ai_session::SessionTodo {
+                    id: format!("plan-{}", i + 1),
+                    content: step.title.clone(),
+                    status: if i == 0 { "in_progress" } else { "pending" }.to_string(),
+                    priority: "medium".to_string(),
+                    notes: if step.detail.is_empty() { None } else { Some(step.detail.clone()) },
+                })
+                .collect();
+            crate::ai_session::set_todos(&input.session_id, todos);
+
+            let auto_start = input.agent_mode == "automatic";
+            let plan_id = format!("plan-{}", tc.id);
+            let _ = emit_turn_event(
+                app,
+                &TurnEvent::PlanProposed {
+                    turn_id: turn_id.to_string(),
+                    plan_id,
+                    title,
+                    summary,
+                    steps: steps.clone(),
+                    auto_start,
+                },
+            );
+            let guidance = if auto_start {
+                "Plan presented and auto-started (Automatic mode). Begin executing step 1 now; do not wait for confirmation."
+            } else {
+                "Plan presented to the user. Stop here and wait — the user will press Start to hand the plan to Agent mode for execution. Do not begin editing yet."
+            };
+            Ok(serde_json::json!({ "stepCount": steps.len(), "autoStart": auto_start, "guidance": guidance }).to_string())
+        }
+
         "ActiveContext" => {
             let workspace = crate::workspace_root(state).ok();
             let documents = state.documents.lock().map_err(|e| e.to_string())?;
-            let open_docs: Vec<serde_json::Value> = documents.snapshots()
+            // Capture the true open-document count BEFORE truncating to the cap,
+            // so the model is told the real total (mirrors DiagnosticsContext).
+            let snaps = documents.snapshots();
+            let open_document_count = snaps.len();
+            let open_docs: Vec<serde_json::Value> = snaps
                 .into_iter()
                 .take(json_usize(&args, "maxOpenDocuments", 24))
                 .map(|doc| serde_json::json!({
@@ -1055,7 +1647,7 @@ async fn execute_tool(
             Ok(serde_json::json!({
                 "workspace": workspace.map(|w| serde_json::json!({ "root": w.to_string_lossy() })),
                 "activeDocument": active_path,
-                "openDocumentCount": open_docs.len(),
+                "openDocumentCount": open_document_count,
                 "openDocuments": open_docs,
                 "aiRuntime": {
                     "model": input.model,
@@ -1310,24 +1902,27 @@ async fn execute_tool(
             if data.is_empty() {
                 return Err("TerminalWrite requires non-empty data.".to_string());
             }
-            let session_id_str = json_str_opt(&args, "sessionId");
+            // Validate the sessionId BEFORE prompting for approval, so a missing
+            // or malformed id fails fast instead of wasting an approval prompt
+            // that immediately errors afterwards.
+            let session_id = match json_str_opt(&args, "sessionId") {
+                Some(id) => {
+                    uuid::Uuid::parse_str(&id).map_err(|_| "invalid session id".to_string())?
+                }
+                None => return Err("TerminalWrite requires a sessionId.".to_string()),
+            };
             require_tool_approval(
                 app,
                 turn_id,
                 tc,
-                &input.tool_approval_mode,
+                effective_approval_mode,
+                interactive,
                 "TerminalWrite",
                 "Write to terminal",
                 &data.chars().take(120).collect::<String>(),
                 "execute",
             )
             .await?;
-            let session_id = match session_id_str {
-                Some(id) => {
-                    uuid::Uuid::parse_str(&id).map_err(|_| "invalid session id".to_string())?
-                }
-                None => return Err("TerminalWrite requires a sessionId.".to_string()),
-            };
             crate::terminal::terminal_write(state.clone(), session_id, data.clone())?;
             Ok(serde_json::json!({ "bytesWritten": data.len(), "sessionId": session_id.to_string() }).to_string())
         }
@@ -1341,10 +1936,16 @@ async fn execute_tool(
             let subagent_type = json_str_opt(&args, "subagent_type")
                 .unwrap_or_else(|| "generalPurpose".to_string());
             let agent_id = format!("subagent-{}", uuid::Uuid::new_v4().simple());
+            // `turn_id` here is the real parent turn id: subagents cannot spawn
+            // Task (blocked inline below), so run_subagent is only reached on the
+            // interactive parent path. Thread it through so a Stop on the parent
+            // halts the subagent's own model↔tool loop instead of letting it run
+            // to completion.
             let summary = run_subagent(
                 app,
                 state,
                 input,
+                turn_id,
                 &agent_id,
                 &description,
                 &prompt,
@@ -1434,8 +2035,11 @@ async fn execute_tool(
                     break;
                 }
                 let clamped: String = content.chars().take(1800).collect();
-                used += clamped.len();
-                selected.push(serde_json::json!({ "kind": kind, "score": score, "chars": clamped.len(), "content": clamped }));
+                // Budget by character count (matches `target_chars`), not UTF-8
+                // byte length, so multibyte content isn't over-counted.
+                let n = clamped.chars().count();
+                used += n;
+                selected.push(serde_json::json!({ "kind": kind, "score": score, "chars": n, "content": clamped }));
             }
             Ok(serde_json::json!({ "query": query, "targetChars": target_chars, "selectedChars": used, "count": selected.len(), "packet": selected }).to_string())
         }
@@ -1456,7 +2060,9 @@ async fn execute_tool(
             let max_bytes = args
                 .get("maxBytesPerFile")
                 .and_then(serde_json::Value::as_u64);
-            let save = args.get("saveToDisk").and_then(serde_json::Value::as_bool);
+            // Automatic mode always persists to disk: staging an edit off-disk would leave
+            // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
+            let save = if is_automatic { Some(true) } else { args.get("saveToDisk").and_then(serde_json::Value::as_bool) };
             let dry = args.get("dryRun").and_then(serde_json::Value::as_bool);
             // Restore mutates files → require approval (unless dry-run / full-access).
             let is_restore = action.trim().to_lowercase().starts_with("rest")
@@ -1467,7 +2073,8 @@ async fn execute_tool(
                     app,
                     turn_id,
                     tc,
-                    &input.tool_approval_mode,
+                    effective_approval_mode,
+                    interactive,
                     "Checkpoint",
                     "Restore checkpoint",
                     id.as_deref().unwrap_or("latest"),
@@ -1504,6 +2111,7 @@ async fn run_subagent(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, crate::SharedState>,
     parent: &TurnInput,
+    parent_turn_id: &str,
     agent_id: &str,
     description: &str,
     prompt: &str,
@@ -1528,7 +2136,9 @@ async fn run_subagent(
     let system = crate::ai_prompt::build_system_prompt(&prompt_input);
 
     let mut messages: Vec<serde_json::Value> = vec![
-        serde_json::json!({ "role": "system", "content": system }),
+        // Inherit the parent's Anthropic cache setting so the subagent's system
+        // prompt is cached on Claude-family models too.
+        build_system_message(&system, parent.anthropic_cache),
         serde_json::json!({ "role": "user", "content": prompt }),
     ];
     let tools = crate::ai_tool_defs::runtime_tool_definitions(
@@ -1538,7 +2148,20 @@ async fn run_subagent(
 
     let mut final_content = String::new();
     for _round in 0..MAX_SUBAGENT_ROUNDS {
-        let payload = serde_json::json!({
+        // A Stop on the parent turn must halt the subagent immediately instead of
+        // burning up to MAX_SUBAGENT_ROUNDS model calls + running side-effecting
+        // tools. The parent loop is blocked awaiting this Task, so this is the
+        // only place the cancellation can be observed mid-subagent. Do NOT clear
+        // the flag here — the parent's post-tool check still needs to see it to
+        // abort the parent turn afterward.
+        if is_turn_cancelled(parent_turn_id) {
+            return Ok(if final_content.is_empty() {
+                "Subagent cancelled.".to_string()
+            } else {
+                final_content
+            });
+        }
+        let mut payload = serde_json::json!({
             "model": parent.model,
             "messages": messages,
             "temperature": 0.2,
@@ -1546,6 +2169,8 @@ async fn run_subagent(
             "tools": tools,
             "tool_choice": "auto",
         });
+        // Subagents inherit the parent turn's reasoning effort.
+        crate::ai_chat_backend::merge_reasoning(&mut payload, parent.reasoning.as_ref());
         let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
             parent.base_url.clone(),
             parent.api_key.clone(),
@@ -1573,7 +2198,7 @@ async fn run_subagent(
                 Err("Nested subagents are not allowed (depth limit).".to_string())
             } else {
                 // Subagent tool calls don't emit UI events (isolated context).
-                Box::pin(execute_tool(app, state, parent, agent_id, child)).await
+                Box::pin(execute_tool(app, state, parent, agent_id, false, child)).await
             };
             let content = match result {
                 Ok(output) => output,
@@ -1584,6 +2209,15 @@ async fn run_subagent(
                 "tool_call_id": child.id,
                 "content": content,
             }));
+            // Stop the subagent between tools too, so a Stop mid-round doesn't
+            // keep running the remaining (possibly side-effecting) tool calls.
+            if is_turn_cancelled(parent_turn_id) {
+                return Ok(if final_content.is_empty() {
+                    "Subagent cancelled.".to_string()
+                } else {
+                    final_content
+                });
+            }
         }
     }
 
@@ -1603,6 +2237,7 @@ async fn require_tool_approval(
     turn_id: &str,
     tc: &ParsedToolCall,
     approval_mode: &str,
+    interactive: bool,
     tool: &str,
     summary: &str,
     preview: &str,
@@ -1611,6 +2246,15 @@ async fn require_tool_approval(
     // Full-access mode → always approved.
     if approval_mode == "full-access" {
         return Ok(());
+    }
+    // Non-interactive callers (subagents) have no UI to approve through: the
+    // approval event would be keyed by the agent id the UI filters out, so
+    // awaiting it would deadlock the parent's Task call. Auto-reject instead so
+    // the model adapts rather than hangs.
+    if !interactive {
+        return Err(format!(
+            "{tool} requires approval and is unavailable to subagents."
+        ));
     }
     // Emit approval request and wait for decision from UI.
     let rx = register_approval(turn_id, &tc.id);

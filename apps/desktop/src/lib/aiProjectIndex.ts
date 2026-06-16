@@ -87,7 +87,7 @@ export function collectAiProjectFileEntries(directories: FileTreeDirectories): F
   for (const entries of Object.values(directories)) {
     for (const entry of entries) {
       if (entry.kind !== "file") continue;
-      byPath.set(normalizePathSlashes(entry.path).toLowerCase(), entry);
+      byPath.set(normalizePathSlashes(entry.path), entry);
     }
   }
   return Array.from(byPath.values());

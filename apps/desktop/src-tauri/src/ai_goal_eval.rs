@@ -16,6 +16,11 @@ pub struct GoalEvalInput {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    /// Provider reasoning payload (reasoning_effort + reasoning.effort), or absent/`{}`
+    /// when the active model has no effort levels. Merged into the request so the
+    /// verdict is judged with the same reasoning depth as the main turn.
+    #[serde(default)]
+    pub reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,7 +65,7 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
         input.transcript,
     );
 
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "model": input.model,
         "messages": [
             { "role": "system", "content": system },
@@ -69,6 +74,7 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
         "temperature": 0.1,
         "stream": false,
     });
+    crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
 
     let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
         input.base_url.clone(),
@@ -85,20 +91,51 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
                 .unwrap_or("");
             Ok(parse_verdict(content))
         }
-        Err(_) => Ok(None),
+        Err(e) => {
+            tracing::warn!(%e, "ai_goal_eval_verdict completion failed");
+            Ok(None)
+        }
     }
 }
 
 /// Extract the first JSON object from the model output and parse the verdict.
 fn parse_verdict(content: &str) -> Option<GoalEvalVerdict> {
     let start = content.find('{')?;
-    let end = content.rfind('}')?;
-    if end < start {
-        return None;
+    // String-aware balanced-brace scan: pair the first '{' with its matching
+    // '}', tracking in-string state so a '}' inside a `reason` value (or any
+    // brace in surrounding prose) does not close the object prematurely.
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut esc = false;
+    let mut end = None;
+    for (i, &b) in content.as_bytes().iter().enumerate().skip(start) {
+        if in_str {
+            if esc {
+                esc = false;
+            } else if b == b'\\' {
+                esc = true;
+            } else if b == b'"' {
+                in_str = false;
+            }
+        } else {
+            match b {
+                b'"' => in_str = true,
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
+    let end = end?;
     let json_slice = &content[start..=end];
     let value: serde_json::Value = serde_json::from_str(json_slice).ok()?;
-    let satisfied = value.get("satisfied")?.as_bool().unwrap_or(false);
+    let satisfied = value.get("satisfied")?.as_bool()?;
     let blocked = value
         .get("blocked")
         .and_then(serde_json::Value::as_bool)

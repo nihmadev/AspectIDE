@@ -13,6 +13,18 @@ const MAX_EDIT_SHEETS: usize = 32;
 const MAX_EDIT_ROWS: usize = 2_000;
 const MAX_EDIT_COLS: usize = 128;
 
+/// Upper bound on the *declared* total uncompressed size of a zip-container
+/// spreadsheet (xlsx/xlsm/xlsb/ods). calamine fully materializes a sheet into a
+/// `Range<Data>` before any row/column cap applies, so a crafted small archive
+/// that inflates to gigabytes would OOM the process. We reject such files
+/// before `open_workbook_auto` ever decompresses them.
+const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Per-entry compression-ratio ceiling. DEFLATE's theoretical maximum is
+/// ~1032:1; legitimate spreadsheet XML stays well below this, so a higher ratio
+/// signals a crafted decompression bomb whose header understates its size.
+const MAX_COMPRESSION_RATIO: u64 = 1000;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpreadsheetEditDocument {
@@ -43,19 +55,65 @@ pub fn spreadsheet_write_from_text(path: &Path, text: &str) -> AppResult<PathBuf
         )));
     }
     let save_path = resolve_spreadsheet_save_path(path);
+    if save_path.as_path() != path && save_path.exists() {
+        return Err(AppError::Service(format!(
+            "cannot save: {} already exists",
+            save_path.display()
+        )));
+    }
     write_spreadsheet_document(&save_path, &document)?;
     Ok(save_path)
 }
 
 fn resolve_spreadsheet_save_path(path: &Path) -> PathBuf {
-    if extension(path) == "xls" {
+    if matches!(extension(path).as_str(), "xls" | "xlsm" | "xlsb") {
         path.with_extension("xlsx")
     } else {
         path.to_path_buf()
     }
 }
 
+/// Reject zip-container spreadsheets whose declared uncompressed payload would
+/// exhaust memory once calamine materializes a sheet. Non-zip formats (.xls
+/// CFB, flat .fods) carry no decompression amplification and are left to the
+/// loader.
+fn guard_decompression_bomb(path: &Path) -> AppResult<()> {
+    if !matches!(extension(path).as_str(), "xlsx" | "xlsm" | "xlsb" | "ods") {
+        return Ok(());
+    }
+    let file = std::fs::File::open(path)?;
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(archive) => archive,
+        // Not a readable zip; let open_workbook_auto surface the real error.
+        Err(_) => return Ok(()),
+    };
+    let mut total_uncompressed: u64 = 0;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|error| AppError::Service(error.to_string()))?;
+        let uncompressed = entry.size();
+        let compressed = entry.compressed_size();
+        total_uncompressed = total_uncompressed.saturating_add(uncompressed);
+        if total_uncompressed > MAX_DECOMPRESSED_BYTES {
+            return Err(AppError::Service(format!(
+                "spreadsheet rejected: declared uncompressed size exceeds {} MiB (possible decompression bomb)",
+                MAX_DECOMPRESSED_BYTES / (1024 * 1024)
+            )));
+        }
+        if compressed > 0 && uncompressed / compressed > MAX_COMPRESSION_RATIO {
+            return Err(AppError::Service(format!(
+                "spreadsheet rejected: entry '{}' expands {}:1, exceeding the {MAX_COMPRESSION_RATIO}:1 limit (possible decompression bomb)",
+                entry.name(),
+                uncompressed / compressed
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn load_spreadsheet_document(path: &Path) -> AppResult<SpreadsheetEditDocument> {
+    guard_decompression_bomb(path)?;
     let mut workbook =
         open_workbook_auto(path).map_err(|error| AppError::Service(error.to_string()))?;
     let sheet_count = workbook.sheet_names().len();
@@ -100,7 +158,7 @@ fn write_spreadsheet_document(path: &Path, document: &SpreadsheetEditDocument) -
     if matches!(ext.as_str(), "ods" | "fods") {
         return write_ods_document(path, document);
     }
-    if !matches!(ext.as_str(), "xlsx" | "xlsm" | "xlsb") {
+    if ext.as_str() != "xlsx" {
         return Err(AppError::Service(format!(
             "unsupported spreadsheet save format: {ext}"
         )));
@@ -125,6 +183,11 @@ fn write_spreadsheet_document(path: &Path, document: &SpreadsheetEditDocument) -
                 worksheet.get_cell_mut(address).set_value(value);
             }
         }
+    }
+
+    if document.sheets.is_empty() {
+        book.new_sheet("Sheet1")
+            .map_err(|error| AppError::Service(error.to_string()))?;
     }
 
     writer::xlsx::write(&book, path).map_err(|error| AppError::Service(error.to_string()))
@@ -154,6 +217,9 @@ fn write_ods_document(path: &Path, document: &SpreadsheetEditDocument) -> AppRes
             }
         }
         workbook.push_sheet(ods_sheet);
+    }
+    if document.sheets.is_empty() {
+        workbook.push_sheet(Sheet::new("Sheet1"));
     }
     write_ods(&mut workbook, path).map_err(|error| AppError::Service(error.to_string()))
 }

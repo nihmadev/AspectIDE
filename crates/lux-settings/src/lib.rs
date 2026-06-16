@@ -2,7 +2,13 @@
 #![deny(clippy::nursery)]
 #![allow(clippy::missing_errors_doc)]
 
-use std::{cmp::Reverse, collections::BTreeMap, fs, path::PathBuf};
+use std::{
+    cmp::Reverse,
+    collections::BTreeMap,
+    fs::{self, File},
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use chrono::Utc;
 use lux_core::{
@@ -23,7 +29,7 @@ pub struct SettingsStore {
 impl SettingsStore {
     pub fn load(path: PathBuf) -> AppResult<Self> {
         let values = if path.exists() {
-            serde_json::from_str(&fs::read_to_string(&path)?)?
+            serde_json::from_str(&fs::read_to_string(&path)?).unwrap_or_default()
         } else {
             BTreeMap::new()
         };
@@ -51,7 +57,7 @@ impl SettingsStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&self.path, serde_json::to_string_pretty(&self.values)?)?;
+        write_atomic(&self.path, serde_json::to_string_pretty(&self.values)?.as_bytes())?;
         Ok(setting)
     }
 
@@ -82,7 +88,7 @@ impl SettingsStore {
         }
 
         let mut workspaces: Vec<RecentWorkspace> =
-            serde_json::from_str(&fs::read_to_string(path)?)?;
+            serde_json::from_str(&fs::read_to_string(path)?).unwrap_or_default();
         workspaces.sort_by_key(|workspace| Reverse(workspace.last_opened_at));
         Ok(workspaces)
     }
@@ -123,7 +129,7 @@ impl SettingsStore {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, serde_json::to_string_pretty(workspaces)?)?;
+        write_atomic(&path, serde_json::to_string_pretty(workspaces)?.as_bytes())?;
         Ok(())
     }
 
@@ -133,6 +139,22 @@ impl SettingsStore {
         })?;
         Ok(parent.join(RECENT_WORKSPACES_FILE))
     }
+}
+
+/// Writes `contents` to `path` atomically by streaming to a sibling temporary
+/// file, flushing it to disk, then renaming over the target. Same-directory
+/// rename replaces the destination atomically (Windows `MoveFileEx` with
+/// `MOVEFILE_REPLACE_EXISTING`), so an interrupted write can never leave the
+/// target truncated.
+fn write_atomic(path: &Path, contents: &[u8]) -> AppResult<()> {
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 #[must_use]

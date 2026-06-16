@@ -47,13 +47,17 @@ export function SearchPanel() {
   }), [caseSensitive, excludePattern, includeHidden, includePattern, useRegex, wholeWord]);
 
   const searchMutation = useMutation({
-    mutationFn: ({ options, value }: { value: string; options: SearchOptions }) => luxCommands.searchQuery(value, options),
-    onSuccess: (response) => {
+    mutationFn: ({ options, value }: { value: string; options: SearchOptions; key: string }) => luxCommands.searchQuery(value, options),
+    onSuccess: (response, variables) => {
+      if (variables.key !== lastScheduledSearchKey.current) return;
       setOpenError(null);
       setSearchError(null);
       setSearchResponse(response);
     },
-    onError: (error) => setSearchError(readErrorMessage(error, t)),
+    onError: (error, variables) => {
+      if (variables.key !== lastScheduledSearchKey.current) return;
+      setSearchError(readErrorMessage(error, t));
+    },
   });
 
   const openSearchHitMutation = useMutation({
@@ -87,10 +91,15 @@ export function SearchPanel() {
 
   const searchKey = useMemo(() => JSON.stringify({ query, searchOptions }), [query, searchOptions]);
   const runSearchRef = useRef<() => void>(() => undefined);
+  const debounceTimerRef = useRef<number | null>(null);
 
   const runSearch = useCallback(() => {
+    if (debounceTimerRef.current !== null) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
     lastScheduledSearchKey.current = searchKey;
-    searchMutation.mutate({ value: query, options: searchOptions });
+    searchMutation.mutate({ value: query, options: searchOptions, key: searchKey });
   }, [query, searchKey, searchMutation, searchOptions]);
 
   useEffect(() => {
@@ -100,8 +109,16 @@ export function SearchPanel() {
   useEffect(() => {
     if (!query.trim()) return;
     if (lastScheduledSearchKey.current === searchKey) return;
-    const timer = window.setTimeout(() => runSearchRef.current(), 260);
-    return () => window.clearTimeout(timer);
+    debounceTimerRef.current = window.setTimeout(() => {
+      debounceTimerRef.current = null;
+      runSearchRef.current();
+    }, 260);
+    return () => {
+      if (debounceTimerRef.current !== null) {
+        window.clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+    };
   }, [query, searchKey]);
 
   return (

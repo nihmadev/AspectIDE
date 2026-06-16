@@ -11,7 +11,7 @@ import {
 } from "./aiChatTypes";
 import { createTurnTimeline, type TurnTimeline } from "./aiChatTimeline";
 import { runAutomaticPostEditVerification, isFileEditToolName } from "./aiAutomaticVerification";
-import { estimateTurnUsageFromAssistant, extractTurnTokenUsage, mergeTurnTokenUsage } from "./aiTurnUsage";
+import { attachTurnCostEstimate, estimateTurnUsageFromAssistant, extractTurnTokenUsage, mergeTurnTokenUsage } from "./aiTurnUsage";
 import type { AiChatTurnTokenUsage } from "./aiChatTypes";
 import { consumeStopAfterToolRound } from "./aiChatTurnRuntime";
 import { clearAiTurnActivity, extractToolPath, setAiTurnActivity } from "./aiTurnActivity";
@@ -20,6 +20,7 @@ import { ToolApprovalRejectedError } from "./aiRuntimeToolApproval";
 import { collectChangedPathsFromToolResult, createRunningToolCall, formatToolOutput } from "./aiRuntimeToolBridge";
 import { runRuntimeTool } from "./aiRuntimeToolDispatch";
 import type { RuntimeToolSession } from "./aiRuntimeToolSession";
+import type { AiModelConfig } from "./aiPreferences";
 import {
   buildPathAttachmentContext,
   encodeVisionImageFromDataUrl,
@@ -174,7 +175,7 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
       if (deriveSegmentContent(timeline.snapshot().segments ?? []).trim().length === 0) {
         timeline.appendText("Done.");
       }
-      const finalMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing, turnUsage);
+      const finalMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing, turnUsage, input.selectedModel);
       input.onAssistantMessageUpdate(assistantMessage.id, finalMessage);
       return finalMessage;
     }
@@ -236,36 +237,34 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
     recordToolTiming(timing, toolsStartedAtMs, requestedToolCalls.length);
     throwIfAborted(input.abortSignal);
 
+    messages.push(...toolResults);
+
     if (editedPathsThisRound.length > 0) {
       const verification = await runAutomaticPostEditVerification(input, editedPathsThisRound);
-      const lastToolCallId = requestedToolCalls[requestedToolCalls.length - 1]?.id
-        ?? toolResults[toolResults.length - 1]?.tool_call_id;
-      if (verification && lastToolCallId) {
-        toolResults.push({
-          role: "tool",
-          tool_call_id: lastToolCallId,
-          content: verification.content,
-        });
+      if (verification) {
+        messages.push({ role: "system", content: verification.content });
       }
     }
 
-    messages.push(...toolResults);
-
     if (consumeStopAfterToolRound()) {
-      await requestToolLimitFinalAnswer(input, messages, timeline, round + 1, timing);
-      const stoppedMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing, turnUsage);
+      const finalUsage = await requestToolLimitFinalAnswer(input, messages, timeline, round + 1, timing, true);
+      if (finalUsage) turnUsage = mergeTurnTokenUsage(turnUsage, finalUsage);
+      const stoppedMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing, turnUsage, input.selectedModel);
       input.onAssistantMessageUpdate(assistantMessage.id, stoppedMessage);
       return stoppedMessage;
     }
   }
 
-  if (toolRoundLimit !== null) await requestToolLimitFinalAnswer(input, messages, timeline, toolRoundLimit, timing);
-  const limitedMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing, turnUsage);
+  if (toolRoundLimit !== null) {
+    const finalUsage = await requestToolLimitFinalAnswer(input, messages, timeline, toolRoundLimit, timing);
+    if (finalUsage) turnUsage = mergeTurnTokenUsage(turnUsage, finalUsage);
+  }
+  const limitedMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing, turnUsage, input.selectedModel);
   input.onAssistantMessageUpdate(assistantMessage.id, limitedMessage);
   return limitedMessage;
 }
 
-async function requestToolLimitFinalAnswer(input: AiChatSendInput, messages: ChatCompletionMessage[], timeline: TurnTimeline, toolRoundLimit: number, timing: ResponseTimingAccumulator) {
+async function requestToolLimitFinalAnswer(input: AiChatSendInput, messages: ChatCompletionMessage[], timeline: TurnTimeline, toolRoundLimit: number, timing: ResponseTimingAccumulator, manualStop = false): Promise<AiChatTurnTokenUsage | null> {
   throwIfAborted(input.abortSignal);
   const toolCalls = timeline.toolCalls();
   const successfulTools = toolCalls.filter((toolCall) => toolCall.status === "success").length;
@@ -288,6 +287,7 @@ async function requestToolLimitFinalAnswer(input: AiChatSendInput, messages: Cha
   // timeline stays intact and is never overwritten.
   timeline.beginRound();
   let streamedAnswer = "";
+  let finalUsage: AiChatTurnTokenUsage | null = null;
   try {
     input.onStatusChange?.("thinking");
     const modelCallStartedAtMs = performance.now();
@@ -297,21 +297,31 @@ async function requestToolLimitFinalAnswer(input: AiChatSendInput, messages: Cha
       timeline.setStreaming(progress);
     }, { toolsEnabled: false });
     recordModelTiming(timing, response, modelCallStartedAtMs);
+    finalUsage = extractTurnTokenUsage(response.body);
     const assistant = normalizeAssistantMessage(firstChoice(response.body)?.message);
     timeline.commitRound(assistant.content ?? "", assistant.reasoning ?? "");
-    if ((assistant.content?.trim() || streamedAnswer.trim())) return;
+    if ((assistant.content?.trim() || streamedAnswer.trim())) return finalUsage;
   } catch (error) {
     throwIfAborted(input.abortSignal);
-    if (streamedAnswer.trim()) return;
+    if (streamedAnswer.trim()) return finalUsage;
   }
 
   if (deriveSegmentContent(timeline.snapshot().segments ?? []).trim().length === 0) {
-    timeline.appendText([
-      `Tool round limit reached (${toolRoundLimit}).`,
-      "Lux executed the available tool calls but the model did not produce a final answer after the limit.",
-      "Increase Settings -> AI -> Tool rounds for longer autonomous tasks, then send a follow-up if more work is needed.",
-    ].join("\n\n"));
+    timeline.appendText(
+      manualStop
+        ? [
+            "Stopped after the current tool round at your request.",
+            "Lux executed the tool calls already in flight but the model did not produce a final answer. Send a follow-up to continue.",
+          ].join("\n\n")
+        : [
+            `Tool round limit reached (${toolRoundLimit}).`,
+            "Lux executed the available tool calls but the model did not produce a final answer after the limit.",
+            "Increase Settings -> AI -> Tool rounds for longer autonomous tasks, then send a follow-up if more work is needed.",
+          ].join("\n\n"),
+    );
   }
+
+  return finalUsage;
 }
 
 function createResponseTimingAccumulator(): ResponseTimingAccumulator {
@@ -353,6 +363,7 @@ function assistantMessageWithTiming(
   patch: Partial<AiChatMessage>,
   timing: ResponseTimingAccumulator,
   turnUsage: AiChatTurnTokenUsage | null,
+  model: AiModelConfig,
 ): AiChatMessage {
   const responseTiming = finalizeResponseTiming(timing);
   const merged: AiChatMessage = {
@@ -361,7 +372,9 @@ function assistantMessageWithTiming(
     responseDurationMs: responseTiming.totalMs,
     responseTiming,
   };
-  const resolvedUsage = turnUsage ?? estimateTurnUsageFromAssistant(merged) ?? undefined;
+  const baseUsage = turnUsage ?? estimateTurnUsageFromAssistant(merged) ?? undefined;
+  // Populate the cost estimate (manual model price first, else alias-based rates).
+  const resolvedUsage = baseUsage ? attachTurnCostEstimate(baseUsage, model) : undefined;
   return {
     ...merged,
     turnUsage: resolvedUsage,

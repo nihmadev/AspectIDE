@@ -132,12 +132,39 @@ pub fn encode_vision_image(
     // a model that *can* read the source format still receives it.
     let Some(decoded) = decode_source(&bytes, hint_mime.clone()) else {
         let mime = hint_mime.unwrap_or_else(|| "application/octet-stream".to_string());
-        return Ok(passthrough_bytes(&mime, &bytes));
+        return Ok(passthrough_bytes(&mime, &bytes, None));
     };
 
     let resized = downscale_if_needed(&decoded.image, max_dimension);
     let effective = resized.as_ref().unwrap_or(&decoded.image);
     let was_resized = resized.is_some();
+
+    // High-bit-depth / HDR sources (16-bit PNG, float) would be truncated to
+    // 8-bit by `to_rgb8()`/`to_rgba8()` below, and since the 8-bit re-encode is
+    // typically smaller than the original the smallest-wins guard would then
+    // adopt it — silently dropping precision and contradicting the module's
+    // "no fidelity lost" guarantee. When the original is already a model-friendly
+    // format and we did not have to resize, forward it untouched instead. (A
+    // high-bit-depth source in a format the model can't read, or one that needs
+    // resizing, still falls through to the 8-bit encode — unavoidable there.)
+    if !was_resized
+        && decoded.original_model_friendly
+        && matches!(
+            decoded.image.color(),
+            image::ColorType::Rgb16
+                | image::ColorType::Rgba16
+                | image::ColorType::L16
+                | image::ColorType::La16
+                | image::ColorType::Rgb32F
+                | image::ColorType::Rgba32F
+        )
+    {
+        return Ok(passthrough_bytes(
+            &decoded.original_mime,
+            &decoded.original_bytes,
+            Some(decoded.image.dimensions()),
+        ));
+    }
 
     let encoded = match target {
         TargetFormat::Webp => {
@@ -151,6 +178,7 @@ pub fn encode_vision_image(
         return Ok(passthrough_bytes(
             &decoded.original_mime,
             &decoded.original_bytes,
+            Some(decoded.image.dimensions()),
         ));
     };
 
@@ -165,6 +193,7 @@ pub fn encode_vision_image(
         return Ok(passthrough_bytes(
             &decoded.original_mime,
             &decoded.original_bytes,
+            Some(decoded.image.dimensions()),
         ));
     }
 
@@ -236,8 +265,15 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
 fn decode_source(bytes: &[u8], hint_mime: Option<String>) -> Option<DecodedSource> {
     let format = image::guess_format(bytes).ok();
     let image = image::load_from_memory(bytes).ok()?;
-    let original_mime = hint_mime
-        .or_else(|| format.map(mime_for_format))
+    // The source decoded successfully, so passthrough forwards the REAL bytes;
+    // the content-sniffed `format` is therefore authoritative for the emitted
+    // MIME. A mislabeled file (e.g. JPEG bytes saved as `.png`) must not be
+    // announced under its extension/data-url hint, which strict media_type
+    // validators (Anthropic) would reject. `hint_mime` only acts as a fallback
+    // when `guess_format` could not name the format.
+    let original_mime = format
+        .map(mime_for_format)
+        .or(hint_mime)
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let original_model_friendly = matches!(format, Some(ImageFormat::Png | ImageFormat::Jpeg));
     Some(DecodedSource {
@@ -322,16 +358,18 @@ fn encode_png(image: &DynamicImage) -> Result<Vec<u8>, String> {
 /// Forwards already-owned source bytes verbatim under their declared MIME.
 /// Used both for the decoded smallest-wins / encode-failure paths and for
 /// sources `image` could not decode at all (HEIC/AVIF/SVG).
-fn passthrough_bytes(mime: &str, bytes: &[u8]) -> VisionEncodeResponse {
-    let dimensions = image::load_from_memory(bytes)
-        .ok()
-        .map(|image| image.dimensions());
+///
+/// `dims` carries the already-known dimensions on the decoded paths so we avoid
+/// a redundant second full-size decode (which would transiently double peak
+/// memory for large images). The undecodable path passes `None` — its bytes
+/// cannot be decoded for dimensions anyway, so the size stays unknown.
+fn passthrough_bytes(mime: &str, bytes: &[u8], dims: Option<(u32, u32)>) -> VisionEncodeResponse {
     VisionEncodeResponse {
         data_url: to_data_url(mime, bytes),
         size: bytes.len() as u64,
         mime_type: mime.to_string(),
-        width: dimensions.map(|(width, _)| width),
-        height: dimensions.map(|(_, height)| height),
+        width: dims.map(|(width, _)| width),
+        height: dims.map(|(_, height)| height),
         passthrough: true,
     }
 }

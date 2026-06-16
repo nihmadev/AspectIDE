@@ -1,7 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Plus, RotateCcw, Search, Settings, Trash2, X } from "lucide-react";
+import { BarChart3, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Plus, RefreshCw, RotateCcw, Search, Settings, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
 import {
   AI_PREFERENCES_KEY,
@@ -36,10 +36,12 @@ import {
   type AiScanConcurrency,
 } from "../lib/aiPreferences";
 import { AI_VISION_IMAGE_FORMATS } from "../lib/aiVisionFormat";
+import { aggregateUsageByProject, clearAiUsageLog, loadAiUsageLog, usageEntryTokensPerSecond, type AiUsageLogEntry } from "../lib/aiUsageLog";
 
 const AI_SCAN_CONCURRENCY_OPTIONS: readonly AiScanConcurrency[] = ["auto", "all", "half"];
 import { formatCompactTokens } from "../lib/aiChatContextUsage";
 import { resolveModelContextTokens } from "../lib/aiModelContext";
+import { fetchProviderModelConfigs, isFreeModelId, mergeRefreshedModels } from "../lib/aiProviderModels";
 import {
   defaultEditorPreferences,
   EDITOR_PREFERENCES_KEY,
@@ -61,7 +63,7 @@ const scope = "user" as const;
 
 // AI configuration is split into focused sections so runtime, instructions,
 // providers, and indexing do not compete in one mixed settings list.
-type SettingsSectionId = "general" | "editor" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-providers" | "ai-indexing";
+type SettingsSectionId = "general" | "editor" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-providers" | "ai-indexing" | "ai-usage";
 
 type SettingsSection = {
   id: SettingsSectionId;
@@ -93,7 +95,7 @@ const PROVIDER_PRESET_DESCRIPTION_KEYS: Record<string, MessageKey> = {
 const settingsNavGroups: Array<{ labelKey: MessageKey; sectionIds: SettingsSectionId[] }> = [
   { labelKey: "settings.group.workspace", sectionIds: ["general"] },
   { labelKey: "settings.group.editor", sectionIds: ["editor"] },
-  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-providers", "ai-indexing"] },
+  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-providers", "ai-indexing", "ai-usage"] },
 ];
 
 const settingsSections: SettingsSection[] = [
@@ -145,6 +147,13 @@ const settingsSections: SettingsSection[] = [
     descriptionKey: "settings.indexing.description",
     icon: <Database size={16} />,
     keywords: ["ai", "index", "indexing", "files", "images", "metadata", "context", "workspace"],
+  },
+  {
+    id: "ai-usage",
+    titleKey: "settings.usage.title",
+    descriptionKey: "settings.usage.description",
+    icon: <BarChart3 size={16} />,
+    keywords: ["ai", "usage", "history", "tokens", "cost", "spend", "speed", "requests", "стоимость", "история", "токены"],
   },
 ];
 
@@ -210,7 +219,7 @@ export function SettingsDialog() {
       setSaveState("saving");
       // Re-apply the scan/search CPU budget immediately (idempotent atomic set)
       // so a changed setting takes effect without an app restart.
-      void luxCommands.setScanConcurrency(nextPreferences.scanConcurrency);
+      void luxCommands.setScanConcurrency(nextPreferences.scanConcurrency).catch(() => undefined);
       void luxCommands.settingsSet(scope, AI_PREFERENCES_KEY, nextPreferences)
         .then(() => setSaveState("saved"))
         .catch(() => setSaveState("error"));
@@ -291,7 +300,7 @@ export function SettingsDialog() {
                   <h2>{t(activeSection.titleKey)}</h2>
                   <p>{t(activeSection.descriptionKey)}</p>
                 </div>
-                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && (
+                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && activeSectionId !== "ai-usage" && (
                   <button className="settings-reset-button" type="button" onClick={() => resetSection(activeSectionId, persistEditorPreferences, persistAiPreferences, aiPreferences)}>
                     <RotateCcw size={14} /> {t("settings.reset", { group: t(activeSection.titleKey) })}
                   </button>
@@ -315,6 +324,7 @@ export function SettingsDialog() {
                 {activeSectionId === "ai-instructions" && <AiInstructionsSection fileEntries={fileEntries} preferences={aiPreferences} workspace={workspace} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-providers" && <AiProvidersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-indexing" && <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+                {activeSectionId === "ai-usage" && <AiUsageSection workspace={workspace} t={t} />}
               </div>
             </main>
           </div>
@@ -530,6 +540,13 @@ function AgentBrowserSection({ onChange, preferences, t }: { onChange: (patch: P
     }
   }, [preferences.agentBrowserCommand]);
 
+  // Sync the real install/version state the moment the section opens, so the card
+  // reflects what's actually installed instead of sitting on "unavailable" until the
+  // user clicks Refresh. Lightweight: resolves CLI + version only, never launches Chromium.
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
+
   const diagnosticState = checking
     ? "checking"
     : status?.available
@@ -567,12 +584,17 @@ function AgentBrowserSection({ onChange, preferences, t }: { onChange: (patch: P
             type="button"
             disabled={checking}
             onClick={() => {
+              setChecking(true);
               void luxCommands.agentBrowserInstall({
                 commandPath: preferences.agentBrowserCommand.trim() || null,
                 withDeps: false,
               }).then(() => {
                 void import("../lib/agentBrowserSkillsCache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
-                return refreshStatus();
+              }).catch(() => undefined).finally(() => {
+                // refreshStatus resets `checking` and surfaces success/error state,
+                // so it covers both the resolved and rejected install paths. The
+                // .catch clears the rejection (finally alone would re-throw it).
+                void refreshStatus();
               });
             }}
           >
@@ -736,6 +758,7 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
           onChange={(maxParallelSubagents) => onChange({ maxParallelSubagents })}
         />
         <ToggleSetting label={t("settings.aiRuntime.responseDuration.label")} detail={t("settings.aiRuntime.responseDuration.detail")} checked={preferences.showResponseDuration} onChange={(showResponseDuration) => onChange({ showResponseDuration })} />
+        <ToggleSetting label={t("settings.aiRuntime.tokenEconomy.label")} detail={t("settings.aiRuntime.tokenEconomy.detail")} checked={preferences.tokenEconomyEnabled} onChange={(tokenEconomyEnabled) => onChange({ tokenEconomyEnabled })} />
         <ToggleSetting
           label={t("settings.aiRuntime.contextAutoCompact.label")}
           detail={t("settings.aiRuntime.contextAutoCompact.detail")}
@@ -782,6 +805,30 @@ function AiInstructionsSection({ fileEntries, onChange, preferences, t, workspac
 
   return (
     <div className="settings-section-stack instructions-section-stack">
+      <SettingsPanel title={t("settings.instructions.customPrompt.title")} description={t("settings.instructions.customPrompt.description")}>
+        <SettingsGrid>
+          <ToggleSetting
+            label={t("settings.instructions.customPrompt.toggle.label")}
+            detail={t("settings.instructions.customPrompt.toggle.detail")}
+            checked={preferences.customSystemPromptEnabled}
+            onChange={(customSystemPromptEnabled) => onChange({ customSystemPromptEnabled })}
+          />
+        </SettingsGrid>
+        {preferences.customSystemPromptEnabled && (
+          <SettingsGrid>
+            <TextareaSetting
+              label={t("settings.instructions.customPrompt.body.label")}
+              detail={t("settings.instructions.customPrompt.body.detail")}
+              placeholder={t("settings.instructions.customPrompt.body.placeholder")}
+              value={preferences.customSystemPrompt}
+              rows={12}
+              onChange={(customSystemPrompt) => onChange({ customSystemPrompt })}
+              wide
+            />
+          </SettingsGrid>
+        )}
+      </SettingsPanel>
+
       <SettingsPanel title={t("settings.instructions.global.title")} description={t("settings.instructions.global.description")}>
         <SettingsGrid>
           <TextareaSetting
@@ -968,11 +1015,14 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
 }) {
   const [editingModelId, setEditingModelId] = useState(provider.models[0]?.id ?? "");
   const [providerDiagnostic, setProviderDiagnostic] = useState<AiProviderDiagnosticResponse | null>(null);
-  const [providerDiagnosticRunning, setProviderDiagnosticRunning] = useState(false);
+  const [runningModelId, setRunningModelId] = useState<string | null>(null);
+  const [refreshingModels, setRefreshingModels] = useState(false);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const modelIdRef = useRef(editingModelId);
   const editingModel = getAiModel(provider, editingModelId) ?? provider.models[0];
   const canRemoveModel = provider.models.length > 1;
-  const diagnosticState = providerDiagnosticRunning ? "checking" : providerDiagnostic?.ok === false ? "error" : providerDiagnostic?.ok ? "ok" : "idle";
-  const diagnosticLabel = providerDiagnosticRunning
+  const diagnosticState = runningModelId === editingModel.id ? "checking" : providerDiagnostic?.ok === false ? "error" : providerDiagnostic?.ok ? "ok" : "idle";
+  const diagnosticLabel = runningModelId === editingModel.id
     ? t("settings.providers.diagnostic.checking")
     : providerDiagnostic
       ? providerDiagnostic.ok
@@ -984,6 +1034,36 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
     if (provider.models.some((model) => model.id === editingModelId)) return;
     setEditingModelId(provider.models[0].id);
   }, [editingModelId, provider]);
+
+  // Clear the diagnostic banner whenever the edited model changes so an "OK"
+  // result for one model never lingers on another, and track the current model
+  // so an in-flight check can be discarded if the user switches mid-request.
+  useEffect(() => {
+    modelIdRef.current = editingModel.id;
+    setProviderDiagnostic(null);
+  }, [editingModel.id]);
+
+  // Auto-pull the live catalog for OpenCode Zen so the real (free-first) model list
+  // appears without a manual Refresh. Fires when (a) still on the offline bootstrap
+  // placeholder, or (b) a free model has a sub-1M context — the signature of an
+  // earlier buggy fetch that inferred e.g. DeepSeek's 128k for "…-free". A single
+  // re-fetch self-heals the stored context to the real 1M window.
+  const autoRefreshedRef = useRef(false);
+  useEffect(() => {
+    if (autoRefreshedRef.current) return;
+    if (provider.providerType !== "opencode-zen") return;
+    const stillBootstrapped = provider.models.length === 1 && provider.models[0].id === "opencode-zen-auto";
+    const hasStaleFreeContext = provider.models.some(
+      (model) => isFreeModelId(model.id)
+        && typeof model.contextTokens === "number"
+        && model.contextTokens > 0
+        && model.contextTokens < 1_000_000,
+    );
+    if (!stillBootstrapped && !hasStaleFreeContext) return;
+    autoRefreshedRef.current = true;
+    void refreshModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider.id, provider.providerType]);
 
   const updateEditingProvider = (patch: Partial<AiProviderConfig>) => {
     updateProviders(preferences.providers.map((candidate) => candidate.id === provider.id ? { ...candidate, ...patch } : candidate));
@@ -1011,6 +1091,38 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
     setEditingModelId(nextModel.id);
     updateProviders(preferences.providers.map((candidate) => candidate.id === provider.id ? { ...candidate, models: [...candidate.models, nextModel] } : candidate));
   };
+  const refreshModels = async () => {
+    if (refreshingModels) return;
+    setRefreshingModels(true);
+    setRefreshError(null);
+    try {
+      const fetched = await fetchProviderModelConfigs(provider);
+      if (fetched.length === 0) {
+        setRefreshError(t("settings.providers.models.refreshEmpty"));
+        return;
+      }
+      const merged = mergeRefreshedModels(provider, fetched);
+      // Keep the selected model if it still exists, else fall back to the first (a free
+      // model, since the list is free-first). Reset effort to that model's first level.
+      const stillThere = merged.models.some((model) => model.id === preferences.selectedModelId);
+      const isActiveProvider = provider.id === preferences.selectedProviderId;
+      const nextSelectedModelId = stillThere ? preferences.selectedModelId : merged.models[0].id;
+      const nextSelectedModel = getAiModel(merged, nextSelectedModelId) ?? merged.models[0];
+      updateProviders(
+        preferences.providers.map((candidate) => candidate.id === provider.id ? merged : candidate),
+        preferences.selectedProviderId,
+        isActiveProvider ? nextSelectedModelId : preferences.selectedModelId,
+        isActiveProvider && !stillThere ? (nextSelectedModel.effortLevels[0]?.id ?? "") : preferences.selectedEffortId,
+      );
+      if (!merged.models.some((model) => model.id === editingModelId)) {
+        setEditingModelId(merged.models[0].id);
+      }
+    } catch (error) {
+      setRefreshError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setRefreshingModels(false);
+    }
+  };
   const removeModel = () => {
     if (!canRemoveModel) return;
     const nextModels = provider.models.filter((model) => model.id !== editingModel.id);
@@ -1025,8 +1137,9 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
     );
   };
   const runProviderDiagnostic = async () => {
-    if (!editingModel || providerDiagnosticRunning) return;
-    setProviderDiagnosticRunning(true);
+    if (!editingModel || runningModelId) return;
+    const targetModelId = editingModel.id;
+    setRunningModelId(targetModelId);
     setProviderDiagnostic(null);
     try {
       const result = await luxCommands.aiProviderDiagnostic({
@@ -1040,8 +1153,12 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
           temperature: 0,
         },
       });
+      // Discard the result if the user switched models (or left) mid-request,
+      // so a passing check for one model is never bound to another.
+      if (modelIdRef.current !== targetModelId) return;
       setProviderDiagnostic(result);
     } catch (error) {
+      if (modelIdRef.current !== targetModelId) return;
       setProviderDiagnostic({
         ok: false,
         status: null,
@@ -1051,7 +1168,9 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
         baseUrl: provider.baseUrl,
       });
     } finally {
-      setProviderDiagnosticRunning(false);
+      // Only one diagnostic can be in flight (the button is disabled while
+      // running), so the running id is always safe to clear here.
+      setRunningModelId(null);
     }
   };
 
@@ -1082,7 +1201,7 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
           <span>{providerDiagnostic?.error ?? (providerDiagnostic?.ok ? t("settings.providers.diagnostic.okDetail", { status: providerDiagnostic.status ?? "-", latency: providerDiagnostic.latencyMs }) : t("settings.providers.diagnostic.description"))}</span>
         </div>
         <div className="settings-banner-actions">
-          <button type="button" disabled={!editingModel || providerDiagnosticRunning} onClick={() => void runProviderDiagnostic()}>
+          <button type="button" disabled={!editingModel || runningModelId !== null} onClick={() => void runProviderDiagnostic()}>
             {t("settings.providers.diagnostic.check")}
           </button>
         </div>
@@ -1126,8 +1245,14 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
           <div className="provider-model-list">
             <div className="provider-model-list-head">
               <strong>{t("settings.providers.models.listTitle")}</strong>
-              <button type="button" onClick={addModel}><Plus size={14} /> {t("settings.providers.addModel")}</button>
+              <div className="provider-model-list-actions">
+                <button type="button" onClick={() => void refreshModels()} disabled={refreshingModels} title={t("settings.providers.models.refreshHint")}>
+                  <RefreshCw size={14} className={refreshingModels ? "spin-icon" : undefined} /> {t("settings.providers.models.refresh")}
+                </button>
+                <button type="button" onClick={addModel}><Plus size={14} /> {t("settings.providers.addModel")}</button>
+              </div>
             </div>
+            {refreshError && <p className="provider-model-refresh-error" role="alert">{refreshError}</p>}
             <div className="provider-model-rows" role="listbox" aria-label={t("settings.providers.models.listTitle")}>
               {provider.models.map((model) => {
                 const activeModel = provider.id === preferences.selectedProviderId && model.id === preferences.selectedModelId;
@@ -1180,6 +1305,24 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
                 max={2_000_000}
                 step={1_000}
                 onChange={(contextTokens) => updateEditingModel({ contextTokens: contextTokens > 0 ? contextTokens : null })}
+              />
+              <NumberSetting
+                label={t("settings.providers.modelInputPrice.label")}
+                detail={t("settings.providers.modelInputPrice.detail")}
+                value={editingModel.inputPricePerMillion ?? 0}
+                min={0}
+                max={1_000}
+                step={0.5}
+                onChange={(price) => updateEditingModel({ inputPricePerMillion: price > 0 ? price : null })}
+              />
+              <NumberSetting
+                label={t("settings.providers.modelOutputPrice.label")}
+                detail={t("settings.providers.modelOutputPrice.detail")}
+                value={editingModel.outputPricePerMillion ?? 0}
+                min={0}
+                max={1_000}
+                step={0.5}
+                onChange={(price) => updateEditingModel({ outputPricePerMillion: price > 0 ? price : null })}
               />
             </SettingsGrid>
             <div className="effort-editor">
@@ -1284,6 +1427,137 @@ function IndexMetric({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+const maxRecentUsageRows = 60;
+
+// AI Usage: persisted per-request history (model, project, speed, tokens, cost).
+// Read-only review surface backed by aiUsageLog; supports clearing the log.
+function AiUsageSection({ t, workspace }: { t: TranslateFn; workspace: WorkspaceInfo | null }) {
+  const [entries, setEntries] = useState<AiUsageLogEntry[] | null>(null);
+  const currentKey = workspaceInstructionsKey(workspace?.root);
+
+  useEffect(() => {
+    let active = true;
+    void loadAiUsageLog().then((loaded) => { if (active) setEntries(loaded); });
+    return () => { active = false; };
+  }, []);
+
+  const projects = useMemo(() => entries ? aggregateUsageByProject(entries) : [], [entries]);
+  const recent = useMemo(() => entries ? entries.slice(-maxRecentUsageRows).reverse() : [], [entries]);
+  const totals = useMemo(() => projects.reduce((sum, project) => ({
+    requestCount: sum.requestCount + project.requestCount,
+    totalTokens: sum.totalTokens + project.totalTokens,
+    estimatedCostUsd: sum.estimatedCostUsd + project.estimatedCostUsd,
+    totalDurationMs: sum.totalDurationMs + project.totalDurationMs,
+  }), { requestCount: 0, totalTokens: 0, estimatedCostUsd: 0, totalDurationMs: 0 }), [projects]);
+
+  const clearLog = () => { void clearAiUsageLog().then(setEntries); };
+
+  if (entries === null) {
+    return <div className="settings-empty-note">{t("settings.usage.loading")}</div>;
+  }
+  if (entries.length === 0) {
+    return (
+      <div className="settings-section-stack">
+        <div className="settings-empty-note">{t("settings.usage.empty")}</div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="settings-section-stack ai-usage-section">
+      <SettingsPanel title={t("settings.usage.totals.title")} description={t("settings.usage.totals.description")}>
+        <div className="index-metrics">
+          <IndexMetric label={t("settings.usage.metric.requests")} value={formatInteger(totals.requestCount)} />
+          <IndexMetric label={t("settings.usage.metric.tokens")} value={formatCompactTokens(totals.totalTokens)} />
+          <IndexMetric label={t("settings.usage.metric.cost")} value={formatUsageCost(totals.estimatedCostUsd, t)} />
+          <IndexMetric label={t("settings.usage.metric.time")} value={formatUsageDuration(totals.totalDurationMs)} />
+        </div>
+      </SettingsPanel>
+
+      <SettingsPanel title={t("settings.usage.byProject.title")} description={t("settings.usage.byProject.description")}>
+        <div className="ai-usage-project-list">
+          {projects.map((project) => (
+            <div className="ai-usage-project-row" key={project.workspaceKey || "__none__"} data-active={project.workspaceKey === currentKey}>
+              <div className="ai-usage-project-main">
+                <strong>{project.workspaceName || projectKeyLabel(project.workspaceKey, t)}</strong>
+                <small>{t("settings.usage.byProject.requests", { count: project.requestCount })}</small>
+              </div>
+              <div className="ai-usage-project-stats">
+                <span>{formatCompactTokens(project.totalTokens)} {t("settings.usage.tok")}</span>
+                <span>{formatUsageCost(project.estimatedCostUsd, t)}</span>
+                <span>{formatUsageDuration(project.totalDurationMs)}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </SettingsPanel>
+
+      <SettingsPanel title={t("settings.usage.recent.title")} description={t("settings.usage.recent.description", { count: recent.length })}>
+        <div className="ai-usage-table" role="table" aria-label={t("settings.usage.recent.title")}>
+          <div className="ai-usage-table-head" role="row">
+            <span role="columnheader">{t("settings.usage.col.when")}</span>
+            <span role="columnheader">{t("settings.usage.col.model")}</span>
+            <span role="columnheader">{t("settings.usage.col.tokens")}</span>
+            <span role="columnheader">{t("settings.usage.col.speed")}</span>
+            <span role="columnheader">{t("settings.usage.col.cost")}</span>
+          </div>
+          {recent.map((entry) => (
+            <div className="ai-usage-table-row" role="row" key={entry.id} title={`${entry.provider} · ${entry.agentMode}`}>
+              <span role="cell">{formatUsageTimestamp(entry.timestamp)}</span>
+              <span role="cell" className="ai-usage-model" title={entry.model}>{entry.model}</span>
+              <span role="cell">{formatCompactTokens(entry.totalTokens)}</span>
+              <span role="cell">{formatUsageSpeed(usageEntryTokensPerSecond(entry), t)}</span>
+              <span role="cell">{formatUsageCost(entry.estimatedCostUsd, t)}</span>
+            </div>
+          ))}
+        </div>
+      </SettingsPanel>
+
+      <div className="ai-usage-actions">
+        <button type="button" className="settings-reset-button" onClick={clearLog}>
+          <Trash2 size={14} /> {t("settings.usage.clear")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function projectKeyLabel(key: string, t: TranslateFn) {
+  if (!key) return t("settings.usage.noProject");
+  const segments = key.split("/").filter(Boolean);
+  return segments[segments.length - 1] || key;
+}
+
+function formatUsageCost(usd: number | null, t: TranslateFn) {
+  if (usd === null || usd <= 0) return t("settings.usage.costUnknown");
+  if (usd < 0.01) return "<$0.01";
+  return `$${usd.toFixed(usd < 1 ? 3 : 2)}`;
+}
+
+function formatUsageDuration(ms: number) {
+  if (ms <= 0) return "—";
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${Math.round(seconds % 60)}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function formatUsageSpeed(tokensPerSecond: number, t: TranslateFn) {
+  if (tokensPerSecond <= 0) return "—";
+  return t("settings.usage.tokPerSec", { value: tokensPerSecond < 10 ? tokensPerSecond.toFixed(1) : String(Math.round(tokensPerSecond)) });
+}
+
+function formatUsageTimestamp(timestamp: number) {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+  if (sameDay) return time;
+  return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
 }
 
 function IndexBucketList({ buckets, emptyLabel, title }: { buckets: Array<{ count: number; label: string }>; emptyLabel: string; title: string }) {
