@@ -1246,7 +1246,7 @@ fn hide_process_window(command: &mut Command) {
 }
 
 #[cfg(not(windows))]
-fn hide_process_window(_command: &mut Command) {}
+const fn hide_process_window(_command: &mut Command) {}
 
 /// Build a PATH value with `dirs` (that exist) prepended ahead of the inherited
 /// PATH. Returns None when there is nothing to prepend, so the child just inherits

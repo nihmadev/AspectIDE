@@ -394,8 +394,7 @@ pub fn reveal_in_file_explorer(path: impl AsRef<Path>) -> AppResult<()> {
             path.to_path_buf()
         } else {
             path.parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."))
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
         };
         // Reap the short-lived launcher on a detached thread; otherwise the
         // dropped `Child` is never waited on and lingers as a zombie until the
