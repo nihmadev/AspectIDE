@@ -174,6 +174,8 @@ fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<Stri
 fn ffmpeg_command(template: &str) -> Command {
     #[cfg(windows)]
     use std::os::windows::process::CommandExt;
+    // `mut` is only exercised by the Windows `creation_flags` call below.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut command = if Path::new(template).is_file() {
         Command::new(template)
     } else if template.contains(' ') {

@@ -29,6 +29,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Spawns the agent-browser CLI without a visible console window on Windows.
 /// Centralizes the `creation_flags` call so no spawn site can forget it.
 fn agent_browser_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    // `mut` is only exercised by the Windows `creation_flags` call below.
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut command = Command::new(program);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
