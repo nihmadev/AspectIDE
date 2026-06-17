@@ -203,10 +203,12 @@ pub fn list_files(root: impl AsRef<Path>, max_results: usize) -> AppResult<Vec<F
     Ok(entries)
 }
 
-/// Like [`list_files`] but applies `predicate` to each file path during the walk
-/// and stops once `max_matches` files have matched. Non-matching files are never
-/// materialized, so callers that only need a bounded set of matches (e.g. a glob
-/// substring filter) do not heap-allocate every path in the workspace first.
+/// Like [`list_files`] but applies `predicate` to each file path during the walk,
+/// stopping once `max_matches` files have matched.
+///
+/// Non-matching files are never materialized, so callers that only need a bounded
+/// set of matches (e.g. a glob substring filter) do not heap-allocate every path in
+/// the workspace first.
 ///
 /// The result is sorted by path. When the workspace contains more than
 /// `max_matches` matching files, the returned subset is walk-order dependent (the
@@ -327,8 +329,10 @@ pub fn copy_path(from: impl AsRef<Path>, to: impl AsRef<Path>) -> AppResult<()> 
         let to_real = to
             .parent()
             .and_then(|parent| fs::canonicalize(parent).ok())
-            .map(|parent| parent.join(to.file_name().unwrap_or_default()))
-            .unwrap_or_else(|| to.to_path_buf());
+            .map_or_else(
+                || to.to_path_buf(),
+                |parent| parent.join(to.file_name().unwrap_or_default()),
+            );
         if to.starts_with(from) || to_real.starts_with(&from_real) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

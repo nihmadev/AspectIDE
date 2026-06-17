@@ -13,7 +13,10 @@ mod protocol;
 mod results;
 mod transport;
 
-pub use discovery::{language_server_diagnostics, workspace_language_servers};
+pub use discovery::{
+    language_server_diagnostics, workspace_language_servers, workspace_language_servers_with_dirs,
+    BuiltinServer, BUILTIN_SERVERS,
+};
 pub use protocol::{
     code_action_request, completion_request, definition_request, did_change_edits_notification,
     did_change_notification, did_close_notification, did_open_notification, did_save_notification,
@@ -62,6 +65,12 @@ pub struct LanguageServerDefinition {
     pub command: String,
     pub args: Vec<String>,
     pub workspace_root: PathBuf,
+    /// Directories prepended to the child process PATH at launch. Carries the
+    /// IDE's managed runtime bins (Node/Rust/Python) so a managed server shim
+    /// (e.g. `typescript-language-server` → `node`) finds its interpreter even
+    /// when the host has no system toolchain. Empty for system-PATH servers.
+    #[serde(default)]
+    pub extra_path_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +153,7 @@ impl LspManager {
     pub async fn start_available_servers(
         &mut self,
         servers: &[LanguageServerInfo],
+        extra_path_dirs: &[PathBuf],
     ) -> Vec<WorkspaceDiagnostic> {
         let wanted_languages = servers
             .iter()
@@ -169,7 +179,8 @@ impl LspManager {
             if server.status != LanguageServerStatus::Available {
                 continue;
             }
-            let definition = LanguageServerDefinition::from(server);
+            let mut definition = LanguageServerDefinition::from(server);
+            definition.extra_path_dirs = extra_path_dirs.to_vec();
             let should_restart = self
                 .sessions
                 .get(&server.language_id)
@@ -192,7 +203,8 @@ impl LspManager {
             {
                 continue;
             }
-            let definition = LanguageServerDefinition::from(server);
+            let mut definition = LanguageServerDefinition::from(server);
+            definition.extra_path_dirs = extra_path_dirs.to_vec();
             let diagnostics_tx = self.diagnostics_tx.clone();
             let language_id = server.language_id.clone();
             let server_name = server.name.clone();
@@ -298,16 +310,12 @@ impl LspManager {
         // `mts`/`scss`/`vue`/`typescriptreact` paths), so `get_mut` missed and
         // `didClose` never fired — leaking client + server open-file state.
         // Find the session that actually holds the path instead.
-        let Some(language_id) = self
-            .sessions
-            .iter()
-            .find_map(|(language_id, session)| {
-                session
-                    .opened_documents
-                    .contains_key(path)
-                    .then(|| language_id.clone())
-            })
-        else {
+        let Some(language_id) = self.sessions.iter().find_map(|(language_id, session)| {
+            session
+                .opened_documents
+                .contains_key(path)
+                .then(|| language_id.clone())
+        }) else {
             return Ok(());
         };
         let Some(session) = self.sessions.get_mut(&language_id) else {
@@ -664,6 +672,11 @@ impl LspSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Prepend the IDE's managed runtime bins so a managed server shim resolves
+        // its interpreter (node/python) without a system toolchain on PATH.
+        if let Some(path) = prepend_path_dirs(&definition.extra_path_dirs) {
+            command.env("PATH", path);
+        }
         hide_process_window(&mut command);
         let mut child = command.spawn()?;
 
@@ -1235,6 +1248,19 @@ fn hide_process_window(command: &mut Command) {
 #[cfg(not(windows))]
 fn hide_process_window(_command: &mut Command) {}
 
+/// Build a PATH value with `dirs` (that exist) prepended ahead of the inherited
+/// PATH. Returns None when there is nothing to prepend, so the child just inherits
+/// the parent PATH unchanged.
+fn prepend_path_dirs(dirs: &[PathBuf]) -> Option<std::ffi::OsString> {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut parts: Vec<PathBuf> = dirs.iter().filter(|dir| dir.is_dir()).cloned().collect();
+    if parts.is_empty() {
+        return None;
+    }
+    parts.extend(std::env::split_paths(&existing));
+    std::env::join_paths(parts).ok()
+}
+
 impl Drop for LspSession {
     fn drop(&mut self) {
         let _ = self.child.start_kill();
@@ -1252,6 +1278,7 @@ impl From<&LanguageServerInfo> for LanguageServerDefinition {
             command: server.command.clone(),
             args: server.args.clone(),
             workspace_root: server.workspace_root.clone(),
+            extra_path_dirs: Vec::new(),
         }
     }
 }
@@ -1377,6 +1404,7 @@ mod tests {
             command: "typescript-language-server".to_string(),
             args: vec!["--stdio".to_string()],
             workspace_root: workspace_root.clone(),
+            extra_path_dirs: Vec::new(),
         };
         let document = DocumentSnapshot {
             id: lux_core::BufferId::new(),

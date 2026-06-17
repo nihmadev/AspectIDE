@@ -57,7 +57,10 @@ impl SettingsStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)?;
         }
-        write_atomic(&self.path, serde_json::to_string_pretty(&self.values)?.as_bytes())?;
+        write_atomic(
+            &self.path,
+            serde_json::to_string_pretty(&self.values)?.as_bytes(),
+        )?;
         Ok(setting)
     }
 

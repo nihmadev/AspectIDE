@@ -145,7 +145,7 @@ async fn context_source_tool(
         .await;
         match read {
             Ok((buf, size)) => {
-                let limit = MAX_FILE_BYTES as usize;
+                let limit = usize::try_from(MAX_FILE_BYTES).unwrap_or(usize::MAX);
                 let truncated = size > MAX_FILE_BYTES;
                 let text = String::from_utf8_lossy(&buf).into_owned();
                 let clamped = if text.len() > limit {

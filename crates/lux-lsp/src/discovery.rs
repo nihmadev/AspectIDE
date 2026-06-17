@@ -5,15 +5,20 @@ use lux_core::{
 };
 
 #[derive(Debug, Clone, Copy)]
-struct BuiltinServer {
-    language_id: &'static str,
-    name: &'static str,
-    command: &'static str,
-    args: &'static [&'static str],
-    extensions: &'static [&'static str],
+pub struct BuiltinServer {
+    pub language_id: &'static str,
+    pub name: &'static str,
+    pub command: &'static str,
+    pub args: &'static [&'static str],
+    pub extensions: &'static [&'static str],
 }
 
-const BUILTIN_SERVERS: &[BuiltinServer] = &[
+/// Popular-language server catalog.
+///
+/// The single source of truth shared by discovery (what to look for) and the
+/// managed installer (what to install and how). Keep `command` aligned with the
+/// binary each install method produces.
+pub const BUILTIN_SERVERS: &[BuiltinServer] = &[
     BuiltinServer {
         language_id: "rust",
         name: "rust-analyzer",
@@ -26,18 +31,86 @@ const BUILTIN_SERVERS: &[BuiltinServer] = &[
         name: "TypeScript Language Server",
         command: "typescript-language-server",
         args: &["--stdio"],
-        extensions: &["ts", "tsx", "js", "jsx"],
+        extensions: &["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"],
+    },
+    BuiltinServer {
+        language_id: "python",
+        name: "ty",
+        command: "ty",
+        args: &["server"],
+        extensions: &["py", "pyi"],
+    },
+    BuiltinServer {
+        language_id: "go",
+        name: "gopls",
+        command: "gopls",
+        args: &[],
+        extensions: &["go"],
     },
     BuiltinServer {
         language_id: "json",
         name: "JSON Language Server",
         command: "vscode-json-language-server",
         args: &["--stdio"],
-        extensions: &["json"],
+        extensions: &["json", "jsonc"],
+    },
+    BuiltinServer {
+        language_id: "html",
+        name: "HTML Language Server",
+        command: "vscode-html-language-server",
+        args: &["--stdio"],
+        extensions: &["html", "htm"],
+    },
+    BuiltinServer {
+        language_id: "css",
+        name: "CSS Language Server",
+        command: "vscode-css-language-server",
+        args: &["--stdio"],
+        extensions: &["css", "scss", "less"],
+    },
+    BuiltinServer {
+        language_id: "yaml",
+        name: "YAML Language Server",
+        command: "yaml-language-server",
+        args: &["--stdio"],
+        extensions: &["yaml", "yml"],
+    },
+    BuiltinServer {
+        language_id: "bash",
+        name: "Bash Language Server",
+        command: "bash-language-server",
+        args: &["start"],
+        extensions: &["sh", "bash", "zsh"],
+    },
+    BuiltinServer {
+        language_id: "lua",
+        name: "lua-language-server",
+        command: "lua-language-server",
+        args: &[],
+        extensions: &["lua"],
+    },
+    BuiltinServer {
+        language_id: "cpp",
+        name: "clangd",
+        command: "clangd",
+        args: &[],
+        extensions: &["c", "h", "cc", "cpp", "cxx", "hpp", "hxx"],
     },
 ];
 
 pub fn workspace_language_servers(root: impl AsRef<Path>) -> AppResult<Vec<LanguageServerInfo>> {
+    workspace_language_servers_with_dirs(root, &[])
+}
+
+/// Discover servers for the workspace, resolving each command against `extra_dirs`
+/// (e.g. the IDE's managed LSP bin directory) FIRST, then PATH.
+///
+/// This is how on-demand-installed servers become "Available" without the user
+/// touching PATH.
+pub fn workspace_language_servers_with_dirs(
+    root: impl AsRef<Path>,
+    extra_dirs: &[std::path::PathBuf],
+) -> AppResult<Vec<LanguageServerInfo>> {
     let root = root.as_ref().canonicalize()?;
     let detected_extensions = detect_extensions(&root);
     let mut servers = Vec::new();
@@ -51,11 +124,17 @@ pub fn workspace_language_servers(root: impl AsRef<Path>) -> AppResult<Vec<Langu
             continue;
         }
 
-        let available = command_available(server.command);
+        let resolved = resolve_command(server.command, extra_dirs);
+        let available = resolved.is_some();
         servers.push(LanguageServerInfo {
             language_id: server.language_id.to_string(),
             name: server.name.to_string(),
-            command: server.command.to_string(),
+            // Use the absolute managed-dir path when found there, so the manager
+            // spawns the installed binary directly regardless of PATH.
+            command: resolved.map_or_else(
+                || server.command.to_string(),
+                |path| path.to_string_lossy().to_string(),
+            ),
             args: server.args.iter().map(|arg| (*arg).to_string()).collect(),
             workspace_root: root.clone(),
             status: if available {
@@ -66,12 +145,31 @@ pub fn workspace_language_servers(root: impl AsRef<Path>) -> AppResult<Vec<Langu
             error: if available {
                 None
             } else {
-                Some(format!("{} was not found in PATH", server.command))
+                Some(format!(
+                    "{} is not installed — install it from Settings → Language Servers",
+                    server.command
+                ))
             },
         });
     }
 
     Ok(servers)
+}
+
+/// Resolve a server command to an absolute executable path, searching `extra_dirs`
+/// (managed install location) before PATH. Returns None if not found anywhere.
+fn resolve_command(command: &str, extra_dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    let command_path = Path::new(command);
+    if command_path.components().count() > 1 {
+        return command_path.is_file().then(|| command_path.to_path_buf());
+    }
+    for dir in extra_dirs {
+        if let Some(path) = executable_in_dir(dir, command) {
+            return Some(path);
+        }
+    }
+    let paths = env::var_os("PATH")?;
+    env::split_paths(&paths).find_map(|dir| executable_in_dir(&dir, command))
 }
 
 #[must_use]
@@ -198,19 +296,6 @@ fn detect_extensions(root: &Path) -> BTreeSet<String> {
     found
 }
 
-fn command_available(command: &str) -> bool {
-    let command_path = Path::new(command);
-    if command_path.components().count() > 1 {
-        return command_path.is_file();
-    }
-
-    let Some(paths) = env::var_os("PATH") else {
-        return false;
-    };
-
-    env::split_paths(&paths).any(|path| command_exists_in_dir(&path, command))
-}
-
 /// Whether `path` points at a file we could actually execute. On Unix this
 /// requires at least one execute bit to be set, so a same-named *non-executable*
 /// data file sitting in PATH is not mistaken for an available server. On other
@@ -231,10 +316,12 @@ fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-fn command_exists_in_dir(dir: &Path, command: &str) -> bool {
+/// Resolve `command` to an absolute executable path within `dir` (applying the
+/// matched Windows extension), so callers can spawn it directly. None if absent.
+fn executable_in_dir(dir: &Path, command: &str) -> Option<std::path::PathBuf> {
     let direct = dir.join(command);
     if is_executable_file(&direct) {
-        return true;
+        return Some(direct);
     }
 
     #[cfg(windows)]
@@ -259,13 +346,14 @@ fn command_exists_in_dir(dir: &Path, command: &str) -> bool {
         );
 
         for extension in extensions {
-            if dir.join(format!("{command}{extension}")).is_file() {
-                return true;
+            let candidate = dir.join(format!("{command}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
             }
         }
     }
 
-    false
+    None
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { BarChart3, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Plus, RefreshCw, RotateCcw, Search, Settings, Trash2, X } from "lucide-react";
+import { BarChart3, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Plus, RefreshCw, RotateCcw, Search, Settings, Share2, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
 import {
   AI_PREFERENCES_KEY,
@@ -43,6 +43,30 @@ import { formatCompactTokens } from "../lib/aiChatContextUsage";
 import { resolveModelContextTokens } from "../lib/aiModelContext";
 import { fetchProviderModelConfigs, isFreeModelId, mergeRefreshedModels } from "../lib/aiProviderModels";
 import {
+  clearLspInstallError,
+  ensureLspInstallSubscription,
+  getLspInstallProgressSnapshot,
+  onLspInstallFinished,
+  subscribeLspInstallProgress,
+  type LspInstallProgress,
+} from "../lib/lspInstallStore";
+import {
+  clearRuntimeProvisionError,
+  ensureRuntimeProvisionSubscription,
+  getRuntimeProvisionProgressSnapshot,
+  onRuntimeProvisionFinished,
+  subscribeRuntimeProvisionProgress,
+  type RuntimeProvisionProgress,
+} from "../lib/runtimeProvisionStore";
+import {
+  applyCodeGraphStatus,
+  clearCodeGraphError,
+  ensureCodeGraphSubscription,
+  getCodeGraphStateSnapshot,
+  onCodeGraphBuildFinished,
+  subscribeCodeGraphState,
+} from "../lib/codeGraphStore";
+import {
   defaultEditorPreferences,
   EDITOR_PREFERENCES_KEY,
   mergeEditorPreferences,
@@ -56,14 +80,14 @@ import { LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from "../lib/i18
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
 import { useLuxStore } from "../lib/store";
-import { isTauriRuntime, luxCommands, type AgentBrowserStatusResponse, type AiProviderDiagnosticResponse } from "../lib/tauri";
+import { isTauriRuntime, luxCommands, type AgentBrowserStatusResponse, type AiProviderDiagnosticResponse, type LspCatalogEntry, type RuntimeCatalogEntry } from "../lib/tauri";
 import type { FsEntry, WorkspaceInfo } from "../lib/types";
 
 const scope = "user" as const;
 
 // AI configuration is split into focused sections so runtime, instructions,
 // providers, and indexing do not compete in one mixed settings list.
-type SettingsSectionId = "general" | "editor" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-providers" | "ai-indexing" | "ai-usage";
+type SettingsSectionId = "general" | "editor" | "lsp" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-providers" | "ai-indexing" | "ai-usage";
 
 type SettingsSection = {
   id: SettingsSectionId;
@@ -94,7 +118,7 @@ const PROVIDER_PRESET_DESCRIPTION_KEYS: Record<string, MessageKey> = {
 
 const settingsNavGroups: Array<{ labelKey: MessageKey; sectionIds: SettingsSectionId[] }> = [
   { labelKey: "settings.group.workspace", sectionIds: ["general"] },
-  { labelKey: "settings.group.editor", sectionIds: ["editor"] },
+  { labelKey: "settings.group.editor", sectionIds: ["editor", "lsp"] },
   { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-providers", "ai-indexing", "ai-usage"] },
 ];
 
@@ -112,6 +136,13 @@ const settingsSections: SettingsSection[] = [
     descriptionKey: "settings.editor.description",
     icon: <Code2 size={16} />,
     keywords: ["font", "line", "tab", "whitespace", "unicode", "minimap", "word wrap", "mouse", "zoom", "smooth", "ligatures", "appearance", "behavior", "редактор", "шрифт"],
+  },
+  {
+    id: "lsp",
+    titleKey: "settings.lsp.title",
+    descriptionKey: "settings.lsp.description",
+    icon: <Cpu size={16} />,
+    keywords: ["lsp", "language server", "rust-analyzer", "gopls", "ty", "pyright", "typescript", "clangd", "intellisense", "completion", "hover", "языковой сервер"],
   },
   {
     id: "ai-runtime",
@@ -315,6 +346,7 @@ export function SettingsDialog() {
                     <EditorBehaviorSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
                   </div>
                 )}
+                {activeSectionId === "lsp" && <LanguageServersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-runtime" && (
                   <AiActiveCard preferences={aiPreferences} onChange={updateAiPreference} t={t} />
                 )}
@@ -498,6 +530,247 @@ function EditorBehaviorSection({ onChange, preferences, t }: { onChange: (patch:
         <ToggleSetting label={t("settings.behavior.smoothScrolling.label")} detail={t("settings.behavior.smoothScrolling.detail")} checked={preferences.smoothScrolling} onChange={(smoothScrolling) => onChange({ smoothScrolling })} />
       </SettingsGrid>
     </SettingsPanel>
+  );
+}
+
+function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
+  const [catalog, setCatalog] = useState<LspCatalogEntry[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [progress, setProgress] = useState<Record<string, LspInstallProgress>>(getLspInstallProgressSnapshot);
+
+  const refreshCatalog = useCallback(() => {
+    luxCommands.lspServerCatalog()
+      .then((entries) => { setCatalog(entries); setLoadError(null); })
+      .catch((error) => setLoadError(error instanceof Error ? error.message : String(error)));
+  }, []);
+
+  useEffect(() => {
+    ensureLspInstallSubscription();
+    refreshCatalog();
+    const stopProgress = subscribeLspInstallProgress(() => setProgress({ ...getLspInstallProgressSnapshot() }));
+    // Re-pull the catalog whenever an install finishes so the badge flips to Installed.
+    const stopFinish = onLspInstallFinished(() => refreshCatalog());
+    return () => { stopProgress(); stopFinish(); };
+  }, [refreshCatalog]);
+
+  const installServer = (languageId: string) => {
+    clearLspInstallError(languageId);
+    setProgress({ ...getLspInstallProgressSnapshot(), [languageId]: { status: "installing", percent: 0, step: "Starting" } });
+    void luxCommands.lspInstallServer(languageId).catch(() => undefined);
+  };
+
+  const installedCount = catalog?.filter((entry) => entry.installed).length ?? 0;
+
+  return (
+    <SettingsPanel title={t("settings.lsp.title")} description={t("settings.lsp.description")}>
+      <SettingsGrid>
+        <ToggleSetting
+          label={t("settings.lsp.autoInstall.label")}
+          detail={t("settings.lsp.autoInstall.detail")}
+          checked={preferences.lspAutoInstall}
+          onChange={(lspAutoInstall) => onChange({ lspAutoInstall })}
+        />
+        <ToggleSetting
+          label={t("settings.runtimes.autoProvision.label")}
+          detail={t("settings.runtimes.autoProvision.detail")}
+          checked={preferences.runtimeAutoProvision}
+          onChange={(runtimeAutoProvision) => onChange({ runtimeAutoProvision })}
+        />
+      </SettingsGrid>
+
+      <RuntimesPanel t={t} />
+
+      <section className="lsp-servers-head">
+        <strong>{t("settings.lsp.listTitle")}</strong>
+        <div className="lsp-servers-head-actions">
+          {catalog && <span className="lsp-servers-count">{t("settings.lsp.installedCount", { installed: installedCount, total: catalog.length })}</span>}
+          <button type="button" onClick={refreshCatalog} title={t("settings.lsp.refresh")} aria-label={t("settings.lsp.refresh")}>
+            <RefreshCw size={14} /> {t("settings.lsp.refresh")}
+          </button>
+        </div>
+      </section>
+
+      {loadError && <p className="lsp-servers-error" role="alert">{loadError}</p>}
+
+      {catalog === null ? (
+        <p className="lsp-servers-loading">{t("settings.lsp.loading")}</p>
+      ) : (
+        <ul className="lsp-servers-list">
+          {catalog.map((entry) => {
+            const live = progress[entry.languageId] ?? null;
+            return (
+              <LanguageServerRow
+                key={entry.languageId}
+                entry={entry}
+                progress={live}
+                onInstall={() => installServer(entry.languageId)}
+                t={t}
+              />
+            );
+          })}
+        </ul>
+      )}
+    </SettingsPanel>
+  );
+}
+
+function LanguageServerRow({ entry, progress, onInstall, t }: {
+  entry: LspCatalogEntry;
+  progress: LspInstallProgress | null;
+  onInstall: () => void;
+  t: TranslateFn;
+}) {
+  const installing = progress?.status === "installing";
+  const errored = progress?.status === "error";
+  // Status precedence: installing > error > installed(managed/PATH) > missing.
+  const state = installing ? "installing" : errored ? "error" : entry.installed ? (entry.managed ? "managed" : "path") : "missing";
+  const isManual = entry.installMethod === "manual";
+
+  const statusLabel = installing
+    ? t("settings.lsp.status.installing", { percent: progress?.percent ?? 0 })
+    : errored
+      ? t("settings.lsp.status.error")
+      : entry.installed
+        ? entry.managed ? t("settings.lsp.status.installed") : t("settings.lsp.status.onPath")
+        : isManual ? t("settings.lsp.status.manual") : t("settings.lsp.status.missing");
+
+  return (
+    <li className="lsp-server-row" data-state={state}>
+      <div className="lsp-server-row-main">
+        <div className="lsp-server-row-title">
+          <span className="lsp-server-dot" data-state={state} aria-hidden="true" />
+          <strong>{entry.name}</strong>
+          <code className="lsp-server-ext">{entry.extensions.slice(0, 4).map((e) => `.${e}`).join(" ")}</code>
+        </div>
+        <span className="lsp-server-status" data-state={state}>{statusLabel}</span>
+        {installing && (
+          <div className="lsp-server-progress" role="progressbar" aria-valuenow={progress?.percent ?? 0} aria-valuemin={0} aria-valuemax={100}>
+            <div className="lsp-server-progress-fill" style={{ width: `${progress?.percent ?? 0}%` }} />
+            <span className="lsp-server-progress-step">{progress?.step}</span>
+          </div>
+        )}
+        {errored && <p className="lsp-server-row-error" title={progress?.error}>{progress?.error}</p>}
+        {isManual && !entry.installed && !installing && <p className="lsp-server-row-hint">{entry.manualHint}</p>}
+      </div>
+      <div className="lsp-server-row-action">
+        {isManual ? (
+          <span className="lsp-server-manual-tag">{t("settings.lsp.manualTag")}</span>
+        ) : (
+          <button type="button" className="lsp-server-install" onClick={onInstall} disabled={installing}>
+            {installing
+              ? t("settings.lsp.installing")
+              : entry.installed
+                ? t("settings.lsp.reinstall")
+                : t("settings.lsp.install")}
+          </button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+/**
+ * Managed language runtimes (Node / Rust / Python). These are the host toolchains
+ * the LSP installers need; the IDE can provision them into a self-contained dir so
+ * a clean machine needs zero manual setup. Mirrors the server list visually.
+ */
+function RuntimesPanel({ t }: { t: TranslateFn }) {
+  const [catalog, setCatalog] = useState<RuntimeCatalogEntry[] | null>(null);
+  const [progress, setProgress] = useState<Record<string, RuntimeProvisionProgress>>(getRuntimeProvisionProgressSnapshot);
+
+  const refreshCatalog = useCallback(() => {
+    luxCommands.runtimeCatalog()
+      .then((entries) => setCatalog(entries))
+      .catch(() => setCatalog([]));
+  }, []);
+
+  useEffect(() => {
+    ensureRuntimeProvisionSubscription();
+    refreshCatalog();
+    const stopProgress = subscribeRuntimeProvisionProgress(() => setProgress({ ...getRuntimeProvisionProgressSnapshot() }));
+    const stopFinish = onRuntimeProvisionFinished(() => refreshCatalog());
+    return () => { stopProgress(); stopFinish(); };
+  }, [refreshCatalog]);
+
+  const provision = (id: string) => {
+    clearRuntimeProvisionError(id);
+    setProgress({ ...getRuntimeProvisionProgressSnapshot(), [id]: { status: "installing", percent: 0, step: "Starting" } });
+    void luxCommands.runtimeProvision(id).catch(() => undefined);
+  };
+
+  const installedCount = catalog?.filter((entry) => entry.installed).length ?? 0;
+
+  return (
+    <>
+      <section className="lsp-servers-head">
+        <strong>{t("settings.runtimes.title")}</strong>
+        <div className="lsp-servers-head-actions">
+          {catalog && <span className="lsp-servers-count">{t("settings.lsp.installedCount", { installed: installedCount, total: catalog.length })}</span>}
+        </div>
+      </section>
+      <p className="lsp-servers-subtitle">{t("settings.runtimes.description")}</p>
+      {catalog === null ? (
+        <p className="lsp-servers-loading">{t("settings.lsp.loading")}</p>
+      ) : (
+        <ul className="lsp-servers-list">
+          {catalog.map((entry) => (
+            <RuntimeRow key={entry.id} entry={entry} progress={progress[entry.id] ?? null} onProvision={() => provision(entry.id)} t={t} />
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+function RuntimeRow({ entry, progress, onProvision, t }: {
+  entry: RuntimeCatalogEntry;
+  progress: RuntimeProvisionProgress | null;
+  onProvision: () => void;
+  t: TranslateFn;
+}) {
+  const installing = progress?.status === "installing";
+  const errored = progress?.status === "error";
+  const state = installing ? "installing" : errored ? "error" : entry.installed ? (entry.managed ? "managed" : "path") : "missing";
+
+  const statusLabel = installing
+    ? t("settings.lsp.status.installing", { percent: progress?.percent ?? 0 })
+    : errored
+      ? t("settings.lsp.status.error")
+      : entry.installed
+        ? entry.managed ? t("settings.runtimes.status.managed") : t("settings.runtimes.status.system")
+        : entry.canAuto ? t("settings.lsp.status.missing") : t("settings.lsp.status.manual");
+
+  return (
+    <li className="lsp-server-row" data-state={state}>
+      <div className="lsp-server-row-main">
+        <div className="lsp-server-row-title">
+          <span className="lsp-server-dot" data-state={state} aria-hidden="true" />
+          <strong>{entry.name}</strong>
+        </div>
+        <span className="lsp-server-status" data-state={state}>{statusLabel}</span>
+        {installing && (
+          <div className="lsp-server-progress" role="progressbar" aria-valuenow={progress?.percent ?? 0} aria-valuemin={0} aria-valuemax={100}>
+            <div className="lsp-server-progress-fill" style={{ width: `${progress?.percent ?? 0}%` }} />
+            <span className="lsp-server-progress-step">{progress?.step}</span>
+          </div>
+        )}
+        {errored && <p className="lsp-server-row-error" title={progress?.error}>{progress?.error}</p>}
+        {!entry.canAuto && !entry.installed && !installing && <p className="lsp-server-row-hint">{entry.manualHint}</p>}
+      </div>
+      <div className="lsp-server-row-action">
+        {entry.canAuto ? (
+          <button type="button" className="lsp-server-install" onClick={onProvision} disabled={installing}>
+            {installing
+              ? t("settings.lsp.installing")
+              : entry.installed
+                ? t("settings.lsp.reinstall")
+                : t("settings.runtimes.install")}
+          </button>
+        ) : (
+          <span className="lsp-server-manual-tag">{t("settings.lsp.manualTag")}</span>
+        )}
+      </div>
+    </li>
   );
 }
 
@@ -1352,6 +1625,85 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
   );
 }
 
+function CodeGraphStatusCard({ t }: { t: TranslateFn }) {
+  const state = useSyncExternalStore(subscribeCodeGraphState, getCodeGraphStateSnapshot, getCodeGraphStateSnapshot);
+  const [busy, setBusy] = useState(false);
+  const [vizBusy, setVizBusy] = useState(false);
+  const [vizError, setVizError] = useState<string | null>(null);
+
+  useEffect(() => {
+    ensureCodeGraphSubscription();
+    // Seed from the persisted status once on mount.
+    luxCommands
+      .codeGraphStatus()
+      .then(applyCodeGraphStatus)
+      .catch(() => undefined);
+    // Refresh the status counts whenever a build finishes.
+    return onCodeGraphBuildFinished(() => {
+      luxCommands
+        .codeGraphStatus()
+        .then(applyCodeGraphStatus)
+        .catch(() => undefined);
+    });
+  }, []);
+
+  const rebuild = useCallback(() => {
+    clearCodeGraphError();
+    setBusy(true);
+    luxCommands
+      .codeGraphBuild()
+      .catch(() => undefined)
+      .finally(() => setBusy(false));
+  }, []);
+
+  const openVisualization = useCallback(() => {
+    setVizError(null);
+    setVizBusy(true);
+    luxCommands
+      .codeGraphExportHtml()
+      .then((path) => luxCommands.fileOpenExternal(path))
+      .catch((error) => setVizError(error instanceof Error ? error.message : String(error)))
+      .finally(() => setVizBusy(false));
+  }, []);
+
+  const statusLabel = state.status === "ready"
+    ? t("settings.codeGraph.status.ready")
+    : state.status === "building"
+      ? t("settings.codeGraph.status.building")
+      : state.status === "error"
+        ? t("settings.codeGraph.status.error")
+        : t("settings.codeGraph.status.idle");
+
+  return (
+    <section className="index-status-card" data-status={state.status}>
+      <div className="index-status-head">
+        <div>
+          <strong>{t("settings.codeGraph.title")}: {statusLabel}</strong>
+          <span>{t("settings.codeGraph.counts", { nodes: state.nodeCount, edges: state.edgeCount })}</span>
+        </div>
+        <div className="index-status-actions">
+          <button
+            className="settings-reset-button"
+            type="button"
+            disabled={vizBusy || state.status !== "ready"}
+            onClick={openVisualization}
+            title={t("settings.codeGraph.visualizeHint")}
+          >
+            <Share2 size={14} /> {vizBusy ? t("settings.codeGraph.visualizeBusy") : t("settings.codeGraph.visualize")}
+          </button>
+          <button className="settings-reset-button" type="button" disabled={busy || state.status === "building"} onClick={rebuild}>
+            <RefreshCw size={14} /> {t("settings.codeGraph.rebuild")}
+          </button>
+        </div>
+      </div>
+      {state.status === "building" && <div className="index-progress"><span style={{ width: `${state.percent}%` }} /></div>}
+      <p className="index-summary-line">{state.status === "building" ? state.step : t("settings.codeGraph.description")}</p>
+      {state.error && <p className="index-error-line">{state.error}</p>}
+      {vizError && <p className="index-error-line">{vizError}</p>}
+    </section>
+  );
+}
+
 function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: ReturnType<typeof useLuxStore.getState>["aiIndex"]; onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
   const statusLabel = aiIndex.status === "ready"
     ? t("settings.indexing.status.ready")
@@ -1367,6 +1719,7 @@ function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: Ret
   const scanTruncatedLabel = aiIndex.scanTruncated ? t("settings.indexing.yes") : t("settings.indexing.no");
   return (
     <div className="settings-section-stack">
+      <CodeGraphStatusCard t={t} />
       <section className="index-status-card" data-status={aiIndex.status} data-quality={aiIndex.quality}>
         <div className="index-status-head">
           <div>

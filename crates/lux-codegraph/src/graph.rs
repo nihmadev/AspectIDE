@@ -1,0 +1,508 @@
+//! Compact in-memory code graph.
+//!
+//! Design goals (in priority order): cache-friendly traversal, low memory, fast
+//! lookup by name and by file.
+//!
+//! * **String interning** — every symbol name becomes a 32-bit [`Symbol`], so
+//!   nodes/edges/indexes store integers, not strings.
+//! * **CSR adjacency** — after [`CodeGraph::finalize`], out- and in-edges live in
+//!   flat, offset-indexed arrays (compressed sparse row). Neighbor iteration is a
+//!   contiguous slice walk with no per-node allocation.
+//! * **Builder → finalized** split — nodes and edges are appended cheaply during
+//!   the build, then `finalize` computes the indexes and adjacency once. Query
+//!   methods assume a finalized graph.
+
+use std::path::{Path, PathBuf};
+
+use rustc_hash::FxHashMap;
+
+use crate::parse::{Span, SymbolKind};
+
+/// An interned symbol name. Index into [`Interner`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Symbol(u32);
+
+/// A graph node handle. Index into [`CodeGraph`]'s node array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct NodeId(u32);
+
+impl NodeId {
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Wrap a raw index as a [`NodeId`]. For graph-internal use and tests; callers
+    /// must ensure the index refers to a real node before querying with it.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+}
+
+/// A file handle. Index into [`CodeGraph`]'s file array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FileId(u32);
+
+impl FileId {
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+
+    /// Wrap a raw index as a [`FileId`]. For graph-internal use and tests.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+}
+
+/// The relationship an edge encodes. `Defines` is structural (a file/scope
+/// defines a symbol); the rest come from resolved references.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    Defines,
+    Calls,
+    Imports,
+    References,
+    Implements,
+}
+
+/// How much to trust an edge, mirroring graphify's tags.
+///
+/// In this AST-only port the tag is derived from *how* a reference resolved, not
+/// from an LLM: a same-file name match is strong, a unique cross-file match is a
+/// label-matching inference, and a multi-candidate match is ambiguous.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    /// Structural fact (nesting) or a unique same-file resolution.
+    Extracted,
+    /// A unique cross-file name match — likely right, but label-based.
+    Inferred,
+    /// One of several same-named candidates — recall kept, precision uncertain.
+    Ambiguous,
+}
+
+impl Confidence {
+    /// Numeric weight graphify writes as `confidence_score` (export parity).
+    ///
+    /// Returns `f64` (not `f32`) so the literal `0.2` serializes as `"0.2"` —
+    /// widening `0.2_f32` to f64 would print `0.20000000298…` and break byte
+    /// compatibility with Python's `json.dump`.
+    #[must_use]
+    pub const fn score(self) -> f64 {
+        match self {
+            Self::Extracted => 1.0,
+            Self::Inferred => 0.5,
+            Self::Ambiguous => 0.2,
+        }
+    }
+
+    /// The uppercase tag graphify writes as the `confidence` field.
+    #[must_use]
+    pub const fn tag(self) -> &'static str {
+        match self {
+            Self::Extracted => "EXTRACTED",
+            Self::Inferred => "INFERRED",
+            Self::Ambiguous => "AMBIGUOUS",
+        }
+    }
+}
+
+/// A definition site in the graph. `span` is the definition's full lexical
+/// extent (drives nesting/containment); `name_span` locates just the identifier
+/// (for display and "go to definition").
+#[derive(Debug, Clone, Copy)]
+pub struct Node {
+    pub name: Symbol,
+    pub kind: SymbolKind,
+    pub file: FileId,
+    pub span: Span,
+    pub name_span: Span,
+}
+
+/// A directed, kinded edge between two nodes.
+#[derive(Debug, Clone, Copy)]
+pub struct Edge {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub kind: EdgeKind,
+    pub confidence: Confidence,
+}
+
+/// One adjacency entry: the neighbor plus the edge kind that reached it.
+///
+/// The edge direction (whether `node` is a successor or predecessor) is implied
+/// by which adjacency list — out or in — the entry came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Adjacent {
+    pub node: NodeId,
+    pub kind: EdgeKind,
+    pub confidence: Confidence,
+}
+
+/// String interner: deduplicates names into stable 32-bit ids.
+#[derive(Debug, Default)]
+pub struct Interner {
+    ids: FxHashMap<Box<str>, Symbol>,
+    names: Vec<Box<str>>,
+}
+
+impl Interner {
+    /// Intern `name`, returning its id (stable for the interner's lifetime).
+    pub fn intern(&mut self, name: &str) -> Symbol {
+        if let Some(&symbol) = self.ids.get(name) {
+            return symbol;
+        }
+        let symbol =
+            Symbol(u32::try_from(self.names.len()).expect("interner exceeded u32 symbols"));
+        let boxed: Box<str> = Box::from(name);
+        self.names.push(boxed.clone());
+        self.ids.insert(boxed, symbol);
+        symbol
+    }
+
+    /// The id `name` already has, if any (no insertion).
+    #[must_use]
+    pub fn lookup(&self, name: &str) -> Option<Symbol> {
+        self.ids.get(name).copied()
+    }
+
+    /// The string behind a symbol id.
+    #[must_use]
+    pub fn resolve(&self, symbol: Symbol) -> Option<&str> {
+        self.names.get(symbol.0 as usize).map(AsRef::as_ref)
+    }
+}
+
+/// The code graph. Build it with `add_file`/`intern`/`add_node`/`add_edge`, then
+/// call [`CodeGraph::finalize`] before querying.
+#[derive(Debug, Default)]
+pub struct CodeGraph {
+    interner: Interner,
+    files: Vec<PathBuf>,
+    file_ids: FxHashMap<PathBuf, FileId>,
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+
+    // ── Built by `finalize` ──
+    by_name: FxHashMap<Symbol, Vec<NodeId>>,
+    by_file: FxHashMap<FileId, Vec<NodeId>>,
+    out_offsets: Vec<u32>,
+    out_adjacent: Vec<Adjacent>,
+    in_offsets: Vec<u32>,
+    in_adjacent: Vec<Adjacent>,
+    finalized: bool,
+}
+
+impl CodeGraph {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // ── Build ──
+
+    /// Intern a name into the graph's shared interner.
+    pub fn intern(&mut self, name: &str) -> Symbol {
+        self.interner.intern(name)
+    }
+
+    /// Register a file path, returning its id. Idempotent: the same path always
+    /// maps to the same [`FileId`].
+    pub fn add_file(&mut self, path: PathBuf) -> FileId {
+        if let Some(&id) = self.file_ids.get(&path) {
+            return id;
+        }
+        let id = FileId(u32::try_from(self.files.len()).expect("file count exceeded u32"));
+        self.files.push(path.clone());
+        self.file_ids.insert(path, id);
+        id
+    }
+
+    /// Append a node, returning its handle. Invalidates any prior finalize.
+    pub fn add_node(&mut self, node: Node) -> NodeId {
+        let id = NodeId(u32::try_from(self.nodes.len()).expect("node count exceeded u32"));
+        self.nodes.push(node);
+        self.finalized = false;
+        id
+    }
+
+    /// Append an edge. Invalidates any prior finalize.
+    pub fn add_edge(&mut self, edge: Edge) {
+        self.edges.push(edge);
+        self.finalized = false;
+    }
+
+    /// Compute the name/file indexes and CSR adjacency. Cheap to call repeatedly
+    /// (a no-op when already finalized). Must run before any query method.
+    pub fn finalize(&mut self) {
+        if self.finalized {
+            return;
+        }
+        self.dedup_edges();
+        self.build_name_and_file_indexes();
+        let node_count = self.nodes.len();
+        (self.out_offsets, self.out_adjacent) =
+            build_csr(node_count, &self.edges, |edge| (edge.from, edge.to));
+        (self.in_offsets, self.in_adjacent) =
+            build_csr(node_count, &self.edges, |edge| (edge.to, edge.from));
+        self.finalized = true;
+    }
+
+    /// Collapse parallel edges sharing `(from, to, kind)` to a single edge,
+    /// keeping the first (its confidence — same-name refs resolve identically, so
+    /// duplicates always carry the same confidence anyway). The graph is not a
+    /// multigraph: two `b()` calls in one function are one `Calls` relationship,
+    /// so this keeps degree/edge counts and the exported `links` honest.
+    fn dedup_edges(&mut self) {
+        let mut seen: rustc_hash::FxHashSet<(NodeId, NodeId, u8)> =
+            rustc_hash::FxHashSet::default();
+        self.edges
+            .retain(|edge| seen.insert((edge.from, edge.to, edge.kind as u8)));
+    }
+
+    fn build_name_and_file_indexes(&mut self) {
+        self.by_name.clear();
+        self.by_file.clear();
+        for (index, node) in self.nodes.iter().enumerate() {
+            let id = NodeId(u32::try_from(index).expect("node index exceeded u32"));
+            self.by_name.entry(node.name).or_default().push(id);
+            self.by_file.entry(node.file).or_default().push(id);
+        }
+    }
+
+    // ── Query (require `finalize`) ──
+
+    #[must_use]
+    pub const fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    #[must_use]
+    pub const fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    #[must_use]
+    pub fn node(&self, id: NodeId) -> Option<&Node> {
+        self.nodes.get(id.index())
+    }
+
+    /// The interned name of a node, as a string.
+    #[must_use]
+    pub fn name_of(&self, id: NodeId) -> Option<&str> {
+        let node = self.nodes.get(id.index())?;
+        self.interner.resolve(node.name)
+    }
+
+    #[must_use]
+    pub fn file_path(&self, id: FileId) -> Option<&Path> {
+        self.files.get(id.index()).map(PathBuf::as_path)
+    }
+
+    /// Number of files registered in the graph.
+    #[must_use]
+    pub const fn file_count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Every file as `(id, path)`, in registration order.
+    pub fn files(&self) -> impl Iterator<Item = (FileId, &Path)> {
+        self.files
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (FileId::from_raw(index as u32), path.as_path()))
+    }
+
+    /// The id a path was registered under, if any.
+    #[must_use]
+    pub fn file_id_of(&self, path: &Path) -> Option<&FileId> {
+        self.file_ids.get(path)
+    }
+
+    /// All nodes defining `name`. Empty slice when the name is unknown.
+    #[must_use]
+    pub fn nodes_by_name(&self, name: &str) -> &[NodeId] {
+        self.interner
+            .lookup(name)
+            .and_then(|symbol| self.by_name.get(&symbol))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// All nodes defined in `file`. Empty slice when the file has none.
+    #[must_use]
+    pub fn nodes_in_file(&self, file: FileId) -> &[NodeId] {
+        self.by_file.get(&file).map_or(&[], Vec::as_slice)
+    }
+
+    /// Successors of `id` (edges pointing *out* of it), as a contiguous slice.
+    #[must_use]
+    pub fn out_neighbors(&self, id: NodeId) -> &[Adjacent] {
+        slice_at(&self.out_offsets, &self.out_adjacent, id)
+    }
+
+    /// Predecessors of `id` (edges pointing *into* it), as a contiguous slice.
+    #[must_use]
+    pub fn in_neighbors(&self, id: NodeId) -> &[Adjacent] {
+        slice_at(&self.in_offsets, &self.in_adjacent, id)
+    }
+
+    /// Borrow the interner (e.g. to resolve symbols held elsewhere).
+    #[must_use]
+    pub const fn interner(&self) -> &Interner {
+        &self.interner
+    }
+}
+
+/// Slice the CSR `entries` to the adjacency window for `id` using `offsets`.
+/// Returns an empty slice for an out-of-range or finalize-less id.
+fn slice_at<'a>(offsets: &[u32], entries: &'a [Adjacent], id: NodeId) -> &'a [Adjacent] {
+    let index = id.index();
+    let (Some(&start), Some(&end)) = (offsets.get(index), offsets.get(index + 1)) else {
+        return &[];
+    };
+    entries.get(start as usize..end as usize).unwrap_or(&[])
+}
+
+/// Build a CSR adjacency (`offsets`, `entries`) from `edges`. `key` extracts
+/// `(source, target)` for the desired direction, so the same routine serves both
+/// out- and in-adjacency. Counting-sort: O(nodes + edges), no per-node Vec.
+fn build_csr(
+    node_count: usize,
+    edges: &[Edge],
+    key: impl Fn(&Edge) -> (NodeId, NodeId),
+) -> (Vec<u32>, Vec<Adjacent>) {
+    let mut offsets = vec![0_u32; node_count + 1];
+    for edge in edges {
+        let (source, _) = key(edge);
+        offsets[source.index() + 1] += 1;
+    }
+    for i in 1..=node_count {
+        offsets[i] += offsets[i - 1];
+    }
+    let mut entries = vec![
+        Adjacent {
+            node: NodeId(0),
+            kind: EdgeKind::Defines,
+            confidence: Confidence::Extracted
+        };
+        edges.len()
+    ];
+    let mut cursor = offsets.clone();
+    for edge in edges {
+        let (source, target) = key(edge);
+        let slot = cursor[source.index()] as usize;
+        entries[slot] = Adjacent {
+            node: target,
+            kind: edge.kind,
+            confidence: edge.confidence,
+        };
+        cursor[source.index()] += 1;
+    }
+    (offsets, entries)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CodeGraph, Confidence, Edge, EdgeKind, Node};
+    use crate::parse::{Span, SymbolKind};
+
+    const SPAN: Span = Span {
+        start_byte: 0,
+        end_byte: 0,
+        start_row: 0,
+        start_col: 0,
+        end_row: 0,
+        end_col: 0,
+    };
+
+    fn graph() -> (CodeGraph, super::NodeId, super::NodeId, super::NodeId) {
+        // main -> helper, main -> util, util -> helper
+        let mut g = CodeGraph::new();
+        let file = g.add_file(std::path::PathBuf::from("a.rs"));
+        let mk = |g: &mut CodeGraph, name: &str| {
+            let symbol = g.intern(name);
+            g.add_node(Node {
+                name: symbol,
+                kind: SymbolKind::Function,
+                file,
+                span: SPAN,
+                name_span: SPAN,
+            })
+        };
+        let main = mk(&mut g, "main");
+        let helper = mk(&mut g, "helper");
+        let util = mk(&mut g, "util");
+        g.add_edge(Edge {
+            from: main,
+            to: helper,
+            kind: EdgeKind::Calls,
+            confidence: Confidence::Extracted,
+        });
+        g.add_edge(Edge {
+            from: main,
+            to: util,
+            kind: EdgeKind::Calls,
+            confidence: Confidence::Extracted,
+        });
+        g.add_edge(Edge {
+            from: util,
+            to: helper,
+            kind: EdgeKind::Calls,
+            confidence: Confidence::Extracted,
+        });
+        g.finalize();
+        (g, main, helper, util)
+    }
+
+    #[test]
+    fn counts_and_lookup() {
+        let (g, main, helper, _util) = graph();
+        assert_eq!(g.node_count(), 3);
+        assert_eq!(g.edge_count(), 3);
+        assert_eq!(g.nodes_by_name("main"), &[main]);
+        assert_eq!(g.name_of(helper), Some("helper"));
+        assert_eq!(g.nodes_by_name("missing"), &[] as &[super::NodeId]);
+    }
+
+    #[test]
+    fn out_adjacency_is_correct() {
+        let (g, main, helper, util) = graph();
+        let mut outs: Vec<_> = g.out_neighbors(main).iter().map(|a| a.node).collect();
+        outs.sort_unstable();
+        let mut expected = vec![helper, util];
+        expected.sort_unstable();
+        assert_eq!(outs, expected);
+        assert!(g.out_neighbors(helper).is_empty());
+    }
+
+    #[test]
+    fn in_adjacency_is_correct() {
+        let (g, main, helper, util) = graph();
+        // helper is called by both main and util.
+        let mut ins: Vec<_> = g.in_neighbors(helper).iter().map(|a| a.node).collect();
+        ins.sort_unstable();
+        let mut expected = vec![main, util];
+        expected.sort_unstable();
+        assert_eq!(ins, expected);
+        assert!(g.in_neighbors(main).is_empty());
+    }
+
+    #[test]
+    fn nodes_in_file_lists_all_definitions() {
+        let (g, main, _helper, _util) = graph();
+        let file = g.node(main).unwrap().file;
+        assert_eq!(g.nodes_in_file(file).len(), 3);
+    }
+
+    #[test]
+    fn interner_dedupes() {
+        let mut g = CodeGraph::new();
+        let a = g.intern("same");
+        let b = g.intern("same");
+        let c = g.intern("other");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+}

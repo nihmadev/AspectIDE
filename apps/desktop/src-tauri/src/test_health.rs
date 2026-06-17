@@ -588,12 +588,12 @@ fn has_valid_package_script(scripts: &serde_json::Map<String, Value>, name: &str
 
 fn is_meaningful_package_script(script: &str) -> bool {
     let script = script.trim().to_ascii_lowercase();
-    !script.is_empty()
-        && !script.contains("no test specified")
-        && !script.contains("echo \"error:")
-        && script != "exit 1"
-        && !(script.starts_with("echo") && script.ends_with("exit 1"))
-        && !is_package_watch_script(&script)
+    !(script.is_empty()
+        || script.contains("no test specified")
+        || script.contains("echo \"error:")
+        || script == "exit 1"
+        || (script.starts_with("echo") && script.ends_with("exit 1"))
+        || is_package_watch_script(&script))
 }
 
 fn is_package_watch_script(script: &str) -> bool {

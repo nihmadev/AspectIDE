@@ -7,8 +7,6 @@ import { buildTurnFileSummary } from "../../lib/aiTurnFileSummary";
 import { openWorkspaceEditorPath } from "../../lib/openWorkspaceEditorPath";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 
-const maxVisibleFiles = 5;
-
 type AiTurnSummaryCardProps = {
   message: AiChatMessage;
   compaction?: ContextCompactionState | null;
@@ -34,8 +32,8 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
 
   if (!hasFiles && !hasUsage && !hasTiming && !hasCompaction) return null;
 
-  // When few files, the list shows inline; when many, it is gated behind the
-  // collapsible header (filesExpanded) so the summary stays a single quiet line.
+  // The file list is collapsed by default behind the header (filesExpanded), so the
+  // summary stays a single quiet line; clicking the header toggles it open/closed.
   const visibleFiles = fileSummary?.files ?? [];
 
   return (
@@ -112,7 +110,7 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
             </span>
             <ChevronRight className="ai-turn-summary-files-caret" size={13} />
           </button>
-          {(filesExpanded || fileSummary.files.length <= maxVisibleFiles) && (
+          {filesExpanded && (
           <ul>
             {visibleFiles.map((file) => (
               <li key={file.path}>

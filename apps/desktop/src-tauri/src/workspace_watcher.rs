@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeSet,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use lux_core::LuxEvent;
@@ -57,7 +58,8 @@ pub fn start(app: &AppHandle, state: &State<'_, SharedState>, root: PathBuf) -> 
         .map_err(|error| error.to_string())?;
     *state.workspace_watcher.lock().map_err(lock_error)? = Some(watcher);
 
-    tauri::async_runtime::spawn(forward_fs_events(app.clone(), root, rx));
+    let state_for_watcher = state.inner().clone();
+    tauri::async_runtime::spawn(forward_fs_events(app.clone(), state_for_watcher, root, rx));
     Ok(())
 }
 
@@ -66,7 +68,12 @@ pub fn stop(state: &State<'_, SharedState>) -> Result<(), String> {
     Ok(())
 }
 
-async fn forward_fs_events(app: AppHandle, root: PathBuf, mut rx: UnboundedReceiver<PathBuf>) {
+async fn forward_fs_events(
+    app: AppHandle,
+    state: Arc<super::AppState>,
+    root: PathBuf,
+    mut rx: UnboundedReceiver<PathBuf>,
+) {
     while let Some(first_path) = rx.recv().await {
         let mut paths = BTreeSet::new();
         let mut collapsed = false;
@@ -83,8 +90,26 @@ async fn forward_fs_events(app: AppHandle, root: PathBuf, mut rx: UnboundedRecei
             paths.insert(root.clone());
         }
 
-        for path in paths {
-            let _ = emit_event(&app, LuxEvent::FsChanged { path });
+        for path in &paths {
+            let _ = emit_event(&app, LuxEvent::FsChanged { path: path.clone() });
+        }
+
+        // Drive a single coalesced code-graph update for the whole batch, tagged
+        // with the current workspace generation so a stale result is discarded.
+        let generation = state
+            .workspace_generation
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if collapsed {
+            // The batch overflowed and individual paths were dropped — a per-file
+            // update can't know what changed, so rebuild the whole index.
+            super::code_graph::handle_fs_collapse(&app, &state, &root, generation);
+        } else {
+            super::code_graph::handle_fs_batch(
+                &app,
+                &state,
+                paths.iter().cloned().collect(),
+                generation,
+            );
         }
     }
 }

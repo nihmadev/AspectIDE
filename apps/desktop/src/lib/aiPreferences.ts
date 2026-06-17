@@ -56,6 +56,10 @@ export type AiPreferences = {
    * The runtime context, tool map, and a minimal safety floor are still appended so the
    * agent and tools keep working — only the behavioral body is swapped. Off → built-in core.
    */
+  /** Auto-install a missing language server in the background when its language is opened. */
+  lspAutoInstall: boolean;
+  /** Auto-provision managed runtimes (Node baseline at startup; Rust/Python/Go on demand). */
+  runtimeAutoProvision: boolean;
   customSystemPromptEnabled: boolean;
   /** User-authored system prompt body, used only when `customSystemPromptEnabled` is on. */
   customSystemPrompt: string;
@@ -451,6 +455,8 @@ export const defaultAiPreferences: AiPreferences = {
   // pleasantries to save output tokens while keeping code, paths, errors, tool work,
   // and reasoning depth exact. Users can turn it off in Settings → AI Usage.
   tokenEconomyEnabled: true,
+  lspAutoInstall: true,
+  runtimeAutoProvision: true,
   customSystemPromptEnabled: false,
   customSystemPrompt: "",
   toolPermissionRules: [],
@@ -531,6 +537,8 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     maxParallelSubagents: clampInteger(source.maxParallelSubagents, maxParallelSubagentsMin, maxParallelSubagentsMax, defaultMaxParallelSubagents),
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
     tokenEconomyEnabled: typeof source.tokenEconomyEnabled === "boolean" ? source.tokenEconomyEnabled : defaultAiPreferences.tokenEconomyEnabled,
+    lspAutoInstall: typeof source.lspAutoInstall === "boolean" ? source.lspAutoInstall : defaultAiPreferences.lspAutoInstall,
+    runtimeAutoProvision: typeof source.runtimeAutoProvision === "boolean" ? source.runtimeAutoProvision : defaultAiPreferences.runtimeAutoProvision,
     customSystemPromptEnabled: typeof source.customSystemPromptEnabled === "boolean" ? source.customSystemPromptEnabled : defaultAiPreferences.customSystemPromptEnabled,
     customSystemPrompt: normalizeEditableText(source.customSystemPrompt, defaultAiPreferences.customSystemPrompt, preserveText),
     toolPermissionRules: Array.isArray(source.toolPermissionRules)

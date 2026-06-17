@@ -19,6 +19,7 @@ use std::{
 };
 
 mod agent_browser;
+mod code_graph;
 mod database;
 mod debug;
 mod editor;
@@ -26,7 +27,9 @@ mod extensions;
 mod file_intel;
 mod git;
 mod lsp;
+mod lsp_install;
 mod media_intel;
+mod runtime_provision;
 mod search;
 mod settings;
 mod terminal;
@@ -76,6 +79,7 @@ use ai_tools::{
     ai_file_delete, ai_file_patch, ai_file_str_replace, ai_file_write, ai_shell, ai_shell_classify,
     ai_symbol_context,
 };
+use code_graph::{code_graph_build, code_graph_export_html, code_graph_query, code_graph_status};
 use database::{database_execute_sql, database_list_tables, database_update_cell};
 use debug::{
     debug_evaluate, debug_execute, debug_scopes, debug_sessions, debug_set_breakpoints,
@@ -121,6 +125,17 @@ struct AppState {
     debug: tokio::sync::Mutex<Option<lux_dap::DebugSessionManager>>,
     settings: Mutex<Option<SettingsStore>>,
     terminals: Mutex<Option<Arc<TerminalService>>>,
+    code_graph: tokio::sync::Mutex<Option<lux_codegraph::Index>>,
+    /// Bumped on every workspace open/close. A background graph build captures the
+    /// value at start and only commits its result if it still matches — so a build
+    /// for a workspace that was since closed or replaced is discarded, never
+    /// overwriting the current one.
+    workspace_generation: std::sync::atomic::AtomicU64,
+    /// Single-flight slot for full code-graph builds: holds the workspace
+    /// generation currently being built (`0` = none). Prevents the open-time
+    /// background build and a manual rebuild from doing duplicate full walks for
+    /// the same workspace. See `code_graph::BuildGuard`.
+    code_graph_building_gen: std::sync::atomic::AtomicU64,
 }
 
 type SharedState = Arc<AppState>;
@@ -151,6 +166,23 @@ async fn workspace_open(
     if let Err(error) = workspace_watcher::start(&app, &state, workspace.root.clone()) {
         tracing::warn!(%error, "workspace file watcher unavailable");
     }
+    // Switching workspaces: invalidate any in-flight build and drop the old graph
+    // so queries return "not built yet" rather than the previous workspace's data
+    // during the rebuild window.
+    let generation = state
+        .workspace_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+    *state.code_graph.lock().await = None;
+    // Kick off a background code-graph build — it streams progress on
+    // `lux://code-graph`, never blocks workspace load, and only commits if this
+    // generation is still current when it finishes.
+    code_graph::start_build_on_workspace(
+        app.clone(),
+        state.inner().clone(),
+        workspace.root.clone(),
+        generation,
+    );
     settings::record_recent_workspace(&state, &workspace)?;
     emit_event(
         &app,
@@ -164,6 +196,12 @@ async fn workspace_open(
 #[tauri::command]
 async fn workspace_close(app: AppHandle, state: State<'_, SharedState>) -> Result<(), String> {
     workspace_watcher::stop(&state)?;
+    // Invalidate any in-flight build and drop the graph so the AI tools don't
+    // serve symbols from a workspace that is no longer open.
+    state
+        .workspace_generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    *state.code_graph.lock().await = None;
     *state.workspace.lock().map_err(lock_error)? = None;
     *state.documents.lock().map_err(lock_error)? = DocumentStore::default();
     lsp::clear_diagnostics(&app, &state)?;
@@ -594,6 +632,10 @@ pub fn run() {
             ai_workspace::ai_repo_map,
             ai_workspace::ai_workspace_index,
             ai_symbol_context,
+            code_graph_build,
+            code_graph_export_html,
+            code_graph_query,
+            code_graph_status,
             voice_input_status,
             voice_transcribe_local,
             terminal_create,
@@ -620,6 +662,10 @@ pub fn run() {
             debug_execute,
             debug_set_breakpoints,
             lsp_servers,
+            lsp_install::lsp_server_catalog,
+            lsp_install::lsp_install_server,
+            runtime_provision::runtime_catalog,
+            runtime_provision::runtime_provision,
             diagnostics_snapshot,
             lsp_hover,
             lsp_definition,

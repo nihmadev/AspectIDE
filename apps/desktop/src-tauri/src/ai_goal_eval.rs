@@ -16,7 +16,7 @@ pub struct GoalEvalInput {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
-    /// Provider reasoning payload (reasoning_effort + reasoning.effort), or absent/`{}`
+    /// Provider reasoning payload (`reasoning_effort` + reasoning.effort), or absent/`{}`
     /// when the active model has no effort levels. Merged into the request so the
     /// verdict is judged with the same reasoning depth as the main turn.
     #[serde(default)]

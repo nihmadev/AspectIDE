@@ -105,9 +105,7 @@ fn list_compressed_tar_entries(
         // this cap a crafted archive with one oversized entry would inflate
         // gigabytes before the entry-count limit in collect_tar_entries runs.
         let decoder: Box<dyn Read> = match compression {
-            Compression::Gzip => {
-                Box::new(MultiGzDecoder::new(reader).take(MAX_DECOMPRESSED_BYTES))
-            }
+            Compression::Gzip => Box::new(MultiGzDecoder::new(reader).take(MAX_DECOMPRESSED_BYTES)),
             Compression::Bzip2 => Box::new(BzDecoder::new(reader).take(MAX_DECOMPRESSED_BYTES)),
             Compression::Xz => Box::new(XzDecoder::new(reader).take(MAX_DECOMPRESSED_BYTES)),
         };

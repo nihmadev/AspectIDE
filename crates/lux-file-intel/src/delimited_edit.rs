@@ -40,8 +40,7 @@ pub fn table_write_from_text(path: &Path, text: &str) -> AppResult<()> {
 }
 
 fn load_table_document(path: &Path) -> AppResult<TableEditDocument> {
-    let metadata =
-        std::fs::metadata(path).map_err(|error| AppError::Service(error.to_string()))?;
+    let metadata = std::fs::metadata(path).map_err(|error| AppError::Service(error.to_string()))?;
     if metadata.len() > MAX_EDIT_FILE_BYTES {
         return Err(AppError::Service(format!(
             "table file too large to edit ({} bytes; limit {} bytes)",
@@ -138,7 +137,11 @@ fn write_table_document(path: &Path, document: &TableEditDocument) -> AppResult<
     Ok(())
 }
 
-fn write_records_to(temp_path: &Path, delimiter: u8, document: &TableEditDocument) -> AppResult<()> {
+fn write_records_to(
+    temp_path: &Path,
+    delimiter: u8,
+    document: &TableEditDocument,
+) -> AppResult<()> {
     let mut writer = WriterBuilder::new()
         .delimiter(delimiter)
         .flexible(true)
@@ -168,8 +171,7 @@ fn temp_sibling_path(path: &Path) -> PathBuf {
         .unwrap_or("table");
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |elapsed| elapsed.as_nanos());
     parent.join(format!(
         ".{file_name}.lux-tmp-{}-{}",
         std::process::id(),

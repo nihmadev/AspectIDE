@@ -21,6 +21,8 @@ import { EDITOR_PREFERENCES_KEY, normalizeEditorPreferences } from "./lib/editor
 import { buildFileTreeDirectories, normalizePath } from "./lib/fileTree";
 import { createKeybindingDispatcher, KEYBINDINGS_SETTINGS_KEY } from "./lib/keybindings";
 import { buildProjectLoadSummary } from "./lib/projectLoadPresentation";
+import { maybeAutoInstallLanguageServers, resetLspAutoInstallAttempts } from "./lib/lspAutoInstall";
+import { bootstrapManagedRuntimes } from "./lib/runtimeBootstrap";
 import { createEmptyAiIndexState, createIdleProjectLoadState, isAiChatSessionBusyStatus, useLuxStore, type Activity } from "./lib/store";
 import { luxCommands, subscribeLuxEvents } from "./lib/tauri";
 import { pickAndOpenWorkspace } from "./lib/workspaceActions";
@@ -177,6 +179,9 @@ export function App() {
 
   useEffect(() => {
     refreshRecentWorkspaces(setRecentWorkspaces);
+    // Provision the baseline managed runtime (Node) in the background at startup, so
+    // the common language servers work out of the box even with no system toolchain.
+    bootstrapManagedRuntimes();
   }, []);
 
   const agentBrowserAutoUpdateKeyRef = useRef<string | null>(null);
@@ -343,6 +348,7 @@ export function App() {
     if (!workspace) return;
     setProjectLoad({ active: true, error: null, progress: 28, root: workspace.root, stage: "files", workspaceName: workspace.name });
     setBottomPanelMaximized(false);
+    resetLspAutoInstallAttempts();
     let cancelled = false;
     clearDiagnostics();
     setFileTreeLoading(true);
@@ -353,35 +359,45 @@ export function App() {
         if (!cancelled) setProjectLoad({ active: false, error: readErrorMessage(error), progress: 100, root: workspace.root, stage: "error", workspaceName: workspace.name });
       })
       .finally(() => {
-        if (!cancelled) {
-          setFileTreeLoading(false);
-          if (useLuxStore.getState().projectLoad.stage !== "error") setProjectLoad({ progress: 56, root: workspace.root, stage: "services", workspaceName: workspace.name });
+        if (cancelled) return;
+        setFileTreeLoading(false);
+        // Files are ready ⇒ the project is ready (or moves to indexing). Language
+        // servers are NOT a gate: they load in the background and can never hold
+        // the splash. This is what kills the "Starting language services" hang.
+        if (useLuxStore.getState().projectLoad.stage !== "error") {
+          const indexingEnabled = useLuxStore.getState().aiPreferences.projectIndexingEnabled;
+          const indexBusy = useLuxStore.getState().aiIndex.status === "indexing";
+          setProjectLoad({
+            active: indexingEnabled && indexBusy,
+            progress: indexingEnabled && indexBusy ? 78 : 100,
+            root: workspace.root,
+            stage: indexingEnabled && indexBusy ? "indexing" : "ready",
+            workspaceName: workspace.name,
+          });
         }
       });
     luxCommands.gitStatus().then((s) => { if (!cancelled) setGitStatus(s); }).catch(() => { if (!cancelled) setGitStatus(null); });
+    // Language-server discovery/startup runs fully in the background, detached from
+    // the loading screen. The loading flag still drives the (non-blocking) status
+    // chip, but its resolution never affects whether the project is "ready".
     setLanguageServersLoading(true);
     luxCommands.lspServers()
       .then((servers) => {
-        if (!cancelled) setLanguageServers(servers);
+        if (cancelled) return;
+        setLanguageServers(servers);
+        // Auto-install missing servers for languages actually present in this
+        // workspace (discovery only returns detected languages). Background,
+        // gated by the setting; the install store streams progress to Settings,
+        // and we re-pull the server list when each finishes so features light up.
+        maybeAutoInstallLanguageServers(servers, () => {
+          if (!cancelled) luxCommands.lspServers().then((next) => { if (!cancelled) setLanguageServers(next); }).catch(() => undefined);
+        });
       })
       .catch(() => {
         if (!cancelled) setLanguageServers([]);
       })
       .finally(() => {
-        if (!cancelled) {
-          setLanguageServersLoading(false);
-          if (useLuxStore.getState().projectLoad.stage !== "error") {
-            const indexingEnabled = useLuxStore.getState().aiPreferences.projectIndexingEnabled;
-            const indexBusy = useLuxStore.getState().aiIndex.status === "indexing";
-            setProjectLoad({
-              active: indexingEnabled && indexBusy,
-              progress: indexingEnabled && indexBusy ? 78 : 100,
-              root: workspace.root,
-              stage: indexingEnabled && indexBusy ? "indexing" : "ready",
-              workspaceName: workspace.name,
-            });
-          }
-        }
+        if (!cancelled) setLanguageServersLoading(false);
       });
     luxCommands.diagnosticsSnapshot()
       .then((diagnostics) => {

@@ -48,17 +48,19 @@ export function buildProjectLoadSummary(signals: ProjectLoadSignals): ProjectLoa
 function deriveProjectLoadStage({
   aiIndexStatus,
   fileTreeLoading,
-  languageServersLoading,
   projectIndexingEnabled,
   projectLoad,
 }: ProjectLoadSignals): ProjectLoadStage {
   if (projectLoad.stage === "error") return "error";
   if (projectLoad.stage === "opening" && projectLoad.active) return "opening";
   if (fileTreeLoading) return "files";
-  if (languageServersLoading) return "services";
+  // Language servers start (and may be missing / installing) entirely in the
+  // background — they MUST NOT gate the loading screen. Previously a stuck
+  // `languageServersLoading` flag, or the old `"services"` fallback, left the
+  // splash on "Starting language services" forever. Files ready ⇒ project ready
+  // (or indexing); LSP fills in asynchronously via its own store slice.
   if (projectIndexingEnabled && aiIndexStatus === "indexing") return "indexing";
-  if (projectLoad.stage === "ready" || !projectLoad.active) return "ready";
-  return "services";
+  return "ready";
 }
 
 function buildProjectLoadChecklist(
@@ -73,7 +75,9 @@ function buildProjectLoadChecklist(
   const steps: ProjectLoadChecklistItem[] = [
     { key: "projectLoading.step.opening", active: stage === "opening", done: progress >= 28 || stage !== "opening" },
     { key: "projectLoading.step.files", active: stage === "files", done: !signals.fileTreeLoading && progress >= 34 },
-    { key: "projectLoading.step.services", active: stage === "services", done: !signals.languageServersLoading && progress >= 58 },
+    // Language services never block the splash: this step is informational, marked
+    // done once files are scanned (LSP keeps starting in the background after ready).
+    { key: "projectLoading.step.services", active: false, done: !signals.fileTreeLoading },
   ];
   if (signals.projectIndexingEnabled) {
     steps.push({
@@ -88,7 +92,6 @@ function buildProjectLoadChecklist(
 function deriveProjectLoadProgress({
   aiIndex,
   fileTreeLoading,
-  languageServersLoading,
   projectIndexingEnabled,
   projectLoad,
   stage,
@@ -96,7 +99,6 @@ function deriveProjectLoadProgress({
   if (stage === "error") return projectLoad.progress;
   if (stage === "opening") return Math.max(projectLoad.progress, 8);
   if (fileTreeLoading) return Math.max(projectLoad.progress, 34);
-  if (languageServersLoading) return Math.max(projectLoad.progress, 58);
   if (stage === "indexing" && projectIndexingEnabled) {
     const indexSlice = Math.min(100, Math.max(0, aiIndex.progress)) * 0.2;
     return Math.max(projectLoad.progress, 78 + indexSlice);

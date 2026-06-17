@@ -22,7 +22,7 @@ pub struct CompactionSummaryInput {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
-    /// Provider reasoning payload (reasoning_effort + reasoning.effort), or absent/`{}`
+    /// Provider reasoning payload (`reasoning_effort` + reasoning.effort), or absent/`{}`
     /// when the active model has no effort levels. Merged into the request so the
     /// checkpoint summary is produced with the selected reasoning depth.
     #[serde(default)]

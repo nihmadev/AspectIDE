@@ -82,10 +82,9 @@ fn guard_decompression_bomb(path: &Path) -> AppResult<()> {
         return Ok(());
     }
     let file = std::fs::File::open(path)?;
-    let mut archive = match zip::ZipArchive::new(file) {
-        Ok(archive) => archive,
-        // Not a readable zip; let open_workbook_auto surface the real error.
-        Err(_) => return Ok(()),
+    // Not a readable zip; let open_workbook_auto surface the real error.
+    let Ok(mut archive) = zip::ZipArchive::new(file) else {
+        return Ok(());
     };
     let mut total_uncompressed: u64 = 0;
     for index in 0..archive.len() {

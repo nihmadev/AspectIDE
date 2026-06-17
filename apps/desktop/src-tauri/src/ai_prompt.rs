@@ -171,14 +171,24 @@ fn tool_availability_section(
         ""
     };
 
-    let tool_map = tool_capability_map(&input.agent_mode, full_exec, read_only, input.agent_browser_enabled);
+    let tool_map = tool_capability_map(
+        &input.agent_mode,
+        full_exec,
+        read_only,
+        input.agent_browser_enabled,
+    );
 
     format!(
         "Runtime tools are available in this request. Prefer tool calls over speculation whenever the task depends on workspace state, files, diagnostics, browser state, or external documentation. The callable Lux tools are the only actions you can actually perform; do not claim to use tools that are not provided.{browser_line}{terminal_line}\n\n{tool_map}"
     )
 }
 
-fn tool_capability_map(agent_mode: &str, full_exec: bool, _read_only: bool, browser_enabled: bool) -> String {
+fn tool_capability_map(
+    agent_mode: &str,
+    full_exec: bool,
+    _read_only: bool,
+    browser_enabled: bool,
+) -> String {
     let mut lines = vec![
         "Lux tool map — reach for the highest-signal tool first:".to_string(),
         "- Orient: ContextBudgeter, FastContext, WorkspaceIndex, RepoMap, ActiveContext. Rules/docs/memory: RulesContext, DocsContext, MemoryContext.".to_string(),

@@ -123,9 +123,24 @@ pub async fn ai_checkpoint(
                 .clamp(1_024, MAX_BYTES_LIMIT);
             let target_paths = resolve_target_paths(&state, &root_str, paths.as_ref(), max_files);
             if target_paths.is_empty() {
-                return Ok(
-                    serde_json::json!({ "status": "skipped", "reason": "No file paths were available." }),
-                );
+                // Distinguish the two empty cases so the model never mistakes a silent
+                // no-op for a working safety net (the "illusion of protection" trap):
+                //   - explicit paths given but none resolved → the request FAILED
+                //     (bad/outside-root paths); surface it as an error so the agent
+                //     fixes the paths instead of trusting a checkpoint that wasn't made.
+                //   - no paths and nothing open → genuine nothing-to-snapshot no-op.
+                let explicit_count = paths
+                    .as_ref()
+                    .map_or(0, |p| p.iter().filter(|s| !s.trim().is_empty()).count());
+                if explicit_count > 0 {
+                    return Err(format!(
+                        "Checkpoint not created: none of the {explicit_count} requested path(s) resolved inside the workspace. Pass workspace-relative or in-root absolute file paths."
+                    ));
+                }
+                return Ok(serde_json::json!({
+                    "status": "skipped",
+                    "reason": "No file paths were available to snapshot (no paths given and no open editor files). Pass an explicit `paths` array.",
+                }));
             }
             let mut files = Vec::with_capacity(target_paths.len());
             for path in &target_paths {
@@ -287,9 +302,11 @@ pub async fn ai_checkpoint(
             let mut added = 0usize;
             for snap in snapshots {
                 let key = ai_semantic::normalize_slashes_pub(&snap.path).to_lowercase();
-                if !cp.files.iter().any(|f| {
-                    ai_semantic::normalize_slashes_pub(&f.path).to_lowercase() == key
-                }) {
+                if !cp
+                    .files
+                    .iter()
+                    .any(|f| ai_semantic::normalize_slashes_pub(&f.path).to_lowercase() == key)
+                {
                     cp.files.push(snap);
                     added += 1;
                 }

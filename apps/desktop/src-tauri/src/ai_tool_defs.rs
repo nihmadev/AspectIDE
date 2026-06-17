@@ -94,6 +94,31 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ],
     ));
     tools.push(tool(
+        "CodeGraphDefinition",
+        "Find definition(s) of a symbol in the code graph. Only one symbol at a time.",
+        &[req("symbol", "string", "Exact or partial symbol name.")],
+    ));
+    tools.push(tool(
+        "CodeGraphCallers",
+        "List all callers of a symbol (who depends on it).",
+        &[req("symbol", "string", "Symbol name.")],
+    ));
+    tools.push(tool(
+        "CodeGraphCallees",
+        "List all symbols a given symbol calls.",
+        &[req("symbol", "string", "Symbol name.")],
+    ));
+    tools.push(tool(
+        "CodeGraphExplain",
+        "Deep info about a symbol: degree, neighbors, and connections sorted by relevance.",
+        &[req("symbol", "string", "Symbol name.")],
+    ));
+    tools.push(tool(
+        "CodeGraphOverview",
+        "Overview of the code graph: total nodes, edges, community count, and top 10 god nodes (most connected symbols).",
+        &[],
+    ));
+    tools.push(tool(
         "Glob",
         "List files matching a pattern.",
         &[
@@ -289,12 +314,12 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ));
         tools.push(tool(
             "Checkpoint",
-            "File snapshots.",
+            "Snapshot file contents so risky edits can be rolled back. action=create captures the given paths (or all open editor files when paths is omitted); list/diff/delete/restore manage them.",
             &[
                 req("action", "string", "create/list/diff/delete/restore."),
-                opt("id", "string", ""),
-                opt("label", "string", ""),
-                opt("paths", "string", ""),
+                opt("id", "string", "Checkpoint id (for diff/delete/restore)."),
+                opt("label", "string", "Human label for a created checkpoint."),
+                opt_arr("paths", "Array of workspace file paths to snapshot on create. Omit to snapshot all open editor files."),
                 opt("saveToDisk", "boolean", ""),
                 opt("dryRun", "boolean", ""),
             ],
@@ -380,10 +405,8 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             ));
             // `fix` triggers a side-effecting repair, so expose it only when execute-capable;
             // diagnostics-only params stay available in read-only modes.
-            let mut doctor_params = vec![
-                opt("offline", "boolean", ""),
-                opt("quick", "boolean", ""),
-            ];
+            let mut doctor_params =
+                vec![opt("offline", "boolean", ""), opt("quick", "boolean", "")];
             if browser_write {
                 doctor_params.push(opt("fix", "boolean", ""));
             }

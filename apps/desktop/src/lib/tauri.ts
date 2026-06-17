@@ -712,6 +712,22 @@ export const luxCommands = {
   debugExecute: (sessionId: string, action: DebugExecutionAction) => invokeRequired<DebugSessionInfo>("debug_execute", { sessionId, action }),
   debugSetBreakpoints: (sessionId: string, path: string, breakpoints: DebugSourceBreakpoint[]) => invokeRequired<DebugBreakpointsUpdate>("debug_set_breakpoints", { sessionId, path, breakpoints }),
   lspServers: () => invokeRequired<LanguageServerInfo[]>("lsp_servers"),
+  /** Popular-language server catalog with live installed-state (managed dir + PATH). */
+  lspServerCatalog: () => invokeRequired<LspCatalogEntry[]>("lsp_server_catalog"),
+  /** Install (or reinstall) a language server into the managed dir; streams lux://lsp-install. */
+  lspInstallServer: (languageId: string) => invokeRequired<string>("lsp_install_server", { languageId }),
+  /** Managed language runtimes (Node/Rust/Python) with live installed-state. */
+  runtimeCatalog: () => invokeRequired<RuntimeCatalogEntry[]>("runtime_catalog"),
+  /** Provision (or repair) a managed runtime; streams lux://runtime-provision. */
+  runtimeProvision: (id: string) => invokeRequired<string>("runtime_provision", { id }),
+  /** Build (or rebuild) the code graph for the current workspace; streams lux://code-graph. */
+  codeGraphBuild: () => invokeRequired<CodeGraphSummary>("code_graph_build"),
+  /** Current code-graph status (ready flag + node/edge/file counts). */
+  codeGraphStatus: () => invokeRequired<CodeGraphStatus>("code_graph_status"),
+  /** Query the code graph by symbol name (definition + callers/callees/neighbors). */
+  codeGraphQuery: (symbol: string) => invokeRequired<CodeGraphQueryResult>("code_graph_query", { symbol }),
+  /** Export an interactive code-graph.html under .lux/, returning the written path. */
+  codeGraphExportHtml: () => invokeRequired<string>("code_graph_export_html"),
   diagnosticsSnapshot: () => invokeRequired<WorkspaceDiagnostic[]>("diagnostics_snapshot"),
   lspHover: (bufferId: BufferId, line: number, column: number) => invokeOptional<LspHover | null>("lsp_hover", { bufferId, line, column }, () => null),
   lspDefinition: (bufferId: BufferId, line: number, column: number) => invokeOptional<LspLocation[]>("lsp_definition", { bufferId, line, column }, () => []),
@@ -941,5 +957,123 @@ export async function subscribeAiTurn(handler: (event: AiTurnEvent) => void) {
     return () => undefined;
   }
   return listen<AiTurnEvent>("lux://ai-turn", (event) => handler(event.payload));
+}
+
+/** One language server in the managed-install catalog, with live installed-state. */
+export type LspCatalogEntry = {
+  languageId: string;
+  name: string;
+  command: string;
+  extensions: string[];
+  /** "npm" | "go" | "pip" | "rustup" | "manual". */
+  installMethod: string;
+  /** Manual-install guidance (non-empty only for installMethod === "manual"). */
+  manualHint: string;
+  installed: boolean;
+  path: string | null;
+  /** True when found in the IDE's managed dir (vs. the user's own PATH). */
+  managed: boolean;
+};
+
+/** Progress events emitted by `lsp_install_server` on lux://lsp-install. */
+export type LspInstallEvent =
+  | { kind: "started"; languageId: string; name: string }
+  | { kind: "progress"; languageId: string; percent: number; step: string }
+  | { kind: "finished"; languageId: string; success: boolean; path: string | null; error: string | null };
+
+export async function subscribeLspInstall(handler: (event: LspInstallEvent) => void) {
+  if (!isTauriRuntime()) {
+    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://lsp-install");
+    return () => undefined;
+  }
+  return listen<LspInstallEvent>("lux://lsp-install", (event) => handler(event.payload));
+}
+
+/** One managed language runtime (Node/Rust/Python), with live installed-state. */
+export type RuntimeCatalogEntry = {
+  id: string;
+  name: string;
+  installed: boolean;
+  /** True when satisfied by the IDE's managed dir (vs. the user's own PATH). */
+  managed: boolean;
+  path: string | null;
+  /** False when this platform has no automated install (UI shows manualHint). */
+  canAuto: boolean;
+  manualHint: string;
+};
+
+/** Progress events emitted by `runtime_provision` on lux://runtime-provision. */
+export type RuntimeProvisionEvent =
+  | { kind: "started"; id: string; name: string }
+  | { kind: "progress"; id: string; percent: number; step: string }
+  | { kind: "finished"; id: string; success: boolean; path: string | null; error: string | null };
+
+export async function subscribeRuntimeProvision(handler: (event: RuntimeProvisionEvent) => void) {
+  if (!isTauriRuntime()) {
+    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://runtime-provision");
+    return () => undefined;
+  }
+  return listen<RuntimeProvisionEvent>("lux://runtime-provision", (event) => handler(event.payload));
+}
+
+/** Summary returned by code_graph_build / reflected in code_graph_status. */
+export type CodeGraphSummary = {
+  nodeCount: number;
+  edgeCount: number;
+  fileCount: number;
+};
+
+/** Live code-graph status — ready flag plus counts. */
+export type CodeGraphStatus = {
+  ready: boolean;
+  nodeCount: number;
+  edgeCount: number;
+  fileCount: number;
+};
+
+/** A definition node referenced in a code-graph query result. */
+export type CodeGraphNode = {
+  name: string;
+  file: string;
+  line: number;
+};
+
+/** One neighbor connection with its relation and direction. */
+export type CodeGraphConnection = {
+  name: string;
+  file: string;
+  line: number;
+  relation: string;
+  direction: string;
+};
+
+/** Result of code_graph_query for a single symbol. */
+export type CodeGraphQueryResult = {
+  found: boolean;
+  node: CodeGraphNode | null;
+  callers: CodeGraphNode[];
+  callees: CodeGraphNode[];
+  neighbors: CodeGraphConnection[];
+  explanation: {
+    kind: string;
+    degree: number;
+    totalConnections: number;
+    connections: CodeGraphConnection[];
+  } | null;
+};
+
+/** Progress events emitted by code_graph_build on lux://code-graph. */
+export type CodeGraphEvent =
+  | { kind: "started"; path: string }
+  | { kind: "progress"; percent: number; step: string }
+  | { kind: "finished"; success: boolean; nodeCount: number; edgeCount: number; error: string | null }
+  | { kind: "updated"; nodeCount: number; edgeCount: number };
+
+export async function subscribeCodeGraph(handler: (event: CodeGraphEvent) => void) {
+  if (!isTauriRuntime()) {
+    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://code-graph");
+    return () => undefined;
+  }
+  return listen<CodeGraphEvent>("lux://code-graph", (event) => handler(event.payload));
 }
 

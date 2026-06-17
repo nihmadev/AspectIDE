@@ -8,6 +8,7 @@ members = [
   "crates/lux-editor",
   "crates/lux-search",
   "crates/lux-lsp",
+  "crates/lux-codegraph",
   "crates/lux-dap",
   "crates/lux-terminal",
   "crates/lux-git",

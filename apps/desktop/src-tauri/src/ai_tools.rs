@@ -194,26 +194,25 @@ pub async fn ai_file_write(
         let existing = {
             let mut documents = state.documents.lock().map_err(lock_error)?;
             let existing = documents.snapshot_for_path(&path).map_err(String::from)?;
-            match existing {
-                Some(document) => Some(
+            if let Some(document) = existing {
+                Some(
                     documents
                         .update_text(document.id, text)
                         .map_err(String::from)?,
-                ),
+                )
+            } else {
                 // Staged (save_to_disk=false) write to a not-yet-open path: open an
                 // in-memory doc and dirty-mark it so the new content is preserved
                 // instead of being silently discarded while we report "file created".
-                None => {
-                    newly_opened = true;
-                    let opened = documents
-                        .open_loaded_file(&path, String::new())
-                        .map_err(String::from)?;
-                    Some(
-                        documents
-                            .update_text(opened.id, text)
-                            .map_err(String::from)?,
-                    )
-                }
+                newly_opened = true;
+                let opened = documents
+                    .open_loaded_file(&path, String::new())
+                    .map_err(String::from)?;
+                Some(
+                    documents
+                        .update_text(opened.id, text)
+                        .map_err(String::from)?,
+                )
             }
         };
         if let Some(document) = &existing {
@@ -490,11 +489,7 @@ pub async fn ai_file_delete(
             let descendants: Vec<PathBuf> = documents
                 .snapshots()
                 .into_iter()
-                .filter_map(|document| {
-                    document
-                        .path
-                        .filter(|doc_path| doc_path.starts_with(&path))
-                })
+                .filter_map(|document| document.path.filter(|doc_path| doc_path.starts_with(&path)))
                 .collect();
             let mut closed = Vec::new();
             for descendant in descendants {
@@ -779,20 +774,67 @@ pub async fn ai_glob(
 ) -> Result<AiGlobResult, String> {
     let root = workspace_root(&state)?;
     let max = max_results.unwrap_or(80).clamp(1, 500);
-    let pattern = pattern.trim().to_lowercase().replace('\\', "/");
-    // Push the substring filter into the walk and stop once `max` files match.
-    // This finds matches anywhere in the tree (no pre-filter file-count cap that
-    // would drop late-sorting matches as a misleading "file not found") while
-    // never materializing the entire workspace — only the matched subset.
-    let scan_pattern = pattern.clone();
+    let pattern = pattern.trim().replace('\\', "/");
+    if pattern.is_empty() {
+        return Ok(AiGlobResult {
+            pattern,
+            count: 0,
+            files: Vec::new(),
+        });
+    }
+
+    // Build a matcher that understands glob wildcards (`*`, `**`, `?`, `[...]`,
+    // `{a,b}`) when present, and falls back to a case-insensitive substring match
+    // for plain text (so `foo.ts` and `src/foo` keep working). A bare pattern like
+    // `*.ts` previously matched nothing because it was compared as a literal
+    // substring of the path — the documented Glob bug. Glob matching runs against
+    // the path RELATIVE to the workspace root so `*.ts` and `**/*.tsx` anchor the
+    // way users expect. The walk stops once `max` files match (no full-tree
+    // materialization, no misleading pre-filter cap).
+    let has_glob_meta = pattern.contains(['*', '?', '[', ']', '{', '}']);
+    let glob_matcher = if has_glob_meta {
+        // Bare `*.ts` should match at any depth, so also accept a `**/` prefix form.
+        let mut builder = globset::GlobSetBuilder::new();
+        let add = |b: &mut globset::GlobSetBuilder, raw: &str| -> Result<(), String> {
+            let glob = globset::GlobBuilder::new(raw)
+                .case_insensitive(true)
+                .literal_separator(false)
+                .build()
+                .map_err(|e| format!("Invalid glob pattern `{raw}`: {e}"))?;
+            b.add(glob);
+            Ok(())
+        };
+        add(&mut builder, &pattern)?;
+        if !pattern.contains('/') {
+            add(&mut builder, &format!("**/{pattern}"))?;
+        }
+        Some(
+            builder
+                .build()
+                .map_err(|e| format!("Invalid glob pattern: {e}"))?,
+        )
+    } else {
+        None
+    };
+
+    let root_for_walk = root.clone();
+    let substring_pattern = pattern.to_lowercase();
     let files: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
         lux_fs::list_files_matching(
-            root,
+            root_for_walk.clone(),
             move |path| {
-                path.to_string_lossy()
-                    .to_lowercase()
-                    .replace('\\', "/")
-                    .contains(&scan_pattern)
+                // Compare against the workspace-relative path (forward slashes) so
+                // glob anchoring matches user intent; fall back to the absolute path
+                // if stripping fails (path outside root — shouldn't happen here).
+                let relative = path
+                    .strip_prefix(&root_for_walk)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                glob_matcher.as_ref().map_or_else(
+                    || relative.to_lowercase().contains(&substring_pattern),
+                    |matcher| matcher.is_match(relative.as_str()),
+                )
             },
             max,
         )
@@ -804,9 +846,9 @@ pub async fn ai_glob(
     .map(|e| e.path)
     .collect();
     Ok(AiGlobResult {
-        pattern: pattern.clone(),
         count: files.len(),
         files,
+        pattern,
     })
 }
 

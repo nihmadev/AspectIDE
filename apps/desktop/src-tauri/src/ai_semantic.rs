@@ -104,11 +104,13 @@ pub async fn ai_semantic_search(
         tokio::task::spawn_blocking(move || lux_search::query(root, query, &options))
             .await
             .map_err(|error| error.to_string())?
-            .map(|response| response.hits)
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "ai_semantic_search: indexed search backend failed");
-                Default::default()
-            })
+            .map_or_else(
+                |error| {
+                    tracing::warn!(%error, "ai_semantic_search: indexed search backend failed");
+                    Vec::default()
+                },
+                |response| response.hits,
+            )
     };
 
     // 3. Workspace file candidates.
@@ -119,7 +121,7 @@ pub async fn ai_semantic_search(
             .map_err(|error| error.to_string())?
             .unwrap_or_else(|error| {
                 tracing::warn!(%error, "ai_semantic_search: file listing backend failed");
-                Default::default()
+                Vec::default()
             })
     };
 
@@ -228,6 +230,19 @@ pub async fn ai_semantic_search(
     }
 
     let mut ranked: Vec<AiSemanticResult> = results.into_values().collect();
+
+    // Best-effort structural boost: lift results that map to a well-connected
+    // code-graph node. The graph is a separate, optional artifact — when it is not
+    // built yet the lexical ranking (and its parity tests) is left byte-for-byte
+    // unchanged. The guard scope is tiny and never awaits, so it can't deadlock the
+    // earlier lsp/search locks (all already dropped by here).
+    {
+        let guard = state.code_graph.lock().await;
+        if let Some(index) = guard.as_ref() {
+            apply_graph_boost(index.graph(), &mut ranked);
+        }
+    }
+
     ranked.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
@@ -243,6 +258,102 @@ pub async fn ai_semantic_search(
         count: ranked.len(),
         results: ranked,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Structural boost — lift results that map to well-connected code-graph nodes
+// ---------------------------------------------------------------------------
+
+/// Add a bounded, degree-based boost to every result that corresponds to a
+/// code-graph node, so structurally central symbols/files rise above lexically
+/// equal but peripheral ones. Operates in place on the already-deduped candidate
+/// set (small — well under a few hundred entries), using only O(1) interner / file
+/// lookups plus per-node [`degree`](lux_codegraph::degree); never a full graph
+/// scan or a betweenness pass. A result that matches nothing in the graph is left
+/// untouched, so an empty/partial graph never perturbs the lexical order.
+fn apply_graph_boost(graph: &lux_codegraph::CodeGraph, ranked: &mut [AiSemanticResult]) {
+    // Normalized-lowercase absolute path -> FileId, built once per query so a
+    // file/text result can find the defs its file contains. O(files), but this is
+    // an AI tool call, not a hot path.
+    let mut path_to_file: std::collections::HashMap<String, lux_codegraph::FileId> =
+        std::collections::HashMap::with_capacity(graph.file_count());
+    for (file_id, path) in graph.files() {
+        path_to_file.insert(
+            normalize_slashes(&path.to_string_lossy()).to_lowercase(),
+            file_id,
+        );
+    }
+
+    for result in ranked.iter_mut() {
+        let degree = graph_degree_for(graph, &path_to_file, result);
+        if degree > 0 {
+            result.score += degree_to_boost(degree);
+        }
+    }
+}
+
+/// The structural degree to credit a single result with: the connectedness of the
+/// graph node it represents. Symbol results match by name (path-independent, with
+/// the same-file occurrence preferred when present); file/text results fall back to
+/// the most-connected definition their file contains. Returns 0 when nothing maps.
+fn graph_degree_for(
+    graph: &lux_codegraph::CodeGraph,
+    path_to_file: &std::collections::HashMap<String, lux_codegraph::FileId>,
+    result: &AiSemanticResult,
+) -> u32 {
+    let result_path = result.path.to_lowercase();
+
+    // Name-based signal: a definition with this exact name. Prefer one in the same
+    // file as the result (disambiguates a common name), else take the most
+    // connected node sharing the name.
+    if let Some(name) = result.name.as_deref().filter(|name| !name.is_empty()) {
+        let nodes = graph.nodes_by_name(name);
+        if !nodes.is_empty() {
+            let mut best = 0u32;
+            let mut same_file: Option<u32> = None;
+            for &node in nodes {
+                let degree = lux_codegraph::degree(graph, node);
+                best = best.max(degree);
+                let in_result_file = graph
+                    .node(node)
+                    .and_then(|n| graph.file_path(n.file))
+                    .is_some_and(|path| {
+                        normalize_slashes(&path.to_string_lossy()).to_lowercase() == result_path
+                    });
+                if in_result_file {
+                    same_file = Some(same_file.map_or(degree, |d| d.max(degree)));
+                }
+            }
+            return same_file.unwrap_or(best);
+        }
+    }
+
+    // File/text signal: the most connected definition the file holds.
+    if let Some(&file_id) = path_to_file.get(&result_path) {
+        return graph
+            .nodes_in_file(file_id)
+            .iter()
+            .map(|&node| lux_codegraph::degree(graph, node))
+            .max()
+            .unwrap_or(0);
+    }
+
+    0
+}
+
+/// Map a node's degree to a bounded score bonus. Saturating and capped well below
+/// the lexical exact-match bonuses (a symbol name hit is +90) so the graph only
+/// re-orders already-relevant hits — it never floats a structurally central but
+/// lexically irrelevant hub to the top.
+const fn degree_to_boost(degree: u32) -> i64 {
+    match degree {
+        0 => 0,
+        1..=2 => 6,
+        3..=5 => 14,
+        6..=10 => 24,
+        11..=20 => 34,
+        _ => 45,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -794,5 +905,108 @@ mod tests {
         let d = Descriptor::new("/root/src/auth/login.ts", "/root");
         assert!(score_file(&d, &tokenize("login")) > 0);
         assert_eq!(score_file(&d, &tokenize("zzzzzz")), 0);
+    }
+
+    // ── Structural graph boost ──
+
+    fn temp_workspace(files: &[(&str, &str)]) -> PathBuf {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = format!(
+            "lux-ai-semantic-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let root = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_dir_all(&root);
+        for (rel, contents) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path)
+                .unwrap()
+                .write_all(contents.as_bytes())
+                .unwrap();
+        }
+        root
+    }
+
+    fn symbol_result(path: &str, name: &str, score: i64) -> AiSemanticResult {
+        AiSemanticResult {
+            kind: "symbol",
+            source: "lsp-symbols",
+            score,
+            path: normalize_slashes(path),
+            relative_path: String::new(),
+            line: Some(1),
+            column: Some(1),
+            name: Some(name.to_string()),
+            symbol_kind: None,
+            container_name: None,
+            preview: None,
+            match_text: None,
+        }
+    }
+
+    #[test]
+    fn degree_to_boost_is_monotonic_and_capped() {
+        assert_eq!(degree_to_boost(0), 0);
+        let mut prev = 0;
+        for degree in [0u32, 1, 3, 6, 11, 21, 1000] {
+            let boost = degree_to_boost(degree);
+            assert!(boost >= prev, "boost must be monotonic in degree");
+            prev = boost;
+        }
+        assert_eq!(degree_to_boost(1000), 45, "boost saturates at the cap");
+    }
+
+    #[test]
+    fn graph_boost_is_noop_without_matches() {
+        // An empty graph (or one with no matching node) must leave scores exactly as
+        // the lexical pass set them — this is what keeps the parity tests valid.
+        let graph = lux_codegraph::CodeGraph::new();
+        let mut ranked = vec![
+            symbol_result("/root/src/app.ts", "thing", 50),
+            symbol_result("/root/src/util.ts", "other", 30),
+        ];
+        apply_graph_boost(&graph, &mut ranked);
+        assert_eq!(ranked[0].score, 50);
+        assert_eq!(ranked[1].score, 30);
+    }
+
+    #[test]
+    fn graph_boost_prefers_connected_symbols() {
+        // `hub` is called three times; `leaf` by no one. The boost must lift the hub
+        // above the lexically identical leaf and leave the unconnected leaf untouched.
+        let root = temp_workspace(&[(
+            "lib.rs",
+            "fn hub() {}\nfn a() { hub(); }\nfn b() { hub(); }\nfn c() { hub(); }\nfn leaf() {}\n",
+        )]);
+        let index = lux_codegraph::Index::build(&root).expect("build graph");
+        let file = root.join("lib.rs");
+        let file = file.to_string_lossy();
+
+        let mut ranked = vec![
+            symbol_result(&file, "hub", 100),
+            symbol_result(&file, "leaf", 100),
+        ];
+        apply_graph_boost(index.graph(), &mut ranked);
+
+        let score = |name: &str| {
+            ranked
+                .iter()
+                .find(|r| r.name.as_deref() == Some(name))
+                .unwrap()
+                .score
+        };
+        assert!(
+            score("hub") > score("leaf"),
+            "hub {} must outrank leaf {}",
+            score("hub"),
+            score("leaf")
+        );
+        assert_eq!(score("leaf"), 100, "an unconnected leaf gets no boost");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

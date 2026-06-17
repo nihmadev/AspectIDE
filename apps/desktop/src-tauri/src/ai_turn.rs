@@ -64,8 +64,7 @@ fn mark_turn_cancelled(turn_id: &str) {
 fn is_turn_cancelled(turn_id: &str) -> bool {
     cancelled_turns()
         .lock()
-        .map(|set| set.contains(turn_id))
-        .unwrap_or(false)
+        .is_ok_and(|set| set.contains(turn_id))
 }
 
 /// Drop the cancellation flag for a finished turn so the set never grows
@@ -166,7 +165,7 @@ pub enum TurnEvent {
         risk: String,
     },
 
-    /// The agent asked the user a question (AskUser tool). UI renders an
+    /// The agent asked the user a question (`AskUser` tool). UI renders an
     /// interactive card and replies via `ai_resolve_turn_question`. In Automatic
     /// mode this event never fires — the model self-answers inline instead.
     #[serde(rename_all = "camelCase")]
@@ -187,7 +186,7 @@ pub enum TurnEvent {
         html_preview: String,
     },
 
-    /// The agent proposed a structured plan (PresentPlan tool). UI renders an
+    /// The agent proposed a structured plan (`PresentPlan` tool). UI renders an
     /// expandable plan card with a "Start" button that hands the plan to Agent
     /// mode. In Automatic mode the plan is shown but execution auto-starts.
     #[serde(rename_all = "camelCase")]
@@ -315,7 +314,7 @@ pub fn cancel_approvals_for_turn(turn_id: &str) {
     }
 }
 
-/// Register a pending question and return a receiver the AskUser tool awaits.
+/// Register a pending question and return a receiver the `AskUser` tool awaits.
 pub fn register_question(turn_id: &str, request_id: &str) -> oneshot::Receiver<QuestionAnswer> {
     let (tx, rx) = oneshot::channel();
     let key = format!("{turn_id}:{request_id}");
@@ -440,7 +439,7 @@ pub async fn ai_run_turn(
     let started_at = std::time::Instant::now();
     // Clamp to [1, 128]: a limit of 0 would skip the loop entirely and emit a
     // fake "Done." success with no model call, so guarantee at least one round.
-    let max_rounds = input.tool_round_limit.unwrap_or(32).min(128).max(1) as usize;
+    let max_rounds = input.tool_round_limit.unwrap_or(32).clamp(1, 128) as usize;
 
     let _ = emit_turn_event(
         &app,
@@ -722,8 +721,96 @@ pub async fn ai_run_turn(
         }
     }
 
+    // The model ended the turn with no answer text — it may have only run tools, hit
+    // the round limit, or returned an empty completion. Give it exactly one tool-free
+    // turn (tool_choice "none" forces prose) to produce its final response, streamed
+    // live so it renders as the answer instead of a bare "Done.". A normal turn (with
+    // text) skips this entirely and pays nothing; it never loops.
+    if final_content.trim().is_empty() && !is_turn_cancelled(&turn_id) {
+        let _ = emit_turn_event(
+            &app,
+            &TurnEvent::StatusChange {
+                turn_id: turn_id.clone(),
+                phase: "thinking".to_string(),
+            },
+        );
+        let mut payload = serde_json::json!({
+            "model": input.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "stream": true,
+            "stream_options": { "include_usage": true },
+            "tools": tools,
+            "tool_choice": "none",
+        });
+        crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
+        let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
+            input.base_url.clone(),
+            input.api_key.clone(),
+            payload,
+        );
+        let stream_app = app.clone();
+        let stream_turn_id = turn_id.clone();
+        let cancel_turn_id = turn_id.clone();
+        let mut announced_streaming = false;
+        if let Ok(response) = crate::ai_chat_backend::completion_streaming(
+            request,
+            move |content, reasoning| {
+                if is_turn_cancelled(&stream_turn_id) {
+                    return;
+                }
+                if content.is_empty() && reasoning.is_empty() {
+                    return;
+                }
+                if !announced_streaming {
+                    announced_streaming = true;
+                    let _ = emit_turn_event(
+                        &stream_app,
+                        &TurnEvent::StatusChange {
+                            turn_id: stream_turn_id.clone(),
+                            phase: "streaming".to_string(),
+                        },
+                    );
+                }
+                let _ = emit_turn_event(
+                    &stream_app,
+                    &TurnEvent::StreamDelta {
+                        turn_id: stream_turn_id.clone(),
+                        content: content.to_string(),
+                        reasoning: reasoning.to_string(),
+                    },
+                );
+            },
+            move || is_turn_cancelled(&cancel_turn_id),
+        )
+        .await
+        {
+            if let Some(usage) = response.body.get("usage") {
+                usage_prompt += usage
+                    .get("prompt_tokens")
+                    .or_else(|| usage.get("input_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                usage_completion += usage
+                    .get("completion_tokens")
+                    .or_else(|| usage.get("output_tokens"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                usage_total += usage
+                    .get("total_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                usage_cached += parse_cached_prompt_tokens(usage);
+            }
+            let parsed = parse_assistant_message(&response.body);
+            if !parsed.content.trim().is_empty() {
+                final_content = parsed.content;
+            }
+        }
+    }
+
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-    if final_content.is_empty() {
+    if final_content.trim().is_empty() {
         final_content = "Done.".to_string();
     }
     if usage_prompt > 0 || usage_completion > 0 || usage_total > 0 {
@@ -996,7 +1083,11 @@ async fn execute_tool(
             }
             // Automatic mode always persists to disk: staging an edit off-disk would leave
             // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
-            let save = if is_automatic { Some(true) } else { args.get("saveToDisk").and_then(serde_json::Value::as_bool) };
+            let save = if is_automatic {
+                Some(true)
+            } else {
+                args.get("saveToDisk").and_then(serde_json::Value::as_bool)
+            };
             require_tool_approval(
                 app,
                 turn_id,
@@ -1041,7 +1132,11 @@ async fn execute_tool(
                 .and_then(|v| usize::try_from(v).ok());
             // Automatic mode always persists to disk: staging an edit off-disk would leave
             // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
-            let save = if is_automatic { Some(true) } else { args.get("saveToDisk").and_then(serde_json::Value::as_bool) };
+            let save = if is_automatic {
+                Some(true)
+            } else {
+                args.get("saveToDisk").and_then(serde_json::Value::as_bool)
+            };
             require_tool_approval(
                 app,
                 turn_id,
@@ -1214,7 +1309,11 @@ async fn execute_tool(
                     .map_err(|e| format!("Invalid patch operations: {e}"))?;
             // Automatic mode always persists to disk: staging an edit off-disk would leave
             // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
-            let save = if is_automatic { Some(true) } else { args.get("saveToDisk").and_then(serde_json::Value::as_bool) };
+            let save = if is_automatic {
+                Some(true)
+            } else {
+                args.get("saveToDisk").and_then(serde_json::Value::as_bool)
+            };
             let dry_run = args.get("dryRun").and_then(serde_json::Value::as_bool);
             if !dry_run.unwrap_or(false) {
                 require_tool_approval(
@@ -1496,7 +1595,9 @@ async fn execute_tool(
                         .join("\n");
                     format!("Automatic mode: no user is available to answer. Pick the single best option for this repository, state the choice as an assumption, and continue.\nOptions:\n{list}")
                 };
-                return Ok(serde_json::json!({ "autoAnswered": true, "answer": rendered }).to_string());
+                return Ok(
+                    serde_json::json!({ "autoAnswered": true, "answer": rendered }).to_string(),
+                );
             }
 
             // Interactive: emit the question and suspend on the oneshot channel.
@@ -1587,10 +1688,10 @@ async fn execute_tool(
             }
             // Pin the plan as the session goal + task list so the rail reflects it
             // immediately, regardless of mode.
-            if !summary.trim().is_empty() {
-                crate::ai_session::set_goal(&input.session_id, &summary);
-            } else {
+            if summary.trim().is_empty() {
                 crate::ai_session::set_goal(&input.session_id, &title);
+            } else {
+                crate::ai_session::set_goal(&input.session_id, &summary);
             }
             let todos: Vec<crate::ai_session::SessionTodo> = steps
                 .iter()
@@ -1600,7 +1701,11 @@ async fn execute_tool(
                     content: step.title.clone(),
                     status: if i == 0 { "in_progress" } else { "pending" }.to_string(),
                     priority: "medium".to_string(),
-                    notes: if step.detail.is_empty() { None } else { Some(step.detail.clone()) },
+                    notes: if step.detail.is_empty() {
+                        None
+                    } else {
+                        Some(step.detail.clone())
+                    },
                 })
                 .collect();
             crate::ai_session::set_todos(&input.session_id, todos);
@@ -2062,7 +2167,11 @@ async fn execute_tool(
                 .and_then(serde_json::Value::as_u64);
             // Automatic mode always persists to disk: staging an edit off-disk would leave
             // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
-            let save = if is_automatic { Some(true) } else { args.get("saveToDisk").and_then(serde_json::Value::as_bool) };
+            let save = if is_automatic {
+                Some(true)
+            } else {
+                args.get("saveToDisk").and_then(serde_json::Value::as_bool)
+            };
             let dry = args.get("dryRun").and_then(serde_json::Value::as_bool);
             // Restore mutates files → require approval (unless dry-run / full-access).
             let is_restore = action.trim().to_lowercase().starts_with("rest")
@@ -2100,6 +2209,100 @@ async fn execute_tool(
             Ok(result.to_string())
         }
 
+        // ── Code-graph tools ──
+        "CodeGraphDefinition" => {
+            let symbol = json_str(&args, "symbol");
+            let result = crate::code_graph::with_index(state.inner(), |index| {
+                let graph = index.graph();
+                match lux_codegraph::resolve_one(graph, &symbol) {
+                    Some(node) => Ok(serde_json::json!({
+                        "found": true,
+                        "name": node.name,
+                        "file": node.file,
+                        "line": node.line,
+                    })),
+                    None => Ok(serde_json::json!({"found": false, "note": format!("No symbol matching '{symbol}' in the code graph.")})),
+                }
+            }).await?;
+            Ok(result.to_string())
+        }
+        "CodeGraphCallers" => {
+            let symbol = json_str(&args, "symbol");
+            let result = crate::code_graph::with_index(state.inner(), |index| {
+                let graph = index.graph();
+                let Some(nr) = lux_codegraph::resolve_one(graph, &symbol) else {
+                    return Ok(serde_json::json!({"found": false, "note": format!("Unknown symbol: {symbol}")}));
+                };
+                let callers: Vec<serde_json::Value> = lux_codegraph::callers(graph, nr.node)
+                    .into_iter()
+                    .map(|r| serde_json::json!({"name": r.name, "file": r.file, "line": r.line}))
+                    .collect();
+                Ok(serde_json::json!({"symbol": nr.name, "callers": callers}))
+            }).await?;
+            Ok(result.to_string())
+        }
+        "CodeGraphCallees" => {
+            let symbol = json_str(&args, "symbol");
+            let result = crate::code_graph::with_index(state.inner(), |index| {
+                let graph = index.graph();
+                let Some(nr) = lux_codegraph::resolve_one(graph, &symbol) else {
+                    return Ok(serde_json::json!({"found": false, "note": format!("Unknown symbol: {symbol}")}));
+                };
+                let callees: Vec<serde_json::Value> = lux_codegraph::callees(graph, nr.node)
+                    .into_iter()
+                    .map(|r| serde_json::json!({"name": r.name, "file": r.file, "line": r.line}))
+                    .collect();
+                Ok(serde_json::json!({"symbol": nr.name, "callees": callees}))
+            }).await?;
+            Ok(result.to_string())
+        }
+        "CodeGraphExplain" => {
+            let symbol = json_str(&args, "symbol");
+            let result = crate::code_graph::with_index(state.inner(), |index| {
+                let graph = index.graph();
+                let Some(nr) = lux_codegraph::resolve_one(graph, &symbol) else {
+                    return Ok(serde_json::json!({"found": false, "note": format!("Unknown symbol: {symbol}")}));
+                };
+                let Some(expl) = lux_codegraph::explain(graph, nr.node) else {
+                    return Ok(serde_json::json!({"found": false}));
+                };
+                Ok(serde_json::json!({
+                    "name": expl.node.name,
+                    "kind": format!("{:?}", expl.kind).to_lowercase(),
+                    "degree": expl.degree,
+                    "totalConnections": expl.total_connections,
+                    "connections": expl.connections.into_iter().map(|n| serde_json::json!({
+                        "name": n.node.name,
+                        "file": n.node.file,
+                        "line": n.node.line,
+                        "relation": format!("{:?}", n.relation).to_lowercase(),
+                        "direction": format!("{:?}", n.direction).to_lowercase(),
+                    })).collect::<Vec<_>>(),
+                }))
+            }).await?;
+            Ok(result.to_string())
+        }
+        "CodeGraphOverview" => {
+            let result = crate::code_graph::with_index(state.inner(), |index| {
+                let graph = index.graph();
+                let gods = lux_codegraph::god_nodes(graph, 10);
+                let nodes = index.graph().node_count();
+                let edges = index.graph().edge_count();
+                let communities = lux_codegraph::detect_communities(graph);
+                Ok(serde_json::json!({
+                    "nodes": nodes,
+                    "edges": edges,
+                    "communities": communities.len(),
+                    "godNodes": gods.into_iter().map(|g| serde_json::json!({
+                        "name": g.name,
+                        "degree": g.degree,
+                    })).collect::<Vec<_>>(),
+                }))
+            })
+            .await?;
+            Ok(result.to_string())
+        }
+
         other => Err(format!("Unknown tool: {other}")),
     }
 }
@@ -2107,6 +2310,7 @@ async fn execute_tool(
 /// Run an isolated subagent turn (Task tool). The subagent gets its own model↔tool
 /// loop with a capped round limit and read-only-leaning tools, then returns a concise
 /// summary to the parent. Shares the session's A2A blackboard for coordination.
+#[allow(clippy::too_many_arguments)]
 async fn run_subagent(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, crate::SharedState>,

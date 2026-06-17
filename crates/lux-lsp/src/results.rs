@@ -208,7 +208,11 @@ pub fn parse_workspace_edit_result(value: &Value) -> Option<LspWorkspaceEdit> {
     // Per the LSP spec, when `documentChanges` is present the `changes` map MUST
     // be ignored. Servers frequently populate both for backward compatibility, so
     // processing both would double-apply every edit and corrupt the file.
-    if value.get("documentChanges").and_then(Value::as_array).is_none() {
+    if value
+        .get("documentChanges")
+        .and_then(Value::as_array)
+        .is_none()
+    {
         if let Some(changes) = value.get("changes").and_then(Value::as_object) {
             for (uri, edits) in changes {
                 let Ok(uri) = uri.parse::<Uri>() else {

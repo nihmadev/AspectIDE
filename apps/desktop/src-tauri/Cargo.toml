@@ -21,6 +21,7 @@ tauri-build = { version = "2", features = [] }
 base64.workspace = true
 chrono.workspace = true
 dunce.workspace = true
+lux-codegraph = { path = "../../../crates/lux-codegraph" }
 lux-core = { path = "../../../crates/lux-core" }
 lux-dap = { path = "../../../crates/lux-dap" }
 lux-editor = { path = "../../../crates/lux-editor" }
@@ -33,6 +34,7 @@ lux-search = { path = "../../../crates/lux-search" }
 lux-settings = { path = "../../../crates/lux-settings" }
 lux-terminal = { path = "../../../crates/lux-terminal" }
 lux-workspace = { path = "../../../crates/lux-workspace" }
+globset.workspace = true
 image.workspace = true
 notify.workspace = true
 serde.workspace = true
@@ -47,6 +49,9 @@ tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures-util = "0.3"
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true

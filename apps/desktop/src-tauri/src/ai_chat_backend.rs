@@ -141,7 +141,7 @@ pub fn merge_reasoning(payload: &mut Value, reasoning: Option<&Value>) {
     }
 }
 
-/// Build the `/models` listing endpoint from a provider base URL (OpenAI shape),
+/// Build the `/models` listing endpoint from a provider base URL (`OpenAI` shape),
 /// mirroring `completion_endpoint` so trailing-slash and `/chat/completions` bases
 /// both resolve correctly.
 fn models_endpoint(base_url: &str) -> Result<String, String> {
@@ -410,15 +410,12 @@ where
             if valid_up_to > 0 {
                 buffer.push_str(std::str::from_utf8(&byte_tail[..valid_up_to]).unwrap());
             }
-            match invalid_len {
-                Some(invalid_len) => {
-                    buffer.push('\u{FFFD}');
-                    byte_tail.drain(..valid_up_to + invalid_len);
-                }
-                None => {
-                    byte_tail.drain(..valid_up_to);
-                    break;
-                }
+            if let Some(invalid_len) = invalid_len {
+                buffer.push('\u{FFFD}');
+                byte_tail.drain(..valid_up_to + invalid_len);
+            } else {
+                byte_tail.drain(..valid_up_to);
+                break;
             }
         }
         normalize_sse_buffer_newlines(&mut buffer);
@@ -975,15 +972,12 @@ async fn stream_completion(
             if valid_up_to > 0 {
                 buffer.push_str(std::str::from_utf8(&byte_tail[..valid_up_to]).unwrap());
             }
-            match invalid_len {
-                Some(invalid_len) => {
-                    buffer.push('\u{FFFD}');
-                    byte_tail.drain(..valid_up_to + invalid_len);
-                }
-                None => {
-                    byte_tail.drain(..valid_up_to);
-                    break;
-                }
+            if let Some(invalid_len) = invalid_len {
+                buffer.push('\u{FFFD}');
+                byte_tail.drain(..valid_up_to + invalid_len);
+            } else {
+                byte_tail.drain(..valid_up_to);
+                break;
             }
         }
         normalize_sse_buffer_newlines(&mut buffer);

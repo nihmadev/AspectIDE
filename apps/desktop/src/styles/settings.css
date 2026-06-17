@@ -1139,6 +1139,12 @@
   gap: 10px;
 }
 
+.index-status-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .index-status-icon {
   display: none;
 }
@@ -1355,4 +1361,244 @@
   display: flex;
   justify-content: flex-end;
   padding-top: 4px;
+}
+
+/* ── Language Servers section ── */
+.lsp-servers-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 16px 0 8px;
+}
+
+.lsp-servers-head > strong {
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.lsp-servers-subtitle {
+  margin: -2px 0 6px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.lsp-servers-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lsp-servers-count {
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.lsp-servers-head-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.lsp-servers-head-actions button:hover {
+  background: var(--surface-hover);
+  color: var(--text-0);
+}
+
+.lsp-servers-error {
+  margin: 0 0 8px;
+  color: var(--danger, #e5534b);
+  font-size: 11.5px;
+}
+
+.lsp-servers-loading {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.lsp-servers-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.lsp-server-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+}
+
+.lsp-server-row-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.lsp-server-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.lsp-server-row-title strong {
+  color: var(--text-0);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.lsp-server-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.lsp-server-dot[data-state="managed"],
+.lsp-server-dot[data-state="path"] {
+  background: var(--success, #3fb950);
+}
+
+.lsp-server-dot[data-state="installing"] {
+  background: #2f9bff;
+  animation: lsp-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.lsp-server-dot[data-state="error"] {
+  background: var(--danger, #e5534b);
+}
+
+@keyframes lsp-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.lsp-server-ext {
+  color: var(--text-3);
+  font-family: var(--font-mono, monospace);
+  font-size: 10.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lsp-server-status {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.lsp-server-status[data-state="managed"],
+.lsp-server-status[data-state="path"] {
+  color: var(--success, #3fb950);
+}
+
+.lsp-server-status[data-state="installing"] {
+  color: #2f9bff;
+}
+
+.lsp-server-status[data-state="error"] {
+  color: var(--danger, #e5534b);
+}
+
+.lsp-server-progress {
+  position: relative;
+  height: 16px;
+  margin-top: 2px;
+  border-radius: 4px;
+  background: var(--surface-1);
+  overflow: hidden;
+}
+
+.lsp-server-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #2f9bff, #4db8ff);
+  transition: width 0.3s ease;
+}
+
+.lsp-server-progress-step {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding-left: 8px;
+  font-size: 10px;
+  color: var(--text-1);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
+.lsp-server-row-error {
+  margin: 0;
+  color: var(--danger, #e5534b);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.lsp-server-row-hint {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.lsp-server-row-action {
+  flex-shrink: 0;
+}
+
+.lsp-server-install {
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.lsp-server-install:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-0);
+}
+
+.lsp-server-install:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.lsp-server-manual-tag {
+  font-size: 10.5px;
+  color: var(--text-3);
+  padding: 3px 8px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
 }

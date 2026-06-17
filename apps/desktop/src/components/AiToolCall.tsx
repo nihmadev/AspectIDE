@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Activity,
@@ -33,6 +33,46 @@ import type { LucideIcon } from "lucide-react";
 import type { AiToolApprovalDecision, AiToolApprovalState } from "../lib/aiChatTypes";
 import { extractReviewPathFromToolInput, requestFileReviewFocus } from "../lib/aiFileReviewBridge";
 import type { TranslateFn } from "../lib/i18n/useTranslation";
+
+/** How long a manual expand/collapse of a tool-call group survives before the
+ *  panel reverts to auto-follow (open while active, closed when idle). Long enough
+ *  to read tool output without the next streaming status flip snapping it shut. */
+const MANUAL_DISCLOSURE_HOLD_MS = 20_000;
+
+/**
+ * Disclosure state for streaming tool-call groups. By default `open` tracks
+ * `active` (auto-expand while work runs, auto-collapse when done). A manual
+ * toggle PINS the user's choice and holds it for ~20s of no further interaction,
+ * then releases back to auto-follow — so a status flip mid-read never collapses
+ * what the user just opened. Each toggle re-arms the hold timer.
+ */
+function useStickyDisclosure(active: boolean) {
+  const [override, setOverride] = useState<boolean | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  }, []);
+
+  const toggle = useCallback(() => {
+    setOverride((current) => {
+      const base = current ?? active;
+      return !base;
+    });
+    clearTimer();
+    timerRef.current = window.setTimeout(() => {
+      setOverride(null);
+      timerRef.current = null;
+    }, MANUAL_DISCLOSURE_HOLD_MS);
+  }, [active, clearTimer]);
+
+  useEffect(() => clearTimer, [clearTimer]);
+
+  return { open: override ?? active, toggle };
+}
 
 export type ToolCallStatus = "approval" | "running" | "success" | "skipped" | "error";
 
@@ -236,12 +276,8 @@ export function AiToolCallsGroup({ onApprovalDecision, t, toolCalls }: AiToolCal
   const runningCount = toolCalls.filter((call) => call.status === "running").length;
   const errorCount = toolCalls.filter((call) => call.status === "error").length;
   const active = approvalCount > 0 || runningCount > 0;
-  const [userToggled, setUserToggled] = useState<boolean | null>(null);
-  const open = userToggled ?? active;
+  const { open, toggle } = useStickyDisclosure(active);
   const groupedBatches = useMemo(() => groupToolCalls(toolCalls), [toolCalls]);
-  useEffect(() => {
-    if (active) setUserToggled(null);
-  }, [active]);
 
   if (toolCalls.length === 0) return null;
 
@@ -253,7 +289,7 @@ export function AiToolCallsGroup({ onApprovalDecision, t, toolCalls }: AiToolCal
 
   return (
     <div className="ai-tool-calls-group" data-active={active || undefined} data-open={open || undefined}>
-      <button type="button" className="ai-tool-calls-summary" onClick={() => setUserToggled(!open)} aria-expanded={open}>
+      <button type="button" className="ai-tool-calls-summary" onClick={toggle} aria-expanded={open}>
         <span className="ai-tool-calls-rail" aria-hidden="true" />
         <span className="ai-tool-calls-summary-label">{summary}</span>
         {groupedBatches.length > 1 && <span className="ai-tool-calls-badge" data-status="neutral">{t("aiTools.summary.groups", { count: groupedBatches.length })}</span>}
@@ -287,17 +323,14 @@ type ToolCallBatchModel = {
 
 function ToolCallBatch({ batch, onApprovalDecision, t }: { batch: ToolCallBatchModel; onApprovalDecision?: (approvalId: string, decision: AiToolApprovalDecision) => void; t: TranslateFn }) {
   const active = batch.toolCalls.some((call) => call.status === "approval" || call.status === "running");
-  const [userToggled, setUserToggled] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (active) setUserToggled(null);
-  }, [active]);
   const collapsible = batch.toolCalls.length > 2;
-  const open = collapsible ? (userToggled ?? active) : true;
+  const { open: stickyOpen, toggle } = useStickyDisclosure(active);
+  const open = collapsible ? stickyOpen : true;
 
   return (
     <div className="ai-tool-call-batch" data-open={open || undefined} data-active={active || undefined}>
       {collapsible && (
-        <button type="button" className="ai-tool-call-batch-head" onClick={() => setUserToggled(!open)} aria-expanded={open}>
+        <button type="button" className="ai-tool-call-batch-head" onClick={toggle} aria-expanded={open}>
           <ChevronRight className="ai-tool-call-batch-caret" data-expanded={open} size={13} />
           <span>{batch.tool ?? t("aiTools.summary.mixedGroup")}</span>
           <strong>{batch.toolCalls.length}</strong>

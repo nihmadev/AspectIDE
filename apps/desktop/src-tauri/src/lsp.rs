@@ -29,12 +29,17 @@ pub async fn lsp_servers(
         .ok_or_else(|| "no workspace is open".to_string())?;
 
     // Discovery is fast and bounded; do it inline so the UI gets the server list
-    // (available/missing) immediately and can clear its "loading" state.
+    // (available/missing) immediately and can clear its "loading" state. The
+    // managed LSP bin dirs are searched BEFORE PATH so on-demand-installed servers
+    // resolve without the user editing PATH.
     tracing::info!("lsp_servers: discovering language servers");
-    let servers = tokio::task::spawn_blocking(move || lux_lsp::workspace_language_servers(root))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(String::from)?;
+    let extra_dirs = crate::lsp_install::managed_bin_dirs(&app);
+    let servers = tokio::task::spawn_blocking(move || {
+        lux_lsp::workspace_language_servers_with_dirs(root, &extra_dirs)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .map_err(String::from)?;
     tracing::info!("lsp_servers: discovered {} server(s)", servers.len());
 
     // Publish missing-server warnings right away.
@@ -49,11 +54,21 @@ pub async fn lsp_servers(
     let background_state = state.inner().clone();
     let background_app = app.clone();
     let background_servers = servers.clone();
+    // Managed runtime bins (Node/Rust/Python) are prepended to each server's PATH at
+    // launch so a managed shim (e.g. typescript-language-server → node) finds its
+    // interpreter on a host with no system toolchain.
+    let runtime_path_dirs = crate::runtime_provision::runtime_bin_dirs(&app);
     // Use Tauri's async runtime (not bare `tokio::spawn`): a command may run on a
     // thread without an entered tokio reactor, where `tokio::spawn` panics and the
     // command never resolves — leaving the UI stuck on "Starting language services".
     tauri::async_runtime::spawn(async move {
-        start_servers_background(&background_app, &background_state, &background_servers).await;
+        start_servers_background(
+            &background_app,
+            &background_state,
+            &background_servers,
+            &runtime_path_dirs,
+        )
+        .await;
     });
 
     tracing::info!("lsp_servers: returning server list to frontend");
@@ -68,6 +83,7 @@ async fn start_servers_background(
     app: &AppHandle,
     state: &SharedState,
     servers: &[LanguageServerInfo],
+    extra_path_dirs: &[std::path::PathBuf],
 ) {
     // Take the manager OUT of the shared slot so the slow `initialize` handshakes
     // (run in parallel, up to ~10s per server) happen WITHOUT holding the `lsp`
@@ -89,7 +105,7 @@ async fn start_servers_background(
     // would drop `manager` while the slot stays `None` for the rest of the
     // session — stranding the LSP and orphaning any already-spawned child
     // servers. `catch_unwind` lets us ALWAYS restore the manager below.
-    let result = AssertUnwindSafe(manager.start_available_servers(servers))
+    let result = AssertUnwindSafe(manager.start_available_servers(servers, extra_path_dirs))
         .catch_unwind()
         .await;
 
@@ -104,9 +120,8 @@ async fn start_servers_background(
 
     // If startup panicked there are no diagnostics to merge; the manager is
     // restored, so feature commands resume serving whatever the survivors offer.
-    let startup_diagnostics = match result {
-        Ok(diagnostics) => diagnostics,
-        Err(_) => return,
+    let Ok(startup_diagnostics) = result else {
+        return;
     };
 
     // Re-publish: keep the missing-server warnings and add any startup failures,
