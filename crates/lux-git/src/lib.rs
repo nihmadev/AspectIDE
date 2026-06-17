@@ -145,7 +145,7 @@ fn hide_process_window(command: &mut Command) {
 }
 
 #[cfg(not(windows))]
-fn hide_process_window(_command: &mut Command) {}
+const fn hide_process_window(_command: &mut Command) {}
 
 fn parse_status(raw: &str) -> GitStatus {
     let mut branch = None;
