@@ -148,6 +148,12 @@ jobs:
             bundle_args: --bundles appimage,deb,rpm
             target_args: ""
     runs-on: ${{ matrix.os }}
+    # Surface the optional code-signing secrets as job env so step `if:` guards can
+    # detect their presence. When unset, signing steps skip and unsigned installers
+    # are produced; the (free, required) updater signing still runs.
+    env:
+      WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -180,7 +186,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Import Windows signing certificate
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_PFX_BASE64 != ''
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -196,7 +202,7 @@ jobs:
           Remove-Item -LiteralPath $certPath -Force
 
       - name: Import macOS signing certificate
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12_BASE64 != ''
         shell: bash
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}

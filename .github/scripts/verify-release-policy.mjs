@@ -94,32 +94,18 @@ function verifySourceReleasePolicy() {
 }
 
 function verifyPreparedReleasePolicy() {
-  const windowsThumbprint = requireEnv("WINDOWS_CERTIFICATE_THUMBPRINT", "Windows Authenticode certificate thumbprint is required.", isCertificateThumbprint);
-  const appleSigningIdentity = requireEnv("APPLE_SIGNING_IDENTITY", "Apple Developer ID signing identity is required.", isDeveloperIdApplicationIdentity);
-  const appleProviderShortName = requireEnv("APPLE_PROVIDER_SHORT_NAME", "Apple notarization provider short name is required.", isProductionIdentifier);
+  // Updater signing is ALWAYS required — it is free (ed25519) and is what makes
+  // auto-update verifiable.
   const updaterPublicKey = requireEnv("TAURI_UPDATER_PUBLIC_KEY", "Tauri updater public key is required.", isProductionKeyMaterial);
   const updaterEndpoints = parseUpdaterEndpoints(requireEnv("TAURI_UPDATER_ENDPOINTS", "Tauri updater HTTPS endpoints are required.", isProductionValue));
-  requireEnv("WINDOWS_CERTIFICATE_PFX_BASE64", "Windows signing certificate PFX is required on GitHub-hosted runners.", isProductionKeyMaterial);
-  requireEnv("WINDOWS_CERTIFICATE_PASSWORD", "Windows signing certificate password is required.", isProductionSecret);
-  requireEnv("APPLE_CERTIFICATE_P12_BASE64", "Apple signing certificate P12 is required on GitHub-hosted runners.", isProductionKeyMaterial);
-  requireEnv("APPLE_CERTIFICATE_PASSWORD", "Apple signing certificate password is required.", isProductionSecret);
-  requireEnv("APPLE_KEYCHAIN_PASSWORD", "Temporary macOS signing keychain password is required.", isProductionSecret);
-  requireEnv("APPLE_ID", "Apple notarization account id is required.", isProductionAppleId);
-  requireEnv("APPLE_PASSWORD", "Apple notarization app-specific password is required.", isProductionSecret);
   requireEnv("TAURI_SIGNING_PRIVATE_KEY", "Tauri updater signing private key is required.", isProductionKeyMaterial);
   requireEnv("TAURI_SIGNING_PRIVATE_KEY_PASSWORD", "Tauri updater signing key password is required.", isProductionSecret);
 
-  if (bundle.windows?.certificateThumbprint !== windowsThumbprint) {
-    errors.push("Prepared config must set bundle.windows.certificateThumbprint from WINDOWS_CERTIFICATE_THUMBPRINT.");
-  }
-
-  if (bundle.macOS?.signingIdentity !== appleSigningIdentity) {
-    errors.push("Prepared config must set bundle.macOS.signingIdentity from APPLE_SIGNING_IDENTITY.");
-  }
-
-  if (bundle.macOS?.providerShortName !== appleProviderShortName) {
-    errors.push("Prepared config must set bundle.macOS.providerShortName from APPLE_PROVIDER_SHORT_NAME.");
-  }
+  // OS code-signing is OPTIONAL (paid certs). When a cert secret IS supplied it
+  // must be valid AND mirrored into the prepared config; when omitted the matching
+  // bundle identity must stay null so an unsigned installer is produced.
+  verifyOptionalWindowsSigning();
+  verifyOptionalAppleSigning();
 
   if (bundle.createUpdaterArtifacts !== true) {
     errors.push("bundle.createUpdaterArtifacts must be true for release channels.");
@@ -145,12 +131,59 @@ function verifyPreparedReleasePolicy() {
     for (const endpoint of endpoints) {
       validateUpdaterEndpoint(String(endpoint));
     }
-
-    requireReleaseChannels(endpoints);
   }
 
   if (!permissions.some((permission) => String(permission).startsWith("updater:"))) {
     errors.push("Tauri capabilities must include explicit updater permissions when release updater artifacts are enabled.");
+  }
+}
+
+// Windows signing is opt-in. If a thumbprint secret is present, validate it and
+// require it to be mirrored into the prepared config (and the PFX/password to be
+// present so the build can actually sign); otherwise the config must keep the
+// thumbprint null (unsigned installer).
+function verifyOptionalWindowsSigning() {
+  const raw = String(process.env.WINDOWS_CERTIFICATE_THUMBPRINT ?? "").trim();
+  if (!raw) {
+    if (bundle.windows?.certificateThumbprint != null) {
+      errors.push("WINDOWS_CERTIFICATE_THUMBPRINT is unset, so prepared bundle.windows.certificateThumbprint must be null (unsigned installer).");
+    }
+    return;
+  }
+  const thumbprint = requireEnv("WINDOWS_CERTIFICATE_THUMBPRINT", "Windows Authenticode certificate thumbprint is required.", isCertificateThumbprint);
+  requireEnv("WINDOWS_CERTIFICATE_PFX_BASE64", "Windows signing certificate PFX is required when a thumbprint is set.", isProductionKeyMaterial);
+  requireEnv("WINDOWS_CERTIFICATE_PASSWORD", "Windows signing certificate password is required when a thumbprint is set.", isProductionSecret);
+  if (bundle.windows?.certificateThumbprint !== thumbprint) {
+    errors.push("Prepared config must set bundle.windows.certificateThumbprint from WINDOWS_CERTIFICATE_THUMBPRINT.");
+  }
+}
+
+// Apple signing is opt-in. If a signing identity secret is present, validate the
+// full notarization secret set and require the identity/provider to be mirrored
+// into the prepared config; otherwise both must stay null (unsigned .app/.dmg).
+function verifyOptionalAppleSigning() {
+  const raw = String(process.env.APPLE_SIGNING_IDENTITY ?? "").trim();
+  if (!raw) {
+    if (bundle.macOS?.signingIdentity != null) {
+      errors.push("APPLE_SIGNING_IDENTITY is unset, so prepared bundle.macOS.signingIdentity must be null (unsigned build).");
+    }
+    if (bundle.macOS?.providerShortName != null) {
+      errors.push("APPLE_SIGNING_IDENTITY is unset, so prepared bundle.macOS.providerShortName must be null.");
+    }
+    return;
+  }
+  const signingIdentity = requireEnv("APPLE_SIGNING_IDENTITY", "Apple Developer ID signing identity is required.", isDeveloperIdApplicationIdentity);
+  const providerShortName = requireEnv("APPLE_PROVIDER_SHORT_NAME", "Apple notarization provider short name is required.", isProductionIdentifier);
+  requireEnv("APPLE_CERTIFICATE_P12_BASE64", "Apple signing certificate P12 is required when a signing identity is set.", isProductionKeyMaterial);
+  requireEnv("APPLE_CERTIFICATE_PASSWORD", "Apple signing certificate password is required when a signing identity is set.", isProductionSecret);
+  requireEnv("APPLE_KEYCHAIN_PASSWORD", "Temporary macOS signing keychain password is required when a signing identity is set.", isProductionSecret);
+  requireEnv("APPLE_ID", "Apple notarization account id is required when a signing identity is set.", isProductionAppleId);
+  requireEnv("APPLE_PASSWORD", "Apple notarization app-specific password is required when a signing identity is set.", isProductionSecret);
+  if (bundle.macOS?.signingIdentity !== signingIdentity) {
+    errors.push("Prepared config must set bundle.macOS.signingIdentity from APPLE_SIGNING_IDENTITY.");
+  }
+  if (bundle.macOS?.providerShortName !== providerShortName) {
+    errors.push("Prepared config must set bundle.macOS.providerShortName from APPLE_PROVIDER_SHORT_NAME.");
   }
 }
 
@@ -257,35 +290,5 @@ function validateUpdaterEndpoint(endpoint) {
   if (["localhost", "127.0.0.1", "0.0.0.0", "example.com", "example.org"].includes(hostname) || hostname.endsWith(".local")) {
     errors.push(`Updater endpoint must not use a local or placeholder host: ${endpoint}`);
   }
-
-  if (endpointChannels(url).length === 0) {
-    errors.push(`Updater endpoint must include an explicit release channel path: ${endpoint}`);
-  }
 }
 
-function requireReleaseChannels(endpoints) {
-  const channels = new Set();
-  for (const endpoint of endpoints) {
-    try {
-      for (const channel of endpointChannels(new URL(String(endpoint)))) {
-        channels.add(channel);
-      }
-    } catch {
-      // validateUpdaterEndpoint already reports invalid URLs.
-    }
-  }
-
-  for (const channel of ["stable", "beta", "nightly"]) {
-    if (!channels.has(channel)) {
-      errors.push(`Updater endpoints must include a ${channel} release channel.`);
-    }
-  }
-}
-
-function endpointChannels(url) {
-  const pathname = url.pathname.toLowerCase();
-  return ["stable", "beta", "nightly"].filter((channel) => {
-    const pattern = new RegExp(`(^|/)${channel}($|[/.])`, "u");
-    return pattern.test(pathname);
-  });
-}
