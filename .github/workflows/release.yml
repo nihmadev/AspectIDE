@@ -137,11 +137,6 @@ jobs:
             artifact: lux-ide-windows
             bundle_args: --bundles nsis
             target_args: ""
-          - label: macOS
-            os: macos-latest
-            artifact: lux-ide-macos
-            bundle_args: --bundles app,dmg
-            target_args: --target universal-apple-darwin
           - label: Linux
             os: ubuntu-latest
             artifact: lux-ide-linux
