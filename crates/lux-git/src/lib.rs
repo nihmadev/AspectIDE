@@ -14,16 +14,8 @@ const MAX_DIFF_PATCH_CHARS: usize = 120_000;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn status(root: impl AsRef<Path>) -> AppResult<GitStatus> {
-    let output = git_command()
-        .arg("-C")
-        .arg(root.as_ref())
-        .args([
-            "-c",
-            "core.quotePath=false",
-            "status",
-            "--porcelain=v1",
-            "--branch",
-        ])
+    let output = git_command(root.as_ref())
+        .args(["status", "--porcelain=v1", "--branch"])
         .output()?;
 
     if !output.status.success() {
@@ -37,18 +29,8 @@ pub fn status(root: impl AsRef<Path>) -> AppResult<GitStatus> {
 
 pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     let root = root.as_ref();
-    let stat_output = git_command()
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "core.quotePath=false",
-            "diff",
-            "--numstat",
-            "--find-renames",
-            "HEAD",
-            "--",
-        ])
+    let stat_output = git_command(root)
+        .args(["diff", "--numstat", "--find-renames", "HEAD", "--"])
         .output()?;
 
     if !stat_output.status.success() {
@@ -59,18 +41,8 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
         ));
     }
 
-    let name_status_output = git_command()
-        .arg("-C")
-        .arg(root)
-        .args([
-            "-c",
-            "core.quotePath=false",
-            "diff",
-            "--name-status",
-            "--find-renames",
-            "HEAD",
-            "--",
-        ])
+    let name_status_output = git_command(root)
+        .args(["diff", "--name-status", "--find-renames", "HEAD", "--"])
         .output()?;
 
     if !name_status_output.status.success() {
@@ -81,12 +53,8 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
         ));
     }
 
-    let patch_output = git_command()
-        .arg("-C")
-        .arg(root)
+    let patch_output = git_command(root)
         .args([
-            "-c",
-            "core.quotePath=false",
             "diff",
             "--find-renames",
             "--patch",
@@ -133,9 +101,33 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     })
 }
 
-fn git_command() -> Command {
+/// Builds a `git` invocation scoped to `root` with the process-spawning side
+/// channels git opens on Windows turned off.
+///
+/// The IDE polls `status`/`diff` on every filesystem change, so each extra
+/// helper git forks is multiplied into a flood. On Git-for-Windows the worst
+/// offenders are the fsmonitor hook (a shell script that shells out to
+/// `find.exe`) and background `gc --auto`/maintenance — both fired from
+/// read-only commands. Disabling them per-invocation keeps a single `git
+/// status` to a single process. `--no-optional-locks` additionally stops
+/// `status` from rewriting the index just to refresh it.
+fn git_command(root: &Path) -> Command {
     let mut command = Command::new("git");
     hide_process_window(&mut command);
+    command
+        .arg("--no-optional-locks")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "-c",
+            "gc.auto=0",
+            "-c",
+            "maintenance.auto=false",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.quotePath=false",
+        ]);
     command
 }
 

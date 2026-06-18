@@ -107,7 +107,15 @@ export function classifyAiChatError(error: unknown, t: TranslateFn): AiChatError
       canOpenSettings: false,
     };
   }
-  if (hasStreamingStarted(error) || /stream/.test(lower)) {
+  // "error decoding response body" is reqwest's opaque label for a streaming
+  // body that dropped mid-flight. The backend now rewrites it to a "stream
+  // interrupted" message, but match the raw phrase too so an unwrapped one still
+  // routes to the retry-able stream branch instead of the generic catch-all.
+  if (
+    hasStreamingStarted(error)
+    || /stream/.test(lower)
+    || /error decoding response body|connection (was )?(closed|reset|dropped)|incomplete (message|chunked)/.test(lower)
+  ) {
     return {
       kind: "stream",
       message: t("aiChat.error.stream", { detail }),

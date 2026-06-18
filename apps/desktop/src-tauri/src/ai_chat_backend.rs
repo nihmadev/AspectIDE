@@ -399,7 +399,7 @@ where
         if should_cancel() {
             break 'outer;
         }
-        let bytes = chunk.map_err(|error| error.to_string())?;
+        let bytes = chunk.map_err(|error| stream_chunk_error(&error))?;
         byte_tail.extend_from_slice(&bytes);
         // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
         // invalid byte (e.g. a stray 0xFF from a misbehaving provider) is replaced
@@ -985,8 +985,14 @@ fn completion_endpoint(base_url: &str) -> Result<String, String> {
 }
 
 /// Transient HTTP statuses worth one bounded automatic retry.
+///
+/// `403` is included deliberately: edge/CDN layers in front of OpenAI-compatible
+/// providers (Cloudflare challenges, regional WAFs, brief key-propagation gaps)
+/// routinely return a transient `403` that clears on a retry. A genuinely
+/// permanent forbidden just costs the two bounded backoff attempts before the
+/// real error surfaces.
 const fn is_transient_status(status: u16) -> bool {
-    matches!(status, 408 | 425 | 429 | 500 | 502 | 503 | 504)
+    matches!(status, 403 | 408 | 425 | 429 | 500 | 502 | 503 | 504)
 }
 
 /// Network-level reqwest errors that are safe to retry (connect/timeout/request).
@@ -1135,7 +1141,7 @@ async fn stream_completion(
         let Some(chunk) = chunk else {
             break;
         };
-        let bytes = chunk.map_err(|error| error.to_string())?;
+        let bytes = chunk.map_err(|error| stream_chunk_error(&error))?;
         byte_tail.extend_from_slice(&bytes);
         // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
         // invalid byte (e.g. a stray 0xFF from a misbehaving provider) is replaced
@@ -1216,6 +1222,21 @@ fn stream_response_error(status: u16, text: &str) -> String {
     } else {
         format!("AI provider stream error {status}: {message}")
     }
+}
+
+/// Turn a mid-stream `bytes_stream()` failure into an actionable message.
+///
+/// reqwest surfaces a dropped/transcoded streaming body as the opaque "error
+/// decoding response body", which tells the user nothing and isn't recognized by
+/// the frontend error classifier (so it shows as a bare "AI request failed").
+/// Tagging it as a stream error routes it to the retry-able "stream" branch and
+/// names the real cause (the connection dropped mid-generation).
+fn stream_chunk_error(error: &reqwest::Error) -> String {
+    let detail = error.to_string();
+    if detail.contains("error decoding response body") {
+        return "AI provider stream interrupted: the connection dropped mid-response. Retry to continue.".to_string();
+    }
+    format!("AI provider stream interrupted: {detail}")
 }
 
 fn normalize_sse_buffer_newlines(buffer: &mut String) {
@@ -1444,10 +1465,10 @@ mod tests {
 
     #[test]
     fn transient_status_classification() {
-        for status in [408, 425, 429, 500, 502, 503, 504] {
+        for status in [403, 408, 425, 429, 500, 502, 503, 504] {
             assert!(is_transient_status(status), "{status} should be transient");
         }
-        for status in [400, 401, 403, 404, 422] {
+        for status in [400, 401, 404, 422] {
             assert!(
                 !is_transient_status(status),
                 "{status} should not be transient"

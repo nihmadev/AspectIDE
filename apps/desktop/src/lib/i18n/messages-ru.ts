@@ -907,13 +907,16 @@ export const messagesRu: Messages = {
   "aiChat.error.toolRejected": "Вызов tool отклонён. {detail}",
   "aiChat.error.workspace": "Контекст workspace недоступен. Откройте проект и повторите. {detail}",
   "aiChat.error.fileNotFound": "Нужный файл не найден. {detail}",
-  "aiChat.error.stream": "Потоковый ответ сломался. Повтор использует тот же промпт. {detail}",
+  "aiChat.error.stream": "Потоковый ответ прервался. Нажмите «Повторить», чтобы продолжить ход. {detail}",
   "aiChat.error.generic": "Запрос ИИ завершился ошибкой. {detail}",
   "aiChat.error.tool": "Ошибка tool. {detail}",
   "aiChat.error.action.retry": "Повторить запрос",
   "aiChat.error.action.retryTools": "Повторить tools",
   "aiChat.error.action.retryApproval": "Повторить после approval",
   "aiChat.error.action.openSettings": "Настройки AI",
+  // Отправляется как ход пользователя при повторе: продолжает ход, сохраняя
+  // предыдущие рассуждения и вызовы tools ИИ, а не переигрывает заново.
+  "aiChat.retry.continue": "Продолжи",
 
   // AI tools.
   "aiTools.title": "AI tools",

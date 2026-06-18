@@ -907,13 +907,16 @@ export const messagesEn = {
   "aiChat.error.toolRejected": "Tool call was rejected. {detail}",
   "aiChat.error.workspace": "Workspace context is unavailable. Open a project and try again. {detail}",
   "aiChat.error.fileNotFound": "A required file was not found. {detail}",
-  "aiChat.error.stream": "Streaming response failed. Retrying uses the same prompt. {detail}",
+  "aiChat.error.stream": "Streaming response was interrupted. Retry to resume the turn. {detail}",
   "aiChat.error.generic": "AI request failed. {detail}",
   "aiChat.error.tool": "A tool call failed. {detail}",
   "aiChat.error.action.retry": "Retry request",
   "aiChat.error.action.retryTools": "Retry tools",
   "aiChat.error.action.retryApproval": "Retry after approval",
   "aiChat.error.action.openSettings": "AI settings",
+  // Sent as the user turn when retrying a failed request: resumes the turn,
+  // preserving the AI's prior reasoning and tool calls instead of replaying.
+  "aiChat.retry.continue": "Continue",
 
   // AI tools.
   "aiTools.title": "AI Tools",

@@ -1357,19 +1357,36 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   }, [activeChatSession, workspace]);
 
   const retryLastRequest = useCallback(() => {
-    const draft = lastUserDraft ?? [...messages].reverse().find((entry) => entry.role === "user")?.content ?? "";
-    if (!draft.trim() || activeSessionBusy || activeSessionClosed) return;
+    if (activeSessionBusy || activeSessionClosed) return;
     if (activeChatSession) {
-      const lastUserIndex = findLastUserMessageIndex(activeChatSession.messages);
+      // Strip only the failed turn's error bubble; the AI's reasoning and tool
+      // calls stay in the transcript.
+      const trimmed = stripTrailingErrorBubble(activeChatSession.messages, activeChatSession.lastError);
+      const tail = trimmed[trimmed.length - 1];
+      if (tail?.role === "assistant" && messageHasAssistantWork(tail)) {
+        // The model produced real work before failing: keep it and resume with a
+        // "continue" turn instead of wiping the thinking/actions and replaying.
+        if (trimmed !== activeChatSession.messages) {
+          replaceAiChatMessages(activeChatSession.id, trimmed);
+        }
+        void handleSend(t("aiChat.retry.continue"), trimmed, { force: true });
+        return;
+      }
+      // Nothing was produced (e.g. the request failed before the first token):
+      // replay the original prompt fresh, the same as before.
+      const lastUserIndex = findLastUserMessageIndex(trimmed);
       if (lastUserIndex >= 0) {
-        const nextHistory = activeChatSession.messages.slice(0, lastUserIndex);
+        const draft = lastUserDraft ?? trimmed[lastUserIndex].content ?? "";
+        if (!draft.trim()) return;
+        const nextHistory = trimmed.slice(0, lastUserIndex);
         replaceAiChatMessages(activeChatSession.id, nextHistory);
         void handleSend(draft, nextHistory);
         return;
       }
     }
-    void handleSend(draft);
-  }, [activeChatSession, activeSessionBusy, activeSessionClosed, handleSend, lastUserDraft, messages, replaceAiChatMessages]);
+    const draft = lastUserDraft ?? [...messages].reverse().find((entry) => entry.role === "user")?.content ?? "";
+    if (draft.trim()) void handleSend(draft);
+  }, [activeChatSession, activeSessionBusy, activeSessionClosed, handleSend, lastUserDraft, messages, replaceAiChatMessages, t]);
 
   const handleReviewAction = useCallback((messageId: string) => {
     if (!activeChatSession || activeSessionBusy || activeSessionClosed) return;
@@ -1891,6 +1908,27 @@ function findLastUserMessageIndex(messages: AiChatMessage[]) {
     if (messages[index].role === "user") return index;
   }
   return -1;
+}
+
+/** Real model output worth resuming from — reasoning, tool calls, or streamed
+ *  text segments. A bare error bubble has none of these. */
+function messageHasAssistantWork(message: AiChatMessage) {
+  return Boolean(
+    (message.segments?.length ?? 0) > 0
+    || (message.toolCalls?.length ?? 0) > 0
+    || message.reasoning?.trim(),
+  );
+}
+
+/** Drop the synthetic error bubble a failed turn appended (its content is the
+ *  session's `lastError`), so a retry resumes from the AI's preserved reasoning
+ *  and tool calls instead of replaying from scratch. */
+function stripTrailingErrorBubble(messages: AiChatMessage[], lastError: string | null) {
+  const last = messages[messages.length - 1];
+  if (last?.role === "assistant" && lastError && last.content === lastError && !messageHasAssistantWork(last)) {
+    return messages.slice(0, -1);
+  }
+  return messages;
 }
 
 function isAbortError(error: unknown) {
