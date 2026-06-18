@@ -23,10 +23,14 @@ const platformExtensions = new Map([
 // signature) use compound suffixes that `extname` cannot match. The updater
 // manifest (latest.json) is generated later from these. Collecting them here is
 // what makes the GitHub-Releases updater endpoint actually resolve.
+// Tauri v2 signs the installer artifacts directly (e.g. `*-setup.exe.sig`,
+// `*.AppImage.sig`), so the updater bundle IS the installer plus its detached
+// `.sig`. We also keep the legacy compound suffixes (`.nsis.zip[.sig]`,
+// `.appimage.tar.gz[.sig]`) for older Tauri output, in case it reappears.
 const platformUpdaterSuffixes = new Map([
-  ["win32", [".nsis.zip", ".nsis.zip.sig", ".msi.zip", ".msi.zip.sig"]],
-  ["darwin", [".app.tar.gz", ".app.tar.gz.sig"]],
-  ["linux", [".appimage.tar.gz", ".appimage.tar.gz.sig"]],
+  ["win32", [".exe.sig", ".msi.sig", ".nsis.zip", ".nsis.zip.sig", ".msi.zip", ".msi.zip.sig"]],
+  ["darwin", [".app.tar.gz", ".app.tar.gz.sig", ".dmg.sig"]],
+  ["linux", [".appimage.sig", ".deb.sig", ".rpm.sig", ".appimage.tar.gz", ".appimage.tar.gz.sig"]],
 ]);
 
 const allowedExtensions = platformExtensions.get(process.platform);

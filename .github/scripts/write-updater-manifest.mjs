@@ -26,14 +26,19 @@ if (!repository) throw new Error("GITHUB_REPOSITORY is required.");
 // platforms as `<os>-<arch>`; the universal macOS build serves both arches.
 function targetsForAsset(name) {
   const lower = name.toLowerCase();
-  if (lower.endsWith(".nsis.zip") || lower.endsWith(".msi.zip")) {
+  // Tauri v2 signs installers directly (`*-setup.exe.sig`, `*.AppImage.sig`, …);
+  // the legacy compound bundles (`.nsis.zip`, `.app.tar.gz`, `.appimage.tar.gz`)
+  // are kept for backward compatibility.
+  if (lower.endsWith(".exe") || lower.endsWith(".msi") || lower.endsWith(".nsis.zip") || lower.endsWith(".msi.zip")) {
     return ["windows-x86_64"];
   }
-  if (lower.endsWith(".app.tar.gz")) {
+  if (lower.endsWith(".app.tar.gz") || lower.endsWith(".dmg")) {
     // Universal-darwin bundle is valid for both Apple Silicon and Intel.
     return ["darwin-x86_64", "darwin-aarch64"];
   }
-  if (lower.endsWith(".appimage.tar.gz")) {
+  // Prefer the AppImage as the Linux updater target; .deb/.rpm are not updater
+  // bundles even though Tauri emits a `.sig` next to them.
+  if (lower.endsWith(".appimage") || lower.endsWith(".appimage.tar.gz")) {
     return ["linux-x86_64"];
   }
   return [];
