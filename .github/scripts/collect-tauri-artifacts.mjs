@@ -1,7 +1,15 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 
-const bundleRoot = "apps/desktop/src-tauri/target/release/bundle";
+// This is a Cargo workspace, so build output lands in the workspace-root `target/`,
+// not under the crate. The macOS universal build adds a target-triple segment.
+// Collect from whichever known locations exist.
+const bundleRootCandidates = [
+  "target/release/bundle",
+  "target/universal-apple-darwin/release/bundle",
+  "apps/desktop/src-tauri/target/release/bundle",
+  "apps/desktop/src-tauri/target/universal-apple-darwin/release/bundle",
+];
 const outputRoot = "release-assets";
 
 // User-facing installers, by platform.
@@ -28,8 +36,11 @@ if (!allowedExtensions || !updaterSuffixes) {
   throw new Error(`Unsupported release platform: ${process.platform}`);
 }
 
-if (!existsSync(bundleRoot)) {
-  throw new Error(`Tauri bundle output was not found: ${bundleRoot}`);
+const bundleRoots = bundleRootCandidates.filter((root) => existsSync(root));
+if (bundleRoots.length === 0) {
+  throw new Error(
+    `Tauri bundle output was not found in any known location: ${bundleRootCandidates.join(", ")}`,
+  );
 }
 
 rmSync(outputRoot, { force: true, recursive: true });
@@ -40,13 +51,14 @@ const matchesUpdaterSuffix = (file) => {
   return updaterSuffixes.some((suffix) => lower.endsWith(suffix));
 };
 
-const files = walk(bundleRoot)
+const files = bundleRoots
+  .flatMap((root) => walk(root))
   .filter((file) => allowedExtensions.has(extname(file).toLowerCase()) || matchesUpdaterSuffix(file))
   .sort((left, right) => left.localeCompare(right));
 
 if (files.length === 0) {
   throw new Error(
-    `No release artifacts found for ${process.platform} in ${bundleRoot}.`,
+    `No release artifacts found for ${process.platform} in ${bundleRoots.join(", ")}.`,
   );
 }
 
