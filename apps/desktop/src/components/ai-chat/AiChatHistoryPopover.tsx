@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { createPortal } from "react-dom";
 import { exportChatSessionMarkdown } from "../../lib/aiChatExport";
 import { aiChatSessionTitle, aiChatStatusLabel } from "../../lib/aiChatPresentation";
+import { sameWorkspaceRoot } from "../../lib/fileTree";
 import { useTranslation } from "../../lib/i18n/useTranslation";
 import { useLuxStore, type AiChatSession } from "../../lib/store";
 
@@ -34,7 +35,7 @@ export function AiChatHistoryPopover({ workspaceRoot }: AiChatHistoryPopoverProp
   const pinChatSession = useLuxStore((state) => state.pinAiChatSession);
 
   const scopedSessions = useMemo(
-    () => chatSessions.filter((session) => session.workspaceRoot === workspaceRoot),
+    () => chatSessions.filter((session) => sameWorkspaceRoot(session.workspaceRoot, workspaceRoot)),
     [chatSessions, workspaceRoot],
   );
   const filteredSessions = useMemo(() => {

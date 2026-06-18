@@ -1,6 +1,6 @@
 [package]
 name = "lux-desktop"
-version = "1.0.1"
+version = "1.0.2"
 description = "Lux IDE desktop shell"
 edition.workspace = true
 license.workspace = true

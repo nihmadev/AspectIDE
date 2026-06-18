@@ -10,6 +10,17 @@ export function normalizePath(path: string) {
   return cleanPath(path).replace(/\/+$/, "").toLowerCase();
 }
 
+/** Robust workspace-root equality: the same folder can arrive with different slash
+ *  direction, trailing slash, or letter case (Windows), so a raw `===` wrongly
+ *  scatters a project's chats. Compare on the normalized form (null = no workspace). */
+export function sameWorkspaceRoot(a: string | null | undefined, b: string | null | undefined) {
+  const left = a ?? null;
+  const right = b ?? null;
+  if (left === right) return true;
+  if (left === null || right === null) return false;
+  return normalizePath(left) === normalizePath(right);
+}
+
 export function displayPath(path: string) {
   return cleanPath(path);
 }

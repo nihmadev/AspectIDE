@@ -77,7 +77,8 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
             { "role": "user", "content": user_parts.join("\n\n") },
         ],
         "temperature": 0.2,
-        "stream": false,
+        "stream": true,
+        "stream_options": { "include_usage": true },
         "max_tokens": max_tokens,
     });
     crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
@@ -88,7 +89,12 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
         payload,
     );
 
-    let response = crate::ai_chat_backend::completion(request).await?;
+    // Stream: a non-streaming request hangs against SSE-only providers/proxies, and
+    // compaction fires automatically mid-conversation, so a stall reads as the chat
+    // freezing. The summary itself isn't surfaced token-by-token, so on_delta is a
+    // no-op.
+    let response =
+        crate::ai_chat_backend::completion_streaming(request, |_, _| {}, || false).await?;
     let content = response
         .body
         .pointer("/choices/0/message/content")

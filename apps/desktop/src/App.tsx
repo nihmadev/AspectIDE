@@ -242,7 +242,9 @@ export function App() {
   useEffect(() => {
     void luxCommands.settingsGet("user", AI_PREFERENCES_KEY)
       .then((setting) => {
-        const prefs = setting ? normalizeAiPreferences(setting.value) : null;
+        // preserveText: this is the user's saved prefs, not display defaults — keep
+        // multi-line editable bodies (custom system prompt, instructions) verbatim.
+        const prefs = setting ? normalizeAiPreferences(setting.value, { preserveText: true }) : null;
         if (prefs) setAiPreferences(prefs);
         // Apply the persisted (or default) scan/search CPU budget to the Rust
         // worker pools on startup so the policy is in effect before any scan.

@@ -9,7 +9,7 @@ import { normalizeAiMessageReasoning } from "./aiChatReasoning";
 import type { AiChatMessage, AiMessageSegment } from "./aiChatTypes";
 import type { AiProjectIndexBucket, AiProjectIndexFile, AiProjectIndexQuality, AiProjectIndexSource } from "./aiProjectIndex";
 import { defaultEditorPreferences, mergeEditorPreferences, type EditorPreferences } from "./editorPreferences";
-import { normalizePath, type FileTreeDirectories } from "./fileTree";
+import { normalizePath, sameWorkspaceRoot, type FileTreeDirectories } from "./fileTree";
 import { DEFAULT_LOCALE, type Locale } from "./i18n";
 import { defaultKeybindingProfile } from "./keybindings";
 import type { TerminalOutputBuffer } from "./terminalTypes";
@@ -354,7 +354,7 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   },
   ensureAiChatSession: (workspaceRoot = get().workspace?.root ?? null) => {
     const current = get();
-    const reusable = current.aiChatSessions.find((session) => !session.closedAt && session.workspaceRoot === workspaceRoot && isEmptyAiChatSession(session));
+    const reusable = current.aiChatSessions.find((session) => !session.closedAt && sameWorkspaceRoot(session.workspaceRoot, workspaceRoot) && isEmptyAiChatSession(session));
     if (reusable) {
       set({ activeAiChatSessionId: reusable.id, aiChatOpen: true });
       return { id: reusable.id, reused: true };
@@ -468,9 +468,9 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   setKeybindingProfile: (keybindingProfile) => set({ keybindingProfile }),
   setWorkspace: (workspace) =>
     set((state) => {
-      const sameWorkspace = Boolean(workspace && state.workspace?.root === workspace.root);
+      const sameWorkspace = Boolean(workspace && sameWorkspaceRoot(state.workspace?.root, workspace.root));
       const workspaceChatSession = workspace
-        ? state.aiChatSessions.find((session) => !session.closedAt && session.workspaceRoot === workspace.root)
+        ? state.aiChatSessions.find((session) => !session.closedAt && sameWorkspaceRoot(session.workspaceRoot, workspace.root))
         : state.aiChatSessions.find((session) => !session.closedAt && session.workspaceRoot === null) ?? null;
       const fallbackChatSession = workspace ? createAiChatSession(workspace.root) : createAiChatSession(null);
       const aiChatSessions = sameWorkspace || !fallbackChatSession

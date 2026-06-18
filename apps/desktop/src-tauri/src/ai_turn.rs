@@ -2369,7 +2369,8 @@ async fn run_subagent(
             "model": parent.model,
             "messages": messages,
             "temperature": 0.2,
-            "stream": false,
+            "stream": true,
+            "stream_options": { "include_usage": true },
             "tools": tools,
             "tool_choice": "auto",
         });
@@ -2380,7 +2381,20 @@ async fn run_subagent(
             parent.api_key.clone(),
             payload,
         );
-        let response = crate::ai_chat_backend::completion(request).await?;
+        // Use the streaming transport (the same one the parent turn uses). A
+        // non-streaming request hangs against providers/local proxies that only
+        // speak SSE — every round stalls until the request timeout, which the user
+        // experiences as the whole IDE freezing while a subagent runs. Streaming
+        // also lets a parent Stop abort the model call mid-flight (the `should_cancel`
+        // hook) instead of only between rounds. The subagent is an isolated context,
+        // so its tokens are intentionally not forwarded to the parent UI.
+        let cancel_turn = parent_turn_id.to_string();
+        let response = crate::ai_chat_backend::completion_streaming(
+            request,
+            |_content, _reasoning| {},
+            move || is_turn_cancelled(&cancel_turn),
+        )
+        .await?;
         let assistant = parse_assistant_message(&response.body);
         if !assistant.content.is_empty() {
             final_content = assistant.content.clone();

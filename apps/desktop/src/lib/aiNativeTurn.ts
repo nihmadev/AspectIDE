@@ -3,6 +3,7 @@ import { createTurnTimeline } from "./aiChatTimeline";
 import { isAnthropicCacheModel, reasoningPayload } from "./aiChatTransport";
 import { attachTurnCostEstimate } from "./aiTurnUsage";
 import { buildUserContent } from "./aiRuntimePrompt";
+import { bridgeNativeToolCompleted, bridgeNativeToolStarted } from "./aiNativeOrchestrationBridge";
 import { clearPendingQuestionsForSession, registerPendingQuestion } from "./aiPendingQuestion";
 import { clearPendingPlansForSession, getPendingPlanForSession, registerPendingPlan } from "./aiPendingPlan";
 import { browserSessionName, ensureBrowserStream } from "./agentBrowser";
@@ -79,6 +80,9 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
   // after tools run.
   let roundContent = "";
   let roundReasoning = "";
+  // toolCallCompleted carries no tool name, so remember it from toolCallStarted to
+  // route the orchestration bridge (TodoWrite/Goal/Task) on completion.
+  const toolNameByCallId = new Map<string, string>();
 
   return await new Promise<AiChatMessage>((resolve, reject) => {
     let unlisten: (() => void) | undefined;
@@ -150,6 +154,10 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             status: "running",
             startTime: Date.now(),
           }]);
+          // Mirror native orchestration tools into the Agent-rail stores (the Rust
+          // loop executes them but can't write the TS stores the panel reads).
+          toolNameByCallId.set(event.callId, event.tool);
+          bridgeNativeToolStarted(input.chatSessionId, event.callId, event.tool, event.input);
           break;
         case "toolCallCompleted": {
           const completed = timeline.updateToolCall(event.callId, {
@@ -158,6 +166,7 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             ...(event.error ? { error: event.error } : {}),
             endTime: Date.now(),
           });
+          bridgeNativeToolCompleted(input.chatSessionId, event.callId, toolNameByCallId.get(event.callId) ?? "", event.status, event.output);
           // A successful navigational browser tool means the agent is driving a live
           // page — reflect it in the preview (stream + blue activity dot) automatically.
           if (event.status !== "error" && completed && NAVIGATIONAL_BROWSER_TOOLS.has(completed.tool)) {

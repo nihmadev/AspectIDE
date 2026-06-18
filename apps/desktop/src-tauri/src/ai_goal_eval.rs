@@ -72,7 +72,8 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
             { "role": "user", "content": user },
         ],
         "temperature": 0.1,
-        "stream": false,
+        "stream": true,
+        "stream_options": { "include_usage": true },
     });
     crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
 
@@ -82,7 +83,9 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
         payload,
     );
 
-    match crate::ai_chat_backend::completion(request).await {
+    // Stream: non-streaming requests hang against SSE-only providers/proxies. The
+    // verdict is parsed from the final content, so on_delta is a no-op.
+    match crate::ai_chat_backend::completion_streaming(request, |_, _| {}, || false).await {
         Ok(response) => {
             let content = response
                 .body

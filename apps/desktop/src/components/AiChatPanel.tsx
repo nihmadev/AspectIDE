@@ -208,6 +208,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [mentionMenuOpen, setMentionMenuOpen] = useState(false);
   const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
+  // True once the user arrow-navigates the mention menu. Until then, Enter sends
+  // the message instead of picking a candidate (so "@foo" + Enter isn't swallowed).
+  const [mentionNavigated, setMentionNavigated] = useState(false);
   const [mentionCandidates, setMentionCandidates] = useState<AiMentionCandidate[]>([]);
   const [compacting, setCompacting] = useState(false);
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
@@ -345,6 +348,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     setSlashActiveIndex(0);
     setMentionMenuOpen(mentionMenuVisible(message));
     setMentionActiveIndex(0);
+    setMentionNavigated(false);
   }, [message]);
 
   useEffect(() => {
@@ -1452,15 +1456,21 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     if (mentionMenuOpen && mentionCandidates.length > 0) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
+        setMentionNavigated(true);
         setMentionActiveIndex((index) => (index + 1) % mentionCandidates.length);
         return;
       }
       if (event.key === "ArrowUp") {
         event.preventDefault();
+        setMentionNavigated(true);
         setMentionActiveIndex((index) => (index - 1 + mentionCandidates.length) % mentionCandidates.length);
         return;
       }
-      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
+      // Tab always picks the highlighted candidate. Enter only picks it when the
+      // user has actually navigated the menu (arrow keys); a bare "@word" + Enter
+      // must SEND the message, not silently swallow it into a mention pick. This
+      // also avoids acting on stale candidates from the search debounce.
+      if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey && mentionNavigated)) {
         event.preventDefault();
         const selected = mentionCandidates[mentionActiveIndex];
         if (selected) handleMentionSelect(selected);
@@ -1498,7 +1508,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
     void handleSend();
-  }, [handleMentionSelect, handleSend, handleSlashSelect, mentionActiveIndex, mentionCandidates, mentionMenuOpen, slashActiveIndex, slashCommands, slashMenuOpen]);
+  }, [handleMentionSelect, handleSend, handleSlashSelect, mentionActiveIndex, mentionCandidates, mentionMenuOpen, mentionNavigated, slashActiveIndex, slashCommands, slashMenuOpen]);
 
   // In the dedicated Agent workspace the left rail already owns New chat,
   // History and the browser-preview button — so the in-chat header would only

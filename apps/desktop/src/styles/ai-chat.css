@@ -837,13 +837,27 @@
 }
 
 .ai-agent-goal-island {
+  position: relative;
   width: 100%;
   padding: 12px 14px 13px;
   border-radius: var(--radius-lg);
-  background: var(--surface-1);
+  background: linear-gradient(180deg, var(--surface-1), var(--surface-0));
   border: 1px solid var(--border-subtle);
-  box-shadow: inset 0 1px 0 var(--on-surface-faint);
-  text-align: center;
+  box-shadow: inset 0 1px 0 var(--on-surface-faint), 0 1px 2px rgba(0, 0, 0, 0.18);
+  text-align: left;
+}
+
+/* A filled goal gets a subtle accent spine on the left edge — reads as "pinned". */
+.ai-agent-goal-island:not([data-empty="true"])::before {
+  content: "";
+  position: absolute;
+  top: 11px;
+  bottom: 11px;
+  left: 0;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+  opacity: 0.7;
 }
 
 .ai-agent-goal-island[data-empty="true"] {
@@ -851,24 +865,46 @@
   border-style: dashed;
   border-color: var(--border-strong);
   box-shadow: none;
+  text-align: center;
 }
 
 .ai-agent-goal-island-label {
-  display: block;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   margin-bottom: 7px;
   color: var(--text-3);
   font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.1em;
+  font-weight: 700;
+  letter-spacing: 0.11em;
   text-transform: uppercase;
+}
+
+.ai-agent-goal-island[data-empty="true"] .ai-agent-goal-island-label {
+  justify-content: center;
+}
+
+.ai-agent-goal-island-label::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--hover);
+}
+
+.ai-agent-goal-island[data-empty="true"] .ai-agent-goal-island-label::before {
+  background: var(--text-3);
+  box-shadow: none;
 }
 
 .ai-agent-goal-island-text {
   margin: 0;
-  color: var(--text-1);
-  font-size: 11.5px;
-  line-height: 1.5;
-  text-align: center;
+  color: var(--text-0);
+  font-size: 12px;
+  line-height: 1.55;
+  font-weight: 550;
+  text-align: left;
   word-break: break-word;
   display: -webkit-box;
   -webkit-line-clamp: 6;
@@ -1606,6 +1642,14 @@
   font-size: 12px;
 }
 
+/* Final-answer typography: an airy, document-like rhythm (Codex lineage). The
+   markdown wrapper reuses .ai-chat-message-content's grid, so a slightly larger
+   gap separates every block uniformly without per-element margin juggling. */
+.ai-chat-markdown {
+  gap: 11px;
+  line-height: 1.62;
+}
+
 .ai-chat-markdown > :first-child,
 .ai-chat-list-item-content > :first-child {
   margin-top: 0;
@@ -1626,11 +1670,17 @@
 .ai-chat-markdown h4,
 .ai-chat-markdown h5,
 .ai-chat-markdown h6 {
-  margin: 3px 0 1px;
-  color: #f0f0f0;
+  /* Extra top space (added on top of the grid gap) so a heading clearly opens a
+     new section instead of hugging the paragraph above it. */
+  margin: 5px 0 0;
+  color: #f6f6f6;
   font-weight: 750;
-  line-height: 1.25;
-  letter-spacing: 0;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+}
+
+.ai-chat-markdown > :first-child:is(h1, h2, h3, h4, h5, h6) {
+  margin-top: 0;
 }
 
 .ai-chat-markdown h1 { font-size: 16px; }
@@ -1675,13 +1725,15 @@
 .ai-chat-markdown ul,
 .ai-chat-markdown ol {
   display: grid;
-  gap: 4px;
+  gap: 5px;
   margin: 0;
-  padding-left: 18px;
+  padding-left: 20px;
 }
 
 .ai-chat-markdown li {
   min-width: 0;
+  padding-left: 2px;
+  line-height: 1.55;
 }
 
 .ai-chat-markdown li::marker {

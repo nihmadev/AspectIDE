@@ -323,7 +323,7 @@ function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
   if (!segments || segments.length === 0) {
     if (message.reasoning && message.reasoning.trim().length > 0) {
       flowNodes.push(
-        <AiReasoningBlock key="reasoning" text={coerceChatMessageText(message.reasoning)} streaming={streaming} hasAnswer={Boolean(coerceChatMessageText(message.content).trim())} t={t} />,
+        <AiReasoningBlock key="reasoning" text={coerceChatMessageText(message.reasoning)} streaming={streaming} t={t} />,
       );
     }
     if (message.toolCalls && message.toolCalls.length > 0) {
@@ -346,17 +346,20 @@ function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
         toolBatch.push(segment);
         return;
       }
+      // An empty reasoning/text segment is not a real visual break, so it must NOT
+      // split an in-progress tool group — otherwise consecutive tool rounds with
+      // only blank scaffolding between them render as several collapsed groups
+      // instead of one. Only flush the accumulated tools right before a segment
+      // that actually renders.
+      if (segment.text.trim().length === 0) return;
       flushTools(`${index}`);
       if (segment.kind === "reasoning") {
-        if (segment.text.trim().length === 0) return;
         const isLast = index === segments.length - 1;
-        const followedByAnswer = segments.slice(index + 1).some((entry) => entry.kind === "text" && entry.text.trim().length > 0);
         flowNodes.push(
-          <AiReasoningBlock key={segment.id} text={coerceChatMessageText(segment.text)} streaming={streaming && isLast} hasAnswer={followedByAnswer} t={t} />,
+          <AiReasoningBlock key={segment.id} text={coerceChatMessageText(segment.text)} streaming={streaming && isLast} t={t} />,
         );
         return;
       }
-      if (segment.text.trim().length === 0) return;
       flowNodes.push(<MarkdownMessage key={segment.id} content={coerceChatMessageText(segment.text)} t={t} />);
     });
     flushTools("tail");
@@ -419,14 +422,16 @@ function formatAttachmentSize(bytes: number, t: TranslateFn) {
   return t("common.fileSize.megabytes", { megabytes: megabytes >= 10 ? megabytes.toFixed(0) : megabytes.toFixed(1) });
 }
 
-function AiReasoningBlock({ text, streaming, hasAnswer, t }: {
+function AiReasoningBlock({ text, streaming, t }: {
   text: string;
   streaming: boolean;
-  hasAnswer: boolean;
   t: TranslateFn;
 }) {
   const [userToggled, setUserToggled] = useState<boolean | null>(null);
-  const autoOpen = streaming || !hasAnswer;
+  // Open only while this block is actively thinking. Once thinking finishes it
+  // auto-collapses (a finished thought shouldn't stay expanded just because the
+  // final answer hasn't arrived yet — e.g. while tools are still running).
+  const autoOpen = streaming;
   const open = userToggled ?? autoOpen;
   const label = streaming ? t("aiChat.reasoning.thinking") : t("aiChat.reasoning.thought");
   useEffect(() => {

@@ -282,10 +282,21 @@ pub async fn completion(
             return Err(response_error(status, &body));
         }
 
-        let body = response
-            .json::<Value>()
+        // Read the body as text first so a non-JSON response (HTML error page, an
+        // empty body, or an SSE stream returned to a non-stream request) yields an
+        // actionable message instead of the opaque "error decoding response body".
+        let text = response
+            .text()
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| format!("Failed to read AI provider response: {error}"))?;
+        let body = serde_json::from_str::<Value>(&text).map_err(|_| {
+            let preview: String = text.trim().chars().take(180).collect();
+            if preview.is_empty() {
+                "AI provider returned an empty response. Check the model id, base URL, and that the endpoint is an OpenAI-compatible /chat/completions.".to_string()
+            } else {
+                format!("AI provider returned a non-JSON response (is the base URL correct?): {preview}")
+            }
+        })?;
         return Ok(AiChatCompletionResponse { status, body });
     }
 }

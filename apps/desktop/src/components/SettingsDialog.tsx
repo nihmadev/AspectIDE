@@ -233,7 +233,9 @@ export function SettingsDialog() {
 
     let cancelled = false;
     void luxCommands.settingsGet(scope, AI_PREFERENCES_KEY).then((setting) => {
-      if (!cancelled && setting) setAiPreferences(normalizeAiPreferences(setting.value));
+      // preserveText: saved user prefs (custom prompt + instructions) must load
+      // verbatim, not be run through display normalization that trims/replaces them.
+      if (!cancelled && setting) setAiPreferences(normalizeAiPreferences(setting.value, { preserveText: true }));
     }).catch(() => undefined);
     void luxCommands.settingsGet(scope, EDITOR_PREFERENCES_KEY).then((setting) => {
       if (!cancelled && setting) setEditorPreferences(normalizeEditorPreferences(setting.value));
