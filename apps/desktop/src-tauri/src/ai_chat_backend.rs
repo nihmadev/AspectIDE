@@ -458,6 +458,9 @@ where
         }
     }
 
+    // Emit any buffered partial `<think>` tail so the last fragment isn't dropped.
+    accumulator.flush(&mut on_delta);
+
     Ok(AiChatCompletionResponse {
         status: 200,
         body: accumulator.into_response_body(),
@@ -474,7 +477,18 @@ struct StreamAccumulator {
     tool_calls: Vec<StreamToolCall>,
     usage: Option<Value>,
     finish_reason: Option<String>,
+    // Inline-`<think>` extraction state. Many local proxies don't map a model's
+    // thinking onto `reasoning_content`/`reasoning`; they emit a leading
+    // `<think>…</think>` block inside `content`. We strip that block out of the
+    // answer and route it to the reasoning channel so the UI shows it as thinking.
+    in_think: bool,
+    think_resolved: bool,
+    think_carry: String,
 }
+
+/// Opening / closing inline-thinking tags recognized in streamed `content`.
+const THINK_OPEN_TAGS: [&str; 2] = ["<think>", "<thinking>"];
+const THINK_CLOSE_TAGS: [&str; 2] = ["</think>", "</thinking>"];
 
 #[derive(Default)]
 struct StreamToolCall {
@@ -501,25 +515,104 @@ impl StreamAccumulator {
             self.finish_reason = Some(reason.to_string());
         }
         let delta = choice.get("delta").unwrap_or(choice);
-        let content = delta.get("content").and_then(Value::as_str).unwrap_or("");
-        let reasoning = delta
-            .get("reasoning_content")
-            .or_else(|| delta.get("reasoning"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
+        let raw_content = delta.get("content").and_then(Value::as_str).unwrap_or("");
+        // Reasoning the provider reports explicitly (various field shapes).
+        let explicit_reasoning = extract_reasoning_field(delta);
+        // Reasoning carried inline as a `<think>` block inside `content`.
+        let (content, inline_reasoning) = if raw_content.is_empty() {
+            (String::new(), String::new())
+        } else {
+            self.split_inline_think(raw_content)
+        };
+        let mut reasoning = explicit_reasoning;
+        reasoning.push_str(&inline_reasoning);
+
         if !content.is_empty() {
-            self.content.push_str(content);
+            self.content.push_str(&content);
         }
         if !reasoning.is_empty() {
-            self.reasoning.push_str(reasoning);
+            self.reasoning.push_str(&reasoning);
         }
         if !content.is_empty() || !reasoning.is_empty() {
-            on_delta(content, reasoning);
+            on_delta(&content, &reasoning);
         }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 self.merge_tool_call(call);
             }
+        }
+    }
+
+    /// Split a streamed `content` chunk into (answer, thinking), extracting an
+    /// inline `<think>…</think>` block. The block is only recognized at the very
+    /// start of the answer (thinking always precedes the answer), so a literal
+    /// `<think>` appearing later in real content is left untouched. Tags split
+    /// across chunks are handled via `think_carry`.
+    fn split_inline_think(&mut self, chunk: &str) -> (String, String) {
+        self.think_carry.push_str(chunk);
+        let mut out_content = String::new();
+        let mut out_reasoning = String::new();
+        loop {
+            if self.in_think {
+                if let Some((index, len)) = find_tag(&self.think_carry, &THINK_CLOSE_TAGS) {
+                    out_reasoning.push_str(&self.think_carry[..index]);
+                    self.think_carry.drain(..index + len);
+                    self.in_think = false;
+                    self.think_resolved = true;
+                    continue;
+                }
+                // No close tag yet: emit reasoning but hold back a possible partial
+                // close-tag suffix that might complete in the next chunk.
+                let keep = partial_tag_tail(&self.think_carry, &THINK_CLOSE_TAGS);
+                let emit_to = self.think_carry.len() - keep;
+                out_reasoning.push_str(&self.think_carry[..emit_to]);
+                self.think_carry.drain(..emit_to);
+                break;
+            }
+            if self.think_resolved {
+                out_content.push_str(&self.think_carry);
+                self.think_carry.clear();
+                break;
+            }
+            // Undecided: a `<think>` block is only valid as the leading content.
+            let lead_ws = self.think_carry.len() - self.think_carry.trim_start().len();
+            let rest = &self.think_carry[lead_ws..];
+            if rest.is_empty() {
+                out_content.push_str(&self.think_carry);
+                self.think_carry.clear();
+                break;
+            }
+            if let Some(len) = prefix_tag(rest, &THINK_OPEN_TAGS) {
+                out_content.push_str(&self.think_carry[..lead_ws]);
+                self.think_carry.drain(..lead_ws + len);
+                self.in_think = true;
+                continue;
+            }
+            if is_tag_prefix(rest, &THINK_OPEN_TAGS) {
+                // `rest` could still grow into an opening tag — emit any leading
+                // whitespace and wait for the next chunk.
+                out_content.push_str(&self.think_carry[..lead_ws]);
+                self.think_carry.drain(..lead_ws);
+                break;
+            }
+            // Definitely not a leading think block — stop scanning for one.
+            self.think_resolved = true;
+        }
+        (out_content, out_reasoning)
+    }
+
+    /// Flush any buffered partial tag at end of stream so nothing is dropped.
+    fn flush<F: FnMut(&str, &str)>(&mut self, on_delta: &mut F) {
+        if self.think_carry.is_empty() {
+            return;
+        }
+        let carry = std::mem::take(&mut self.think_carry);
+        if self.in_think {
+            self.reasoning.push_str(&carry);
+            on_delta("", &carry);
+        } else {
+            self.content.push_str(&carry);
+            on_delta(&carry, "");
         }
     }
 
@@ -585,6 +678,81 @@ impl StreamAccumulator {
         }
         body
     }
+}
+
+/// Pull a provider's explicitly-reported reasoning out of a streamed delta,
+/// tolerating the several shapes providers use: `reasoning_content`, a string
+/// `reasoning`, `thinking`, or a `reasoning: { content | text }` object.
+fn extract_reasoning_field(delta: &Value) -> String {
+    for key in ["reasoning_content", "reasoning", "thinking"] {
+        if let Some(text) = delta.get(key).and_then(Value::as_str) {
+            if !text.is_empty() {
+                return text.to_string();
+            }
+        }
+    }
+    if let Some(object) = delta.get("reasoning").and_then(Value::as_object) {
+        for key in ["content", "text"] {
+            if let Some(text) = object.get(key).and_then(Value::as_str) {
+                if !text.is_empty() {
+                    return text.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// First (lowest-index) occurrence of any `tags` entry in `haystack`, matched
+/// case-insensitively. Returns `(byte_index, tag_len)`. Tags are ASCII, so
+/// lowercasing preserves byte positions and lengths.
+fn find_tag(haystack: &str, tags: &[&str]) -> Option<(usize, usize)> {
+    let lower = haystack.to_ascii_lowercase();
+    tags.iter()
+        .filter_map(|tag| lower.find(tag).map(|index| (index, tag.len())))
+        .min_by_key(|(index, _)| *index)
+}
+
+/// `Some(tag_len)` when `text` starts with one of `tags` (case-insensitive).
+fn prefix_tag(text: &str, tags: &[&str]) -> Option<usize> {
+    let lower = text.to_ascii_lowercase();
+    tags.iter()
+        .find(|tag| lower.starts_with(**tag))
+        .map(|tag| tag.len())
+}
+
+/// True when `text` is a non-empty *proper* prefix of some tag (so the tag may
+/// still complete in a later chunk).
+fn is_tag_prefix(text: &str, tags: &[&str]) -> bool {
+    let lower = text.to_ascii_lowercase();
+    !lower.is_empty()
+        && tags
+            .iter()
+            .any(|tag| lower.len() < tag.len() && tag.starts_with(&lower))
+}
+
+/// Length of the longest suffix of `s` that is a prefix of some tag — i.e. how
+/// many trailing bytes to hold back in case a tag is split across chunks.
+fn partial_tag_tail(s: &str, tags: &[&str]) -> usize {
+    let lower = s.to_ascii_lowercase();
+    let n = lower.len();
+    let max = tags
+        .iter()
+        .map(|t| t.len())
+        .max()
+        .unwrap_or(0)
+        .saturating_sub(1)
+        .min(n);
+    for k in (1..=max).rev() {
+        if !s.is_char_boundary(n - k) {
+            continue;
+        }
+        let suffix = &lower[n - k..];
+        if tags.iter().any(|tag| tag.starts_with(suffix)) {
+            return k;
+        }
+    }
+    0
 }
 
 pub fn history_load(app: &AppHandle) -> Result<AiChatHistoryResponse, String> {
@@ -1119,6 +1287,103 @@ fn emit_stream_event(app: &AppHandle, event: AiChatStreamEvent) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Drive the accumulator with a sequence of content/reasoning deltas and return
+    // the final (answer, thinking) after flush.
+    fn run_stream(chunks: &[(&str, &str)]) -> (String, String) {
+        let mut acc = StreamAccumulator::default();
+        let mut seen_content = String::new();
+        let mut seen_reasoning = String::new();
+        let mut on_delta = |c: &str, r: &str| {
+            seen_content.push_str(c);
+            seen_reasoning.push_str(r);
+        };
+        for (content, reasoning) in chunks {
+            let mut delta = serde_json::Map::new();
+            if !content.is_empty() {
+                delta.insert("content".into(), Value::String((*content).into()));
+            }
+            if !reasoning.is_empty() {
+                delta.insert(
+                    "reasoning_content".into(),
+                    Value::String((*reasoning).into()),
+                );
+            }
+            let value = serde_json::json!({ "choices": [{ "delta": Value::Object(delta) }] });
+            acc.ingest(&value, &mut on_delta);
+        }
+        acc.flush(&mut on_delta);
+        // The streamed deltas and the accumulated body must agree.
+        assert_eq!(seen_content, acc.content);
+        assert_eq!(seen_reasoning, acc.reasoning);
+        (acc.content, acc.reasoning)
+    }
+
+    #[test]
+    fn inline_think_block_is_routed_to_reasoning() {
+        let (content, reasoning) =
+            run_stream(&[("<think>planning the answer</think>Hello world", "")]);
+        assert_eq!(content, "Hello world");
+        assert_eq!(reasoning, "planning the answer");
+    }
+
+    #[test]
+    fn inline_think_split_across_chunks() {
+        // Tag boundaries land mid-token across deltas.
+        let (content, reasoning) = run_stream(&[
+            ("<thi", ""),
+            ("nk>step one ", ""),
+            ("step two</thi", ""),
+            ("nk>Final ", ""),
+            ("answer", ""),
+        ]);
+        assert_eq!(content, "Final answer");
+        assert_eq!(reasoning, "step one step two");
+    }
+
+    #[test]
+    fn content_without_think_is_untouched() {
+        let (content, reasoning) = run_stream(&[("Just ", ""), ("a normal answer", "")]);
+        assert_eq!(content, "Just a normal answer");
+        assert_eq!(reasoning, "");
+    }
+
+    #[test]
+    fn think_tag_mid_answer_is_not_stripped() {
+        // A `<think>` that is not the leading content stays in the answer.
+        let (content, reasoning) = run_stream(&[("Use the ", ""), ("<think> HTML tag here", "")]);
+        assert_eq!(content, "Use the <think> HTML tag here");
+        assert_eq!(reasoning, "");
+    }
+
+    #[test]
+    fn explicit_reasoning_field_still_works() {
+        let (content, reasoning) = run_stream(&[("", "deep thought"), ("the answer", "")]);
+        assert_eq!(content, "the answer");
+        assert_eq!(reasoning, "deep thought");
+    }
+
+    #[test]
+    fn thinking_variant_and_case_insensitive() {
+        let (content, reasoning) = run_stream(&[("<THINKING>hmm</Thinking>done", "")]);
+        assert_eq!(content, "done");
+        assert_eq!(reasoning, "hmm");
+    }
+
+    #[test]
+    fn unterminated_think_flushes_as_reasoning() {
+        let (content, reasoning) =
+            run_stream(&[("<think>still thinking when the stream ended", "")]);
+        assert_eq!(content, "");
+        assert_eq!(reasoning, "still thinking when the stream ended");
+    }
+
+    #[test]
+    fn leading_whitespace_before_think_is_preserved_then_stripped() {
+        let (content, reasoning) = run_stream(&[("\n<think>x</think>answer", "")]);
+        assert_eq!(reasoning, "x");
+        assert_eq!(content.trim(), "answer");
+    }
 
     #[test]
     fn sse_event_data_collects_multiline_data_and_ignores_comments() {
