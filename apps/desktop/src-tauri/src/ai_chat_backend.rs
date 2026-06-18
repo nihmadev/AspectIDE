@@ -518,6 +518,12 @@ impl StreamAccumulator {
         let raw_content = delta.get("content").and_then(Value::as_str).unwrap_or("");
         // Reasoning the provider reports explicitly (various field shapes).
         let explicit_reasoning = extract_reasoning_field(delta);
+        // A provider that reports reasoning through its own field is not inlining a
+        // `<think>` block, so its answer content must be left verbatim (it may even
+        // legitimately contain a literal `<think>`). Stop scanning for inline think.
+        if !explicit_reasoning.is_empty() {
+            self.think_resolved = true;
+        }
         // Reasoning carried inline as a `<think>` block inside `content`.
         let (content, inline_reasoning) = if raw_content.is_empty() {
             (String::new(), String::new())
@@ -578,21 +584,21 @@ impl StreamAccumulator {
             let lead_ws = self.think_carry.len() - self.think_carry.trim_start().len();
             let rest = &self.think_carry[lead_ws..];
             if rest.is_empty() {
-                out_content.push_str(&self.think_carry);
-                self.think_carry.clear();
+                // Only whitespace so far. A `<think>` may still follow it in the next
+                // chunk, so hold the whitespace back rather than committing it to the
+                // answer (flush() will emit it if the stream ends here).
                 break;
             }
             if let Some(len) = prefix_tag(rest, &THINK_OPEN_TAGS) {
-                out_content.push_str(&self.think_carry[..lead_ws]);
+                // Confirmed leading think block: drop the whitespace that preceded
+                // it (pre-think formatting) along with the open tag.
                 self.think_carry.drain(..lead_ws + len);
                 self.in_think = true;
                 continue;
             }
             if is_tag_prefix(rest, &THINK_OPEN_TAGS) {
-                // `rest` could still grow into an opening tag — emit any leading
-                // whitespace and wait for the next chunk.
-                out_content.push_str(&self.think_carry[..lead_ws]);
-                self.think_carry.drain(..lead_ws);
+                // `rest` could still grow into an opening tag — hold everything
+                // (including leading whitespace) until the next chunk decides.
                 break;
             }
             // Definitely not a leading think block — stop scanning for one.
@@ -1379,10 +1385,34 @@ mod tests {
     }
 
     #[test]
-    fn leading_whitespace_before_think_is_preserved_then_stripped() {
-        let (content, reasoning) = run_stream(&[("\n<think>x</think>answer", "")]);
+    fn explicit_reasoning_disables_inline_think_stripping() {
+        // Provider reports reasoning via its own field, then its answer legitimately
+        // starts with a literal `<think>` (e.g. talking about the tag). It must NOT
+        // be treated as a thinking block.
+        let (content, reasoning) =
+            run_stream(&[("", "real reasoning"), ("<think> is an HTML-ish tag", "")]);
+        assert_eq!(content, "<think> is an HTML-ish tag");
+        assert_eq!(reasoning, "real reasoning");
+    }
+
+    #[test]
+    fn whitespace_then_think_split_across_chunks_does_not_leak_space() {
+        // A leading space arrives alone, then `<think>` in the next chunk: the space
+        // must not leak into the answer ahead of the (stripped) think block.
+        let (content, reasoning) = run_stream(&[(" ", ""), ("<think>x</think>answer", "")]);
         assert_eq!(reasoning, "x");
         assert_eq!(content.trim(), "answer");
+        assert!(
+            !content.starts_with(' '),
+            "leading space must not precede the answer"
+        );
+    }
+
+    #[test]
+    fn leading_whitespace_before_think_is_dropped_with_the_block() {
+        let (content, reasoning) = run_stream(&[("\n<think>x</think>answer", "")]);
+        assert_eq!(reasoning, "x");
+        assert_eq!(content, "answer");
     }
 
     #[test]
