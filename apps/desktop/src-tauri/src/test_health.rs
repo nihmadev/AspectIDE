@@ -600,7 +600,11 @@ fn is_package_watch_script(script: &str) -> bool {
     let is_explicit_false = script.contains("--watch=false")
         || script.contains("--watch false")
         || script.contains("--watchall=false")
-        || script.contains("--watchall false");
+        || script.contains("--watchall false")
+        // Runners explicitly put into one-shot mode are NOT watch scripts.
+        || script.contains("--run")
+        || script.contains("--ci")
+        || script.contains("run ");
     !is_explicit_false
         && (script.contains("--watch")
             || script == "watch"
@@ -610,7 +614,33 @@ fn is_package_watch_script(script: &str) -> bool {
             || script.contains(" watch:")
             || script
                 .split_whitespace()
-                .any(|token| token.starts_with("watch:")))
+                .any(|token| token.starts_with("watch:"))
+            || is_watch_default_runner(script))
+}
+
+/// True when a script invokes a runner that defaults to WATCH mode unless told
+/// otherwise. `vitest` with no subcommand watches by default; Create React App's
+/// `react-scripts test` watches unless `CI=true` or `--watchAll=false`. Both would
+/// otherwise hang the one-shot health check until it is force-killed.
+fn is_watch_default_runner(script: &str) -> bool {
+    let tokens: Vec<&str> = script.split_whitespace().collect();
+    // `vitest` / `npx vitest` with no `run`/`watch` subcommand → watch default.
+    let vitest_idx = tokens
+        .iter()
+        .position(|t| *t == "vitest" || t.ends_with("/vitest"));
+    if let Some(index) = vitest_idx {
+        let sub = tokens.get(index + 1).copied().unwrap_or("");
+        let is_oneshot_sub = matches!(sub, "run" | "bench" | "list" | "related");
+        if !is_oneshot_sub {
+            return true;
+        }
+    }
+    // Create React App test runner watches unless CI / --watchAll=false (handled
+    // by the explicit-false check above).
+    if script.contains("react-scripts test") {
+        return true;
+    }
+    false
 }
 
 fn has_package_test_script(directory: &Path) -> bool {
@@ -932,11 +962,52 @@ async fn run_single_test_health_plan(root: &Path, plan: TestHealthPlan) -> TestH
     let started = std::time::Instant::now();
     let mut command = shell_command(&plan.command);
     command.current_dir(&plan.working_dir);
-    let output_result = timeout(
-        Duration::from_secs(AI_TEST_HEALTH_TIMEOUT_SECS),
-        command.output(),
-    )
-    .await;
+    // Capture pipes so a watch-mode runner (which never closes stdout) can't wedge
+    // the read, and make the child die with its handle so a timeout actually frees
+    // it instead of leaking an orphaned watcher.
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command.kill_on_drop(true);
+
+    let output_result = match command.spawn() {
+        Ok(mut child) => {
+            // Drain both pipes concurrently so a chatty runner can't fill a pipe and
+            // deadlock; `wait_with_output` would move `child`, leaving nothing to kill
+            // on timeout, so read the handles separately and keep `child` to kill.
+            let child_pid = child.id();
+            let mut stdout_pipe = child.stdout.take();
+            let mut stderr_pipe = child.stderr.take();
+            let collect = async {
+                use tokio::io::AsyncReadExt;
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                if let Some(pipe) = stdout_pipe.as_mut() {
+                    let _ = pipe.read_to_end(&mut out).await;
+                }
+                if let Some(pipe) = stderr_pipe.as_mut() {
+                    let _ = pipe.read_to_end(&mut err).await;
+                }
+                let status = child.wait().await;
+                (status, out, err)
+            };
+            match timeout(Duration::from_secs(AI_TEST_HEALTH_TIMEOUT_SECS), collect).await {
+                Ok((Ok(status), out, err)) => Ok(Ok(CollectedOutput {
+                    status,
+                    stdout: out,
+                    stderr: err,
+                })),
+                Ok((Err(error), _, _)) => Ok(Err(error)),
+                Err(elapsed) => {
+                    // Timed out: kill the whole process tree (the shell plus any test
+                    // runner / watcher it spawned) so nothing survives this call.
+                    kill_test_health_process_tree(child_pid).await;
+                    Err(elapsed)
+                }
+            }
+        }
+        Err(error) => Ok(Err(error)),
+    };
     let duration_ms = started.elapsed().as_millis();
     let id = test_health_runner_id(root, &plan);
     let workspace_relative_path = workspace_relative_path(root, &plan.working_dir);
@@ -1169,6 +1240,14 @@ fn truncate_output(value: &str) -> String {
     format!("{head}\n...[truncated]")
 }
 
+/// Pipe output collected from a finished child, mirroring the shape of
+/// `std::process::Output` we consume (status + raw stdout/stderr).
+struct CollectedOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
 fn shell_command(command_line: &str) -> tokio::process::Command {
     #[cfg(windows)]
     {
@@ -1181,7 +1260,37 @@ fn shell_command(command_line: &str) -> tokio::process::Command {
     {
         let mut command = tokio::process::Command::new("sh");
         command.arg("-c").arg(command_line);
+        // Own process group (pgid == pid) so a timeout can group-kill the shell and
+        // every test runner / watcher it spawned in one shot.
+        command.process_group(0);
         command
+    }
+}
+
+/// Kill the timed-out test process and everything it spawned. A `sh -c "vitest"`
+/// (or jest/CRA) often launches a watcher child; killing only the shell would
+/// orphan it, so target the whole tree/group.
+async fn kill_test_health_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        let mut command = tokio::process::Command::new("taskkill");
+        command
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW);
+        let _ = command.output().await;
+    }
+    #[cfg(not(windows))]
+    {
+        // The child leads its own process group (process_group(0)), so its pgid
+        // equals its pid; the leading '-' signals the whole group.
+        let _ = tokio::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid}"))
+            .output()
+            .await;
     }
 }
 
@@ -1195,6 +1304,32 @@ fn normalize_watch_path_for_compare(path: &Path) -> String {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn watch_default_runners_are_treated_as_watch_scripts() {
+        // Runners that default to watch with no explicit run flag would hang the
+        // one-shot health check, so they must be filtered out.
+        assert!(is_package_watch_script("vitest"));
+        assert!(is_package_watch_script("npx vitest"));
+        assert!(is_package_watch_script("react-scripts test"));
+        // Explicit one-shot invocations are fine.
+        assert!(!is_package_watch_script("vitest run"));
+        assert!(!is_package_watch_script("vitest run --coverage"));
+        assert!(!is_package_watch_script("jest --ci"));
+        assert!(!is_package_watch_script(
+            "react-scripts test --watchall=false"
+        ));
+        // A plain non-watch command is unaffected.
+        assert!(!is_package_watch_script("jest"));
+        assert!(!is_package_watch_script("cargo test"));
+    }
+
+    #[test]
+    fn watch_default_runners_are_not_meaningful_scripts() {
+        assert!(!is_meaningful_package_script("vitest"));
+        assert!(is_meaningful_package_script("vitest run"));
+        assert!(is_meaningful_package_script("jest"));
+    }
 
     #[test]
     fn test_health_detects_root_workspace_before_nested_crates() {

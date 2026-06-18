@@ -1078,9 +1078,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         scheduleChatSessionTitleRefresh({
           sessionId,
           firstUserMessage: displayMessage,
-          provider: selectedProvider,
-          model: selectedModel,
-          selectedEffortId: aiPreferences.selectedEffortId,
           rename: renameAiChatSession,
           readSession: (id) => {
             const session = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === id);

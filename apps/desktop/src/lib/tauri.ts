@@ -637,10 +637,6 @@ export const luxCommands = {
   aiResolveTurnQuestion: (turnId: string, requestId: string, answer: { answer: string; cancelled: boolean }) =>
     invokeRequired<null>("ai_resolve_turn_question", { turnId, requestId, answer }),
   aiCancelTurn: (turnId: string) => invokeRequired<null>("ai_cancel_turn", { turnId }),
-  aiGenerateSessionTitle: (input: {
-    firstUserMessage: string; baseUrl: string; apiKey: string | null;
-    models: { id: string; alias: string; name: string }[]; activeModelAlias: string;
-  }) => invokeRequired<string>("ai_generate_session_title", { input }),
   aiGoalEvalVerdict: (input: {
     condition: string; transcript: string; openTodoSummaries: string[];
     baseUrl: string; apiKey: string | null; model: string; reasoning: Record<string, unknown>;

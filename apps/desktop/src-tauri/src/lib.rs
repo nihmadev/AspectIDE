@@ -50,7 +50,6 @@ mod ai_prompt;
 mod ai_related;
 mod ai_semantic;
 mod ai_session;
-mod ai_session_title;
 mod ai_shell_safety;
 mod ai_tokens;
 mod ai_tool_defs;
@@ -624,7 +623,6 @@ pub fn run() {
             ai_session::ai_session_goal_set,
             ai_session::ai_session_todos_get,
             ai_session::ai_session_todos_set,
-            ai_session_title::ai_generate_session_title,
             ai_turn::ai_run_turn,
             ai_turn::ai_resolve_turn_approval,
             ai_turn::ai_resolve_turn_question,
