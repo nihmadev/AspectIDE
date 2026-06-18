@@ -44,8 +44,12 @@ function targetsForAsset(name) {
   return [];
 }
 
+// GitHub Releases rewrites any character outside [A-Za-z0-9._-] in an uploaded
+// asset name (spaces -> `.`). The download URL MUST use that rewritten name or it
+// 404s, so sanitize identically here instead of URL-encoding the raw name.
+const sanitizeAssetName = (name) => name.replace(/[^A-Za-z0-9._-]+/g, ".");
 const downloadUrl = (assetName) =>
-  `https://github.com/${repository}/releases/download/${tagName}/${encodeURIComponent(assetName)}`;
+  `https://github.com/${repository}/releases/download/${tagName}/${sanitizeAssetName(assetName)}`;
 
 const entries = readdirSync(assetsRoot, { withFileTypes: true })
   .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".sig"));

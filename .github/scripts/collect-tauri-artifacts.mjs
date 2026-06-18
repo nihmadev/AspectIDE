@@ -90,15 +90,24 @@ function walk(root) {
   });
 }
 
+// GitHub Releases rewrites any character outside [A-Za-z0-9._-] in an uploaded
+// asset name (notably spaces -> `.`). If we upload "Lux IDE_1.0.1.exe" the asset
+// becomes "Lux.IDE_1.0.1.exe", but the updater manifest builds its download URL
+// from the original name -> 404. Sanitize here so the on-disk name, the uploaded
+// asset name, and the manifest URL all agree.
+function sanitizeAssetName(name) {
+  return name.replace(/[^A-Za-z0-9._-]+/g, ".");
+}
+
 function uniqueAssetName(file, usedNames) {
-  const preferred = basename(file);
+  const preferred = sanitizeAssetName(basename(file));
 
   if (!usedNames.has(preferred)) {
     usedNames.add(preferred);
     return preferred;
   }
 
-  const parent = basename(dirname(file));
+  const parent = sanitizeAssetName(basename(dirname(file)));
   const fallback = `${parent}-${preferred}`;
 
   if (!usedNames.has(fallback)) {
