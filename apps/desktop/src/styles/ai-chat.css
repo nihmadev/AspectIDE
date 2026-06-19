@@ -2104,9 +2104,64 @@
   color: #c8c8c8;
 }
 
+/* Live auto-retry notice: amber, with a spinning indicator while a transient
+   failure is being retried in the background (before any token streams). */
+.ai-retry-notice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: fit-content;
+  max-width: 92%;
+  padding: 7px 11px;
+  border: 1px solid color-mix(in srgb, var(--gold, #e3b341) 38%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--gold, #e3b341) 10%, transparent);
+  color: var(--gold, #e3b341);
+  font: 11px/1.4 var(--font-ui);
+}
+
+.ai-retry-notice-spin {
+  flex: none;
+  animation: lux-spin 0.9s linear infinite;
+}
+
+.ai-retry-notice-text {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ai-retry-notice-text strong {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.ai-retry-notice-text span {
+  color: color-mix(in srgb, var(--gold, #e3b341) 80%, #ffffff);
+  opacity: 0.92;
+}
+
+.ai-retry-notice-countdown {
+  padding-left: 7px;
+  margin-left: 1px;
+  border-left: 1px solid color-mix(in srgb, var(--gold, #e3b341) 30%, transparent);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.78;
+}
+
 .ai-chat-error span:first-child,
 .ai-chat-closed-notice span:first-child {
   min-width: 0;
+}
+
+/* Rate limit + timeout are transient/recoverable — amber, not the alarming red
+   reserved for genuine failures. */
+.ai-chat-error[data-kind="rate-limit"],
+.ai-chat-error[data-kind="timeout"] {
+  border-color: color-mix(in srgb, var(--gold, #e3b341) 38%, transparent);
+  background: color-mix(in srgb, var(--gold, #e3b341) 10%, transparent);
+  color: var(--gold, #e3b341);
 }
 
 .ai-chat-closed-notice button {
@@ -5152,7 +5207,43 @@
 
 .ai-chat-history-item-actions {
   display: flex;
-  gap: 2px;
+  flex: none;
+  gap: 1px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+/* Reveal the row actions on hover/focus or for the active chat, so the list
+   stays clean but every chat is one hover away from rename/archive/delete. */
+.ai-chat-history-item-row:hover .ai-chat-history-item-actions,
+.ai-chat-history-item-row:focus-within .ai-chat-history-item-actions,
+.ai-chat-history-item-row[data-active="true"] .ai-chat-history-item-actions {
+  opacity: 1;
+}
+
+.ai-chat-history-item-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #9a9a9a;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.ai-chat-history-item-actions button:hover {
+  background: #333333;
+  color: #ededed;
+}
+
+.ai-chat-history-item-actions button.ai-chat-history-item-danger:hover {
+  background: color-mix(in srgb, var(--danger, #f14c4c) 18%, transparent);
+  color: var(--danger, #f14c4c);
 }
 
 .ai-chat-history-item-label {

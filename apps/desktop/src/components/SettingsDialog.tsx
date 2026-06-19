@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { BarChart3, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Plus, RefreshCw, RotateCcw, Search, Settings, Share2, Trash2, X } from "lucide-react";
+import { ArrowUpCircle, BarChart3, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Loader2, Plus, RefreshCw, RotateCcw, Search, Settings, Share2, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
@@ -81,6 +81,7 @@ import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
 import { useLuxStore } from "../lib/store";
 import { isTauriRuntime, luxCommands, type AgentBrowserStatusResponse, type AiProviderDiagnosticResponse, type LspCatalogEntry, type RuntimeCatalogEntry } from "../lib/tauri";
+import { useUpdater } from "../lib/useUpdater";
 import type { FsEntry, WorkspaceInfo } from "../lib/types";
 
 const scope = "user" as const;
@@ -422,80 +423,103 @@ function GeneralSection({ locale, onChangeLocale, t }: { locale: Locale; onChang
   );
 }
 
-type UpdateCheckState =
-  | { status: "idle" | "checking" }
-  | { status: "available"; version: string }
-  | { status: "upToDate" }
-  | { status: "error"; message: string };
-
 function UpdatesSection({ t }: { t: TranslateFn }) {
-  const [currentVersion, setCurrentVersion] = useState("");
-  const [check, setCheck] = useState<UpdateCheckState>({ status: "idle" });
-  const [lastChecked, setLastChecked] = useState<number | null>(null);
+  // Shared singleton updater: the same state the corner UpdateNotice renders, so
+  // a check or install started here is reflected everywhere (and vice versa).
+  const { state, check, install } = useUpdater();
 
-  const runCheck = useCallback(async () => {
-    if (!isTauriRuntime()) return;
-    setCheck({ status: "checking" });
-    try {
-      const result = await luxCommands.updateCheck();
-      if (result.currentVersion) setCurrentVersion(result.currentVersion);
-      setLastChecked(Date.now());
-      setCheck(
-        result.available && result.version
-          ? { status: "available", version: result.version }
-          : { status: "upToDate" },
-      );
-    } catch (error) {
-      setCheck({ status: "error", message: error instanceof Error ? error.message : String(error) });
-    }
-  }, []);
-
-  useEffect(() => {
-    // Populate the current version on open without forcing a network check.
-    if (!isTauriRuntime()) return;
-    void luxCommands.updateCheck()
-      .then((result) => {
-        if (result.currentVersion) setCurrentVersion(result.currentVersion);
-        if (result.available && result.version) setCheck({ status: "available", version: result.version });
-      })
-      .catch(() => undefined);
-  }, []);
+  const updateAvailable = state.status === "available";
+  const downloading = state.status === "downloading";
+  const relaunching = state.status === "relaunching";
+  const checking = state.status === "checking";
+  const busy = checking || downloading || relaunching;
+  const percent = state.progress === null ? null : Math.round(state.progress * 100);
 
   const statusLine = (() => {
-    switch (check.status) {
+    switch (state.status) {
       case "checking":
         return t("update.checking");
       case "available":
-        return t("update.available.body", { version: check.version });
+        return t("update.available.body", { version: state.availableVersion ?? "" });
       case "upToDate":
         return t("update.upToDate");
+      case "downloading":
+        return percent === null
+          ? t("update.downloading.preparing")
+          : t("update.downloading.body", { version: state.availableVersion ?? "", percent });
+      case "relaunching":
+        return t("update.relaunching.body");
       case "error":
-        return check.message;
+        return state.error ?? t("update.error.title");
       default:
-        return lastChecked === null
+        return state.lastCheckedAt === null
           ? t("update.settings.lastCheckedNever")
-          : t("update.settings.lastChecked", { time: new Date(lastChecked).toLocaleTimeString() });
+          : t("update.settings.lastChecked", { time: new Date(state.lastCheckedAt).toLocaleTimeString() });
     }
   })();
 
   return (
     <SettingsPanel title={t("update.settings.title")} description={t("update.settings.detail")}>
-      <div className="settings-update-row" data-status={check.status}>
+      <div className="settings-update-row" data-status={state.status}>
         <div className="settings-update-info">
           <span className="settings-update-version">
-            {currentVersion ? t("update.settings.currentVersion", { version: currentVersion }) : t("update.settings.title")}
+            {state.currentVersion ? t("update.settings.currentVersion", { version: state.currentVersion }) : t("update.settings.title")}
           </span>
           <span className="settings-update-status">{statusLine}</span>
         </div>
-        <button
-          type="button"
-          className="settings-update-check"
-          disabled={check.status === "checking" || !isTauriRuntime()}
-          onClick={() => void runCheck()}
-        >
-          {t("update.settings.check")}
-        </button>
+        <div className="settings-update-actions">
+          {/* When an update is found, install right here — no waiting for the
+              corner toast. Mid-download/relaunch the button reflects progress. */}
+          {(updateAvailable || downloading || relaunching) && (
+            <button
+              type="button"
+              className="settings-update-install"
+              disabled={downloading || relaunching || !isTauriRuntime()}
+              onClick={() => void install()}
+            >
+              {relaunching ? (
+                <>
+                  <Loader2 size={14} className="settings-update-spin" />
+                  {t("update.relaunching.title")}
+                </>
+              ) : downloading ? (
+                <>
+                  <Loader2 size={14} className="settings-update-spin" />
+                  {percent === null ? t("update.downloading.preparing") : `${percent}%`}
+                </>
+              ) : (
+                <>
+                  <ArrowUpCircle size={14} />
+                  {t("update.settings.updateNow")}
+                </>
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            className="settings-update-check"
+            disabled={busy || !isTauriRuntime()}
+            onClick={() => void check()}
+          >
+            {t("update.settings.check")}
+          </button>
+        </div>
       </div>
+      {downloading && (
+        <div
+          className="settings-update-bar-track"
+          role="progressbar"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent ?? undefined}
+        >
+          <div
+            className="settings-update-bar"
+            data-indeterminate={percent === null ? "true" : undefined}
+            style={percent === null ? undefined : { width: `${percent}%` }}
+          />
+        </div>
+      )}
     </SettingsPanel>
   );
 }

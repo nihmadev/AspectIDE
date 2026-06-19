@@ -528,6 +528,7 @@ export const messagesRu: Messages = {
   "update.settings.detail": "Lux IDE автоматически проверяет подписанные обновления и устанавливает их при перезапуске.",
   "update.settings.currentVersion": "Текущая версия: {version}",
   "update.settings.check": "Проверить обновления",
+  "update.settings.updateNow": "Обновить сейчас",
   "update.settings.lastChecked": "Последняя проверка: {time}",
   "update.settings.lastCheckedNever": "Ещё не проверялось",
 
@@ -902,6 +903,7 @@ export const messagesRu: Messages = {
   "aiChat.crash.reload": "Сбросить вид чата",
   "aiChat.error.cancelled": "Запрос отменён.",
   "aiChat.error.timeout": "Провайдер не ответил вовремя. {detail}",
+  "aiChat.error.rateLimit": "Достигнут лимит запросов (429) — автоповтор не помог. Подожди немного и повтори, или смени модель/провайдера в настройках. {detail}",
   "aiChat.error.providerUnavailable": "Провайдер недоступен. Проверьте, что локальный endpoint запущен. {detail}",
   "aiChat.error.invalidJson": "Провайдер вернул некорректный JSON. {detail}",
   "aiChat.error.toolRejected": "Вызов tool отклонён. {detail}",
@@ -917,6 +919,19 @@ export const messagesRu: Messages = {
   // Отправляется как ход пользователя при повторе: продолжает ход, сохраняя
   // предыдущие рассуждения и вызовы tools ИИ, а не переигрывает заново.
   "aiChat.retry.continue": "Продолжи",
+
+  // Живое уведомление об автоповторе при временном сбое провайдера.
+  "aiChat.retryNotice.title": "Повтор",
+  "aiChat.retryNotice.body": "{reason} · попытка {attempt}/{max}",
+  "aiChat.retryNotice.countdown": "повтор через {seconds}с",
+  "aiChat.retryNotice.reconnecting": "переподключение…",
+  "aiChat.retryNotice.reason.rate-limited": "лимит запросов",
+  "aiChat.retryNotice.reason.server": "ошибка провайдера",
+  "aiChat.retryNotice.reason.forbidden": "доступ заблокирован",
+  "aiChat.retryNotice.reason.timeout": "таймаут",
+  "aiChat.retryNotice.reason.network": "сбой сети",
+  "aiChat.retryNotice.reason.stream": "поток прерван",
+  "aiChat.retryNotice.reason.generic": "временный сбой",
 
   // AI tools.
   "aiTools.title": "AI tools",
@@ -1225,6 +1240,32 @@ export const messagesRu: Messages = {
 
   // Sidebar — git.
   "sidebar.git.noRepository": "Нет репозитория",
+  "sidebar.git.noWorkspace": "Папка не открыта",
+  "sidebar.git.stagedChanges": "Подготовлено",
+  "sidebar.git.changes": "Изменения",
+  "sidebar.git.stage": "Подготовить",
+  "sidebar.git.unstage": "Убрать из индекса",
+  "sidebar.git.stageAll": "Подготовить все изменения",
+  "sidebar.git.unstageAll": "Убрать всё из индекса",
+  "sidebar.git.discard": "Отменить изменения",
+  "sidebar.git.discardAll": "Отменить все изменения",
+  "sidebar.git.discardConfirm": "Отменить изменения в {target}? Это нельзя отменить.",
+  "sidebar.git.allChanges": "всех файлах",
+  "sidebar.git.commit": "Коммит",
+  "sidebar.git.commitAll": "Коммит всех",
+  "sidebar.git.commitAllHint": "Подготовить все изменения и закоммитить",
+  "sidebar.git.commitPlaceholder": "Сообщение (Ctrl+Enter — коммит)",
+  "sidebar.git.push": "Запушить",
+  "sidebar.git.pull": "Подтянуть",
+  "sidebar.git.refresh": "Обновить",
+  "sidebar.git.switchBranch": "Сменить ветку",
+  "sidebar.git.newBranch": "Создать ветку…",
+  "sidebar.git.newBranchPrompt": "Имя новой ветки",
+  "sidebar.git.noBranches": "Нет веток",
+  "sidebar.git.clean": "Нет изменений",
+  "sidebar.git.diffSubtitle": "HEAD ↔ Рабочая копия",
+  "sidebar.git.diffLoading": "Загрузка diff…",
+  "sidebar.git.closeDiff": "Закрыть diff",
 
   // Sidebar — run & debug.
   "sidebar.runDebug.actions.refreshConfiguration": "Обновить конфигурацию отладки",

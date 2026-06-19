@@ -1,6 +1,6 @@
 {
   "name": "@lux/desktop",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "license": "Apache-2.0",
   "private": true,
   "description": "Lux IDE desktop application built with Tauri, React, Monaco, and Rust.",

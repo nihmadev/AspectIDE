@@ -53,7 +53,13 @@ function deriveProjectLoadStage({
 }: ProjectLoadSignals): ProjectLoadStage {
   if (projectLoad.stage === "error") return "error";
   if (projectLoad.stage === "opening" && projectLoad.active) return "opening";
-  if (fileTreeLoading) return "files";
+  // Only the INITIAL workspace scan drives the full-screen splash. On open,
+  // projectLoad.stage is set to "files" and flips to "ready"/"indexing" once the
+  // scan's finally() runs. Incremental file-tree refreshes (delete/create/rename/
+  // paste/move all flip the low-level `fileTreeLoading` flag too) happen while the
+  // project is already "ready"/"indexing" — they must stay in the background and
+  // never re-raise the overlay. Gating on stage === "files" is what keeps them quiet.
+  if (fileTreeLoading && projectLoad.stage === "files") return "files";
   // Language servers start (and may be missing / installing) entirely in the
   // background — they MUST NOT gate the loading screen. Previously a stuck
   // `languageServersLoading` flag, or the old `"services"` fallback, left the

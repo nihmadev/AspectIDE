@@ -193,6 +193,7 @@ fn tool_capability_map(
         "Lux tool map — reach for the highest-signal tool first:".to_string(),
         "- Orient: ContextBudgeter, FastContext, WorkspaceIndex, RepoMap, ActiveContext. Rules/docs/memory: RulesContext, DocsContext, MemoryContext.".to_string(),
         "- Find: SemanticSearch, SymbolContext (LSP), Grep, Glob, RelatedFiles. Read: Read (source/text), InspectFile (tables/PDF/Office/archives/notebooks/media/binaries).".to_string(),
+        "- CodeGraph (built-in graphify-style code graph, instant whole-repo structure — strongly prefer over grepping for relationships): CodeGraphDefinition (where a symbol is defined), CodeGraphCallers/CodeGraphCallees (who calls it / what it calls), CodeGraphExplain (a symbol's connections), CodeGraphOverview (god-nodes + communities). Use these first to trace impact, dependencies, and call chains.".to_string(),
     ];
     if full_exec {
         lines.push("- Edit: StrReplace, PatchEngine (multi-file, one approval+rollback), Write, Delete, Checkpoint. Execute: Shell (catastrophic commands blocked in Rust), TerminalContext, TerminalWrite.".to_string());
@@ -302,9 +303,12 @@ mod tests {
 
     #[test]
     fn prompt_length_within_budget() {
+        // Ceilings carry headroom for the progress-narration guidance and the
+        // CodeGraph tool-map line (deliberate features), while still guarding
+        // against an unbounded prompt.
         let prompt = build_system_prompt(&test_input());
         assert!(
-            prompt.len() <= 15_000,
+            prompt.len() <= 16_500,
             "agent prompt too long: {}",
             prompt.len()
         );
@@ -313,7 +317,7 @@ mod tests {
         auto_input.agent_mode = "automatic".to_string();
         let auto_prompt = build_system_prompt(&auto_input);
         assert!(
-            auto_prompt.len() <= 16_000,
+            auto_prompt.len() <= 18_000,
             "automatic prompt too long: {}",
             auto_prompt.len()
         );

@@ -101,6 +101,173 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     })
 }
 
+// ── Mutations (stage / unstage / discard / commit / sync / branches) ──
+// Every mutation returns the freshly recomputed `GitStatus` so a single IPC call
+// both performs the action and gives the UI the new state to render.
+
+/// Run a prepared git invocation, mapping a non-zero exit to a Service error that
+/// carries git's own stderr (so the panel shows the real reason — failed hook,
+/// nothing staged, rejected push, …).
+fn run_git(command: &mut Command) -> AppResult<String> {
+    let output = command.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let message = if stderr.is_empty() { stdout } else { stderr };
+        return Err(AppError::Service(if message.is_empty() {
+            "git command failed".to_string()
+        } else {
+            message
+        }));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Append literal pathspecs after a `--` separator so leading dashes or odd names
+/// are never parsed as flags.
+fn add_pathspecs(command: &mut Command, paths: &[String]) {
+    command.arg("--");
+    for path in paths {
+        command.arg(path);
+    }
+}
+
+/// Stage the given paths, or everything (`git add -A`) when `paths` is empty.
+pub fn stage(root: impl AsRef<Path>, paths: &[String]) -> AppResult<GitStatus> {
+    let root = root.as_ref();
+    if paths.is_empty() {
+        run_git(git_command(root).args(["add", "-A"]))?;
+    } else {
+        let mut command = git_command(root);
+        command.arg("add");
+        add_pathspecs(&mut command, paths);
+        run_git(&mut command)?;
+    }
+    status(root)
+}
+
+/// Unstage the given paths, or everything (`git reset`) when `paths` is empty.
+pub fn unstage(root: impl AsRef<Path>, paths: &[String]) -> AppResult<GitStatus> {
+    let root = root.as_ref();
+    if paths.is_empty() {
+        run_git(git_command(root).args(["reset", "-q"]))?;
+    } else {
+        let mut command = git_command(root);
+        command.args(["reset", "-q", "HEAD"]);
+        add_pathspecs(&mut command, paths);
+        run_git(&mut command)?;
+    }
+    status(root)
+}
+
+/// Discard worktree (and staged) changes for the given paths.
+///
+/// Untracked files are deleted; staged-new files are unstaged then deleted;
+/// tracked changes are reset to HEAD. Destructive — the UI confirms first.
+pub fn discard(root: impl AsRef<Path>, paths: &[String]) -> AppResult<GitStatus> {
+    let root = root.as_ref();
+    let current = status(root)?;
+    for path in paths {
+        let entry = current
+            .files
+            .iter()
+            .find(|file| file.path == Path::new(path));
+        let untracked = entry.is_some_and(|file| file.worktree_status == "?");
+        let staged_new = entry.is_some_and(|file| file.index_status == "A");
+        let absolute = root.join(path);
+        if untracked {
+            remove_path(&absolute);
+        } else if staged_new {
+            let mut command = git_command(root);
+            command.args(["reset", "-q", "HEAD"]);
+            add_pathspecs(&mut command, std::slice::from_ref(path));
+            run_git(&mut command)?;
+            remove_path(&absolute);
+        } else {
+            let mut command = git_command(root);
+            command.args(["checkout", "-q", "HEAD"]);
+            add_pathspecs(&mut command, std::slice::from_ref(path));
+            run_git(&mut command)?;
+        }
+    }
+    status(root)
+}
+
+/// Best-effort removal of a worktree path (file or directory).
+fn remove_path(path: &Path) {
+    if path.is_dir() {
+        let _ = std::fs::remove_dir_all(path);
+    } else {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Commit the staged changes with `message`.
+pub fn commit(root: impl AsRef<Path>, message: &str) -> AppResult<GitStatus> {
+    let root = root.as_ref();
+    run_git(git_command(root).args(["commit", "-m", message]))?;
+    status(root)
+}
+
+/// Push the current branch to its upstream.
+pub fn push(root: impl AsRef<Path>) -> AppResult<GitStatus> {
+    let root = root.as_ref();
+    run_git(git_command(root).arg("push"))?;
+    status(root)
+}
+
+/// Fast-forward pull from the upstream (never creates a merge commit silently).
+pub fn pull(root: impl AsRef<Path>) -> AppResult<GitStatus> {
+    let root = root.as_ref();
+    run_git(git_command(root).args(["pull", "--ff-only"]))?;
+    status(root)
+}
+
+/// Local branch names (current branch is reported separately by `status`).
+pub fn branches(root: impl AsRef<Path>) -> AppResult<Vec<String>> {
+    let output = run_git(git_command(root.as_ref()).args(["branch", "--format=%(refname:short)"]))?;
+    Ok(parse_branches(&output))
+}
+
+/// Switch to an existing branch.
+pub fn checkout_branch(root: impl AsRef<Path>, name: &str) -> AppResult<GitStatus> {
+    let root = root.as_ref();
+    run_git(git_command(root).args(["switch", name]))?;
+    status(root)
+}
+
+/// Create and switch to a new branch.
+pub fn create_branch(root: impl AsRef<Path>, name: &str) -> AppResult<GitStatus> {
+    let root = root.as_ref();
+    run_git(git_command(root).args(["switch", "-c", name]))?;
+    status(root)
+}
+
+/// HEAD vs working-tree text for one file, for the side-by-side diff view.
+/// `head_text` is empty for an untracked/new file (or empty repo); `working_text`
+/// is empty for a deleted file.
+pub fn file_diff(root: impl AsRef<Path>, path: &str) -> AppResult<(String, String)> {
+    let root = root.as_ref();
+    let head = git_command(root)
+        .args(["show", &format!("HEAD:{path}")])
+        .output()?;
+    let head_text = if head.status.success() {
+        String::from_utf8_lossy(&head.stdout).to_string()
+    } else {
+        String::new()
+    };
+    let working_text = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+    Ok((head_text, working_text))
+}
+
+fn parse_branches(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "(HEAD detached)")
+        .map(ToString::to_string)
+        .collect()
+}
+
 /// Builds a `git` invocation scoped to `root` with the process-spawning side
 /// channels git opens on Windows turned off.
 ///
@@ -292,6 +459,12 @@ mod tests {
         assert_eq!(files[1].status, "D");
         assert!(files[1].binary);
         assert_eq!(files[2].status, "A");
+    }
+
+    #[test]
+    fn parses_branch_list() {
+        let branches = parse_branches("main\nfeature/x\n  release \n(HEAD detached)\n\n");
+        assert_eq!(branches, vec!["main", "feature/x", "release"]);
     }
 
     #[test]

@@ -13,7 +13,10 @@ import { luxCommands } from "../../lib/tauri";
 import type { FsEntry } from "../../lib/types";
 import {
   buildDirectories,
+  buildGitDecorations,
   countDescendants,
+  gitDecoBadge,
+  type GitDecoStatus,
   deleteDialogDescription,
   deleteDialogTitle,
   deleteOpenDocumentsMessage,
@@ -36,6 +39,7 @@ export function ExplorerPanel() {
   const addWorkspaceFolder = useLuxStore((state) => state.addWorkspaceFolder);
   const removeWorkspaceFolder = useLuxStore((state) => state.removeWorkspaceFolder);
   const fileEntries = useLuxStore((state) => state.fileEntries);
+  const gitStatus = useLuxStore((state) => state.gitStatus);
   const fileTreeDirectories = useLuxStore((state) => state.fileTreeDirectories);
   const fileTreeLoading = useLuxStore((state) => state.fileTreeLoading);
   const fileTreeError = useLuxStore((state) => state.fileTreeError);
@@ -82,6 +86,12 @@ export function ExplorerPanel() {
     : null;
   const rootEntries = fileTreeDirectories[rootKey] ?? fileEntries;
   const rootPendingCreate = pendingCreate && normalizePath(pendingCreate.parentPath) === rootKey ? pendingCreate : null;
+  // Git status → tree decorations (green added, gold modified, red deleted, …),
+  // refreshed automatically by the workspace watcher's gitStatusChanged events.
+  const gitDecorations = useMemo(
+    () => buildGitDecorations(gitStatus?.files ?? [], rootPath),
+    [gitStatus, rootPath],
+  );
 
   const openFileMutation = useMutation({
     mutationFn: luxCommands.editorOpenFile,
@@ -636,6 +646,7 @@ export function ExplorerPanel() {
                     endEntryDrag={endEntryDrag}
                     entry={entry}
                     expandedPaths={expandedPaths}
+                    gitDecorations={gitDecorations}
                     key={entry.path}
                     openFile={(path) => openFileMutation.mutate(path)}
                     pendingCreate={pendingCreate}
@@ -683,6 +694,7 @@ function TreeEntry({
   endEntryDrag,
   entry,
   expandedPaths,
+  gitDecorations,
   openFile,
   pendingCreate,
   pendingRename,
@@ -709,6 +721,7 @@ function TreeEntry({
   endEntryDrag: () => void;
   entry: FsEntry;
   expandedPaths: Set<string>;
+  gitDecorations: Map<string, GitDecoStatus>;
   openFile: (path: string) => void;
   pendingCreate: PendingCreate | null;
   pendingRename: PendingRename | null;
@@ -741,6 +754,7 @@ function TreeEntry({
           depth={depth}
           entry={entry}
           expanded={isExpanded}
+          gitStatus={gitDecorations.get(key) ?? null}
           hasChildren={hasChildren}
           isDragging={draggedEntry ? normalizePath(draggedEntry.entry.path) === key : false}
           isDropTarget={dropTargetPath === key}
@@ -804,6 +818,7 @@ function TreeEntry({
               endEntryDrag={endEntryDrag}
               entry={child}
               expandedPaths={expandedPaths}
+              gitDecorations={gitDecorations}
               key={child.path}
               openFile={openFile}
               pendingCreate={pendingCreate}
@@ -831,6 +846,7 @@ function FileRow({
   depth,
   entry,
   expanded,
+  gitStatus,
   hasChildren,
   isDragging,
   isDropTarget,
@@ -850,6 +866,7 @@ function FileRow({
   depth: number;
   entry: FsEntry;
   expanded: boolean;
+  gitStatus: GitDecoStatus | null;
   hasChildren: boolean;
   isDragging: boolean;
   isDropTarget: boolean;
@@ -882,6 +899,8 @@ function FileRow({
         data-dragging={isDragging}
         data-drop-target={isDropTarget}
         data-selected={isSelected}
+        data-git={gitStatus ?? undefined}
+        data-git-dir={gitStatus && isDirectory ? "" : undefined}
         onClick={onOpen}
         onContextMenu={onContextMenu}
         onKeyDown={(event) => {
@@ -899,7 +918,8 @@ function FileRow({
       >
         {isDirectory && hasChildren ? <span className="tree-chevron">{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span> : <span className="tree-chevron" />}
         <Icon size={15} className={isDirectory ? "folder-icon" : iconMeta.className} />
-        <span>{entry.name}</span>
+        <span className="file-row-name">{entry.name}</span>
+        {gitStatus && !isDirectory && <span className="git-badge" title={gitStatus}>{gitDecoBadge(gitStatus)}</span>}
       </button>
     </div>
   );

@@ -528,6 +528,7 @@ export const messagesEn = {
   "update.settings.detail": "Lux IDE checks for signed updates automatically and installs them on restart.",
   "update.settings.currentVersion": "Current version: {version}",
   "update.settings.check": "Check for updates",
+  "update.settings.updateNow": "Update now",
   "update.settings.lastChecked": "Last checked {time}",
   "update.settings.lastCheckedNever": "Not checked yet",
 
@@ -902,6 +903,7 @@ export const messagesEn = {
   "aiChat.crash.reload": "Reset chat view",
   "aiChat.error.cancelled": "Request cancelled.",
   "aiChat.error.timeout": "The provider timed out. {detail}",
+  "aiChat.error.rateLimit": "Rate limit reached (429) — auto-retry didn't clear it. Wait a bit and retry, or switch model/provider in Settings. {detail}",
   "aiChat.error.providerUnavailable": "The provider is unavailable. Check that the local endpoint is running. {detail}",
   "aiChat.error.invalidJson": "The provider returned an invalid JSON response. {detail}",
   "aiChat.error.toolRejected": "Tool call was rejected. {detail}",
@@ -917,6 +919,19 @@ export const messagesEn = {
   // Sent as the user turn when retrying a failed request: resumes the turn,
   // preserving the AI's prior reasoning and tool calls instead of replaying.
   "aiChat.retry.continue": "Continue",
+
+  // Live auto-retry notice shown while a transient provider failure is being retried.
+  "aiChat.retryNotice.title": "Retrying",
+  "aiChat.retryNotice.body": "{reason} · attempt {attempt}/{max}",
+  "aiChat.retryNotice.countdown": "retrying in {seconds}s",
+  "aiChat.retryNotice.reconnecting": "reconnecting…",
+  "aiChat.retryNotice.reason.rate-limited": "rate limited",
+  "aiChat.retryNotice.reason.server": "provider error",
+  "aiChat.retryNotice.reason.forbidden": "access blocked",
+  "aiChat.retryNotice.reason.timeout": "timed out",
+  "aiChat.retryNotice.reason.network": "network issue",
+  "aiChat.retryNotice.reason.stream": "stream dropped",
+  "aiChat.retryNotice.reason.generic": "transient error",
 
   // AI tools.
   "aiTools.title": "AI Tools",
@@ -1225,6 +1240,32 @@ export const messagesEn = {
 
   // Sidebar — git.
   "sidebar.git.noRepository": "No repository",
+  "sidebar.git.noWorkspace": "No folder open",
+  "sidebar.git.stagedChanges": "Staged Changes",
+  "sidebar.git.changes": "Changes",
+  "sidebar.git.stage": "Stage",
+  "sidebar.git.unstage": "Unstage",
+  "sidebar.git.stageAll": "Stage all changes",
+  "sidebar.git.unstageAll": "Unstage all",
+  "sidebar.git.discard": "Discard changes",
+  "sidebar.git.discardAll": "Discard all changes",
+  "sidebar.git.discardConfirm": "Discard changes to {target}? This cannot be undone.",
+  "sidebar.git.allChanges": "all changes",
+  "sidebar.git.commit": "Commit",
+  "sidebar.git.commitAll": "Commit all",
+  "sidebar.git.commitAllHint": "Stage every change, then commit",
+  "sidebar.git.commitPlaceholder": "Message (Ctrl+Enter to commit)",
+  "sidebar.git.push": "Push",
+  "sidebar.git.pull": "Pull",
+  "sidebar.git.refresh": "Refresh",
+  "sidebar.git.switchBranch": "Switch branch",
+  "sidebar.git.newBranch": "Create new branch…",
+  "sidebar.git.newBranchPrompt": "New branch name",
+  "sidebar.git.noBranches": "No branches",
+  "sidebar.git.clean": "No changes",
+  "sidebar.git.diffSubtitle": "HEAD ↔ Working Tree",
+  "sidebar.git.diffLoading": "Loading diff…",
+  "sidebar.git.closeDiff": "Close diff",
 
   // Sidebar — run & debug.
   "sidebar.runDebug.actions.refreshConfiguration": "Refresh debug configuration",

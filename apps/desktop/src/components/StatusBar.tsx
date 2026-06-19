@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, ChevronsRight } from "lucide-react";
+import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, ChevronsRight, GitBranch } from "lucide-react";
 import { displayPath } from "../lib/fileTree";
 import { useTranslation } from "../lib/i18n/useTranslation";
 import { useLuxStore } from "../lib/store";
@@ -6,8 +6,24 @@ import { useLuxStore } from "../lib/store";
 export function StatusBar() {
   const workspace = useLuxStore((state) => state.workspace);
   const diagnosticsByPath = useLuxStore((state) => state.diagnosticsByPath);
+  const gitStatus = useLuxStore((state) => state.gitStatus);
+  const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
   const toggleBottomPanel = useLuxStore((state) => state.toggleBottomPanel);
   const { t } = useTranslation();
+
+  const branchChip = workspace && gitStatus?.branch ? (
+    <button
+      className="status-item status-branch"
+      type="button"
+      title={t("sidebar.git.title")}
+      onClick={() => setActiveActivity("git")}
+    >
+      <GitBranch size={13} />
+      <span>{gitStatus.branch}</span>
+      {gitStatus.behind > 0 && <span className="status-branch-count"><ArrowDown size={11} />{gitStatus.behind}</span>}
+      {gitStatus.ahead > 0 && <span className="status-branch-count"><ArrowUp size={11} />{gitStatus.ahead}</span>}
+    </button>
+  ) : null;
 
   let errorCount = 0;
   let warningCount = 0;
@@ -46,6 +62,7 @@ export function StatusBar() {
           <CheckCircle2 size={14} /> {errorCount}
           <AlertTriangle size={14} /> {warningCount}
         </button>
+        {branchChip}
       </div>
       <div className="status-group">
         <span className="status-item">{workspace ? displayPath(workspace.root) : t("status.noWorkspace")}</span>

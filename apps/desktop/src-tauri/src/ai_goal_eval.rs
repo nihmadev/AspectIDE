@@ -85,7 +85,7 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
 
     // Stream: non-streaming requests hang against SSE-only providers/proxies. The
     // verdict is parsed from the final content, so on_delta is a no-op.
-    match crate::ai_chat_backend::completion_streaming(request, |_, _| {}, || false).await {
+    match crate::ai_chat_backend::completion_streaming(request, |_, _| {}, || false, |_| {}).await {
         Ok(response) => {
             let content = response
                 .body

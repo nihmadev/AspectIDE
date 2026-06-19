@@ -139,11 +139,14 @@ if (!webPrompt.includes("Runtime tools are not attached")) {
   throw new Error("AI system prompt must clearly explain web/dev chat requests without runtime tools.");
 }
 
-if (prompt.length < 6_000 || prompt.length > 15_000) {
-  throw new Error(`AI system prompt length ${prompt.length} is outside the expected 6000-15000 character range.`);
+// Upper bounds carry headroom for the progress-narration guidance and the
+// CodeGraph tool-map line (deliberate features); the floor still guards against
+// an accidentally gutted prompt.
+if (prompt.length < 6_000 || prompt.length > 16_000) {
+  throw new Error(`AI system prompt length ${prompt.length} is outside the expected 6000-16000 character range.`);
 }
-if (automaticPrompt.length > 16_000) {
-  throw new Error(`Automatic mode prompt length ${automaticPrompt.length} exceeds 16000 characters.`);
+if (automaticPrompt.length > 17_500) {
+  throw new Error(`Automatic mode prompt length ${automaticPrompt.length} exceeds 17500 characters.`);
 }
 
 console.log(`AI prompt verification passed (${prompt.length} chars).`);

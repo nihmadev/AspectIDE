@@ -2,6 +2,10 @@ import { joinPath, normalizePath, parentPath, displayPath } from "../../lib/file
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 import type { FsEntry, WorkspaceInfo } from "../../lib/types";
 
+// Git decoration logic now lives in lib/gitDecorations.ts (shared with editor tabs
+// + status bar). Re-export so existing explorer imports keep working.
+export { buildGitDecorations, gitDecoBadge, type GitDecoStatus } from "../../lib/gitDecorations";
+
 export function buildDirectories(root: string, entries: FsEntry[]) {
   const directories: Record<string, FsEntry[]> = { [normalizePath(root)]: [] };
 

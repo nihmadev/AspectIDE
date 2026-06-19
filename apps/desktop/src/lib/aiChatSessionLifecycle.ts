@@ -1,4 +1,5 @@
 import { disposeChatTurnRuntimeSession } from "./aiChatTurnRuntime";
+import { clearAiRetryNotice } from "./aiRetryNotice";
 import { clearComposerSessionState } from "./aiChatComposerSession";
 import { clearAiSessionGoal } from "./aiSessionGoal";
 import { disposeGoalRun } from "./aiSessionGoalRun";
@@ -20,4 +21,5 @@ export function disposeAiChatSessionSideState(sessionId: string) {
   clearPendingQuestionsForSession(sessionId);
   clearPendingPlansForSession(sessionId);
   clearComposerSessionState(sessionId);
+  clearAiRetryNotice(sessionId);
 }

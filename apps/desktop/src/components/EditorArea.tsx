@@ -14,6 +14,7 @@ import { DiagramEditorPane } from "./DiagramEditorPane";
 import { SpreadsheetEditorPane } from "./SpreadsheetEditorPane";
 import { TableEditorPane } from "./TableEditorPane";
 import { isAgentBrowserPreviewDocument } from "../lib/agentBrowserPreviewDocument";
+import { gitStatusForPath, useGitDecorations } from "../lib/gitDecorations";
 import { resolveEditorPaneKind } from "../lib/documentViewRouting";
 import { AgentBrowserPreviewEditorPane } from "./AgentBrowserPreviewEditorPane";
 import { useTranslation } from "../lib/i18n/useTranslation";
@@ -759,6 +760,8 @@ function EditorTab({
 }) {
   const { t } = useTranslation();
   const name = documentTitle(document);
+  const gitDecorations = useGitDecorations();
+  const gitStatus = document.path ? gitStatusForPath(gitDecorations, document.path) : null;
   const [menuPosition, setMenuPosition] = useState<{ x: number; y: number } | null>(null);
 
   const closeTab = () => closeDocumentInGroup(groupId, document.id);
@@ -832,7 +835,7 @@ function EditorTab({
         onClick={() => setActiveDocumentInGroup(groupId, document.id)}
       >
         {isAgentBrowserPreviewDocument(document) ? <Globe size={15} /> : <FileCode2 size={15} />}
-        <span>{name}</span>
+        <span className="editor-tab-name" data-git={gitStatus ?? undefined}>{name}</span>
         {document.is_dirty && <Circle className="dirty-dot" size={8} fill="currentColor" />}
       </button>
       <button

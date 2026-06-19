@@ -13,12 +13,27 @@ use tokio::{sync::oneshot, time::timeout};
 const CHAT_TIMEOUT_SECS: u64 = 180;
 const HISTORY_FILE: &str = "ai-chat-history.json";
 const HISTORY_SCHEMA_VERSION: u32 = 1;
-/// Automatic retries for transient provider failures (429 / 5xx / network).
-/// Concept ported from claw-code (MIT) recovery recipes: one bounded automatic
-/// recovery before surfacing the error. Streaming only retries the connection
-/// phase (before any token is emitted) so partial output is never replayed.
-const MAX_TRANSIENT_RETRIES: u32 = 2;
-const MAX_RETRY_DELAY_SECS: u64 = 20;
+/// Hard ceiling on automatic transient retries (so up to 10 total attempts for the
+/// most recoverable failures). The per-failure budget below decides how many of
+/// these a given error actually gets — a rate limit earns all of them, a dead
+/// socket only a few. Streaming only retries the connection phase (before any token
+/// is emitted), so partial output is never replayed.
+const MAX_TRANSIENT_RETRIES: u32 = 9;
+const MAX_RETRY_DELAY_SECS: u64 = 30;
+
+/// Retries worth attempting for a transient HTTP status. Rate limits and server/
+/// overload errors recover by waiting, so they get the full budget; an edge 403 or
+/// request-timeout status clears less often, so it gets only a few before surfacing.
+const fn retry_budget_for_status(status: u16) -> u32 {
+    match status {
+        429 | 500 | 502 | 503 | 504 => MAX_TRANSIENT_RETRIES,
+        _ => 4,
+    }
+}
+
+/// Connect/timeout/request errors: a persistent network fault won't clear in ten
+/// tries, so cap lower than the rate-limit budget while still riding out a blip.
+const NETWORK_RETRY_BUDGET: u32 = 4;
 /// Hard cap on the SSE reassembly buffer. A server that streams bytes without an
 /// event delimiter (`\n\n`) could otherwise grow this without bound; cutting at
 /// 8 MiB bounds memory against a misbehaving or malicious provider.
@@ -222,9 +237,13 @@ pub async fn ai_list_provider_models(
     Ok(ids)
 }
 
-pub async fn completion(
+pub async fn completion<R>(
     request: AiChatCompletionRequest,
-) -> Result<AiChatCompletionResponse, String> {
+    mut on_retry: R,
+) -> Result<AiChatCompletionResponse, String>
+where
+    R: FnMut(RetryNotice),
+{
     let endpoint = completion_endpoint(&request.base_url)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
@@ -251,16 +270,34 @@ pub async fn completion(
         let send_result = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()).await;
         let response = match send_result {
             Err(_) => {
-                if attempt < MAX_TRANSIENT_RETRIES {
-                    sleep_backoff(attempt).await;
+                if attempt < NETWORK_RETRY_BUDGET {
+                    let delay = backoff_delay(attempt);
+                    emit_retry(
+                        &mut on_retry,
+                        attempt,
+                        NETWORK_RETRY_BUDGET,
+                        "timeout",
+                        "request timed out",
+                        delay,
+                    );
+                    tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
                 }
                 return Err("AI request timed out".to_string());
             }
             Ok(Err(error)) => {
-                if attempt < MAX_TRANSIENT_RETRIES && is_transient_reqwest_error(&error) {
-                    sleep_backoff(attempt).await;
+                if attempt < NETWORK_RETRY_BUDGET && is_transient_reqwest_error(&error) {
+                    let delay = backoff_delay(attempt);
+                    emit_retry(
+                        &mut on_retry,
+                        attempt,
+                        NETWORK_RETRY_BUDGET,
+                        retry_reason_for_error(&error),
+                        "connection failed",
+                        delay,
+                    );
+                    tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
                 }
@@ -271,9 +308,17 @@ pub async fn completion(
 
         let status = response.status().as_u16();
         if status >= 400 {
-            if attempt < MAX_TRANSIENT_RETRIES && is_transient_status(status) {
-                let delay =
-                    retry_after_delay(response.headers()).unwrap_or_else(|| backoff_delay(attempt));
+            let budget = retry_budget_for_status(status);
+            if attempt < budget && is_transient_status(status) {
+                let delay = transient_retry_delay(status, response.headers(), attempt);
+                emit_retry(
+                    &mut on_retry,
+                    attempt,
+                    budget,
+                    retry_reason_for_status(status),
+                    format!("HTTP {status}"),
+                    delay,
+                );
                 tokio::time::sleep(delay).await;
                 attempt += 1;
                 continue;
@@ -314,14 +359,16 @@ pub async fn completion(
 /// a Stop pressed mid-stream truly aborts the in-flight request instead of draining
 /// the model's full generation. The partial body is returned so the caller's own
 /// post-stream cancellation check can finalize the turn as cancelled.
-pub async fn completion_streaming<F, C>(
+pub async fn completion_streaming<F, C, R>(
     request: AiChatCompletionRequest,
     mut on_delta: F,
     should_cancel: C,
+    mut on_retry: R,
 ) -> Result<AiChatCompletionResponse, String>
 where
     F: FnMut(&str, &str),
     C: Fn() -> bool,
+    R: FnMut(RetryNotice),
 {
     let endpoint = completion_endpoint(&request.base_url)?;
     let client = reqwest::Client::builder()
@@ -351,16 +398,34 @@ where
             let send = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()).await;
             let response = match send {
                 Err(_) => {
-                    if attempt < MAX_TRANSIENT_RETRIES {
-                        sleep_backoff(attempt).await;
+                    if attempt < NETWORK_RETRY_BUDGET {
+                        let delay = backoff_delay(attempt);
+                        emit_retry(
+                            &mut on_retry,
+                            attempt,
+                            NETWORK_RETRY_BUDGET,
+                            "timeout",
+                            "request timed out",
+                            delay,
+                        );
+                        tokio::time::sleep(delay).await;
                         attempt += 1;
                         continue;
                     }
                     return Err("AI stream request timed out".to_string());
                 }
                 Ok(Err(error)) => {
-                    if attempt < MAX_TRANSIENT_RETRIES && is_transient_reqwest_error(&error) {
-                        sleep_backoff(attempt).await;
+                    if attempt < NETWORK_RETRY_BUDGET && is_transient_reqwest_error(&error) {
+                        let delay = backoff_delay(attempt);
+                        emit_retry(
+                            &mut on_retry,
+                            attempt,
+                            NETWORK_RETRY_BUDGET,
+                            retry_reason_for_error(&error),
+                            "connection failed",
+                            delay,
+                        );
+                        tokio::time::sleep(delay).await;
                         attempt += 1;
                         continue;
                     }
@@ -370,9 +435,17 @@ where
             };
             let status = response.status().as_u16();
             if status >= 400 {
-                if attempt < MAX_TRANSIENT_RETRIES && is_transient_status(status) {
-                    let delay = retry_after_delay(response.headers())
-                        .unwrap_or_else(|| backoff_delay(attempt));
+                let budget = retry_budget_for_status(status);
+                if attempt < budget && is_transient_status(status) {
+                    let delay = transient_retry_delay(status, response.headers(), attempt);
+                    emit_retry(
+                        &mut on_retry,
+                        attempt,
+                        budget,
+                        retry_reason_for_status(status),
+                        format!("HTTP {status}"),
+                        delay,
+                    );
                     tokio::time::sleep(delay).await;
                     attempt += 1;
                     continue;
@@ -1012,6 +1085,27 @@ async fn sleep_backoff(attempt: u32) {
     tokio::time::sleep(backoff_delay(attempt)).await;
 }
 
+/// Pick a backoff for a transient HTTP failure. A `Retry-After` header always
+/// wins (the server told us exactly how long). A rate limit (429) without that
+/// header gets a longer floor than the generic backoff — 0.5s/1s does nothing
+/// against a real limit, so wait long enough to have a genuine chance (and to
+/// make the live "retrying in Ns" notice actually visible).
+fn transient_retry_delay(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    attempt: u32,
+) -> Duration {
+    if let Some(delay) = retry_after_delay(headers) {
+        return delay;
+    }
+    if status == 429 {
+        // 3s, 6s, … capped at the ceiling.
+        let secs = (3u64 << attempt).min(MAX_RETRY_DELAY_SECS);
+        return Duration::from_secs(secs);
+    }
+    backoff_delay(attempt)
+}
+
 /// Honor a numeric `Retry-After` header (seconds), capped to a sane maximum.
 fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     let seconds = headers
@@ -1022,6 +1116,65 @@ fn retry_after_delay(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
         .parse::<u64>()
         .ok()?;
     Some(Duration::from_secs(seconds.min(MAX_RETRY_DELAY_SECS)))
+}
+
+/// One bounded automatic-retry notice, emitted right before a backoff sleep so a
+/// caller can surface "retrying because X (attempt n/m)" to the user. Retries only
+/// happen in the connection phase (before any token streams), so a notice always
+/// means nothing has been shown yet and the request is safe to replay.
+#[derive(Debug, Clone)]
+pub struct RetryNotice {
+    /// 1-based number of the upcoming attempt (the first try is attempt 1).
+    pub attempt: u32,
+    /// Total attempts that will be made before giving up.
+    pub max_attempts: u32,
+    /// Machine reason: `rate-limited` | `server` | `forbidden` | `timeout` | `network`.
+    pub reason: String,
+    /// Short human detail (e.g. `HTTP 429`).
+    pub detail: String,
+    /// How long the backoff will wait before the retry.
+    pub delay_ms: u64,
+}
+
+/// Emit a retry notice for the upcoming attempt. `attempt` is the loop's 0-based
+/// retry counter, so the upcoming try is `attempt + 2` (try 1 already failed).
+/// `budget` is the per-failure retry ceiling, so the notice reads "attempt n of
+/// budget+1" and reflects the real number of tries this error type will get.
+fn emit_retry<R: FnMut(RetryNotice)>(
+    on_retry: &mut R,
+    attempt: u32,
+    budget: u32,
+    reason: &str,
+    detail: impl Into<String>,
+    delay: Duration,
+) {
+    let max_attempts = budget + 1;
+    on_retry(RetryNotice {
+        attempt: (attempt + 2).min(max_attempts),
+        max_attempts,
+        reason: reason.to_string(),
+        detail: detail.into(),
+        delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+    });
+}
+
+/// Map a transient HTTP status to a stable retry reason the UI can label.
+const fn retry_reason_for_status(status: u16) -> &'static str {
+    match status {
+        429 => "rate-limited",
+        403 => "forbidden",
+        408 | 425 => "timeout",
+        _ => "server",
+    }
+}
+
+/// Map a retryable reqwest error to a stable retry reason.
+fn retry_reason_for_error(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else {
+        "network"
+    }
 }
 
 fn response_error(status: u16, body: &Value) -> String {
@@ -1452,6 +1605,107 @@ mod tests {
         let event = ": keep-alive\nevent: message\ndata: {\"a\":\ndata: 1}\n";
 
         assert_eq!(sse_event_data(event).as_deref(), Some("{\"a\":\n1}"));
+    }
+
+    #[test]
+    fn rate_limit_without_header_uses_longer_floor() {
+        let empty = reqwest::header::HeaderMap::new();
+        // 429 with no Retry-After: 3s, then 6s — long enough to matter and to show.
+        assert_eq!(
+            transient_retry_delay(429, &empty, 0),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            transient_retry_delay(429, &empty, 1),
+            Duration::from_secs(6)
+        );
+        // Other transient statuses keep the quick generic backoff.
+        assert_eq!(
+            transient_retry_delay(503, &empty, 0),
+            Duration::from_millis(500)
+        );
+        // A Retry-After header always wins, even for 429.
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "5".parse().unwrap());
+        assert_eq!(
+            transient_retry_delay(429, &headers, 0),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn retry_reason_classification() {
+        assert_eq!(retry_reason_for_status(429), "rate-limited");
+        assert_eq!(retry_reason_for_status(403), "forbidden");
+        assert_eq!(retry_reason_for_status(408), "timeout");
+        assert_eq!(retry_reason_for_status(425), "timeout");
+        assert_eq!(retry_reason_for_status(500), "server");
+        assert_eq!(retry_reason_for_status(503), "server");
+    }
+
+    #[test]
+    fn emit_retry_reports_1_based_attempt_and_total() {
+        // The 0-based loop counter maps to a 1-based "attempt n of budget+1" the UI
+        // shows: the first failure (attempt 0) is the upcoming try 2.
+        let mut seen: Vec<RetryNotice> = Vec::new();
+        let mut on_retry = |notice: RetryNotice| seen.push(notice);
+        emit_retry(
+            &mut on_retry,
+            0,
+            9,
+            "rate-limited",
+            "HTTP 429",
+            Duration::from_millis(500),
+        );
+        emit_retry(
+            &mut on_retry,
+            1,
+            9,
+            "server",
+            "HTTP 503",
+            Duration::from_secs(1),
+        );
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].attempt, 2);
+        assert_eq!(seen[0].max_attempts, 10);
+        assert_eq!(seen[0].reason, "rate-limited");
+        assert_eq!(seen[0].delay_ms, 500);
+        assert_eq!(seen[1].attempt, 3);
+        // The notice reflects the real per-failure ceiling, not a global one.
+        let mut net: Option<RetryNotice> = None;
+        emit_retry(
+            &mut |n: RetryNotice| net = Some(n),
+            0,
+            NETWORK_RETRY_BUDGET,
+            "network",
+            "",
+            Duration::ZERO,
+        );
+        assert_eq!(net.unwrap().max_attempts, NETWORK_RETRY_BUDGET + 1);
+        // Attempt never advertises past the total even if the counter would overflow it.
+        let mut last: Option<RetryNotice> = None;
+        emit_retry(
+            &mut |n: RetryNotice| last = Some(n),
+            99,
+            9,
+            "timeout",
+            "",
+            Duration::ZERO,
+        );
+        assert_eq!(last.unwrap().attempt, 10);
+    }
+
+    #[test]
+    fn retry_budget_differs_by_failure() {
+        // Rate limit / server / overload recover by waiting → full budget.
+        assert_eq!(retry_budget_for_status(429), MAX_TRANSIENT_RETRIES);
+        assert_eq!(retry_budget_for_status(503), MAX_TRANSIENT_RETRIES);
+        assert_eq!(retry_budget_for_status(500), MAX_TRANSIENT_RETRIES);
+        // Edge 403 / request-timeout statuses clear less often → fewer tries.
+        assert_eq!(retry_budget_for_status(403), 4);
+        assert_eq!(retry_budget_for_status(408), 4);
+        // A dead socket shouldn't burn the full budget.
+        assert_eq!(NETWORK_RETRY_BUDGET, 4);
     }
 
     #[test]

@@ -4,6 +4,7 @@ import { isAnthropicCacheModel, reasoningPayload } from "./aiChatTransport";
 import { attachTurnCostEstimate } from "./aiTurnUsage";
 import { buildUserContent } from "./aiRuntimePrompt";
 import { bridgeNativeToolCompleted, bridgeNativeToolStarted } from "./aiNativeOrchestrationBridge";
+import { captureNativeEditBefore, NATIVE_FILE_EDIT_TOOLS, registerNativeEditReview } from "./aiNativeFileReview";
 import { clearPendingQuestionsForSession, registerPendingQuestion } from "./aiPendingQuestion";
 import { clearPendingPlansForSession, getPendingPlanForSession, registerPendingPlan } from "./aiPendingPlan";
 import { browserSessionName, ensureBrowserStream } from "./agentBrowser";
@@ -83,6 +84,9 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
   // toolCallCompleted carries no tool name, so remember it from toolCallStarted to
   // route the orchestration bridge (TodoWrite/Goal/Task) on completion.
   const toolNameByCallId = new Map<string, string>();
+  // Pre-edit file snapshots captured at toolCallStarted, consumed at completion to
+  // register a Cursor-style pending review (green/red diff + Accept/Reject).
+  const editBeforeByCallId = new Map<string, Promise<Awaited<ReturnType<typeof captureNativeEditBefore>>>>();
 
   return await new Promise<AiChatMessage>((resolve, reject) => {
     let unlisten: (() => void) | undefined;
@@ -97,6 +101,7 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
       if (resolved) return;
       resolved = true;
       cleanup();
+      input.onRetryNotice?.(null);
       // A question tied to this (now finished) turn can never be answered back into
       // the loop, so drop it. An auto-started plan (Automatic mode) was a record of
       // work already executed — clear it; a manual plan persists so its Start button
@@ -110,6 +115,7 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
       if (resolved) return;
       resolved = true;
       cleanup();
+      input.onRetryNotice?.(null);
       // The turn errored/aborted: both prompts are bound to a dead loop now.
       clearPendingQuestionsForSession(input.chatSessionId);
       clearPendingPlansForSession(input.chatSessionId);
@@ -133,6 +139,10 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             roundContent = "";
             roundReasoning = "";
           }
+          // The call recovered (tokens flowing / tools running) — drop any retry notice.
+          if (event.phase === "streaming" || event.phase === "running-tools") {
+            input.onRetryNotice?.(null);
+          }
           input.onStatusChange?.(mapPhase(event.phase));
           break;
         case "streamDelta":
@@ -144,9 +154,14 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           break;
         case "toolCallStarted":
           // Any streamed text/reasoning for this round is final once tools start.
-          timeline.commitRound(roundContent, roundReasoning);
-          roundContent = "";
-          roundReasoning = "";
+          // Commit only on the FIRST tool of the round (when there is buffered
+          // text/reasoning); later parallel tool calls must not re-commit an empty
+          // round, which used to splice out the just-shown narration line.
+          if (roundContent || roundReasoning) {
+            timeline.commitRound(roundContent, roundReasoning);
+            roundContent = "";
+            roundReasoning = "";
+          }
           timeline.addToolCalls([{
             id: event.callId,
             tool: event.tool,
@@ -158,6 +173,12 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           // loop executes them but can't write the TS stores the panel reads).
           toolNameByCallId.set(event.callId, event.tool);
           bridgeNativeToolStarted(input.chatSessionId, event.callId, event.tool, event.input);
+          // Capture each touched file's pre-edit text now, before the write lands
+          // (Default approval mode suspends here, so there is no read/write race),
+          // so completion can register an Accept/Reject review against it.
+          if (NATIVE_FILE_EDIT_TOOLS.has(event.tool)) {
+            editBeforeByCallId.set(event.callId, captureNativeEditBefore(event.tool, event.input, input));
+          }
           break;
         case "toolCallCompleted": {
           const completed = timeline.updateToolCall(event.callId, {
@@ -171,6 +192,19 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           // page — reflect it in the preview (stream + blue activity dot) automatically.
           if (event.status !== "error" && completed && NAVIGATIONAL_BROWSER_TOOLS.has(completed.tool)) {
             void reflectBrowserActivityInPreview(input);
+          }
+          // Register the Cursor-style file review once the edit landed successfully.
+          {
+            const beforeCapture = editBeforeByCallId.get(event.callId);
+            if (beforeCapture) {
+              editBeforeByCallId.delete(event.callId);
+              if (event.status !== "error") {
+                const toolName = toolNameByCallId.get(event.callId) ?? "Edit";
+                void beforeCapture
+                  .then((before) => registerNativeEditReview(toolName, event.callId, event.output, before, input))
+                  .catch(() => undefined);
+              }
+            }
           }
           break;
         }
@@ -266,6 +300,19 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
         }
         case "turnError":
           settleReject(new Error(event.error));
+          break;
+        case "turnRetry":
+          // A transient provider failure is being auto-retried (connection phase,
+          // no tokens streamed yet). Surface a live notice; the next streaming /
+          // tool / done event clears it once the call recovers or the turn ends.
+          input.onRetryNotice?.({
+            attempt: event.attempt,
+            maxAttempts: event.maxAttempts,
+            reason: event.reason,
+            detail: event.detail,
+            delayMs: event.delayMs,
+          });
+          input.onStatusChange?.("thinking");
           break;
         case "turnCancelled":
           settleReject(new DOMException("AI request was cancelled", "AbortError"));

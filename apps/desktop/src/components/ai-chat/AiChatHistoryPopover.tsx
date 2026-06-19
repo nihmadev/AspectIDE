@@ -1,4 +1,4 @@
-import { Archive, Download, History, Pin, PinOff, Pencil } from "lucide-react";
+import { Archive, ArchiveRestore, Download, History, Pin, PinOff, Pencil, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { exportChatSessionMarkdown } from "../../lib/aiChatExport";
@@ -33,6 +33,8 @@ export function AiChatHistoryPopover({ workspaceRoot }: AiChatHistoryPopoverProp
   const restoreChatSession = useLuxStore((state) => state.restoreAiChatSession);
   const renameChatSession = useLuxStore((state) => state.renameAiChatSession);
   const pinChatSession = useLuxStore((state) => state.pinAiChatSession);
+  const closeChatSession = useLuxStore((state) => state.closeAiChatSession);
+  const deleteChatSession = useLuxStore((state) => state.deleteAiChatSession);
 
   const scopedSessions = useMemo(
     () => chatSessions.filter((session) => sameWorkspaceRoot(session.workspaceRoot, workspaceRoot)),
@@ -104,6 +106,12 @@ export function AiChatHistoryPopover({ workspaceRoot }: AiChatHistoryPopoverProp
     setOpen(false);
   };
 
+  const deleteSession = (session: AiChatSession) => {
+    if (window.confirm(t("agent.chat.deleteConfirm", { title: aiChatSessionTitle(session.title, t) }))) {
+      deleteChatSession(session.id);
+    }
+  };
+
   const exportSession = (session: AiChatSession) => {
     const markdown = exportChatSessionMarkdown(session, workspaceRoot);
     const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
@@ -163,6 +171,8 @@ export function AiChatHistoryPopover({ workspaceRoot }: AiChatHistoryPopoverProp
               }}
               onPin={(sessionId, pinned) => pinChatSession(sessionId, pinned)}
               onExport={exportSession}
+              onArchive={(sessionId) => closeChatSession(sessionId)}
+              onDelete={deleteSession}
               onSelect={selectSession}
               title={t("agent.sidebar.chats")}
             />
@@ -177,6 +187,7 @@ export function AiChatHistoryPopover({ workspaceRoot }: AiChatHistoryPopoverProp
               }}
               onPin={(sessionId, pinned) => pinChatSession(sessionId, pinned)}
               onExport={exportSession}
+              onDelete={deleteSession}
               onSelect={selectSession}
               title={t("agent.sidebar.history")}
             />
@@ -196,6 +207,8 @@ function AiChatHistorySection({
   onSelect,
   onPin,
   onExport,
+  onArchive,
+  onDelete,
   renamingId,
   renameDraft,
   onRenameDraft,
@@ -211,6 +224,8 @@ function AiChatHistorySection({
   onSelect: (sessionId: string) => void;
   onPin?: (sessionId: string, pinned: boolean) => void;
   onExport?: (session: AiChatSession) => void;
+  onArchive?: (sessionId: string) => void;
+  onDelete?: (session: AiChatSession) => void;
   renamingId?: string | null;
   renameDraft?: string;
   onRenameDraft?: (value: string) => void;
@@ -277,6 +292,21 @@ function AiChatHistorySection({
               {onExport && (
                 <button type="button" title={t("aiChat.history.export")} onClick={() => onExport(session)}>
                   <Download size={12} />
+                </button>
+              )}
+              {archived && onRestore && (
+                <button type="button" title={t("aiChat.restoreChat")} onClick={() => onRestore(session.id)}>
+                  <ArchiveRestore size={12} />
+                </button>
+              )}
+              {!archived && onArchive && (
+                <button type="button" title={t("agent.chat.contextMenu.archive")} onClick={() => onArchive(session.id)}>
+                  <Archive size={12} />
+                </button>
+              )}
+              {onDelete && (
+                <button type="button" className="ai-chat-history-item-danger" title={t("agent.chat.contextMenu.delete")} onClick={() => onDelete(session)}>
+                  <Trash2 size={12} />
                 </button>
               )}
             </div>

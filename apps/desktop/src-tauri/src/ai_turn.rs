@@ -222,6 +222,20 @@ pub enum TurnEvent {
     /// Turn failed.
     #[serde(rename_all = "camelCase")]
     TurnError { turn_id: String, error: String },
+
+    /// A transient provider failure is being retried automatically (connection
+    /// phase only — no tokens have streamed yet). The UI surfaces a live
+    /// "retrying (reason) — attempt n/m" notice instead of leaving the user
+    /// staring at a frozen turn.
+    #[serde(rename_all = "camelCase")]
+    TurnRetry {
+        turn_id: String,
+        attempt: u32,
+        max_attempts: u32,
+        reason: String,
+        detail: String,
+        delay_ms: u64,
+    },
 }
 
 // ── Interactive question / plan payloads ──
@@ -367,6 +381,25 @@ pub fn cancel_questions_for_turn(turn_id: &str) {
 pub fn emit_turn_event(app: &tauri::AppHandle, event: &TurnEvent) -> Result<(), String> {
     use tauri::Emitter;
     app.emit("lux://ai-turn", event).map_err(|e| e.to_string())
+}
+
+/// Map a backend `RetryNotice` onto a `TurnRetry` event for the active turn.
+fn emit_retry_event(
+    app: &tauri::AppHandle,
+    turn_id: &str,
+    notice: &crate::ai_chat_backend::RetryNotice,
+) {
+    let _ = emit_turn_event(
+        app,
+        &TurnEvent::TurnRetry {
+            turn_id: turn_id.to_string(),
+            attempt: notice.attempt,
+            max_attempts: notice.max_attempts,
+            reason: notice.reason.clone(),
+            detail: notice.detail.clone(),
+            delay_ms: notice.delay_ms,
+        },
+    );
 }
 
 // ── Turn input ──
@@ -541,6 +574,8 @@ pub async fn ai_run_turn(
         let stream_app = app.clone();
         let stream_turn_id = turn_id.clone();
         let cancel_turn_id = turn_id.clone();
+        let retry_app = app.clone();
+        let retry_turn_id = turn_id.clone();
         let mut announced_streaming = false;
         let response = match crate::ai_chat_backend::completion_streaming(
             request,
@@ -576,6 +611,9 @@ pub async fn ai_run_turn(
             // Polled once per SSE chunk: a Stop drops the in-flight stream
             // immediately instead of waiting for the model's full generation.
             move || is_turn_cancelled(&cancel_turn_id),
+            // Surface each automatic transient retry so the user sees a live
+            // "retrying (reason) — attempt n/m" notice instead of a frozen turn.
+            move |notice| emit_retry_event(&retry_app, &retry_turn_id, &notice),
         )
         .await
         {
@@ -752,6 +790,8 @@ pub async fn ai_run_turn(
         let stream_app = app.clone();
         let stream_turn_id = turn_id.clone();
         let cancel_turn_id = turn_id.clone();
+        let retry_app = app.clone();
+        let retry_turn_id = turn_id.clone();
         let mut announced_streaming = false;
         if let Ok(response) = crate::ai_chat_backend::completion_streaming(
             request,
@@ -782,6 +822,7 @@ pub async fn ai_run_turn(
                 );
             },
             move || is_turn_cancelled(&cancel_turn_id),
+            move |notice| emit_retry_event(&retry_app, &retry_turn_id, &notice),
         )
         .await
         {
@@ -2393,6 +2434,8 @@ async fn run_subagent(
             request,
             |_content, _reasoning| {},
             move || is_turn_cancelled(&cancel_turn),
+            // Subagents run in an isolated context with no UI to notify.
+            |_notice| {},
         )
         .await?;
         let assistant = parse_assistant_message(&response.body);

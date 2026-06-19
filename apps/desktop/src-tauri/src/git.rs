@@ -1,16 +1,26 @@
 use std::{
     collections::HashMap,
     future::Future,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::{Duration, Instant},
 };
 
 use lux_core::{GitDiff, GitStatus};
+use serde::Serialize;
 use tauri::State;
 use tokio::sync::Mutex as AsyncMutex;
 
 use super::{lock_error, SharedState};
+
+/// HEAD-vs-working text for one file, powering the side-by-side diff view.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GitFileDiff {
+    pub path: String,
+    pub head_text: String,
+    pub working_text: String,
+}
 
 /// How long a freshly computed `status`/`diff` is reused before re-running git.
 ///
@@ -43,6 +53,133 @@ pub async fn git_diff(state: State<'_, SharedState>) -> Result<GitDiff, String> 
             run_blocking(move || lux_git::diff(root))
         })
         .await
+}
+
+// ── Mutations (stage / unstage / discard / commit / push / pull / branches) ──
+// Each runs the blocking git op off-thread, then busts the status/diff coalescer
+// caches for the root so the explorer, editor tabs, status bar, and AI runtime see
+// the new state immediately instead of a ≤300ms-stale snapshot. lux-git recomputes
+// and returns the fresh GitStatus, which the caller pushes straight into the store.
+
+fn invalidate_git_caches(root: &Path) {
+    status_coalescer().clear(root);
+    diff_coalescer().clear(root);
+}
+
+#[tauri::command]
+pub async fn git_stage(
+    state: State<'_, SharedState>,
+    paths: Vec<String>,
+) -> Result<GitStatus, String> {
+    let root = workspace_root(&state)?;
+    let target = root.clone();
+    let status = run_blocking(move || lux_git::stage(target, &paths)).await?;
+    invalidate_git_caches(&root);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_unstage(
+    state: State<'_, SharedState>,
+    paths: Vec<String>,
+) -> Result<GitStatus, String> {
+    let root = workspace_root(&state)?;
+    let target = root.clone();
+    let status = run_blocking(move || lux_git::unstage(target, &paths)).await?;
+    invalidate_git_caches(&root);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_discard(
+    state: State<'_, SharedState>,
+    paths: Vec<String>,
+) -> Result<GitStatus, String> {
+    let root = workspace_root(&state)?;
+    let target = root.clone();
+    let status = run_blocking(move || lux_git::discard(target, &paths)).await?;
+    invalidate_git_caches(&root);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_commit(
+    state: State<'_, SharedState>,
+    message: String,
+) -> Result<GitStatus, String> {
+    let trimmed = message.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("A commit message is required.".to_string());
+    }
+    let root = workspace_root(&state)?;
+    let target = root.clone();
+    let status = run_blocking(move || lux_git::commit(target, &trimmed)).await?;
+    invalidate_git_caches(&root);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_push(state: State<'_, SharedState>) -> Result<GitStatus, String> {
+    let root = workspace_root(&state)?;
+    let target = root.clone();
+    let status = run_blocking(move || lux_git::push(target)).await?;
+    invalidate_git_caches(&root);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_pull(state: State<'_, SharedState>) -> Result<GitStatus, String> {
+    let root = workspace_root(&state)?;
+    let target = root.clone();
+    let status = run_blocking(move || lux_git::pull(target)).await?;
+    invalidate_git_caches(&root);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_branches(state: State<'_, SharedState>) -> Result<Vec<String>, String> {
+    let root = workspace_root(&state)?;
+    run_blocking(move || lux_git::branches(root)).await
+}
+
+#[tauri::command]
+pub async fn git_checkout_branch(
+    state: State<'_, SharedState>,
+    name: String,
+) -> Result<GitStatus, String> {
+    let root = workspace_root(&state)?;
+    let target = root.clone();
+    let status = run_blocking(move || lux_git::checkout_branch(target, &name)).await?;
+    invalidate_git_caches(&root);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_create_branch(
+    state: State<'_, SharedState>,
+    name: String,
+) -> Result<GitStatus, String> {
+    let root = workspace_root(&state)?;
+    let target = root.clone();
+    let status = run_blocking(move || lux_git::create_branch(target, &name)).await?;
+    invalidate_git_caches(&root);
+    Ok(status)
+}
+
+#[tauri::command]
+pub async fn git_file_diff(
+    state: State<'_, SharedState>,
+    path: String,
+) -> Result<GitFileDiff, String> {
+    let root = workspace_root(&state)?;
+    let diff_path = path.clone();
+    let (head_text, working_text) =
+        run_blocking(move || lux_git::file_diff(root, &diff_path)).await?;
+    Ok(GitFileDiff {
+        path,
+        head_text,
+        working_text,
+    })
 }
 
 async fn run_blocking<T, F>(work: F) -> Result<T, String>
@@ -128,6 +265,14 @@ impl<T: Clone> Coalescer<T> {
             .entry(root)
             .or_default()
             .clone()
+    }
+
+    /// Drop the cached value for `root` so the next read recomputes (called after a
+    /// mutation rewrites the index/worktree).
+    fn clear(&self, root: &Path) {
+        if let Ok(mut slots) = self.slots.lock() {
+            slots.remove(root);
+        }
     }
 }
 

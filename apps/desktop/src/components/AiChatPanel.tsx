@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUpRight, Brain, Bug, Code2, FlaskConical, Globe, MessageSquarePlus, PanelRightClose, Plus, RotateCcw, Sparkles, X } from "lucide-react";
+import { ArrowDown, ArrowUpRight, Brain, Bug, Code2, FlaskConical, Globe, Loader2, MessageSquarePlus, PanelRightClose, Plus, RotateCcw, Sparkles, X } from "lucide-react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { mapComposerAttachments } from "./ai-chat/AiComposerAttachments";
@@ -13,6 +13,7 @@ import { AiSubagentPanel } from "./ai-chat/AiSubagentPanel";
 import { AiAutomaticChecklist } from "./ai-chat/AiAutomaticChecklist";
 import { buildContextDropSummary } from "../lib/aiChatContextReport";
 import { aiChatErrorFromMessage, classifyAiChatError, type AiChatErrorPresentation } from "../lib/aiChatErrors";
+import { clearAiRetryNotice, getAiRetryNotice, getAiRetryNoticeRevision, setAiRetryNotice, subscribeAiRetryNotice } from "../lib/aiRetryNotice";
 import { shouldAutoRefreshIndexForAutomatic } from "../lib/aiProjectIndexPolicy";
 
 import { AiChatSlashMenu } from "./ai-chat/AiChatSlashMenu";
@@ -1176,6 +1177,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           if (!isActiveTurn()) return;
           setAiChatSessionStatus(sessionId, statusToSessionStatus(status));
         },
+        onRetryNotice: (notice) => {
+          if (!isActiveTurn()) return;
+          if (notice) setAiRetryNotice(sessionId, notice);
+          else clearAiRetryNotice(sessionId);
+        },
         onToolApproval: requestToolApproval,
         onContextBudgetReport: (report) => {
           if (!isActiveTurn()) return;
@@ -1207,6 +1213,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       if (useLuxStore.getState().activeAiChatSessionId === sessionId) setSendError(errorPresentation);
     } finally {
       finishAiChatTurn(sessionId, abortController);
+      clearAiRetryNotice(sessionId);
       requestAnimationFrame(() => resizeComposerTextarea());
       const pendingContinuation = goalContinuationTimersRef.current.get(sessionId);
       if (pendingContinuation !== undefined) {
@@ -1728,6 +1735,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                 </div>
               )}
               {restoreNotice && <div className="ai-chat-restore-notice" role="status">{restoreNotice}</div>}
+              {activeChatSession && <AiRetryBanner sessionId={activeChatSession.id} t={t} />}
               {showStandaloneThinking && <AiThinkingIndicator status={activeStatus} t={t} />}
               {activeSessionClosed && <AiChatClosedNotice onRestore={() => restoreAiChatSession(activeAiChatSessionId)} t={t} />}
               {sendError && (
@@ -1864,6 +1872,42 @@ function AiChatError({
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+function AiRetryBanner({ sessionId, t }: { sessionId: string; t: TranslateFn }) {
+  useSyncExternalStore(subscribeAiRetryNotice, getAiRetryNoticeRevision, getAiRetryNoticeRevision);
+  const notice = getAiRetryNotice(sessionId);
+  const [now, setNow] = useState(() => Date.now());
+
+  // While a backoff is counting down, tick a few times a second so the live
+  // "retrying in Ns" stays accurate. The interval only runs while a notice with a
+  // real delay is present, and resets whenever a fresh retry arrives (updatedAt).
+  const updatedAt = notice?.updatedAt ?? 0;
+  const delayMs = notice?.delayMs ?? 0;
+  useEffect(() => {
+    if (!updatedAt || delayMs <= 0) return;
+    setNow(Date.now());
+    const id = window.setInterval(() => setNow(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, [updatedAt, delayMs]);
+
+  if (!notice) return null;
+  const reasonLabel = t(`aiChat.retryNotice.reason.${notice.reason}` as "aiChat.retryNotice.reason.generic");
+  const remainingMs = Math.max(0, notice.delayMs - (now - notice.updatedAt));
+  const seconds = Math.ceil(remainingMs / 1000);
+  const countdown = remainingMs > 0
+    ? t("aiChat.retryNotice.countdown", { seconds })
+    : t("aiChat.retryNotice.reconnecting");
+  return (
+    <div className="ai-retry-notice" role="status" aria-live="polite" data-reason={notice.reason}>
+      <Loader2 size={13} className="ai-retry-notice-spin" aria-hidden="true" />
+      <span className="ai-retry-notice-text">
+        <strong>{t("aiChat.retryNotice.title")}</strong>
+        <span>{t("aiChat.retryNotice.body", { reason: reasonLabel, attempt: notice.attempt, max: notice.maxAttempts })}</span>
+        <span className="ai-retry-notice-countdown">{countdown}</span>
+      </span>
     </div>
   );
 }

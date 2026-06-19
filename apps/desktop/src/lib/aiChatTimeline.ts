@@ -58,6 +58,9 @@ export function createTurnTimeline(emit: (patch: Partial<AiChatMessage>) => void
           activeReasoningId = crypto.randomUUID();
           segments.push({ kind: "reasoning", id: activeReasoningId, text: reasoning });
         }
+        // Seal it: a later empty commit in the same round (e.g. a second parallel
+        // tool call) must not re-touch this finalized block.
+        activeReasoningId = null;
       }
       if (text.trim()) {
         if (activeTextId) {
@@ -67,9 +70,18 @@ export function createTurnTimeline(emit: (patch: Partial<AiChatMessage>) => void
           activeTextId = crypto.randomUUID();
           segments.push({ kind: "text", id: activeTextId, text });
         }
+        // Seal the committed text so the NEXT commitRound("") this round (the native
+        // loop fires one per tool call) can't fall into the delete branch below and
+        // splice out already-shown narration. A new round opens a fresh segment.
+        activeTextId = null;
       } else if (activeTextId) {
-        const index = segments.findIndex((segment) => segment.id === activeTextId);
-        if (index >= 0) segments.splice(index, 1);
+        // Only drop a placeholder that never received real text — never delete a
+        // committed narration line.
+        const segment = find(activeTextId);
+        if (segment && segment.kind === "text" && !segment.text.trim()) {
+          const index = segments.findIndex((entry) => entry.id === activeTextId);
+          if (index >= 0) segments.splice(index, 1);
+        }
         activeTextId = null;
       }
       flush();

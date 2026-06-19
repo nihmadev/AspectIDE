@@ -112,6 +112,15 @@ export type AiChatMentionHints = {
   docs?: boolean;
 };
 
+/** Payload delivered to onRetryNotice when the turn auto-retries a transient failure. */
+export type AiChatRetryNotice = {
+  attempt: number;
+  maxAttempts: number;
+  reason: string;
+  detail: string;
+  delayMs: number;
+};
+
 export type AiChatAttachmentInput = {
   name: string;
   size: number;
@@ -161,6 +170,8 @@ export type AiChatSendInput = {
   onAssistantMessage: (message: AiChatMessage) => void;
   onAssistantMessageUpdate: (messageId: string, patch: Partial<AiChatMessage>) => void;
   onStatusChange?: (status: AiChatRuntimeStatus) => void;
+  /** Live notice that a transient provider failure is being auto-retried. `null` clears it. */
+  onRetryNotice?: (notice: AiChatRetryNotice | null) => void;
   onToolApproval: (request: AiToolApprovalRequest) => Promise<AiToolApprovalDecision>;
   onContextBudgetReport?: (report: AiChatContextBudgetReport) => void;
   onFilePathsEdited?: (paths: string[]) => void;

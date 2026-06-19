@@ -96,7 +96,10 @@ use file_intel::{
     file_asset_data, file_inspect, file_media_ai_context, file_open_external,
     file_supported_formats,
 };
-use git::{git_diff, git_status};
+use git::{
+    git_branches, git_checkout_branch, git_commit, git_create_branch, git_diff, git_discard,
+    git_file_diff, git_pull, git_push, git_stage, git_status, git_unstage,
+};
 use lsp::{
     diagnostics_snapshot, lsp_code_actions, lsp_completion, lsp_definition, lsp_document_symbols,
     lsp_folding_ranges, lsp_format_document, lsp_format_range, lsp_hover, lsp_inlay_hints,
@@ -336,7 +339,7 @@ fn fs_reveal_in_file_explorer(path: PathBuf) -> Result<(), String> {
 async fn ai_chat_completion(
     request: ai_chat_backend::AiChatCompletionRequest,
 ) -> Result<ai_chat_backend::AiChatCompletionResponse, String> {
-    ai_chat_backend::completion(request).await
+    ai_chat_backend::completion(request, |_| {}).await
 }
 
 #[tauri::command]
@@ -643,6 +646,16 @@ pub fn run() {
             terminal_close_all,
             git_status,
             git_diff,
+            git_stage,
+            git_unstage,
+            git_discard,
+            git_commit,
+            git_push,
+            git_pull,
+            git_branches,
+            git_checkout_branch,
+            git_create_branch,
+            git_file_diff,
             extensions_list,
             extensions_activation_plan,
             extensions_activate,

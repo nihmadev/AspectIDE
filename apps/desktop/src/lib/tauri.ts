@@ -67,6 +67,13 @@ export type VoiceInputProviderStatus = {
   modelPath: string | null;
 };
 
+/** HEAD vs working-tree text for one file (powers the Git diff view). */
+export type GitFileDiff = {
+  path: string;
+  headText: string;
+  workingText: string;
+};
+
 export type VoiceTranscriptionRequest = {
   provider: "local";
   audioBase64: string;
@@ -690,6 +697,16 @@ export const luxCommands = {
   terminalCloseAll: () => invokeRequired<void>("terminal_close_all"),
   gitStatus: () => invokeRequired<GitStatus>("git_status"),
   gitDiff: () => invokeRequired<GitDiff>("git_diff"),
+  gitStage: (paths: string[]) => invokeRequired<GitStatus>("git_stage", { paths }),
+  gitUnstage: (paths: string[]) => invokeRequired<GitStatus>("git_unstage", { paths }),
+  gitDiscard: (paths: string[]) => invokeRequired<GitStatus>("git_discard", { paths }),
+  gitCommit: (message: string) => invokeRequired<GitStatus>("git_commit", { message }),
+  gitPush: () => invokeRequired<GitStatus>("git_push"),
+  gitPull: () => invokeRequired<GitStatus>("git_pull"),
+  gitBranches: () => invokeRequired<string[]>("git_branches"),
+  gitCheckoutBranch: (name: string) => invokeRequired<GitStatus>("git_checkout_branch", { name }),
+  gitCreateBranch: (name: string) => invokeRequired<GitStatus>("git_create_branch", { name }),
+  gitFileDiff: (path: string) => invokeRequired<GitFileDiff>("git_file_diff", { path }),
   extensionsList: () => invokeRequired<ExtensionInfo[]>("extensions_list"),
   extensionsActivationPlan: () => invokeRequired<ExtensionActivationPlan>("extensions_activation_plan"),
   extensionsActivate: () => invokeRequired<ExtensionActivationReport>("extensions_activate"),
@@ -945,6 +962,7 @@ export type AiTurnEvent =
   | { kind: "turnUsage"; turnId: string; promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number }
   | { kind: "turnDone"; turnId: string; messageId: string; content: string; durationMs: number }
   | { kind: "turnError"; turnId: string; error: string }
+  | { kind: "turnRetry"; turnId: string; attempt: number; maxAttempts: number; reason: string; detail: string; delayMs: number }
   | { kind: "turnCancelled"; turnId: string };
 
 export async function subscribeAiTurn(handler: (event: AiTurnEvent) => void) {

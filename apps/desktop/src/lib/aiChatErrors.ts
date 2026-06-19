@@ -4,6 +4,7 @@ import type { TranslateFn } from "./i18n/useTranslation";
 export type AiChatErrorKind =
   | "cancelled"
   | "timeout"
+  | "rate-limit"
   | "provider"
   | "invalid-json"
   | "tool-rejected"
@@ -37,6 +38,20 @@ export function classifyAiChatError(error: unknown, t: TranslateFn): AiChatError
   const detail = readErrorMessage(error);
   const lower = detail.toLowerCase();
 
+  // Rate limit (429): the backend already auto-retried the connection a couple of
+  // times (with the live "retrying in Ns" notice), so reaching here means the limit
+  // is still in effect. Surface a calm, recognizable message + retry instead of the
+  // generic "AI request failed", and offer Settings to switch model/provider.
+  if (/\b429\b|rate[ _-]?limit|too many requests|quota/.test(lower)) {
+    return {
+      kind: "rate-limit",
+      message: t("aiChat.error.rateLimit", { detail }),
+      detail,
+      canRetry: true,
+      canRetryTools: false,
+      canOpenSettings: true,
+    };
+  }
   if (/timed out|timeout/.test(lower)) {
     return {
       kind: "timeout",
