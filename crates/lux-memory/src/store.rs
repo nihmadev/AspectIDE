@@ -753,9 +753,14 @@ mod tests {
         let hits = store
             .search(
                 "rolldown build",
-                &SearchOptions { touch: false, ..SearchOptions::default() },
+                &SearchOptions {
+                    touch: false,
+                    ..SearchOptions::default()
+                },
             )
             .unwrap();
-        assert!(hits.iter().any(|hit| hit.memory.content.contains("rolldown")));
+        assert!(hits
+            .iter()
+            .any(|hit| hit.memory.content.contains("rolldown")));
     }
 }
