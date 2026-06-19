@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUpRight, Brain, Bug, Code2, FlaskConical, Globe, Loader2, MessageSquarePlus, PanelRightClose, Plus, RotateCcw, Sparkles, X } from "lucide-react";
+import { ArrowDown, ArrowUpRight, Brain, Bug, Code2, FlaskConical, Globe, PanelRightClose, Plus, Sparkles, X } from "lucide-react";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { mapComposerAttachments } from "./ai-chat/AiComposerAttachments";
@@ -13,8 +13,7 @@ import { AiSubagentPanel } from "./ai-chat/AiSubagentPanel";
 import { AiAutomaticChecklist } from "./ai-chat/AiAutomaticChecklist";
 import { buildContextDropSummary } from "../lib/aiChatContextReport";
 import { aiChatErrorFromMessage, classifyAiChatError, type AiChatErrorPresentation } from "../lib/aiChatErrors";
-import { clearAiRetryNotice, getAiRetryNotice, getAiRetryNoticeRevision, setAiRetryNotice, subscribeAiRetryNotice } from "../lib/aiRetryNotice";
-import { shouldAutoRefreshIndexForAutomatic } from "../lib/aiProjectIndexPolicy";
+import { clearAiRetryNotice, setAiRetryNotice } from "../lib/aiRetryNotice";
 
 import { AiChatSlashMenu } from "./ai-chat/AiChatSlashMenu";
 import { AiChatMentionMenu } from "./ai-chat/AiChatMentionMenu";
@@ -37,7 +36,6 @@ import {
 import { openAgentBrowserPreviewTab } from "../lib/agentBrowserPreviewDocument";
 import { buildAiChatContextUsageSummary, formatCompactTokens } from "../lib/aiChatContextUsage";
 import { aiChatSessionTitle, aiChatStatusLabel } from "../lib/aiChatPresentation";
-import { documentDisplayPath, documentTitle } from "../lib/documents";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { sanitizeSessionGoal } from "../lib/aiSessionOrchestrationSanitize";
 import { getAiSessionGoal, setAiSessionGoal } from "../lib/aiSessionGoal";
@@ -89,12 +87,7 @@ import { restoreChatBeforeUserMessage, undoLastAgentTurn } from "../lib/aiChatTu
 import {
   buildMessageDisplayAttachments,
   collectClipboardFiles,
-  createComposerFileAttachment,
-  createComposerMentionAttachment,
-  createComposerSelectionAttachment,
-  revokeComposerAttachmentPreview,
   revokeComposerAttachmentPreviews,
-  type ComposerAttachment,
 } from "../lib/aiChatComposerAttachments";
 import { buildMentionRuntimeAttachments, collectMentionHints } from "../lib/aiChatMentionAttachments";
 import { applyMentionSelection, mentionMenuVisible, parseMentionQuery, searchMentionCandidates, type AiMentionCandidate } from "../lib/aiChatMentions";
@@ -102,10 +95,19 @@ import { buildPlanHandoffUserMessage, extractPlanHandoffPayload } from "../lib/a
 import { clearPendingPlan, getPendingPlanForSession, getPendingPlansSnapshot, subscribePendingPlans } from "../lib/aiPendingPlan";
 import { getPendingQuestionForSession, getPendingQuestionsSnapshot, settlePendingQuestion, subscribePendingQuestions } from "../lib/aiPendingQuestion";
 import { readEditorDocumentAttachment, readSelectionAttachment } from "../lib/aiChatDocumentAttachment";
-import { formatSelectionLabel, getEditorSelectionSnapshot } from "../lib/editorSelectionBridge";
 import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
 import { runNativeChatTurn } from "../lib/aiNativeTurn";
-import { appendAiUsageLogEntry } from "../lib/aiUsageLog";
+import {
+  findLastUserMessageIndex,
+  isAbortError,
+  messageHasAssistantWork,
+  readErrorMessage,
+  recordAiUsageLogEntry,
+  replaceEmptyAssistantTail,
+  statusToSessionStatus,
+  stripTrailingErrorBubble,
+  trimCancelledAssistantShell,
+} from "../lib/aiChatPanelTurnHelpers";
 import { dragEventHasEditorTab, readEditorTabDrop } from "../lib/editorChatBridge";
 import {
   abortAiChatTurn,
@@ -123,6 +125,8 @@ import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision, AiTo
 import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
 import { isTauriRuntime, luxCommands } from "../lib/tauri";
 import { useVoiceInput } from "../lib/useVoiceInput";
+import { useAiChatScroll } from "../lib/useAiChatScroll";
+import { useAiChatComposerAttachments } from "../lib/useAiChatComposerAttachments";
 import {
   getComposerAttachments,
   getComposerDraft,
@@ -133,40 +137,15 @@ import { findAnyPendingToolApproval } from "../lib/aiChatPendingApproval";
 import { openWorkspaceEditorPath } from "../lib/openWorkspaceEditorPath";
 import { AiChatGlobalApprovalBanner } from "./ai-chat/AiChatGlobalApprovalBanner";
 import { AiThinkingIndicator, isPendingAssistantShell } from "./ai-chat/AiThinkingIndicator";
+import { AiChatClosedNotice } from "./ai-chat/AiChatClosedNotice";
+import { AiChatError } from "./ai-chat/AiChatErrorNotice";
+import { AiRetryBanner } from "./ai-chat/AiRetryBanner";
 
 type AiChatPanelProps = {
   embedded?: boolean;
   presentation?: "panel" | "agent";
   showCloseButton?: boolean;
 };
-
-/**
- * Append a completed assistant turn to the persisted usage log (model, project,
- * speed, tokens, cost). Reads provider/model/workspace fresh from the store so it
- * is closure-safe inside the turn `finally` block. Best-effort: never throws into
- * the turn lifecycle.
- */
-function recordAiUsageLogEntry(assistant: AiChatMessage | null | undefined) {
-  const usage = assistant?.turnUsage;
-  if (!usage) return;
-  const state = useLuxStore.getState();
-  const prefs = state.aiPreferences;
-  const provider = getAiProvider(prefs.providers, prefs.selectedProviderId) ?? prefs.providers[0] ?? null;
-  const model = getAiModel(provider, prefs.selectedModelId) ?? provider?.models[0] ?? null;
-  void appendAiUsageLogEntry({
-    workspaceRoot: state.workspace?.root,
-    workspaceName: state.workspace?.name,
-    model: model?.alias || model?.id || prefs.selectedModelId,
-    provider: provider?.name ?? "",
-    agentMode: prefs.agentMode,
-    promptTokens: usage.promptTokens,
-    completionTokens: usage.completionTokens,
-    totalTokens: usage.totalTokens,
-    cachedPromptTokens: usage.cachedPromptTokens,
-    estimatedCostUsd: usage.estimatedCostUsd,
-    durationMs: assistant?.responseTiming?.totalMs ?? assistant?.responseDurationMs ?? 0,
-  });
-}
 
 export function AiChatPanel({ embedded = false, presentation = "panel", showCloseButton = true }: AiChatPanelProps) {
   const activeDocumentId = useLuxStore((state) => state.activeDocumentId);
@@ -193,18 +172,25 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const workspace = useLuxStore((state) => state.workspace);
   const fileEntries = useLuxStore((state) => state.fileEntries);
   const openSettingsSection = useLuxStore((state) => state.openSettingsSection);
-  const requestAiIndexRefresh = useLuxStore((state) => state.requestAiIndexRefresh);
   const setAiChatSessionContextBudgetReport = useLuxStore((state) => state.setAiChatSessionContextBudgetReport);
   const setActiveAiChatSession = useLuxStore((state) => state.setActiveAiChatSession);
   const { locale, t } = useTranslation();
   const [message, setMessage] = useState("");
   const [projectSlashCommands, setProjectSlashCommands] = useState<ProjectSlashCommand[]>([]);
-  const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
+  const {
+    attachments,
+    setAttachments,
+    pinnedEditorPaths,
+    attachFiles,
+    attachMention,
+    attachSelection,
+    attachEditorDocument,
+    removeAttachment,
+  } = useAiChatComposerAttachments({ sessionId: activeAiChatSessionId, openDocuments });
   const [contextOpen, setContextOpen] = useState(false);
   const [draggingFiles, setDraggingFiles] = useState(false);
   const [sendError, setSendError] = useState<AiChatErrorPresentation | null>(null);
   const [lastUserDraft, setLastUserDraft] = useState<string | null>(null);
-  const [showScrollDown, setShowScrollDown] = useState(false);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
   const [mentionMenuOpen, setMentionMenuOpen] = useState(false);
@@ -219,8 +205,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const mentionMenuRef = useRef<HTMLDivElement | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  const pinnedToBottomRef = useRef(true);
   const goalContinuationTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const runtimeSnapshot = useSyncExternalStore(subscribeAiChatTurnRuntime, getAiChatTurnRuntimeSnapshot, getAiChatTurnRuntimeSnapshot);
@@ -288,19 +272,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const providerOptions = aiPreferences.providers.map((provider) => ({ label: provider.name, value: provider.id }));
   const modelOptions = selectedProvider?.models.map((model) => ({ label: model.name, value: model.id })) ?? [];
   const effortOptions = selectedModel?.effortLevels.map((effort) => ({ label: effort.label, value: effort.id })) ?? [];
-  const pinnedEditorPaths = useMemo(
-    () => attachments.flatMap((attachment) => {
-      if (attachment.kind === "editor") {
-        const document = openDocuments.find((candidate) => candidate.id === attachment.documentId);
-        return document ? [documentDisplayPath(document)] : [attachment.name];
-      }
-      if (attachment.kind === "mention" && attachment.path) return [attachment.path];
-      if (attachment.kind === "selection") return [attachment.path];
-      return [];
-    }),
-    [attachments, openDocuments],
-  );
-
   const slashCommands = useMemo(
     () => filterSlashCommands(message, t, projectSlashCommands),
     [message, projectSlashCommands, t],
@@ -389,6 +360,13 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const pendingPlan = activeAiChatSessionId ? getPendingPlanForSession(activeAiChatSessionId) : null;
   // A structured PresentPlan card supersedes the heuristic prose-checklist handoff.
   const showLegacyPlanHandoff = planHandoff && !pendingPlan;
+  // Blocking interaction cards live in separate stores, so the scroll hook can't
+  // see them via `messages`; this key force-reveals a card the moment it appears.
+  const { scrollRef, showScrollDown, scrollToBottom, handleBodyScroll, pinToBottom } = useAiChatScroll({
+    messages,
+    activeSessionId: activeAiChatSessionId,
+    revealKey: pendingQuestion?.requestId ?? (pendingPlan ? `plan:${pendingPlan.planId}` : null),
+  });
   const contextTitle = t("aiChat.context.tooltip", {
     percent: contextUsage.percent,
     totalTokens: formatCompactTokens(contextUsage.totalTokens),
@@ -406,19 +384,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     [activeChatSession?.lastError, t],
   );
 
-  useEffect(() => {
-    if (!workspace) return;
-    if (!shouldAutoRefreshIndexForAutomatic(aiPreferences.projectIndexingEnabled, aiIndex)) return;
-    if (aiIndex.status === "indexing") return;
-    requestAiIndexRefresh();
-  }, [
-    aiIndex.indexedFiles,
-    aiIndex.quality,
-    aiIndex.status,
-    aiPreferences.projectIndexingEnabled,
-    requestAiIndexRefresh,
-    workspace,
-  ]);
   const composerAttachments = useMemo(() => mapComposerAttachments(attachments), [attachments]);
   const canSend =
     Boolean(selectedProvider && selectedModel && (message.trim() || attachments.length > 0))
@@ -469,39 +434,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     setDraggingFiles(false);
     requestAnimationFrame(() => resizeComposerTextarea());
   }, [activeAiChatSessionId, resizeComposerTextarea]);
-
-  const scrollToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
-    const element = scrollRef.current;
-    if (!element) return;
-    pinnedToBottomRef.current = true;
-    setShowScrollDown(false);
-    element.scrollTo({ top: element.scrollHeight, behavior });
-  }, []);
-
-  const handleBodyScroll = useCallback(() => {
-    const element = scrollRef.current;
-    if (!element) return;
-    const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight;
-    const pinned = distanceFromBottom <= 28;
-    pinnedToBottomRef.current = pinned;
-    setShowScrollDown(!pinned && element.scrollHeight - element.clientHeight > 48);
-  }, []);
-
-  // Keep the view pinned to the latest message while the user is already at the bottom.
-  // When they have scrolled up to read, new content streams in without yanking the viewport.
-  useLayoutEffect(() => {
-    if (!pinnedToBottomRef.current) return;
-    const element = scrollRef.current;
-    if (!element) return;
-    element.scrollTop = element.scrollHeight;
-  }, [messages]);
-
-  useEffect(() => {
-    pinnedToBottomRef.current = true;
-    setShowScrollDown(false);
-    const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
-  }, [activeAiChatSessionId]);
 
   useEffect(() => {
     setSendError(null);
@@ -651,90 +583,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   }, [activeChatSession, activeSessionBusy, aiIndex.indexedFiles, aiIndex.quality, aiIndex.status, aiPreferences, message, openSettingsSection, replaceAiChatMessages, runCompaction, selectedProvider, t, updateAiPreference, updateMessage]);
 
   const voiceInput = useVoiceInput({ message, preferences: aiPreferences, updateMessage });
-
-  const attachFiles = (files: FileList | File[] | null) => {
-    if (!files || files.length === 0) return;
-    // Mint each blob preview URL exactly once in the event handler, never inside
-    // the updater — React may invoke an updater more than once (StrictMode/dev or
-    // a discarded concurrent render), which would leak the discarded URL.
-    const incoming = Array.from(files).map((file) => createComposerFileAttachment(file));
-    setAttachments((current) => {
-      const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
-      for (const next of incoming) {
-        const existing = byId.get(next.id);
-        if (existing?.kind === "file") revokeComposerAttachmentPreview(existing);
-        byId.set(next.id, next);
-      }
-      const nextAttachments = [...byId.values()];
-      setComposerAttachments(activeAiChatSessionId, nextAttachments);
-      return nextAttachments;
-    });
-  };
-
-  const attachMention = useCallback((candidate: AiMentionCandidate) => {
-    const next = createComposerMentionAttachment({
-      mentionType: candidate.kind,
-      name: candidate.label,
-      path: candidate.path,
-      symbolName: candidate.symbolName,
-      line: candidate.line,
-      column: candidate.column,
-    });
-    setAttachments((current) => {
-      const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
-      byId.set(next.id, next);
-      const nextAttachments = [...byId.values()];
-      setComposerAttachments(activeAiChatSessionId, nextAttachments);
-      return nextAttachments;
-    });
-  }, [activeAiChatSessionId]);
-
-  const attachSelection = useCallback((selection = getEditorSelectionSnapshot()) => {
-    if (!selection) return false;
-    const next = createComposerSelectionAttachment({
-      documentId: selection.documentId,
-      name: formatSelectionLabel(selection),
-      path: selection.path,
-      text: selection.text,
-      startLine: selection.startLine,
-      endLine: selection.endLine,
-      startColumn: selection.startColumn,
-      endColumn: selection.endColumn,
-      languageId: selection.languageId,
-    });
-    setAttachments((current) => {
-      const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
-      byId.set(next.id, next);
-      const nextAttachments = [...byId.values()];
-      setComposerAttachments(activeAiChatSessionId, nextAttachments);
-      return nextAttachments;
-    });
-    return true;
-  }, [activeAiChatSessionId]);
-
-  const attachEditorDocument = useCallback((documentId: string) => {
-    const document = openDocuments.find((candidate) => candidate.id === documentId);
-    if (!document) return;
-    const id = `editor:${documentId}`;
-    const name = documentTitle(document);
-    setAttachments((current) => {
-      const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
-      byId.set(id, { kind: "editor", documentId, id, name, size: document.text.length });
-      const nextAttachments = [...byId.values()];
-      setComposerAttachments(activeAiChatSessionId, nextAttachments);
-      return nextAttachments;
-    });
-  }, [activeAiChatSessionId, openDocuments]);
-
-  const removeAttachment = (id: string) => {
-    setAttachments((current) => {
-      const removed = current.find((attachment) => attachment.id === id);
-      if (removed) revokeComposerAttachmentPreview(removed);
-      const nextAttachments = current.filter((attachment) => attachment.id !== id);
-      setComposerAttachments(activeAiChatSessionId, nextAttachments);
-      return nextAttachments;
-    });
-  };
 
   const handleComposerDragOver = (event: DragEvent<HTMLDivElement>) => {
     const hasFiles = event.dataTransfer.types.includes("Files");
@@ -1090,8 +938,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           },
         });
       }
-      pinnedToBottomRef.current = true;
-      setShowScrollDown(false);
+      pinToBottom();
       // Review requests don't originate from the composer, so leave the user's draft and
       // pending attachments intact instead of clearing them.
       if (!options?.reviewRequest) {
@@ -1824,163 +1671,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   );
 }
 
-function AiChatClosedNotice({ onRestore, t }: { onRestore: () => void; t: TranslateFn }) {
-  return (
-    <div className="ai-chat-closed-notice" role="status">
-      <span>{t("aiChat.closedNotice")}</span>
-      <button type="button" onClick={onRestore}>
-        <MessageSquarePlus size={13} />
-        <span>{t("aiChat.restoreChat")}</span>
-      </button>
-    </div>
-  );
-}
 
-function AiChatError({
-  canRetry,
-  presentation,
-  onRetry,
-  onOpenSettings,
-  t,
-}: {
-  canRetry: boolean;
-  presentation: AiChatErrorPresentation;
-  onRetry: () => void;
-  onOpenSettings?: () => void;
-  t: TranslateFn;
-}) {
-  const retryLabel = presentation.kind === "approval"
-    ? t("aiChat.error.action.retryApproval")
-    : presentation.canRetryTools
-      ? t("aiChat.error.action.retryTools")
-      : t("aiChat.error.action.retry");
-  const showRetry = canRetry && (presentation.canRetry || presentation.canRetryTools);
-
-  return (
-    <div className="ai-chat-error" role="status" data-kind={presentation.kind}>
-      <span>{presentation.message}</span>
-      <div className="ai-chat-error-actions">
-        {showRetry && (
-          <button type="button" onClick={onRetry}>
-            <RotateCcw size={13} />
-            <span>{retryLabel}</span>
-          </button>
-        )}
-        {presentation.canOpenSettings && onOpenSettings && (
-          <button type="button" onClick={onOpenSettings}>
-            <span>{t("aiChat.error.action.openSettings")}</span>
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AiRetryBanner({ sessionId, t }: { sessionId: string; t: TranslateFn }) {
-  useSyncExternalStore(subscribeAiRetryNotice, getAiRetryNoticeRevision, getAiRetryNoticeRevision);
-  const notice = getAiRetryNotice(sessionId);
-  const [now, setNow] = useState(() => Date.now());
-
-  // While a backoff is counting down, tick a few times a second so the live
-  // "retrying in Ns" stays accurate. The interval only runs while a notice with a
-  // real delay is present, and resets whenever a fresh retry arrives (updatedAt).
-  const updatedAt = notice?.updatedAt ?? 0;
-  const delayMs = notice?.delayMs ?? 0;
-  useEffect(() => {
-    if (!updatedAt || delayMs <= 0) return;
-    setNow(Date.now());
-    const id = window.setInterval(() => setNow(Date.now()), 250);
-    return () => window.clearInterval(id);
-  }, [updatedAt, delayMs]);
-
-  if (!notice) return null;
-  const reasonLabel = t(`aiChat.retryNotice.reason.${notice.reason}` as "aiChat.retryNotice.reason.generic");
-  const remainingMs = Math.max(0, notice.delayMs - (now - notice.updatedAt));
-  const seconds = Math.ceil(remainingMs / 1000);
-  const countdown = remainingMs > 0
-    ? t("aiChat.retryNotice.countdown", { seconds })
-    : t("aiChat.retryNotice.reconnecting");
-  return (
-    <div className="ai-retry-notice" role="status" aria-live="polite" data-reason={notice.reason}>
-      <Loader2 size={13} className="ai-retry-notice-spin" aria-hidden="true" />
-      <span className="ai-retry-notice-text">
-        <strong>{t("aiChat.retryNotice.title")}</strong>
-        <span>{t("aiChat.retryNotice.body", { reason: reasonLabel, attempt: notice.attempt, max: notice.maxAttempts })}</span>
-        <span className="ai-retry-notice-countdown">{countdown}</span>
-      </span>
-    </div>
-  );
-}
-
-function statusToSessionStatus(status: "thinking" | "streaming" | "running-tools" | "waiting-approval"): AiChatSessionStatus {
-  return status;
-}
-
-function trimCancelledAssistantShell(
-  sessionId: string,
-  replaceMessages: (sessionId: string, messages: AiChatMessage[]) => void,
-) {
-  const session = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === sessionId);
-  if (!session) return;
-  const last = session.messages[session.messages.length - 1];
-  if (last?.role !== "assistant") return;
-  const hasContent = Boolean(
-    last.content.trim()
-    || last.reasoning?.trim()
-    || (last.toolCalls?.length ?? 0) > 0
-    || (last.segments?.length ?? 0) > 0,
-  );
-  if (!hasContent) replaceMessages(sessionId, session.messages.slice(0, -1));
-}
-
-function replaceEmptyAssistantTail(messages: AiChatMessage[], assistantError: AiChatMessage) {
-  const last = messages[messages.length - 1];
-  if (
-    last?.role === "assistant"
-    && !last.content.trim()
-    && !last.reasoning?.trim()
-    && (last.toolCalls?.length ?? 0) === 0
-    && (last.segments?.length ?? 0) === 0
-  ) {
-    return [...messages.slice(0, -1), { ...last, content: assistantError.content, timestamp: assistantError.timestamp }];
-  }
-  return [...messages, assistantError];
-}
-
-function findLastUserMessageIndex(messages: AiChatMessage[]) {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index].role === "user") return index;
-  }
-  return -1;
-}
-
-/** Real model output worth resuming from — reasoning, tool calls, or streamed
- *  text segments. A bare error bubble has none of these. */
-function messageHasAssistantWork(message: AiChatMessage) {
-  return Boolean(
-    (message.segments?.length ?? 0) > 0
-    || (message.toolCalls?.length ?? 0) > 0
-    || message.reasoning?.trim(),
-  );
-}
-
-/** Drop the synthetic error bubble a failed turn appended (its content is the
- *  session's `lastError`), so a retry resumes from the AI's preserved reasoning
- *  and tool calls instead of replaying from scratch. */
-function stripTrailingErrorBubble(messages: AiChatMessage[], lastError: string | null) {
-  const last = messages[messages.length - 1];
-  if (last?.role === "assistant" && lastError && last.content === lastError && !messageHasAssistantWork(last)) {
-    return messages.slice(0, -1);
-  }
-  return messages;
-}
-
-function isAbortError(error: unknown) {
-  return error instanceof DOMException && error.name === "AbortError";
-}
-
-function readErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
 
 

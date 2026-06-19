@@ -1,6 +1,6 @@
 {
   "name": "@lux/desktop",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "license": "Apache-2.0",
   "private": true,
   "description": "Lux IDE desktop application built with Tauri, React, Monaco, and Rust.",
@@ -12,7 +12,7 @@
   "type": "module",
   "scripts": {
     "dev": "node ./scripts/kill-dev-port.mjs 5173 && node ./scripts/start-browser-preview.mjs",
-    "build": "pnpm run verify:ai-index && pnpm run verify:ai-prompt && pnpm run verify:ai-tools && pnpm run verify:ai-transport && pnpm run verify:ai-chat-pipeline && pnpm run verify:decode-chat-text && pnpm run verify:ai-chat-persistence && tsc --noEmit && vite build && pnpm run verify:bundle-budget",
+    "build": "pnpm run verify:ai-index && pnpm run verify:ai-prompt && pnpm run verify:ai-tools && pnpm run verify:ai-transport && pnpm run verify:ai-chat-pipeline && pnpm run verify:decode-chat-text && pnpm run verify:ai-chat-persistence && pnpm run test && tsc --noEmit && vite build && pnpm run verify:bundle-budget",
     "compare:ai-agents": "node ./scripts/compare-ai-agents.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "benchmark:ai-agent": "node ./scripts/benchmark-ai-agent.mjs",
@@ -26,6 +26,7 @@
     "verify:ai-chat-pipeline": "node ./scripts/verify-ai-chat-pipeline.mjs",
     "verify:decode-chat-text": "node ./scripts/verify-decode-chat-text.mjs",
     "verify:bundle-budget": "node ./scripts/verify-bundle-budget.mjs",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri"
   },
@@ -59,6 +60,7 @@
     "@vitejs/plugin-react": "latest",
     "esbuild": "latest",
     "typescript": "latest",
-    "vite": "latest"
+    "vite": "latest",
+    "vitest": "latest"
   }
 }

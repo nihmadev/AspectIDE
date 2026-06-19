@@ -1,0 +1,610 @@
+/* Skills & per-project Memory settings sections. Shares the dark settings look:
+   subtle panels, hover-reveal row actions, scope/category chips. */
+
+.lux-spin {
+  animation: lux-spin-kf 0.8s linear infinite;
+}
+@keyframes lux-spin-kf {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── shared section primitives ── */
+.lux-mem,
+.lux-skill {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.lux-mem-empty,
+.lux-skill-none,
+.lux-mem-none {
+  color: var(--text-2, rgba(255, 255, 255, 0.45));
+  font-size: 13px;
+  padding: 12px 2px;
+}
+
+.lux-mem-error,
+.lux-skill-error {
+  color: #ff7b72;
+  font-size: 12.5px;
+  margin: 0;
+}
+
+.lux-mem-loading,
+.lux-skill-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2, rgba(255, 255, 255, 0.5));
+  font-size: 12.5px;
+  margin: 0;
+}
+
+/* ── memory header / stats ── */
+.lux-mem-head,
+.lux-skill-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.lux-mem-stat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-1, rgba(255, 255, 255, 0.8));
+}
+.lux-mem-pincount {
+  color: var(--text-2, rgba(255, 255, 255, 0.45));
+}
+
+.lux-mem-add-btn,
+.lux-skill-new,
+.lux-mem-composer-save,
+.lux-skill-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-0, #fff);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.lux-mem-add-btn:hover,
+.lux-skill-new:hover,
+.lux-mem-composer-save:not(:disabled):hover,
+.lux-skill-save:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+.lux-mem-composer-save:disabled,
+.lux-skill-save:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── controls: search + sort + chips ── */
+.lux-mem-controls {
+  display: flex;
+  gap: 8px;
+}
+.lux-mem-search,
+.lux-mem-select,
+.lux-skill-field input,
+.lux-skill-field select,
+.lux-skill-field textarea,
+.lux-mem-composer-text,
+.lux-mem-composer-cat {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  color: var(--text-0, #fff);
+  font-size: 12.5px;
+  padding: 7px 10px;
+  font-family: inherit;
+}
+.lux-mem-search {
+  flex: 1;
+}
+.lux-mem-search:focus,
+.lux-mem-select:focus,
+.lux-skill-field input:focus,
+.lux-skill-field textarea:focus,
+.lux-mem-composer-text:focus {
+  outline: none;
+  border-color: var(--accent, #4c8bf5);
+}
+
+.lux-mem-cats,
+.lux-skill-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lux-mem-cats button,
+.lux-skill-scopes button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: transparent;
+  color: var(--text-1, rgba(255, 255, 255, 0.7));
+  font-size: 12px;
+  cursor: pointer;
+}
+.lux-mem-cats button[data-active="true"],
+.lux-skill-scopes button[data-active="true"] {
+  background: var(--accent, #4c8bf5);
+  border-color: var(--accent, #4c8bf5);
+  color: #fff;
+}
+.lux-mem-cats button span {
+  opacity: 0.6;
+}
+
+/* ── lists ── */
+.lux-mem-list,
+.lux-skill-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lux-mem-row,
+.lux-skill-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+}
+.lux-mem-row[data-pinned] {
+  border-color: rgba(76, 139, 245, 0.4);
+  background: rgba(76, 139, 245, 0.07);
+}
+.lux-skill-row[data-disabled] {
+  opacity: 0.55;
+}
+.lux-mem-row-main,
+.lux-skill-row-main {
+  min-width: 0;
+  flex: 1;
+}
+.lux-mem-content {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-0, #fff);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.lux-mem-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--text-2, rgba(255, 255, 255, 0.45));
+}
+.lux-mem-badge,
+.lux-skill-scope-badge {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-1, rgba(255, 255, 255, 0.75));
+  font-size: 11px;
+}
+.lux-skill-scope-badge[data-scope="project"] {
+  background: rgba(76, 139, 245, 0.18);
+  color: #9cc0ff;
+}
+.lux-skill-scope-badge[data-scope="global"] {
+  background: rgba(160, 120, 245, 0.18);
+  color: #c7adff;
+}
+.lux-mem-imp {
+  font-variant-numeric: tabular-nums;
+}
+
+/* row actions hover-reveal (like the chat history rows) */
+.lux-mem-row-actions,
+.lux-skill-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.lux-mem-row:hover .lux-mem-row-actions,
+.lux-skill-row:hover .lux-skill-row-actions,
+.lux-skill-row-actions:focus-within,
+.lux-mem-row-actions:focus-within {
+  opacity: 1;
+}
+.lux-mem-row-actions button,
+.lux-skill-row-actions button {
+  display: inline-flex;
+  padding: 5px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-1, rgba(255, 255, 255, 0.7));
+  cursor: pointer;
+}
+.lux-mem-row-actions button:hover,
+.lux-skill-row-actions button:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.lux-mem-danger:hover,
+.lux-skill-danger:hover {
+  color: #ff7b72 !important;
+}
+
+/* ── skill rows ── */
+.lux-skill-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.lux-skill-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-0, #fff);
+}
+.lux-skill-off {
+  font-size: 11px;
+  color: var(--text-2, rgba(255, 255, 255, 0.4));
+}
+.lux-skill-desc {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: var(--text-1, rgba(255, 255, 255, 0.65));
+}
+.lux-skill-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.lux-skill-tags span {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-2, rgba(255, 255, 255, 0.55));
+}
+
+/* toggle switch */
+.lux-skill-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.lux-skill-toggle input {
+  position: absolute;
+  opacity: 0;
+}
+.lux-skill-toggle span {
+  width: 30px;
+  height: 17px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+  position: relative;
+  transition: background 0.15s ease;
+}
+.lux-skill-toggle span::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.15s ease;
+}
+.lux-skill-toggle input:checked + span {
+  background: var(--accent, #4c8bf5);
+}
+.lux-skill-toggle input:checked + span::after {
+  transform: translateX(13px);
+}
+
+/* ── composer (add memory) ── */
+.lux-mem-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.03);
+}
+.lux-mem-composer-text {
+  resize: vertical;
+}
+.lux-mem-composer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.lux-mem-composer-cat {
+  flex: 1;
+  min-width: 120px;
+}
+.lux-mem-composer-imp,
+.lux-mem-composer-pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-1, rgba(255, 255, 255, 0.7));
+}
+
+.lux-mem-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+.lux-mem-wipe {
+  background: transparent;
+  border: 1px solid rgba(255, 123, 114, 0.3);
+  color: #ff7b72;
+  border-radius: 7px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.lux-mem-wipe:hover {
+  background: rgba(255, 123, 114, 0.1);
+}
+
+/* ── skill editor form ── */
+.lux-skill-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lux-skill-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.lux-skill-editor-head h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.lux-skill-editor-back {
+  background: transparent;
+  border: none;
+  color: var(--text-2, rgba(255, 255, 255, 0.5));
+  cursor: pointer;
+  font-size: 12.5px;
+}
+.lux-skill-editor-back:hover {
+  color: var(--text-0, #fff);
+}
+.lux-skill-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-1, rgba(255, 255, 255, 0.7));
+}
+.lux-skill-field textarea {
+  resize: vertical;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.lux-skill-field small,
+.lux-skill-slug {
+  color: var(--text-2, rgba(255, 255, 255, 0.4));
+  font-size: 11px;
+}
+.lux-skill-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.lux-skill-enabled {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--text-1, rgba(255, 255, 255, 0.7));
+}
+.lux-skill-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ── Skill importer ── */
+.lux-skill-head-actions {
+  display: flex;
+  gap: 8px;
+}
+.lux-skill-import {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: transparent;
+  color: var(--text-1, rgba(255, 255, 255, 0.8));
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.lux-skill-import:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+.lux-skill-importer {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.lux-skill-import-h {
+  margin: 6px 0 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-2, rgba(255, 255, 255, 0.45));
+}
+.lux-skill-import-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lux-skill-import-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+}
+.lux-skill-import-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(76, 139, 245, 0.4);
+  background: rgba(76, 139, 245, 0.12);
+  color: #9cc0ff;
+  font-size: 12px;
+  cursor: pointer;
+}
+.lux-skill-import-btn:hover:not(:disabled) {
+  background: rgba(76, 139, 245, 0.2);
+}
+.lux-skill-import-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+  border-color: rgba(78, 201, 138, 0.4);
+  background: rgba(78, 201, 138, 0.12);
+  color: #8fe0b3;
+}
+
+/* ── Web research settings ── */
+.lux-research {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.lux-research-intro {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  color: var(--text-1, rgba(255, 255, 255, 0.7));
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.lux-research-intro svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--accent, #4c8bf5);
+}
+.lux-research-intro p {
+  margin: 0;
+}
+.lux-research-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.lux-research-label {
+  font-size: 12.5px;
+  color: var(--text-1, rgba(255, 255, 255, 0.8));
+}
+.lux-research-input {
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 7px;
+  color: var(--text-0, #fff);
+  font-size: 12.5px;
+  padding: 8px 11px;
+  font-family: inherit;
+}
+.lux-research-input:focus {
+  outline: none;
+  border-color: var(--accent, #4c8bf5);
+}
+.lux-research-hint {
+  font-size: 11px;
+  color: var(--text-2, rgba(255, 255, 255, 0.45));
+}
+.lux-research-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.lux-research-save {
+  font-size: 11.5px;
+  color: var(--text-2, rgba(255, 255, 255, 0.5));
+}
+.lux-research-save[data-state="saved"] {
+  color: #4ec98a;
+}
+.lux-research-test {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-0, #fff);
+  font-size: 12px;
+  cursor: pointer;
+}
+.lux-research-test:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+}
+.lux-research-test:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.lux-research-test-result {
+  margin: 0;
+  font-size: 12px;
+  padding: 8px 11px;
+  border-radius: 7px;
+}
+.lux-research-test-result[data-status="ok"] {
+  background: rgba(78, 201, 138, 0.12);
+  color: #8fe0b3;
+}
+.lux-research-test-result[data-status="error"] {
+  background: rgba(255, 123, 114, 0.1);
+  color: #ff9c94;
+}
+.lux-research-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-2, rgba(255, 255, 255, 0.4));
+}

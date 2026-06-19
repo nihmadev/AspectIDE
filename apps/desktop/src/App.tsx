@@ -93,6 +93,8 @@ export function App() {
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
   const [bottomPanelMaximized, setBottomPanelMaximized] = useState(false);
   const [aiIndexRefreshToken, setAiIndexRefreshToken] = useState(0);
+  const lastIndexFingerprintRef = useRef<string | null>(null);
+  const lastIndexedRootRef = useRef<string | null>(null);
   const keybindingDispatcherRef = useRef(createKeybindingDispatcher(keybindingProfile));
   const bottomPanelRef = useRef<PanelImperativeHandle | null>(null);
   const aiChatHistoryLoadedRef = useRef(false);
@@ -273,6 +275,8 @@ export function App() {
     const scanLimit = aiIndexScanLimit(aiPreferences.maxIndexedFiles);
     if (!workspace) {
       setAiIndex(createEmptyAiIndexState(aiPreferences.projectIndexingEnabled ? "idle" : "disabled"));
+      lastIndexedRootRef.current = null;
+      lastIndexFingerprintRef.current = null;
       return;
     }
     if (!aiPreferences.projectIndexingEnabled) {
@@ -280,20 +284,32 @@ export function App() {
       return;
     }
 
+    // Only the first index of a workspace shows the "indexing" UI; a realtime
+    // refresh stays silent and updates the snapshot only if the file structure
+    // (hence the fingerprint) actually changed.
+    const isInitial = lastIndexedRootRef.current !== workspace.root;
     let cancelled = false;
     const startedAtMs = performance.now();
-    setAiIndex({
-      ...createEmptyAiIndexState("indexing"),
-      progress: 8,
-      scanLimit,
-      source: "workspace-scan",
-      workspaceRoot: workspace.root,
-    });
+    if (isInitial) {
+      setAiIndex({
+        ...createEmptyAiIndexState("indexing"),
+        progress: 8,
+        scanLimit,
+        source: "workspace-scan",
+        workspaceRoot: workspace.root,
+      });
+    }
     const indexTimer = window.setTimeout(() => {
       if (cancelled) return;
       void buildWorkspaceAiIndex(workspace, aiPreferences.includeImages, aiPreferences.maxIndexedFiles, scanLimit, startedAtMs)
-        .then((snapshot) => {
+        .then(({ snapshot, fingerprint }) => {
           if (cancelled) return;
+          lastIndexedRootRef.current = workspace.root;
+          // Unchanged file-path set on a non-initial refresh → the path-based
+          // snapshot is identical; skip the state update (and the "indexing"
+          // flicker) to avoid wasted re-scoring/re-renders during editing.
+          if (!isInitial && fingerprint === lastIndexFingerprintRef.current) return;
+          lastIndexFingerprintRef.current = fingerprint;
           setAiIndex({
             ...snapshot,
             status: "ready",
@@ -303,6 +319,9 @@ export function App() {
         })
         .catch((error) => {
           if (cancelled) return;
+          // Mark this workspace as attempted so a subsequent refresh stays a silent
+          // retry (no "indexing" flash) rather than re-running the initial pass.
+          lastIndexedRootRef.current = workspace.root;
           setAiIndex({
             ...createEmptyAiIndexState("idle"),
             lastError: readErrorMessage(error),
@@ -312,7 +331,7 @@ export function App() {
           });
           // Indexing error is handled by setAiIndex above
         });
-    }, 60);
+    }, isInitial ? 60 : 0);
 
     return () => {
       cancelled = true;
@@ -470,7 +489,7 @@ export function App() {
       aiIndexRefreshTimer = window.setTimeout(() => {
         aiIndexRefreshTimer = undefined;
         setAiIndexRefreshToken((token) => token + 1);
-      }, 650);
+      }, 2_500);
     };
 
     void subscribeLuxEvents((event) => {
@@ -774,7 +793,7 @@ function aiIndexScanLimit(maxIndexedFiles: number) {
 
 async function buildWorkspaceAiIndex(workspace: WorkspaceInfo, includeImages: boolean, maxIndexedFiles: number, scanLimit: number, startedAtMs: number) {
   const entries = await luxCommands.fsListFiles(scanLimit);
-  return buildAiProjectIndexSnapshot(entries, {
+  const snapshot = buildAiProjectIndexSnapshot(entries, {
     finishedAtMs: performance.now(),
     includeImages,
     maxIndexedFiles,
@@ -783,6 +802,31 @@ async function buildWorkspaceAiIndex(workspace: WorkspaceInfo, includeImages: bo
     startedAtMs,
     workspaceRoot: workspace.root,
   });
+  return { snapshot, fingerprint: aiIndexFingerprint(entries, maxIndexedFiles, includeImages) };
+}
+
+/**
+ * Structural fingerprint of an index scan: the SET of file paths (sorted, FNV-1a
+ * hashed) plus the two preferences that change which files are indexed. The
+ * snapshot is path-based, so a content edit (same paths) yields the same
+ * fingerprint — letting a realtime refresh skip the rebuild — while an
+ * add/delete/rename (or a settings change) flips it and triggers a real rebuild.
+ */
+function aiIndexFingerprint(entries: { kind: string; path: string }[], maxIndexedFiles: number, includeImages: boolean): string {
+  const paths: string[] = [];
+  for (const entry of entries) {
+    if (entry.kind === "file") paths.push(entry.path);
+  }
+  paths.sort();
+  let hash = 0x811c_9dc5;
+  for (const path of paths) {
+    for (let index = 0; index < path.length; index += 1) {
+      hash ^= path.charCodeAt(index);
+      hash = Math.imul(hash, 0x0100_0193);
+    }
+    hash = Math.imul(hash, 0x0100_0193); // path separator
+  }
+  return `${paths.length}:${(hash >>> 0).toString(16)}:${maxIndexedFiles}:${includeImages ? 1 : 0}`;
 }
 
 async function refreshWorkspaceFileTree(workspace: WorkspaceInfo, clearTreeOnError: boolean, rootsToRefresh?: WorkspaceInfo[]) {

@@ -74,6 +74,139 @@ export type GitFileDiff = {
   workingText: string;
 };
 
+// ── Per-project memory (lux-memory) ──
+
+/** One durable memory entry as stored by the per-project memory backend. */
+export type MemoryRecord = {
+  id: string;
+  category: string;
+  content: string;
+  metadata: Record<string, unknown>;
+  importance: number;
+  pinned: boolean;
+  source?: string;
+  createdAt: number;
+  updatedAt: number;
+  lastAccessedAt: number;
+  accessCount: number;
+  hasEmbedding: boolean;
+};
+
+/** A memory with its blended retrieval score (Rust flattens the record in). */
+export type ScoredMemory = MemoryRecord & { score: number; lexical: number };
+
+export type MemoryCategoryCount = { category: string; count: number };
+export type MemoryStats = {
+  total: number;
+  pinned: number;
+  byCategory: MemoryCategoryCount[];
+  lastUpdatedAt?: number;
+};
+
+export type MemorySortOrder = "relevance" | "recent" | "importance" | "oldest";
+
+export type MemorySearchOptions = {
+  category?: string | null;
+  limit?: number;
+  offset?: number;
+  minScore?: number | null;
+  recencyHalfLifeDays?: number;
+  sort?: MemorySortOrder;
+  includePinned?: boolean;
+  touch?: boolean;
+};
+
+export type NewMemoryInput = {
+  category: string;
+  content: string;
+  metadata?: Record<string, unknown>;
+  importance?: number;
+  pinned?: boolean;
+  source?: string;
+  id?: string;
+};
+
+export type MemoryPatch = {
+  content?: string;
+  category?: string;
+  metadata?: Record<string, unknown>;
+  importance?: number;
+  pinned?: boolean;
+  source?: string;
+};
+
+// ── Web research (lux-research) ──
+
+export type ResearchFocus = "web" | "academic" | "news" | "social" | "video" | "code";
+
+export type ResearchOptions = {
+  focus?: ResearchFocus;
+  maxSources?: number;
+  maxCharsPerSource?: number;
+};
+
+export type RankedSource = {
+  rank: number;
+  url: string;
+  title: string;
+  snippet: string;
+  content: string;
+  relevance: number;
+  engine: string;
+};
+
+export type ResearchResponse = {
+  query: string;
+  focus: ResearchFocus;
+  provider: string;
+  sourceCount: number;
+  sources: RankedSource[];
+  notes: string[];
+};
+
+// ── Skills (lux-skills) ──
+
+export type SkillScope = "project" | "global";
+
+export type Skill = {
+  slug: string;
+  name: string;
+  title?: string;
+  description: string;
+  whenToUse?: string;
+  allowedTools: string[];
+  tags: string[];
+  enabled: boolean;
+  scope: SkillScope;
+  path: string;
+  body: string;
+};
+
+/** A skill with its relevance score (Rust flattens the skill in). */
+export type ScoredSkill = Skill & { score: number };
+
+/** A skill found in another agent's folder (Claude/Codex), offered for import. */
+export type ImportableSkill = {
+  source: string;
+  slug: string;
+  name: string;
+  description: string;
+  scopeHint: SkillScope;
+  path: string;
+  content: string;
+};
+
+export type SkillDraft = {
+  name: string;
+  title?: string;
+  description: string;
+  whenToUse?: string;
+  allowedTools: string[];
+  tags: string[];
+  enabled: boolean;
+  body: string;
+};
+
 export type VoiceTranscriptionRequest = {
   provider: "local";
   audioBase64: string;
@@ -707,6 +840,23 @@ export const luxCommands = {
   gitCheckoutBranch: (name: string) => invokeRequired<GitStatus>("git_checkout_branch", { name }),
   gitCreateBranch: (name: string) => invokeRequired<GitStatus>("git_create_branch", { name }),
   gitFileDiff: (path: string) => invokeRequired<GitFileDiff>("git_file_diff", { path }),
+  memoryCreate: (input: NewMemoryInput) => invokeRequired<MemoryRecord>("memory_create", { input }),
+  memorySearch: (query: string, options?: MemorySearchOptions) => invokeRequired<ScoredMemory[]>("memory_search", { query, options }),
+  memoryGet: (id: string) => invokeRequired<MemoryRecord | null>("memory_get", { id }),
+  memoryUpdate: (id: string, patch: MemoryPatch) => invokeRequired<MemoryRecord>("memory_update", { id, patch }),
+  memoryDelete: (id: string) => invokeRequired<boolean>("memory_delete", { id }),
+  memoryList: (options?: MemorySearchOptions) => invokeRequired<MemoryRecord[]>("memory_list", { options }),
+  memoryStats: () => invokeRequired<MemoryStats>("memory_stats"),
+  memoryWipe: (category?: string | null) => invokeRequired<number>("memory_wipe", { category: category ?? null }),
+  skillsList: () => invokeRequired<Skill[]>("skills_list"),
+  skillsGet: (slug: string) => invokeRequired<Skill | null>("skills_get", { slug }),
+  skillsMatch: (query: string, limit?: number) => invokeRequired<ScoredSkill[]>("skills_match", { query, limit }),
+  skillsSave: (scope: SkillScope, slug: string, draft: SkillDraft) => invokeRequired<Skill>("skills_save", { scope, slug, draft }),
+  skillsDelete: (scope: SkillScope, slug: string) => invokeRequired<boolean>("skills_delete", { scope, slug }),
+  skillsSetEnabled: (scope: SkillScope, slug: string, enabled: boolean) => invokeRequired<boolean>("skills_set_enabled", { scope, slug, enabled }),
+  skillsDiscoverImportable: () => invokeRequired<ImportableSkill[]>("skills_discover_importable"),
+  skillsImport: (scope: SkillScope, slug: string, content: string) => invokeRequired<Skill>("skills_import", { scope, slug, content }),
+  webResearch: (query: string, options?: ResearchOptions) => invokeRequired<ResearchResponse>("web_research", { query, options }),
   extensionsList: () => invokeRequired<ExtensionInfo[]>("extensions_list"),
   extensionsActivationPlan: () => invokeRequired<ExtensionActivationPlan>("extensions_activation_plan"),
   extensionsActivate: () => invokeRequired<ExtensionActivationReport>("extensions_activate"),

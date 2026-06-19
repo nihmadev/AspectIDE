@@ -1427,6 +1427,37 @@ async fn execute_tool(
                 crate::web_fetch::fetch(url, max_bytes, timeout_secs, allow_private).await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
+        "WebResearch" => {
+            let query = json_str(&args, "query");
+            if query.trim().is_empty() {
+                return Err("WebResearch requires a query.".to_string());
+            }
+            let focus = match json_str_opt(&args, "focus")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("academic") => lux_research::FocusMode::Academic,
+                Some("news") => lux_research::FocusMode::News,
+                Some("social") => lux_research::FocusMode::Social,
+                Some("video") => lux_research::FocusMode::Video,
+                Some("code") => lux_research::FocusMode::Code,
+                _ => lux_research::FocusMode::Web,
+            };
+            let max_sources = args
+                .get("maxSources")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok());
+            let options = lux_research::ResearchOptions {
+                focus,
+                ..lux_research::ResearchOptions::default()
+            };
+            let options = lux_research::ResearchOptions {
+                max_sources: max_sources.unwrap_or(options.max_sources),
+                ..options
+            };
+            let result = crate::research::web_research(state.clone(), query, Some(options)).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
         "TestHealth" => {
             let root = crate::workspace_root(state)?;
             let result = crate::test_health::run(root).await?;
@@ -1851,6 +1882,89 @@ async fn execute_tool(
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
+        "RecallMemory" => {
+            let query = json_str(&args, "query");
+            let category = json_str_opt(&args, "category");
+            let limit = args
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap_or(8);
+            let options = lux_memory::SearchOptions {
+                category,
+                limit,
+                ..Default::default()
+            };
+            let hits =
+                crate::memory::memory_search(app.clone(), state.clone(), query, Some(options))
+                    .await?;
+            serde_json::to_string(&serde_json::json!({ "memories": hits }))
+                .map_err(|e| e.to_string())
+        }
+        "RememberMemory" => {
+            let content = json_str(&args, "content");
+            if content.trim().is_empty() {
+                return Ok(serde_json::json!({ "error": "content is required" }).to_string());
+            }
+            let category =
+                json_str_opt(&args, "category").unwrap_or_else(|| "semantic".to_string());
+            let input = lux_memory::NewMemory {
+                category,
+                content,
+                importance: args.get("importance").and_then(serde_json::Value::as_f64),
+                pinned: args.get("pinned").and_then(serde_json::Value::as_bool),
+                source: Some("agent".to_string()),
+                ..Default::default()
+            };
+            let memory = crate::memory::memory_create(app.clone(), state.clone(), input).await?;
+            serde_json::to_string(&serde_json::json!({
+                "status": "remembered",
+                "id": memory.id,
+                "category": memory.category,
+            }))
+            .map_err(|e| e.to_string())
+        }
+        "ListSkills" => {
+            let query = json_str_opt(&args, "query").unwrap_or_default();
+            let limit = args
+                .get("limit")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok())
+                .unwrap_or(20);
+            let matched =
+                crate::skills::skills_match(app.clone(), state.clone(), query, Some(limit))?;
+            let catalog: Vec<_> = matched
+                .iter()
+                .map(|scored| {
+                    serde_json::json!({
+                        "slug": scored.skill.slug,
+                        "name": scored.skill.name,
+                        "description": scored.skill.description,
+                        "scope": scored.skill.scope,
+                        "tags": scored.skill.tags,
+                    })
+                })
+                .collect();
+            serde_json::to_string(&serde_json::json!({ "skills": catalog }))
+                .map_err(|e| e.to_string())
+        }
+        "UseSkill" => {
+            let slug = json_str(&args, "slug");
+            match crate::skills::skills_get(app.clone(), state.clone(), slug.clone())? {
+                Some(skill) => serde_json::to_string(&serde_json::json!({
+                    "slug": skill.slug,
+                    "name": skill.name,
+                    "description": skill.description,
+                    "allowedTools": skill.allowed_tools,
+                    "instructions": skill.body,
+                }))
+                .map_err(|e| e.to_string()),
+                None => Ok(
+                    serde_json::json!({ "error": format!("no skill named {slug}") }).to_string(),
+                ),
+            }
+        }
+
         "FastContext" => {
             let query = json_str(&args, "query");
             // FastContext composes multiple tools — call them sequentially in Rust.
@@ -1898,6 +2012,61 @@ async fn execute_tool(
             {
                 if let Ok(json) = serde_json::to_string(&mc) {
                     parts.push(format!("MemoryContext: {json}"));
+                }
+            }
+            // SkillsCatalog — reusable instruction modules relevant to the task.
+            if let Ok(skills) =
+                crate::skills::skills_match(app.clone(), state.clone(), query.clone(), Some(12))
+            {
+                if !skills.is_empty() {
+                    let catalog: Vec<_> = skills
+                        .iter()
+                        .map(|scored| {
+                            serde_json::json!({
+                                "slug": scored.skill.slug,
+                                "name": scored.skill.name,
+                                "description": scored.skill.description,
+                            })
+                        })
+                        .collect();
+                    if let Ok(json) =
+                        serde_json::to_string(&serde_json::json!({ "skills": catalog }))
+                    {
+                        parts.push(format!("SkillsCatalog: {json}"));
+                    }
+                }
+            }
+            // MemoryRecall — salient durable memories from the structured store.
+            {
+                let options = lux_memory::SearchOptions {
+                    limit: 6,
+                    ..Default::default()
+                };
+                if let Ok(hits) = crate::memory::memory_search(
+                    app.clone(),
+                    state.clone(),
+                    query.clone(),
+                    Some(options),
+                )
+                .await
+                {
+                    if !hits.is_empty() {
+                        let items: Vec<_> = hits
+                            .iter()
+                            .map(|hit| {
+                                serde_json::json!({
+                                    "content": hit.memory.content,
+                                    "category": hit.memory.category,
+                                    "importance": hit.memory.importance,
+                                })
+                            })
+                            .collect();
+                        if let Ok(json) =
+                            serde_json::to_string(&serde_json::json!({ "memories": items }))
+                        {
+                            parts.push(format!("MemoryRecall: {json}"));
+                        }
+                    }
                 }
             }
             // DiagnosticsContext

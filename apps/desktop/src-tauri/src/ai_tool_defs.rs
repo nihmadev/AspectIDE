@@ -73,6 +73,38 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ],
     ));
     tools.push(tool(
+        "RecallMemory",
+        "Search this project's durable memory — facts, decisions, and conventions saved across sessions. Prefer this over re-deriving things you may have learned before.",
+        &[
+            req("query", "string", "What to recall."),
+            opt("category", "string", "Restrict to a category (core, episodic, semantic, procedural, or custom)."),
+            opt("limit", "number", "Max results, default 8."),
+        ],
+    ));
+    tools.push(tool(
+        "RememberMemory",
+        "Save a durable, project-scoped memory for future sessions (a stable fact, decision, or convention). Keep each memory one concise, self-contained statement.",
+        &[
+            req("content", "string", "The fact to remember, as one self-contained sentence."),
+            opt("category", "string", "core | episodic | semantic | procedural | custom (default semantic)."),
+            opt("importance", "number", "0..1 relevance weight (default 0.5)."),
+            opt("pinned", "boolean", "Pin so it always surfaces first."),
+        ],
+    ));
+    tools.push(tool(
+        "ListSkills",
+        "List available skills — reusable, vetted instruction modules for recurring tasks. Check here before improvising a procedure; an existing skill is more reliable.",
+        &[
+            opt("query", "string", "Rank skills by relevance to this topic; omit to list all."),
+            opt("limit", "number", "Max skills, default 20."),
+        ],
+    ));
+    tools.push(tool(
+        "UseSkill",
+        "Fetch a skill's full instructions by slug (from ListSkills) and follow them for the current task.",
+        &[req("slug", "string", "The skill slug to load.")],
+    ));
+    tools.push(tool(
         "ContextBudgeter",
         "Ranked context under a char budget.",
         &[
@@ -220,12 +252,21 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "WebFetch",
-        "Fetch a URL.",
+        "Fetch ONE known URL's content. For an open-ended question across the web, use WebResearch instead.",
         &[
             req("url", "string", "URL."),
             opt("maxBytes", "number", ""),
             opt("timeoutSecs", "number", ""),
             opt("allowPrivateHosts", "boolean", ""),
+        ],
+    ));
+    tools.push(tool(
+        "WebResearch",
+        "Deep web research: searches the web (SearxNG or DuckDuckGo), fetches the top pages, reranks them by relevance, and returns ranked sources with extracted content + citation indices. Use this to answer open questions from current external information, then cite sources as [1], [2]. Prefer over WebFetch when you don't already have the exact URL.",
+        &[
+            req("query", "string", "The research question or topic."),
+            opt("focus", "string", "web | academic | news | social | video | code (default web)."),
+            opt("maxSources", "number", "How many ranked sources to return, default 6 (max 8)."),
         ],
     ));
     tools.push(tool("TestHealth", "Run workspace tests.", &[]));

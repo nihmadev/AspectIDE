@@ -3116,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "lux-desktop"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3134,8 +3134,11 @@ dependencies = [
  "lux-fs",
  "lux-git",
  "lux-lsp",
+ "lux-memory",
+ "lux-research",
  "lux-search",
  "lux-settings",
+ "lux-skills",
  "lux-terminal",
  "lux-workspace",
  "notify",
@@ -3235,6 +3238,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lux-memory"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lux-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
+name = "lux-research"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "lux-search"
 version = "0.1.0"
 dependencies = [
@@ -3255,6 +3279,16 @@ dependencies = [
  "serde_json",
  "tempfile",
  "uuid",
+]
+
+[[package]]
+name = "lux-skills"
+version = "0.1.0"
+dependencies = [
+ "lux-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

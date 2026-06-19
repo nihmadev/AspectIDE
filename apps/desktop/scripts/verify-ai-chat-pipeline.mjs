@@ -44,7 +44,6 @@ assert.match(fileTools, /agentMode === "automatic"/, "automatic mode must force 
 
 const panel = await readFile(path.join(src, "components", "AiChatPanel.tsx"), "utf8");
 assert.match(panel, /buildContextDropSummary/, "context drop summary must be wired in chat panel");
-assert.match(panel, /shouldAutoRefreshIndexForAutomatic/, "automatic index refresh policy required");
 assert.match(panel, /classifyAiChatError/, "structured chat errors required");
 assert.match(panel, /AiSubagentPanel/, "subagent panel must be visible in chat");
 

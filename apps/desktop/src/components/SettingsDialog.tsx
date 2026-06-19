@@ -1,8 +1,11 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowUpCircle, BarChart3, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Loader2, Plus, RefreshCw, RotateCcw, Search, Settings, Share2, Trash2, X } from "lucide-react";
+import { ArrowUpCircle, BarChart3, Bot, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Loader2, Plus, RefreshCw, RotateCcw, Search, Settings, Share2, Trash2, Wand2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
+import { SkillsSection } from "./settings/SkillsSection";
+import { MemorySection } from "./settings/MemorySection";
+import { WebResearchSection } from "./settings/WebResearchSection";
 import {
   AI_PREFERENCES_KEY,
   AI_PROVIDER_PRESETS,
@@ -88,7 +91,7 @@ const scope = "user" as const;
 
 // AI configuration is split into focused sections so runtime, instructions,
 // providers, and indexing do not compete in one mixed settings list.
-type SettingsSectionId = "general" | "editor" | "lsp" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-providers" | "ai-indexing" | "ai-usage";
+type SettingsSectionId = "general" | "editor" | "lsp" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-skills" | "ai-memory" | "ai-research" | "ai-providers" | "ai-indexing" | "ai-usage";
 
 type SettingsSection = {
   id: SettingsSectionId;
@@ -120,7 +123,7 @@ const PROVIDER_PRESET_DESCRIPTION_KEYS: Record<string, MessageKey> = {
 const settingsNavGroups: Array<{ labelKey: MessageKey; sectionIds: SettingsSectionId[] }> = [
   { labelKey: "settings.group.workspace", sectionIds: ["general"] },
   { labelKey: "settings.group.editor", sectionIds: ["editor", "lsp"] },
-  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-providers", "ai-indexing", "ai-usage"] },
+  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-skills", "ai-memory", "ai-research", "ai-providers", "ai-indexing", "ai-usage"] },
 ];
 
 const settingsSections: SettingsSection[] = [
@@ -165,6 +168,27 @@ const settingsSections: SettingsSection[] = [
     descriptionKey: "settings.instructions.description",
     icon: <FileText size={16} />,
     keywords: ["ai", "instructions", "system", "prompt", "profile", "behavior", "agent", "plan", "ask"],
+  },
+  {
+    id: "ai-skills",
+    titleKey: "settings.skills.title",
+    descriptionKey: "settings.skills.description",
+    icon: <Wand2 size={16} />,
+    keywords: ["skill", "skills", "procedure", "playbook", "reusable", "instructions", "навык", "навыки"],
+  },
+  {
+    id: "ai-memory",
+    titleKey: "settings.memory.title",
+    descriptionKey: "settings.memory.description",
+    icon: <Brain size={16} />,
+    keywords: ["memory", "memories", "remember", "recall", "durable", "context", "память", "запомнить"],
+  },
+  {
+    id: "ai-research",
+    titleKey: "settings.research.title",
+    descriptionKey: "settings.research.description",
+    icon: <Globe size={16} />,
+    keywords: ["web", "research", "search", "searxng", "duckduckgo", "perplexica", "sources", "поиск", "исследование"],
   },
   {
     id: "ai-providers",
@@ -334,7 +358,7 @@ export function SettingsDialog() {
                   <h2>{t(activeSection.titleKey)}</h2>
                   <p>{t(activeSection.descriptionKey)}</p>
                 </div>
-                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && activeSectionId !== "ai-usage" && (
+                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && activeSectionId !== "ai-usage" && activeSectionId !== "ai-skills" && activeSectionId !== "ai-memory" && activeSectionId !== "ai-research" && (
                   <button className="settings-reset-button" type="button" onClick={() => resetSection(activeSectionId, persistEditorPreferences, persistAiPreferences, aiPreferences)}>
                     <RotateCcw size={14} /> {t("settings.reset", { group: t(activeSection.titleKey) })}
                   </button>
@@ -359,6 +383,9 @@ export function SettingsDialog() {
                 {activeSectionId === "ai-instructions" && <AiInstructionsSection fileEntries={fileEntries} preferences={aiPreferences} workspace={workspace} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-providers" && <AiProvidersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-indexing" && <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+                {activeSectionId === "ai-skills" && <SkillsSection workspace={workspace} t={t} />}
+                {activeSectionId === "ai-memory" && <MemorySection workspace={workspace} t={t} />}
+                {activeSectionId === "ai-research" && <WebResearchSection t={t} />}
                 {activeSectionId === "ai-usage" && <AiUsageSection workspace={workspace} t={t} />}
               </div>
             </main>

@@ -1,6 +1,6 @@
 [package]
 name = "lux-desktop"
-version = "1.0.4"
+version = "1.0.5"
 description = "Lux IDE desktop shell"
 edition.workspace = true
 license.workspace = true
@@ -30,8 +30,11 @@ lux-file-intel = { path = "../../../crates/lux-file-intel" }
 lux-fs = { path = "../../../crates/lux-fs" }
 lux-git = { path = "../../../crates/lux-git" }
 lux-lsp = { path = "../../../crates/lux-lsp" }
+lux-memory = { path = "../../../crates/lux-memory" }
+lux-research = { path = "../../../crates/lux-research" }
 lux-search = { path = "../../../crates/lux-search" }
 lux-settings = { path = "../../../crates/lux-settings" }
+lux-skills = { path = "../../../crates/lux-skills" }
 lux-terminal = { path = "../../../crates/lux-terminal" }
 lux-workspace = { path = "../../../crates/lux-workspace" }
 globset.workspace = true

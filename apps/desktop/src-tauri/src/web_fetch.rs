@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use reqwest::redirect::Policy;
 use serde::Serialize;
 use tokio::time::timeout;
 
@@ -11,6 +12,11 @@ const MAX_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MAX_BYTES: u64 = 250_000;
 const MAX_BYTES: u64 = 1_000_000;
 const USER_AGENT: &str = "LuxIDE-WebFetch/0.1";
+/// Browser-like UA for SEARCH-PROVIDER requests only — DuckDuckGo/SearxNG serve an
+/// empty/challenge page to bot user-agents, so the research search query must look
+/// like a browser. (`fetch`/`WebFetch` keep the honest `USER_AGENT`.)
+const SEARCH_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +30,17 @@ pub struct WebFetchResponse {
     bytes_read: u64,
     truncated: bool,
     elapsed_ms: u128,
+}
+
+impl WebFetchResponse {
+    /// Extracted, normalized page text (read by the research engine).
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+    /// Page title, if one was found.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
 }
 
 pub async fn fetch(
@@ -47,7 +64,7 @@ pub async fn fetch(
         .clamp(1, MAX_TIMEOUT_SECS);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(ssrf_redirect_policy())
         .user_agent(USER_AGENT)
         .build()
         .map_err(|error| error.to_string())?;
@@ -87,6 +104,81 @@ pub async fn fetch(
         bytes_read: visible.len() as u64,
         truncated,
         elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+/// SSRF-safe GET that returns the raw response body as text. Reuses the same URL
+/// validation + private-host rejection as [`fetch`]. Used by the research engine
+/// to query a search provider: a user-configured `SearxNG` instance is trusted
+/// (`allow_private = true`, since it is commonly self-hosted on localhost/LAN),
+/// while the public `DuckDuckGo` fallback keeps the private-host guard on.
+pub async fn fetch_text(
+    url: &str,
+    accept: &str,
+    timeout_secs: u64,
+    max_bytes: usize,
+    allow_private: bool,
+) -> Result<String, String> {
+    let parsed = validate_url(url)?;
+    if !allow_private {
+        reject_private_host(&parsed).await?;
+    }
+    let timeout_secs = timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .redirect(ssrf_redirect_policy())
+        .user_agent(SEARCH_USER_AGENT)
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = timeout(
+        Duration::from_secs(timeout_secs + 5),
+        client
+            .get(parsed.clone())
+            .header(reqwest::header::ACCEPT, accept)
+            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+            .send(),
+    )
+    .await
+    .map_err(|_| "search request timed out".to_string())?
+    .map_err(|error| error.to_string())?;
+    if !allow_private {
+        reject_private_host(response.url()).await?;
+    }
+    if !response.status().is_success() {
+        return Err(format!(
+            "search provider returned HTTP {}",
+            response.status().as_u16()
+        ));
+    }
+    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+    let visible = &bytes[..usize::min(bytes.len(), max_bytes)];
+    Ok(String::from_utf8_lossy(visible).into_owned())
+}
+
+/// Redirect policy that re-checks SSRF on EVERY hop, not just the first/final URL.
+/// `Policy::limited` would follow a 302 into a private/metadata host before the
+/// caller's final-URL guard runs; this rejects literal localhost/private-IP hops
+/// synchronously (a redirect callback cannot await DNS — the caller's async
+/// `reject_private_host` still covers DNS-resolved privates on the first/last hop).
+fn ssrf_redirect_policy() -> Policy {
+    Policy::custom(|attempt| {
+        let host = attempt.url().host_str().unwrap_or("");
+        if host.trim().is_empty() {
+            return attempt.stop();
+        }
+        let lower = host.trim_end_matches('.').to_ascii_lowercase();
+        if lower == "localhost" || lower.ends_with(".localhost") {
+            return attempt.error("redirect blocked: localhost host");
+        }
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if is_private_ip(ip) {
+                return attempt.error("redirect blocked: private IP");
+            }
+        }
+        if attempt.previous().len() >= 5 {
+            return attempt.stop();
+        }
+        attempt.follow()
     })
 }
 

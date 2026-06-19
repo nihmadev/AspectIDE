@@ -160,7 +160,6 @@ type LuxState = {
   locale: Locale;
   aiPreferences: AiPreferences;
   aiIndex: AiIndexState;
-  aiIndexRefreshNonce: number;
   aiChatSessions: AiChatSession[];
   activeAiChatSessionId: string;
   editorPreferences: EditorPreferences;
@@ -205,7 +204,6 @@ type LuxState = {
   updateAiPreferences: (preferences: Partial<AiPreferences>) => void;
   setAiPreferences: (preferences: AiPreferences) => void;
   setAiIndex: (index: Partial<AiIndexState>) => void;
-  requestAiIndexRefresh: () => void;
   setAiChatSessionContextBudgetReport: (sessionId: string, report: AiChatContextBudgetReport | null) => void;
   setAiChatSessions: (state: AiChatSessionState) => void;
   createAiChatSession: (workspaceRoot?: string | null) => string;
@@ -291,7 +289,6 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   locale: DEFAULT_LOCALE,
   aiPreferences: defaultAiPreferences,
   aiIndex: createEmptyAiIndexState(),
-  aiIndexRefreshNonce: 0,
   ...createInitialAiChatState(),
   editorPreferences: defaultEditorPreferences,
   keybindingProfile: defaultKeybindingProfile(),
@@ -335,7 +332,6 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   updateAiPreferences: (preferences) => set((state) => ({ aiPreferences: mergeAiPreferences(state.aiPreferences, preferences) })),
   setAiPreferences: (aiPreferences) => set({ aiPreferences }),
   setAiIndex: (index) => set((state) => ({ aiIndex: { ...state.aiIndex, ...index } })),
-  requestAiIndexRefresh: () => set((state) => ({ aiIndexRefreshNonce: state.aiIndexRefreshNonce + 1 })),
   setAiChatSessionContextBudgetReport: (sessionId, report) =>
     set((state) => ({
       aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId

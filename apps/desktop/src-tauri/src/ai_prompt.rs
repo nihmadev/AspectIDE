@@ -199,7 +199,9 @@ fn tool_capability_map(
         lines.push("- Edit: StrReplace, PatchEngine (multi-file, one approval+rollback), Write, Delete, Checkpoint. Execute: Shell (catastrophic commands blocked in Rust), TerminalContext, TerminalWrite.".to_string());
         lines.push("- Orchestrate: Goal, TodoWrite, Task (isolated subagent), AgentMessage (shared agent board — post/read findings so subagents don't repeat work).".to_string());
     }
-    lines.push("- Verify: ReadLints/DiagnosticsContext, TestHealth, FailureAnalyzer, ReviewDiff, ImpactAnalysis, SecretGuard. Git: GitContext. Web: WebFetch.".to_string());
+    lines.push("- Memory & skills: RecallMemory/RememberMemory (durable per-project memory across sessions); ListSkills/UseSkill (reusable vetted procedures — prefer an existing skill over improvising).".to_string());
+    lines.push("- Verify: ReadLints/DiagnosticsContext, TestHealth, FailureAnalyzer, ReviewDiff, ImpactAnalysis, SecretGuard. Git: GitContext.".to_string());
+    lines.push("- Web: WebResearch (first-class deep research — searches the web, fetches + reranks the top pages, returns ranked sources with content; use for any open question needing current external info, then cite [1],[2]). WebFetch only when you already have the exact URL.".to_string());
     if browser_enabled {
         lines.push(
             "- Browser: BrowserOpen → BrowserSnapshot (-i) → BrowserAct on @refs → re-snapshot."
@@ -303,12 +305,12 @@ mod tests {
 
     #[test]
     fn prompt_length_within_budget() {
-        // Ceilings carry headroom for the progress-narration guidance and the
-        // CodeGraph tool-map line (deliberate features), while still guarding
-        // against an unbounded prompt.
+        // Ceilings carry headroom for the progress-narration guidance, the
+        // CodeGraph tool-map line, and the WebResearch deep-research guidance
+        // (deliberate features), while still guarding against an unbounded prompt.
         let prompt = build_system_prompt(&test_input());
         assert!(
-            prompt.len() <= 16_500,
+            prompt.len() <= 17_000,
             "agent prompt too long: {}",
             prompt.len()
         );
@@ -317,7 +319,7 @@ mod tests {
         auto_input.agent_mode = "automatic".to_string();
         let auto_prompt = build_system_prompt(&auto_input);
         assert!(
-            auto_prompt.len() <= 18_000,
+            auto_prompt.len() <= 18_500,
             "automatic prompt too long: {}",
             auto_prompt.len()
         );

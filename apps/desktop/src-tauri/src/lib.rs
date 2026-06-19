@@ -29,9 +29,12 @@ mod git;
 mod lsp;
 mod lsp_install;
 mod media_intel;
+mod memory;
+mod research;
 mod runtime_provision;
 mod search;
 mod settings;
+mod skills;
 mod terminal;
 mod test_health;
 mod updater;
@@ -128,6 +131,15 @@ struct AppState {
     settings: Mutex<Option<SettingsStore>>,
     terminals: Mutex<Option<Arc<TerminalService>>>,
     code_graph: tokio::sync::Mutex<Option<lux_codegraph::Index>>,
+    /// Currently-open per-project memory store, keyed by its on-disk path. Reopened
+    /// lazily when the active workspace (hence the db path) changes, so each project
+    /// gets its own isolated memory backend.
+    memory: tokio::sync::Mutex<
+        Option<(
+            std::path::PathBuf,
+            std::sync::Arc<std::sync::Mutex<lux_memory::MemoryStore>>,
+        )>,
+    >,
     /// Bumped on every workspace open/close. A background graph build captures the
     /// value at start and only commits its result if it still matches — so a build
     /// for a workspace that was since closed or replaced is discarded, never
@@ -612,6 +624,23 @@ pub fn run() {
             ai_context_sources::ai_rules_context,
             ai_context_sources::ai_docs_context,
             ai_context_sources::ai_memory_context,
+            memory::memory_create,
+            memory::memory_search,
+            memory::memory_get,
+            memory::memory_update,
+            memory::memory_delete,
+            memory::memory_list,
+            memory::memory_stats,
+            memory::memory_wipe,
+            skills::skills_list,
+            skills::skills_get,
+            skills::skills_match,
+            skills::skills_save,
+            skills::skills_delete,
+            skills::skills_set_enabled,
+            skills::skills_discover_importable,
+            skills::skills_import,
+            research::web_research,
             ai_a2a::ai_blackboard_post,
             ai_a2a::ai_blackboard_read,
             ai_a2a::ai_blackboard_clear,
