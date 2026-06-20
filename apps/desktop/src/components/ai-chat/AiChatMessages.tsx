@@ -1,6 +1,6 @@
 import { Brain, ChevronRight, Copy, SearchCheck } from "lucide-react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
-import { Fragment, memo, useEffect, useMemo, useState } from "react";
+import { createContext, Fragment, memo, useContext, useEffect, useMemo, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { lexer, type Token, type Tokens } from "marked";
 import { AiChatMessageActions } from "./AiChatMessageActions";
@@ -13,6 +13,8 @@ import { AiTurnSummaryCard } from "./AiTurnSummaryCard";
 import { AiThinkingIndicator, isPendingAssistantShell } from "./AiThinkingIndicator";
 import type { AiChatSessionStatus } from "../../lib/store";
 import * as chatDisplayText from "../../lib/aiChatDisplayText";
+import { useElapsedSeconds, formatThinkingElapsed } from "../../lib/useElapsedSeconds";
+import { HtmlArtifact } from "./HtmlArtifact";
 import { isReviewRequestMessage, type AiChatMessage, type AiChatMessageAttachment, type AiChatResponseTiming, type AiMessageSegment, type AiToolApprovalDecision } from "../../lib/aiChatTypes";
 
 const coerceChatMessageText =
@@ -308,6 +310,11 @@ function formatTimingMs(value: number, t: TranslateFn) {
   return t("aiChat.responseDuration", { milliseconds: value, seconds });
 }
 
+// Whether the markdown block currently being rendered is part of a still-streaming
+// message. Consumed by MarkdownCodeBlock so a fenced ```html artifact stays plain
+// code until the turn settles (a half-written <script> would thrash the iframe).
+const MarkdownStreamingContext = createContext(false);
+
 function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
   message: AiChatMessage;
   streaming: boolean;
@@ -368,7 +375,11 @@ function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
   // Assistant turns render as a single connected timeline (reasoning → tools →
   // answer), tied together by one left rail. User messages stay a plain bubble.
   if (message.role === "assistant") {
-    return <div className="ai-turn-flow" data-streaming={streaming || undefined}>{flowNodes}</div>;
+    return (
+      <MarkdownStreamingContext.Provider value={streaming}>
+        <div className="ai-turn-flow" data-streaming={streaming || undefined}>{flowNodes}</div>
+      </MarkdownStreamingContext.Provider>
+    );
   }
   return (
     <>
@@ -434,6 +445,10 @@ function AiReasoningBlock({ text, streaming, t }: {
   const autoOpen = streaming;
   const open = userToggled ?? autoOpen;
   const label = streaming ? t("aiChat.reasoning.thinking") : t("aiChat.reasoning.thought");
+  // Live thinking timer: counts up while this block streams, freezes the total when
+  // thinking ends ("thought for Ns"). Self-contained, so the row's memo bail-out
+  // doesn't stop the tick.
+  const elapsedMs = useElapsedSeconds(streaming);
   useEffect(() => {
     if (streaming) setUserToggled(null);
   }, [streaming]);
@@ -443,6 +458,11 @@ function AiReasoningBlock({ text, streaming, t }: {
         <ChevronRight className="ai-reasoning-caret" size={13} />
         <Brain size={13} />
         <span>{label}</span>
+        {(streaming || elapsedMs > 0) && (
+          <span className="ai-reasoning-elapsed" data-streaming={streaming || undefined}>
+            {t("aiChat.reasoning.elapsed", { seconds: formatThinkingElapsed(elapsedMs) })}
+          </span>
+        )}
       </button>
       {open && (
         <div className="ai-reasoning-body">
@@ -551,6 +571,20 @@ function renderMarkdownTable(token: Tokens.Table, key: string) {
 
 function MarkdownCodeBlock({ code, language, t }: { code: string; language?: string; t: TranslateFn }) {
   const trimmedLanguage = language?.trim();
+  const streaming = useContext(MarkdownStreamingContext);
+  const artifact = parseHtmlArtifactLang(trimmedLanguage);
+  if (artifact) {
+    // Live HTML/3D artifact (sandboxed). `html preview`/`html live` auto-render the
+    // preview; a bare `html` fence opens the code with a one-click Preview tab.
+    return (
+      <HtmlArtifact
+        html={code}
+        autoPreview={artifact.autoPreview}
+        settled={!streaming}
+        t={t}
+      />
+    );
+  }
   return (
     <pre className="ai-chat-code-block" data-language={trimmedLanguage || undefined}>
       <button type="button" aria-label={t("aiChat.markdown.copyCode")} title={t("aiChat.markdown.copyCode")} onClick={() => void copyMarkdownCode(code)}>
@@ -559,6 +593,21 @@ function MarkdownCodeBlock({ code, language, t }: { code: string; language?: str
       <code>{code}</code>
     </pre>
   );
+}
+
+/**
+ * Detect a fenced HTML artifact from a code block's info-string. `html` / `htm`
+ * qualify; an explicit `preview`/`live`/`run` modifier (e.g. ```html preview)
+ * auto-opens the live sandbox, while a bare ```html opens code-first with a
+ * one-click Preview tab. Returns null for any non-HTML language.
+ */
+export function parseHtmlArtifactLang(language: string | undefined): { autoPreview: boolean } | null {
+  if (!language) return null;
+  const parts = language.toLowerCase().split(/[\s,]+/).filter(Boolean);
+  if (parts.length === 0) return null;
+  if (parts[0] !== "html" && parts[0] !== "htm") return null;
+  const autoPreview = parts.slice(1).some((p) => p === "preview" || p === "live" || p === "run");
+  return { autoPreview };
 }
 
 function copyMarkdownCode(code: string) {

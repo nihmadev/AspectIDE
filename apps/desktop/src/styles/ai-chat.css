@@ -416,12 +416,22 @@
   background: #181818;
 }
 
-.ai-chat-body[data-orchestration-rail] .ai-chat-main {
+/* The chat column must always constrain its scroller's height so .ai-chat-scroll
+   actually scrolls — in EVERY mode, not only Agent/Automatic. Without this base
+   rule, Plan/Ask had no height constraint on .ai-chat-main, so the thread grew
+   past the panel and the chat could not be scrolled. */
+.ai-chat-main {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
+}
+
+/* Agent/Automatic add the orchestration-rail row above the scroller. */
+.ai-chat-body[data-orchestration-rail] .ai-chat-main {
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: visible;
 }
 
@@ -1619,8 +1629,26 @@
   color: var(--text-1);
 }
 
-.ai-reasoning[data-streaming="true"] .ai-reasoning-header span {
+.ai-reasoning[data-streaming="true"] .ai-reasoning-header span:not(.ai-reasoning-elapsed) {
   animation: ai-reasoning-pulse 1.4s ease-in-out infinite;
+}
+
+/* Live thinking timer — sits immediately after the "Thinking…/Thought" label (not
+   pinned to the far edge), steady (no pulse), tabular so the width does not jitter as
+   it counts. Muted when frozen, accented while thinking. */
+.ai-reasoning-elapsed {
+  margin-left: -2px;
+  color: var(--text-3, var(--icon-muted));
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-transform: none;
+  font-feature-settings: "tnum" 1;
+  opacity: 0.85;
+}
+
+.ai-reasoning-elapsed[data-streaming="true"] {
+  color: var(--accent, var(--text-1));
 }
 
 @keyframes ai-reasoning-pulse {
@@ -4440,38 +4468,134 @@
 
 .ai-question-preview {
   margin: 0 12px 10px;
+}
+
+/* ── In-chat HTML/3D artifact (shared by message blocks + AskUser cards) ── */
+.ai-artifact {
+  margin: 10px 0;
   border: 1px solid var(--border-subtle);
   border-radius: 9px;
   overflow: hidden;
   background: var(--surface-1);
 }
 
-.ai-question-preview-toggle {
+.ai-question-preview .ai-artifact {
+  margin: 0;
+}
+
+.ai-artifact-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 11px;
+  background: var(--surface-2, var(--surface-1));
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ai-artifact-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font: 600 11px/1 var(--font-ui);
+  letter-spacing: 0.02em;
+}
+
+.ai-artifact-actions {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: 100%;
-  padding: 7px 10px;
+  flex: 0 0 auto;
+}
+
+.ai-artifact-toggle {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+}
+
+.ai-artifact-toggle button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
   border: 0;
+  border-radius: 5px;
   background: transparent;
-  color: var(--text-2);
+  color: var(--text-3);
   font: 600 11px/1 var(--font-ui);
   cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
 }
 
-.ai-question-preview-hint {
-  margin-left: auto;
-  color: var(--text-3);
-  font-weight: 400;
+.ai-artifact-toggle button:hover {
+  color: var(--text-1);
 }
 
-.ai-question-preview-frame {
+.ai-artifact-toggle button[data-active] {
+  background: var(--accent-soft, var(--hover-soft));
+  color: var(--accent, var(--text-0));
+}
+
+.ai-artifact-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--icon-muted);
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.ai-artifact-copy:hover {
+  color: var(--text-0);
+  background: var(--hover-soft);
+}
+
+.ai-artifact-frame {
   display: block;
   width: 100%;
-  height: 260px;
+  height: 320px;
   border: 0;
-  border-top: 1px solid var(--border-subtle);
   background: #fff;
+  resize: vertical;
+}
+
+/* Height-reserving placeholder shown until the artifact scrolls into view, so the
+   live iframe mounts seamlessly with no layout shift and costs nothing until seen. */
+.ai-artifact-frame-idle {
+  background:
+    repeating-linear-gradient(
+      45deg,
+      var(--surface-1),
+      var(--surface-1) 10px,
+      var(--surface-2, var(--surface-1)) 10px,
+      var(--surface-2, var(--surface-1)) 20px
+    );
+  opacity: 0.5;
+  resize: none;
+}
+
+.ai-artifact-code {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  max-height: 360px;
+}
+
+.ai-artifact-pending {
+  padding: 14px;
+  color: var(--text-3);
+  font: 500 12px/1.4 var(--font-ui);
+  text-align: center;
 }
 
 .ai-question-options {

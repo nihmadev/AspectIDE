@@ -551,7 +551,7 @@ export const runtimeTools: RuntimeToolDefinition[] = [
     type: "function",
     function: {
       name: "PresentPlan",
-      description: "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution; in Automatic mode execution auto-starts. Prefer this over a plain prose checklist when proposing multi-step work.",
+      description: "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution; in Automatic mode execution auto-starts. Scale the plan to the task's complexity and risk — it is NOT a flat list of phases: decompose into concrete file-level steps (each step = a specific action on a named file/module with its acceptance check, never vague labels like 'implement business logic' or 'add documentation'); name the key decision and chosen alternative where one genuinely exists; flag the riskiest step and its failure mode; and end with an explicit verification step (the tests/build/checks that prove it works, plus a rollback trigger for risky changes). Riskier work (auth, payments, migrations, concurrency, data-loss, public APIs) earns more steps and explicit verification; trivial work stays terse. Prefer this over a plain prose checklist for multi-step work.",
       parameters: objectSchema({
         steps: arraySchema("Ordered steps: strings or { title, detail, file } objects."),
         title: stringSchema("Short plan title."),

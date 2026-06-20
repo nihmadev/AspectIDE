@@ -10,6 +10,8 @@ type AiPlanCardProps = {
   onStart: () => void;
   /** Disable Start while a turn is already running. */
   busy: boolean;
+  /** Live agent mode. In Automatic the plan always auto-runs — never show a Start button. */
+  agentMode?: string;
   t: TranslateFn;
 };
 
@@ -20,8 +22,12 @@ type AiPlanCardProps = {
  * plan auto-starts, so instead of a button it shows a running indicator (the card
  * is purely informational there).
  */
-export function AiPlanCard({ plan, onStart, busy, t }: AiPlanCardProps) {
+export function AiPlanCard({ plan, onStart, busy, agentMode, t }: AiPlanCardProps) {
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set([0]));
+  // Automatic mode never hands a plan to the user to start — it auto-executes.
+  // Trust the live mode too, not only the (snapshotted) plan.autoStart, so a plan
+  // proposed while the backend saw a non-automatic mode still renders as auto here.
+  const autoStart = plan.autoStart || agentMode === "automatic";
 
   const toggleStep = (index: number) => {
     setExpanded((prev) => {
@@ -91,7 +97,7 @@ export function AiPlanCard({ plan, onStart, busy, t }: AiPlanCardProps) {
       </ol>
 
       <footer className="ai-plan-card-foot">
-        {plan.autoStart ? (
+        {autoStart ? (
           <span className="ai-plan-card-auto">
             <Loader2 size={12} className="spin-icon" />
             {t("aiChat.plan.autoRunning")}

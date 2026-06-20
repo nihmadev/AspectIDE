@@ -124,10 +124,17 @@ pub async fn fetch_text(
         reject_private_host(&parsed).await?;
     }
     let timeout_secs = timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
+    // Search providers (DuckDuckGo especially) fingerprint the TLS ClientHello and
+    // serve a content-free challenge page to reqwest's default rustls stack — the
+    // request returns 200 with ~14KB and zero result anchors. The platform-native
+    // TLS backend (Schannel / Secure Transport / vendored OpenSSL) presents a
+    // browser-like handshake that passes, returning the real results page. Normal
+    // WebFetch keeps rustls; only this search path opts into native TLS.
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .redirect(ssrf_redirect_policy())
         .user_agent(SEARCH_USER_AGENT)
+        .use_native_tls()
         .build()
         .map_err(|error| error.to_string())?;
     let response = timeout(
@@ -371,5 +378,23 @@ mod tests {
         assert!(text.contains("World now"));
         assert!(!text.contains("secret()"));
         assert!(!text.contains(".x{}"));
+    }
+
+    // Live network-gated check: the search client must use a TLS backend DuckDuckGo
+    // does not fingerprint-block. Ignored by default (needs network); run with
+    // `cargo test -p lux-desktop search_client_reaches_ddg -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "requires network"]
+    async fn search_client_reaches_ddg() {
+        let url = lux_research::duckduckgo_lite_search_url("rust async runtime");
+        let body = fetch_text(&url, "text/html", 18, 600_000, false)
+            .await
+            .expect("search fetch should succeed");
+        let hits = lux_research::parse_duckduckgo_html(&body);
+        assert!(
+            !hits.is_empty(),
+            "expected DDG result hits, got body len {} (TLS-block challenge page?)",
+            body.len()
+        );
     }
 }

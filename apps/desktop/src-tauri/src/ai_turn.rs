@@ -263,6 +263,151 @@ pub struct PlanStep {
     pub file: String,
 }
 
+/// Risk markers that demand a deeper, verified plan (ported from think-mcp's
+/// complexity heuristic). Their presence in the goal/steps raises the bar for how
+/// many concrete steps and explicit verification the plan must carry.
+const PLAN_RISK_MARKERS: &[&str] = &[
+    "security",
+    "secure",
+    "auth",
+    "password",
+    "token",
+    "payment",
+    "billing",
+    "concurren",
+    "migrat",
+    "schema",
+    "distributed",
+    "performance",
+    "rollback",
+    "delete",
+    "destructive",
+    "public api",
+    "breaking",
+];
+
+/// Vague step labels that signal a phase-level plan instead of concrete edits.
+const PLAN_VAGUE_LABELS: &[&str] = &[
+    "set up the project",
+    "set up project",
+    "setup",
+    "implement business logic",
+    "implement logic",
+    "implement the feature",
+    "add documentation",
+    "write docs",
+    "do the rest",
+    "finish up",
+    "wire everything",
+    "make it work",
+    "clean up",
+    "testing",
+    "polish",
+];
+
+/// Deterministic, advisory plan-quality assessment — the think-mcp cycle gate
+/// applied to a `PresentPlan`. Returns a score in `[0,1]` plus concrete coaching
+/// nudges for whatever is missing. Never blocks; it only tells the model how to
+/// make the plan sharper (decompose, name verification, cover the riskiest step).
+fn assess_plan_quality(title: &str, summary: &str, steps: &[PlanStep]) -> (f64, Vec<String>) {
+    let mut coaching: Vec<String> = Vec::new();
+    let haystack = {
+        let mut s = format!("{title}\n{summary}");
+        for step in steps {
+            s.push('\n');
+            s.push_str(&step.title);
+            s.push('\n');
+            s.push_str(&step.detail);
+        }
+        s.to_lowercase()
+    };
+    let risk_hits = PLAN_RISK_MARKERS
+        .iter()
+        .filter(|m| haystack.contains(**m))
+        .count();
+    // Riskier work needs more decomposition: 3 steps baseline, +1 per risk marker, capped.
+    let required_steps = (3 + risk_hits).min(8);
+
+    // 1. Decomposition depth.
+    let mut score = 1.0_f64;
+    if steps.len() < required_steps {
+        score -= 0.25;
+        coaching.push(format!(
+            "Decompose further — {} step(s) for {}-risk work; aim for ~{}, each a concrete action on a named file/module.",
+            steps.len(),
+            if risk_hits > 0 { "higher" } else { "this" },
+            required_steps
+        ));
+    }
+
+    // 2. Concreteness — steps should reference a file or carry real detail, not vague labels.
+    let vague = steps
+        .iter()
+        .filter(|s| {
+            let t = s.title.to_lowercase();
+            PLAN_VAGUE_LABELS
+                .iter()
+                .any(|v| t == *v || t.starts_with(v))
+        })
+        .count();
+    let with_anchor = steps
+        .iter()
+        .filter(|s| !s.file.is_empty() || s.detail.chars().count() >= 24)
+        .count();
+    if vague > 0 {
+        score -= 0.15;
+        coaching.push(format!(
+            "Replace {vague} vague step label(s) (e.g. 'implement logic', 'add documentation') with a specific action + its acceptance check."
+        ));
+    }
+    if steps.len() >= 3 && with_anchor * 2 < steps.len() {
+        score -= 0.15;
+        coaching.push(
+            "Most steps lack a file or concrete detail — name the file/module each step touches and what proves it done.".to_string(),
+        );
+    }
+
+    // 3. Verification — a complete plan ends with an explicit check.
+    let has_verification = steps.iter().any(|s| {
+        let t = format!("{} {}", s.title, s.detail).to_lowercase();
+        [
+            "test",
+            "verif",
+            "build",
+            "typecheck",
+            "lint",
+            "run ",
+            "check",
+            "assert",
+            "validate",
+        ]
+        .iter()
+        .any(|kw| t.contains(kw))
+    });
+    if !has_verification {
+        score -= 0.25;
+        coaching.push(
+            "Add a final verification step: the tests/build/checks that prove it works (plus a rollback trigger for risky changes).".to_string(),
+        );
+    }
+
+    // 4. Rollback awareness for genuinely risky work.
+    if risk_hits >= 2 {
+        let has_rollback = haystack.contains("rollback")
+            || haystack.contains("revert")
+            || haystack.contains("checkpoint")
+            || haystack.contains("backup");
+        if !has_rollback {
+            score -= 0.1;
+            coaching.push(
+                "High-risk plan: name a rollback/recovery path (Checkpoint, revert, or backup) for the riskiest step.".to_string(),
+            );
+        }
+    }
+
+    (score.clamp(0.0, 1.0), coaching)
+}
+
 // ── Approval types (UI → Rust) ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1782,6 +1927,13 @@ async fn execute_tool(
                 .collect();
             crate::ai_session::set_todos(&input.session_id, todos);
 
+            // Deterministic plan-quality gate (ported from think-mcp's cycle gate):
+            // score the proposed plan on the dimensions the prompt asks for and fold
+            // coaching nudges into the tool result. Advisory, never blocking — in
+            // Automatic the plan auto-starts, so a hard gate would stall execution;
+            // instead the model sees concrete gaps and can self-correct in-flight.
+            let (quality, coaching) = assess_plan_quality(&title, &summary, &steps);
+
             let auto_start = input.agent_mode == "automatic";
             let plan_id = format!("plan-{}", tc.id);
             let _ = emit_turn_event(
@@ -1795,12 +1947,30 @@ async fn execute_tool(
                     auto_start,
                 },
             );
-            let guidance = if auto_start {
+            let base_guidance = if auto_start {
                 "Plan presented and auto-started (Automatic mode). Begin executing step 1 now; do not wait for confirmation."
             } else {
                 "Plan presented to the user. Stop here and wait — the user will press Start to hand the plan to Agent mode for execution. Do not begin editing yet."
             };
-            Ok(serde_json::json!({ "stepCount": steps.len(), "autoStart": auto_start, "guidance": guidance }).to_string())
+            // Prepend coaching so the model addresses gaps — on the next step in
+            // Automatic, or by revising the plan before the user starts it otherwise.
+            let guidance = if coaching.is_empty() {
+                base_guidance.to_string()
+            } else {
+                format!(
+                    "Plan quality {:.2}/1.0 — strengthen before/while executing: {}\n{base_guidance}",
+                    quality,
+                    coaching.join(" ")
+                )
+            };
+            Ok(serde_json::json!({
+                "stepCount": steps.len(),
+                "autoStart": auto_start,
+                "quality": quality,
+                "coaching": coaching,
+                "guidance": guidance,
+            })
+            .to_string())
         }
 
         "ActiveContext" => {
@@ -2874,6 +3044,78 @@ mod tests {
         ai_resolve_turn_approval("turn-1".into(), "req-1".into(), ApprovalDecision::Approved)
             .unwrap();
         assert_eq!(rx.blocking_recv().unwrap(), ApprovalDecision::Approved);
+    }
+
+    fn step(title: &str, detail: &str, file: &str) -> PlanStep {
+        PlanStep {
+            title: title.to_string(),
+            detail: detail.to_string(),
+            file: file.to_string(),
+        }
+    }
+
+    #[test]
+    fn plan_gate_flags_vague_and_missing_verification() {
+        let steps = vec![
+            step("Set up the project", "", ""),
+            step("Implement business logic", "", ""),
+            step("Add documentation", "", ""),
+        ];
+        let (quality, coaching) = assess_plan_quality("Build a thing", "", &steps);
+        assert!(quality < 0.6, "vague plan should score low, got {quality}");
+        assert!(coaching.iter().any(|c| c.contains("vague")));
+        assert!(coaching.iter().any(|c| c.contains("verification")));
+    }
+
+    #[test]
+    fn plan_gate_passes_a_concrete_verified_plan() {
+        let steps = vec![
+            step(
+                "Add SQLite models",
+                "Define User/Sticker models in db/models.py with FK constraints",
+                "db/models.py",
+            ),
+            step(
+                "Wire moderation handler",
+                "Add /ban command handler in handlers/moderation.py reading the banlist",
+                "handlers/moderation.py",
+            ),
+            step(
+                "Verify",
+                "Run pytest -q and `python -m bot --dry-run`; both pass clean",
+                "tests/test_moderation.py",
+            ),
+        ];
+        let (quality, coaching) =
+            assess_plan_quality("Moderation bot", "aiogram + SQLAlchemy", &steps);
+        assert!(
+            quality >= 0.8,
+            "concrete plan should score high, got {quality}: {coaching:?}"
+        );
+    }
+
+    #[test]
+    fn plan_gate_demands_rollback_for_high_risk() {
+        let steps = vec![
+            step(
+                "Add auth migration",
+                "Alter users schema; add password_hash",
+                "migrations/004.sql",
+            ),
+            step(
+                "Update login",
+                "Hash + verify token in auth/login.rs",
+                "auth/login.rs",
+            ),
+            step("Verify", "cargo test auth:: passes", "auth/login.rs"),
+        ];
+        let (_quality, coaching) = assess_plan_quality("Auth + payment migration", "", &steps);
+        assert!(
+            coaching
+                .iter()
+                .any(|c| c.to_lowercase().contains("rollback")),
+            "high-risk plan must nudge rollback: {coaching:?}"
+        );
     }
 
     #[test]

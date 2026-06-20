@@ -650,6 +650,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       /** Review-request turn: render a badge instead of the raw prompt, and leave the
        *  composer draft/attachments untouched (the prompt is system-authored, not typed). */
       reviewRequest?: boolean;
+      /** Force a turn checkpoint even on an override send (edit-resend): without it the
+       *  re-sent user message has no checkpoint and stops being editable. */
+      checkpoint?: boolean;
     },
   ) => {
     const isInternalSend = options?.internalSend === true;
@@ -881,7 +884,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     const userMessageId = crypto.randomUUID();
     let turnCheckpointId: string | undefined;
     let turnFileCheckpointId: string | undefined;
-    if (workspace && selectedProvider && selectedModel && !overrideMessage && !isGoalOrchestration) {
+    if (workspace && selectedProvider && selectedModel && (!overrideMessage || options?.checkpoint) && !isGoalOrchestration) {
       try {
         const turn = await createTurnCheckpointBeforeSend({
           input: buildCheckpointSendInput({
@@ -1195,7 +1198,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       replaceAiChatMessages(activeChatSession.id, result.messages, { contextCompaction: null });
       showRestoreSuccess(result);
       saveChatCheckpointStore();
-      await handleSend(nextContent.trim(), result.messages, { force: true });
+      // Re-checkpoint the edited turn so the new user message stays editable; without
+      // this the resend (an override send) skips the checkpoint and the Edit affordance
+      // disappears after the first edit.
+      await handleSend(nextContent.trim(), result.messages, { force: true, checkpoint: true });
     } catch (error) {
       setSendError(classifyAiChatError(error, t));
       setRestoreNotice(null);
@@ -1311,13 +1317,27 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     if (!pendingPlan || activeSessionBusy || activeSessionClosed) return;
     const sessionId = pendingPlan.sessionId;
     clearPendingPlan(pendingPlan.planId);
-    const agentProfile = aiPreferences.agentProfiles.find((profile) => profile.mode === "agent")
-      ?? aiPreferences.agentProfiles[0];
-    if (agentProfile) updateAiPreference({ selectedAgentId: agentProfile.id, agentMode: "agent" });
+    // Automatic owns the whole run — keep it in Automatic on hand-off. Only a
+    // manual Start from a read-only/plan mode switches into Agent for execution.
+    if (aiPreferences.agentMode !== "automatic") {
+      const agentProfile = aiPreferences.agentProfiles.find((profile) => profile.mode === "agent")
+        ?? aiPreferences.agentProfiles[0];
+      if (agentProfile) updateAiPreference({ selectedAgentId: agentProfile.id, agentMode: "agent" });
+    }
     const handoffMessage = buildPlanHandoffUserMessage(pendingPlan.steps.map((step) => step.title));
     void handleSend(handoffMessage, undefined, { force: true });
     void sessionId;
-  }, [pendingPlan, activeSessionBusy, activeSessionClosed, aiPreferences.agentProfiles, updateAiPreference, handleSend]);
+  }, [pendingPlan, activeSessionBusy, activeSessionClosed, aiPreferences.agentMode, aiPreferences.agentProfiles, updateAiPreference, handleSend]);
+
+  // Automatic safety net: a plan must never strand execution in Automatic mode. If
+  // the model presented a plan but the turn ended without proceeding (idle, plan
+  // still pending), auto-hand it to execution. The busy guard prevents double-firing
+  // while the model is already continuing in-turn; clearing the plan stops re-entry.
+  useEffect(() => {
+    if (aiPreferences.agentMode !== "automatic") return;
+    if (!pendingPlan || activeSessionBusy || activeSessionClosed) return;
+    handlePlanStart();
+  }, [aiPreferences.agentMode, pendingPlan, activeSessionBusy, activeSessionClosed, handlePlanStart]);
 
   const handleComposerKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
     // While an IME is composing (CJK candidate selection), let the IME consume
@@ -1559,6 +1579,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                   plan={pendingPlan}
                   onStart={handlePlanStart}
                   busy={activeSessionBusy || activeSessionClosed}
+                  agentMode={aiPreferences.agentMode}
                   t={t}
                 />
               )}

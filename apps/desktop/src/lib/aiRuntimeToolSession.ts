@@ -235,13 +235,82 @@ export async function presentPlanTool(args: UnknownRecord, input: AiChatSendInpu
     steps,
     autoStart,
   });
-  return toolJson("PresentPlan", {
-    stepCount: steps.length,
-    autoStart,
-    guidance: autoStart
-      ? "Plan presented and auto-started (Automatic mode). Begin executing step 1 now; do not wait for confirmation."
-      : "Plan presented to the user. Stop here and wait — the user will press Start to hand the plan to Agent mode. Do not begin editing yet.",
+  const { quality, coaching } = assessPlanQuality(title, summary, steps);
+  const baseGuidance = autoStart
+    ? "Plan presented and auto-started (Automatic mode). Begin executing step 1 now; do not wait for confirmation."
+    : "Plan presented to the user. Stop here and wait — the user will press Start to hand the plan to Agent mode. Do not begin editing yet.";
+  const guidance = coaching.length === 0
+    ? baseGuidance
+    : `Plan quality ${quality.toFixed(2)}/1.0 — strengthen before/while executing: ${coaching.join(" ")}\n${baseGuidance}`;
+  return toolJson("PresentPlan", { stepCount: steps.length, autoStart, quality, coaching, guidance });
+}
+
+const PLAN_RISK_MARKERS = [
+  "security", "secure", "auth", "password", "token", "payment", "billing",
+  "concurren", "migrat", "schema", "distributed", "performance", "rollback",
+  "delete", "destructive", "public api", "breaking",
+];
+const PLAN_VAGUE_LABELS = [
+  "set up the project", "set up project", "setup", "implement business logic",
+  "implement logic", "implement the feature", "add documentation", "write docs",
+  "do the rest", "finish up", "wire everything", "make it work", "clean up",
+  "testing", "polish",
+];
+
+/**
+ * Deterministic, advisory plan-quality gate — mirror of the Rust `assess_plan_quality`
+ * (itself a port of think-mcp's cycle gate). Scores decomposition depth, concreteness,
+ * an explicit verification step, and rollback awareness for risky work; returns a
+ * `[0,1]` score plus concrete coaching nudges. Never blocks execution.
+ */
+function assessPlanQuality(
+  title: string,
+  summary: string,
+  steps: { title: string; detail: string; file: string }[],
+): { quality: number; coaching: string[] } {
+  const coaching: string[] = [];
+  const haystack = [title, summary, ...steps.flatMap((s) => [s.title, s.detail])].join("\n").toLowerCase();
+  const riskHits = PLAN_RISK_MARKERS.filter((m) => haystack.includes(m)).length;
+  const requiredSteps = Math.min(3 + riskHits, 8);
+  let score = 1.0;
+
+  if (steps.length < requiredSteps) {
+    score -= 0.25;
+    coaching.push(`Decompose further — ${steps.length} step(s) for ${riskHits > 0 ? "higher" : "this"}-risk work; aim for ~${requiredSteps}, each a concrete action on a named file/module.`);
+  }
+
+  const vague = steps.filter((s) => {
+    const t = s.title.toLowerCase();
+    return PLAN_VAGUE_LABELS.some((v) => t === v || t.startsWith(v));
+  }).length;
+  const withAnchor = steps.filter((s) => s.file !== "" || [...s.detail].length >= 24).length;
+  if (vague > 0) {
+    score -= 0.15;
+    coaching.push(`Replace ${vague} vague step label(s) (e.g. 'implement logic', 'add documentation') with a specific action + its acceptance check.`);
+  }
+  if (steps.length >= 3 && withAnchor * 2 < steps.length) {
+    score -= 0.15;
+    coaching.push("Most steps lack a file or concrete detail — name the file/module each step touches and what proves it done.");
+  }
+
+  const hasVerification = steps.some((s) => {
+    const t = `${s.title} ${s.detail}`.toLowerCase();
+    return ["test", "verif", "build", "typecheck", "lint", "run ", "check", "assert", "validate"].some((kw) => t.includes(kw));
   });
+  if (!hasVerification) {
+    score -= 0.25;
+    coaching.push("Add a final verification step: the tests/build/checks that prove it works (plus a rollback trigger for risky changes).");
+  }
+
+  if (riskHits >= 2) {
+    const hasRollback = ["rollback", "revert", "checkpoint", "backup"].some((kw) => haystack.includes(kw));
+    if (!hasRollback) {
+      score -= 0.1;
+      coaching.push("High-risk plan: name a rollback/recovery path (Checkpoint, revert, or backup) for the riskiest step.");
+    }
+  }
+
+  return { quality: Math.max(0, Math.min(1, score)), coaching };
 }
 
 export async function taskSubagentTool(args: UnknownRecord, input: AiChatSendInput, session: RuntimeToolSession): Promise<ToolResult> {

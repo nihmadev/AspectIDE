@@ -1,6 +1,6 @@
 [package]
 name = "lux-desktop"
-version = "1.0.5"
+version = "1.0.6"
 description = "Lux IDE desktop shell"
 edition.workspace = true
 license.workspace = true
@@ -50,7 +50,7 @@ tauri-plugin-opener = "2"
 tauri-plugin-process = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "native-tls-vendored", "stream"] }
 futures-util = "0.3"
 zip.workspace = true
 tar.workspace = true
