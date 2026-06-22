@@ -110,7 +110,7 @@ fn parse_result_anchors(html: &str, link_class: &str, snippet_class: &str) -> Ve
         hits.push(SearchHit {
             url,
             title,
-            snippet: extract_following_snippet(html, cursor, snippet_class),
+            snippet: extract_following_snippet(html, cursor, link_class, snippet_class),
             engine: "duckduckgo".to_string(),
             provider_score: 0.0,
         });
@@ -127,13 +127,28 @@ fn string_field(item: &serde_json::Value, key: &str) -> String {
 }
 
 /// Pull the `snippet_class` text that follows a result anchor, if present and
-/// reasonably close (within ~1.5KB) to avoid grabbing the next result's snippet.
-fn extract_following_snippet(html: &str, from: usize, snippet_class: &str) -> String {
+/// reasonably close (within ~1.5KB). Bounded by the next result anchor: if another
+/// `link_class` result starts before the next snippet, the current result simply has
+/// no snippet — we return empty rather than stealing (and duplicating) the next
+/// result's snippet.
+fn extract_following_snippet(
+    html: &str,
+    from: usize,
+    link_class: &str,
+    snippet_class: &str,
+) -> String {
     let Some(relative) = html[from..].find(snippet_class) else {
         return String::new();
     };
     if relative > 1_500 {
         return String::new();
+    }
+    // The snippet must belong to THIS result: if the next result's anchor appears
+    // before it, this result has none of its own.
+    if let Some(next_anchor) = html[from..].find(link_class) {
+        if next_anchor < relative {
+            return String::new();
+        }
     }
     let snippet_pos = from + relative;
     let Some(open_rel) = html[snippet_pos..].find('>') else {
@@ -333,6 +348,22 @@ mod tests {
     fn drops_non_http_result_urls() {
         let html = r#"<a class="result__a" href="javascript:alert(1)">Evil</a>"#;
         assert!(parse_duckduckgo_html(html).is_empty());
+    }
+
+    #[test]
+    fn snippet_less_result_does_not_steal_the_next_snippet() {
+        // Result A has no snippet of its own; result B does. A must NOT borrow B's.
+        let html = r#"
+          <a class="result__a" href="https://a.com/aaa">Result A</a>
+          <a class="result__a" href="https://b.com/bbb">Result B</a>
+          <a class="result__snippet" href="x">This snippet belongs to B.</a>
+        "#;
+        let hits = parse_duckduckgo_html(html);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://a.com/aaa");
+        assert_eq!(hits[0].snippet, "", "A must not borrow B's snippet");
+        assert_eq!(hits[1].url, "https://b.com/bbb");
+        assert_eq!(hits[1].snippet, "This snippet belongs to B.");
     }
 
     #[test]

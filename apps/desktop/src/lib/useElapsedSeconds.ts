@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * Live elapsed-time ticker for the chat "thinking" row. While `active`, counts up
@@ -13,12 +13,10 @@ import { useEffect, useRef, useState } from "react";
  */
 export function useElapsedSeconds(active: boolean): number {
   const [elapsedMs, setElapsedMs] = useState(0);
-  const startRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!active) return; // inactive → keep the last frozen value, run nothing.
     const start = Date.now();
-    startRef.current = start;
     setElapsedMs(0);
     const id = window.setInterval(() => setElapsedMs(Date.now() - start), 250);
     return () => {

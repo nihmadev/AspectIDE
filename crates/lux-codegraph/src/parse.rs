@@ -5,6 +5,7 @@
 //! definition (that is `resolve`'s job in the graph build). It just reports what
 //! the tree-sitter `tags` query saw.
 
+use serde::{Deserialize, Serialize};
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, Query, QueryCursor};
 
@@ -13,7 +14,7 @@ use crate::lang::Lang;
 /// What kind of thing a definition is. Derived from the `definition.<kind>`
 /// capture name; unknown kinds fall back to [`SymbolKind::Other`] so a new query
 /// capture never silently drops a symbol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SymbolKind {
     Function,
     Method,
@@ -49,7 +50,7 @@ impl SymbolKind {
 }
 
 /// What kind of edge a reference will become once resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefKind {
     Call,
     Import,
@@ -71,7 +72,7 @@ impl RefKind {
 /// A source range, stored compactly as `u32`s (byte offsets plus 0-based
 /// line/column for both ends). Files larger than 4 GiB saturate — a non-issue for
 /// source code.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
     pub start_byte: u32,
     pub end_byte: u32,
@@ -103,7 +104,7 @@ fn clamp_u32(value: usize) -> u32 {
 /// A symbol this file defines. `span` is the definition's full lexical extent
 /// (used to decide nesting/containment); `name_span` is just the identifier (used
 /// for navigation and display).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawSymbol {
     pub name: String,
     pub kind: SymbolKind,
@@ -112,7 +113,7 @@ pub struct RawSymbol {
 }
 
 /// A reference this file makes to some (as-yet unresolved) name.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RawRef {
     pub name: String,
     pub kind: RefKind,
@@ -120,7 +121,7 @@ pub struct RawRef {
 }
 
 /// Everything one parsed file contributes to the graph.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedFile {
     pub symbols: Vec<RawSymbol>,
     pub refs: Vec<RawRef>,

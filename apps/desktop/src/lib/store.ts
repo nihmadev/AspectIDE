@@ -366,6 +366,18 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   setActiveAiChatSession: (sessionId) => set((state) => {
     const target = state.aiChatSessions.find((session) => session.id === sessionId);
     if (!target) return {};
+    // Selecting a session from history must always yield a usable, open chat. If the
+    // target was archived (closedAt set), re-open it — otherwise it would render with
+    // the composer disabled ("shows but won't open / can't do anything").
+    if (target.closedAt) {
+      const now = Date.now();
+      return {
+        activeAiChatSessionId: sessionId,
+        aiChatOpen: true,
+        aiChatSessions: state.aiChatSessions.map((session) =>
+          session.id === sessionId ? { ...session, closedAt: null, updatedAt: now } : session),
+      };
+    }
     return {
       activeAiChatSessionId: sessionId,
       aiChatOpen: true,
@@ -924,8 +936,8 @@ function createAiChatSession(workspaceRoot: string | null): AiChatSession {
   };
 }
 
-function normalizeAiChatSessionState(chatState: AiChatSessionState): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
-  let sessions = chatState.sessions.length > 0 ? chatState.sessions.map((session) => normalizeAiChatSession(session)) : [createAiChatSession(null)];
+function normalizeAiChatSessionState(chatState: AiChatSessionState, fallbackRoot: string | null = null): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
+  let sessions = chatState.sessions.length > 0 ? chatState.sessions.map((session) => normalizeAiChatSession(session)) : [createAiChatSession(fallbackRoot)];
   let activeAiChatSessionId = sessions.some((session) => session.id === chatState.activeSessionId) ? chatState.activeSessionId : sessions[0].id;
   const activeSession = sessions.find((session) => session.id === activeAiChatSessionId);
   if (!activeSession || activeSession.closedAt) {
@@ -933,7 +945,9 @@ function normalizeAiChatSessionState(chatState: AiChatSessionState): Pick<LuxSta
     if (openSession) {
       activeAiChatSessionId = openSession.id;
     } else {
-      const fallback = createAiChatSession(null);
+      // Scope a freshly-minted fallback to the open workspace, not the global (null)
+      // root, so it stays a project chat instead of leaking across every project.
+      const fallback = createAiChatSession(fallbackRoot);
       sessions = [fallback, ...sessions];
       activeAiChatSessionId = fallback.id;
     }
@@ -942,7 +956,7 @@ function normalizeAiChatSessionState(chatState: AiChatSessionState): Pick<LuxSta
 }
 
 function mergeAiChatSessionState(state: LuxState, chatState: AiChatSessionState): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
-  const incoming = normalizeAiChatSessionState(chatState);
+  const incoming = normalizeAiChatSessionState(chatState, state.workspace?.root ?? null);
   const byId = new Map<string, AiChatSession>();
 
   for (const session of incoming.aiChatSessions) {
