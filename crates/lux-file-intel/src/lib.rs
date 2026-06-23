@@ -123,7 +123,7 @@ fn preview_for_file(
         FileViewStrategy::DatabasePreview | FileViewStrategy::DatabaseEditor => {
             Ok(database_preview(path, options))
         }
-        FileViewStrategy::PdfPreview => Ok(pdf_preview(path)),
+        FileViewStrategy::PdfPreview => pdf_preview(path),
         FileViewStrategy::OfficePreview => office_preview(path, options),
         FileViewStrategy::ArchivePreview => Ok(archive_preview(path, options)),
         FileViewStrategy::NotebookPreview => notebook_preview(path, options),
@@ -261,6 +261,10 @@ fn table_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<File
 }
 
 fn spreadsheet_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
+    // Reject zip-bomb workbooks before `open_workbook_auto`/`worksheet_range`
+    // materializes a sheet into memory: a ~1 KB crafted xlsx can otherwise
+    // inflate to gigabytes and OOM the process during `InspectFile`.
+    spreadsheet_edit::guard_decompression_bomb(path)?;
     let mut workbook =
         open_workbook_auto(path).map_err(|error| AppError::Service(error.to_string()))?;
     let names = workbook.sheet_names();
@@ -328,8 +332,14 @@ fn database_preview(path: &Path, options: &FileInspectionOptions) -> FilePreview
     }
 }
 
-fn pdf_preview(path: &Path) -> FilePreview {
-    let extracted = pdf_extract::extract_text(path).unwrap_or_default();
+fn pdf_preview(path: &Path) -> AppResult<FilePreview> {
+    // pdf-extract 0.10 panics (not just `Err`s) on some malformed PDFs. The
+    // extraction is synchronous, so catch the unwind here and turn it into a
+    // clean error rather than tearing down the caller. `&Path` is unwind-safe,
+    // so no `AssertUnwindSafe` is required.
+    let extracted = std::panic::catch_unwind(|| pdf_extract::extract_text(path))
+        .map_err(|_| AppError::Service("unable to extract PDF text".to_string()))?
+        .unwrap_or_default();
     let truncated = extracted.len() > PDF_TEXT_LIMIT;
     let text = truncate_chars(&extracted, PDF_TEXT_LIMIT);
     let page_count = if extracted.is_empty() {
@@ -337,11 +347,11 @@ fn pdf_preview(path: &Path) -> FilePreview {
     } else {
         extracted.matches('\x0C').count().checked_add(1)
     };
-    FilePreview::Pdf {
+    Ok(FilePreview::Pdf {
         text,
         page_count,
         truncated,
-    }
+    })
 }
 
 fn office_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<FilePreview> {
@@ -782,6 +792,41 @@ mod tests {
         let _ = fs::remove_file(&root);
 
         assert!(matches!(inspection.preview, FilePreview::Pdf { .. }));
+    }
+
+    #[test]
+    fn spreadsheet_preview_rejects_decompression_bomb() {
+        use std::io::Write;
+        use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+
+        // A tiny .xlsx-shaped zip whose single entry inflates ~8 MiB from a few
+        // KB: the compression ratio blows past the guard's 1000:1 ceiling, so
+        // the bomb is rejected before calamine ever materializes a sheet.
+        let root = std::env::temp_dir().join("lux-file-intel-bomb.xlsx");
+        {
+            let file = fs::File::create(&root).unwrap();
+            let mut writer = ZipWriter::new(file);
+            let options =
+                SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+            writer
+                .start_file("xl/worksheets/sheet1.xml", options)
+                .unwrap();
+            writer.write_all(&vec![0u8; 8 * 1024 * 1024]).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let result = spreadsheet_preview(&root, &FileInspectionOptions::default());
+        let _ = fs::remove_file(&root);
+
+        match result {
+            Err(AppError::Service(message)) => {
+                assert!(
+                    message.contains("decompression bomb"),
+                    "unexpected error message: {message}"
+                );
+            }
+            other => panic!("expected decompression-bomb rejection, got: {other:?}"),
+        }
     }
 
     #[test]

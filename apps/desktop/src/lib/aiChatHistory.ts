@@ -195,7 +195,9 @@ function compactMessage(message: AiChatMessage): AiChatMessage {
         ...segment,
         toolCall: {
           ...segment.toolCall,
-          input: truncateOptional(segment.toolCall.input, 2_000),
+          // Persist tool input at the same budget as output: a 2 000-char cap
+          // silently lost the body of Write/PatchEngine/Shell calls on reload.
+          input: truncateOptional(segment.toolCall.input, maxPersistedToolTextChars),
           output: truncateOptional(segment.toolCall.output, maxPersistedToolTextChars),
           error: truncateOptional(segment.toolCall.error, 4_000),
           approval: segment.toolCall.approval ? {
@@ -215,7 +217,7 @@ function compactMessage(message: AiChatMessage): AiChatMessage {
     reasoning: truncateOptional(message.reasoning, maxPersistedTextChars),
     toolCalls: message.toolCalls?.map((toolCall) => ({
       ...toolCall,
-      input: truncateOptional(toolCall.input, 2_000),
+      input: truncateOptional(toolCall.input, maxPersistedToolTextChars),
       output: truncateOptional(toolCall.output, maxPersistedToolTextChars),
       error: truncateOptional(toolCall.error, 4_000),
     })),

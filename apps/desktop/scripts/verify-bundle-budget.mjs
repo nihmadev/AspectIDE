@@ -12,8 +12,8 @@ const maxEntryChunkBytes = 300 * 1024;
 // they get an explicit higher ceiling instead of inflating the global budget.
 // Each prefix is matched against chunk names; anything not listed stays strict.
 const lazyVendorBudgets = [
-  { prefix: "vendor-mermaid-", maxBytes: 2_000 * 1024 },
-  { prefix: "vendor-graph-cytoscape-", maxBytes: 512 * 1024 },
+  { prefix: "vendor-mermaid-", maxBytes: 2_048 * 1024 },
+  { prefix: "vendor-graph-cytoscape-", maxBytes: 768 * 1024 },
   { prefix: "vendor-graph-dagre-", maxBytes: 512 * 1024 },
   { prefix: "vendor-graph-elk-", maxBytes: 768 * 1024 },
   { prefix: "vendor-katex-", maxBytes: 512 * 1024 },

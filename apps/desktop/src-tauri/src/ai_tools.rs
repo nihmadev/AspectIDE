@@ -22,7 +22,7 @@ const AI_SHELL_DEFAULT_TIMEOUT_SECS: u64 = 120;
 const AI_SHELL_MAX_TIMEOUT_SECS: u64 = 600;
 const AI_SHELL_MAX_OUTPUT_CHARS: usize = 24_000;
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -609,7 +609,10 @@ pub async fn ai_shell(
 
     let started = std::time::Instant::now();
     let mut process = shell_command(&command);
-    process.current_dir(&cwd);
+    // Strip any verbatim `\\?\` prefix: cmd.exe refuses verbatim/UNC working
+    // directories and silently falls back to C:\Windows, so the shell would run
+    // in the wrong place (the recurring "cmd stuck in C:\Windows" bug).
+    process.current_dir(dunce::simplified(&cwd));
     process.stdin(Stdio::null());
     process.stdout(Stdio::piped());
     process.stderr(Stdio::piped());
@@ -637,20 +640,51 @@ pub async fn ai_shell(
     // borrow, leaving the child alive so the tree-kill below can target it.
     let collect = async {
         use tokio::io::AsyncReadExt;
+        // Cap each pipe so a runaway producer (`yes`, `cat /dev/urandom`) can't
+        // balloon memory before the timeout fires — the output is truncated for
+        // display anyway. Bounded read here, not "read everything then cap".
+        const MAX_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
+        // After the command's own process exits, a backgrounded grandchild it
+        // spawned (`cmd /C foo &`, `serve &`, a daemon) can keep the stdout/stderr
+        // write end open, so `read_to_end` would block on an EOF that never comes —
+        // making the tool wait the FULL timeout for a command that already finished.
+        // So we reap the child first, then give the pipes only a short grace window
+        // to flush trailing output before returning. The real command's output is
+        // already captured; a lingering daemon must not hold the turn hostage.
+        const PIPE_DRAIN_GRACE_SECS: u64 = 2;
         let mut stdout_buf = Vec::new();
         let mut stderr_buf = Vec::new();
         let read_stdout = async {
             if let Some(pipe) = stdout_pipe.as_mut() {
-                let _ = pipe.read_to_end(&mut stdout_buf).await;
+                let _ = pipe
+                    .take(MAX_CAPTURE_BYTES)
+                    .read_to_end(&mut stdout_buf)
+                    .await;
             }
         };
         let read_stderr = async {
             if let Some(pipe) = stderr_pipe.as_mut() {
-                let _ = pipe.read_to_end(&mut stderr_buf).await;
+                let _ = pipe
+                    .take(MAX_CAPTURE_BYTES)
+                    .read_to_end(&mut stderr_buf)
+                    .await;
             }
         };
-        tokio::join!(read_stdout, read_stderr);
-        let status = child.wait().await;
+        let drain = async { tokio::join!(read_stdout, read_stderr) };
+        let mut drain = Box::pin(drain);
+        // Race the pipe drain against the child exiting. If the pipes hit EOF first
+        // (normal case), `status` is taken right after. If the child exits while a
+        // grandchild still holds a pipe, the drain stalls — cap it at the grace
+        // window so we return promptly instead of stalling to the outer timeout.
+        let status = tokio::select! {
+            _ = drain.as_mut() => child.wait().await,
+            status = child.wait() => {
+                let _ = timeout(Duration::from_secs(PIPE_DRAIN_GRACE_SECS), drain.as_mut()).await;
+                status
+            }
+        };
+        // Drop the future (and its borrows of the buffers) before moving them out.
+        drop(drain);
         (status, stdout_buf, stderr_buf)
     };
 
@@ -696,7 +730,7 @@ pub async fn ai_shell(
 /// Best-effort kill of a timed-out shell command's entire process tree.
 /// `kill_on_drop` only terminates the immediate `cmd.exe`/`sh` child, so any
 /// grandchildren it spawned would otherwise keep running orphaned.
-async fn kill_process_tree(pid: Option<u32>) {
+pub async fn kill_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
@@ -727,7 +761,11 @@ pub async fn ai_read_file(
     path: PathBuf,
     max_bytes: Option<u64>,
 ) -> Result<AiReadFileResult, String> {
-    let max_bytes = max_bytes.unwrap_or(120_000).max(1);
+    // Hard upper ceiling so a caller/model can't request an arbitrarily large
+    // read (e.g. `maxBytes: 9_999_999_999`) and balloon memory; the default
+    // stays small and the request is clamped into [1, 10 MiB].
+    const MAX_READ_BYTES: u64 = 10 * 1024 * 1024;
+    let max_bytes = max_bytes.unwrap_or(120_000).clamp(1, MAX_READ_BYTES);
     let path = resolve_workspace_path(&state, &path)?;
     tokio::task::spawn_blocking(move || -> Result<AiReadFileResult, String> {
         use std::io::Read;
@@ -1037,6 +1075,17 @@ async fn prepare_ai_patch_operations(
                     && !operation.overwrite.unwrap_or(false)
                 {
                     return Err(format!("file already exists: {}", path.display()));
+                }
+                // `rewrite` replaces an EXISTING file's contents; it must not be a
+                // back door for silently creating a file (that is `create`'s job,
+                // which is gated by the overwrite check above). Requiring existence
+                // keeps the create/rewrite contract explicit; the turn-loop's
+                // read-before-edit guard already prevents clobbering unread content.
+                if kind == AiPreparedPatchKind::Rewrite && before_text.is_none() {
+                    return Err(format!(
+                        "rewrite target does not exist (use create): {}",
+                        path.display()
+                    ));
                 }
                 let stats = diff_stats(
                     before_text.as_deref().unwrap_or(""),
@@ -1370,7 +1419,7 @@ fn shell_command(command_line: &str) -> tokio::process::Command {
     }
 }
 
-fn truncate_shell_output(value: &str) -> String {
+pub fn truncate_shell_output(value: &str) -> String {
     let trimmed = value.trim();
     if trimmed.chars().count() <= AI_SHELL_MAX_OUTPUT_CHARS {
         return trimmed.to_string();

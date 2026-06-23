@@ -19,6 +19,11 @@ export type RuntimeToolName =
   | "Shell"
   | "TerminalContext"
   | "TerminalWrite"
+  | "SshConnect"
+  | "SshExec"
+  | "SshTransfer"
+  | "SshList"
+  | "SshDisconnect"
   | "Grep"
   | "ReadLints"
   | "Goal"
@@ -27,6 +32,7 @@ export type RuntimeToolName =
   | "AgentMessage"
   | "AskUser"
   | "PresentPlan"
+  | "McpManage"
   | "WebFetch"
   | "BrowserStatus"
   | "BrowserOpen"
@@ -93,6 +99,14 @@ const terminalToolNames = new Set<RuntimeToolName>([
   "TerminalWrite",
 ]);
 
+/** Side-effecting SSH tools (connect/exec/transfer/disconnect). SshList is read-only and stays available. */
+const sshExecToolNames = new Set<RuntimeToolName>([
+  "SshConnect",
+  "SshExec",
+  "SshTransfer",
+  "SshDisconnect",
+]);
+
 /** Blocked in Plan/Ask — enforced like OpenCode `permission.edit` / `bash` deny, not prompt-only. */
 const readOnlyBlockedToolNames = new Set<RuntimeToolName>([
   "Write",
@@ -103,7 +117,9 @@ const readOnlyBlockedToolNames = new Set<RuntimeToolName>([
   "TodoWrite",
   "Goal",
   "Task",
+  "McpManage",
   ...terminalToolNames,
+  ...sshExecToolNames,
 ]);
 
 export function readOnlyAgentModeToolDenyReason(
@@ -438,6 +454,66 @@ export const runtimeTools: RuntimeToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "SshConnect",
+      description: "Open a non-interactive SSH session to a remote host and verify it. Use a host alias from ~/.ssh/config (see SshList), a hostname/IP, or user@host. Auth uses ssh-agent, default keys, or an explicit identityFile — never an interactive password (Lux runs OpenSSH in BatchMode). Returns a sessionId for SshExec/SshTransfer plus the remote OS and home directory. This is the ONLY correct way to start remote work — never run `ssh` through Shell or TerminalWrite.",
+      parameters: objectSchema({
+        host: stringSchema("An ~/.ssh/config alias, a hostname/IP, or user@host."),
+        user: stringSchema("Login user (overrides the host/config user)."),
+        port: numberSchema("Port, default 22 or per ~/.ssh/config."),
+        identityFile: stringSchema("Path to a private key file to use exclusively for auth."),
+        label: stringSchema("Optional friendly label for the session."),
+      }, ["host"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "SshExec",
+      description: "Run a command on an SSH session (from SshConnect) and return structured { exitCode, stdout, stderr, durationMs }. Runs in the session's sticky working directory; pass cwd to change it for this and subsequent commands. Non-interactive and guarded against catastrophic commands. Prefer this over a Shell `ssh ...` for every remote command.",
+      parameters: objectSchema({
+        session: stringSchema("The sessionId returned by SshConnect."),
+        command: stringSchema("The exact command to run on the remote host."),
+        cwd: stringSchema("Remote working directory; becomes the session's sticky cwd."),
+        timeoutSecs: numberSchema("Timeout in seconds, default 120, maximum 600."),
+      }, ["session", "command"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "SshTransfer",
+      description: "Copy a file or directory between the workspace and a remote host over scp for an SSH session. The local path is confined to the active workspace.",
+      parameters: objectSchema({
+        session: stringSchema("The sessionId returned by SshConnect."),
+        direction: stringSchema('"upload" (local→remote) or "download" (remote→local).'),
+        localPath: stringSchema("Workspace-relative or absolute path inside the workspace."),
+        remotePath: stringSchema("Absolute or login-relative path on the remote host."),
+        recursive: booleanSchema("Copy directories recursively. Default false."),
+      }, ["session", "direction", "localPath", "remotePath"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "SshList",
+      description: "List active SSH sessions and the hosts defined in ~/.ssh/config, plus whether the OpenSSH client is available. Read-only; call this to discover connectable hosts before SshConnect.",
+      parameters: objectSchema({}),
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "SshDisconnect",
+      description: "Close an SSH session by sessionId, or every session with all=true.",
+      parameters: objectSchema({
+        session: stringSchema("The sessionId to close."),
+        all: booleanSchema("Close all active sessions. Default false."),
+      }),
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "Grep",
       description: "Search text in the current workspace using the IDE search index.",
       parameters: objectSchema({
@@ -551,24 +627,42 @@ export const runtimeTools: RuntimeToolDefinition[] = [
     type: "function",
     function: {
       name: "PresentPlan",
-      description: "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution; in Automatic mode execution auto-starts. Scale the plan to the task's complexity and risk — it is NOT a flat list of phases: decompose into concrete file-level steps (each step = a specific action on a named file/module with its acceptance check, never vague labels like 'implement business logic' or 'add documentation'); name the key decision and chosen alternative where one genuinely exists; flag the riskiest step and its failure mode; and end with an explicit verification step (the tests/build/checks that prove it works, plus a rollback trigger for risky changes). Riskier work (auth, payments, migrations, concurrency, data-loss, public APIs) earns more steps and explicit verification; trivial work stays terse. Prefer this over a plain prose checklist for multi-step work.",
+      description: "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution; in Automatic mode execution auto-starts. Scale the plan to the task's complexity and risk — it is NOT a flat list of phases. A strong plan covers five reasoning phases (a deterministic quality gate scores them and coaches whatever is missing): (1) DECOMPOSE into concrete file-level steps (each = a specific action on a named file/module with its acceptance check, never vague labels like 'implement business logic'); (2) ALTERNATIVES — in `alternatives`, name the key decision(s): the approach you chose and why it wins over the option you rejected (the tradeoff); (3) CRITIQUE — in `risks`, the failure modes and hidden assumptions of the riskiest step (what breaks, under what input/timing); (4) SYNTHESIS — the chosen path's rationale in `summary`; (5) VERIFY — in `verification`, the tests/build/checks that prove it works, plus a rollback/recovery trigger for risky changes. Riskier work (auth, payments, migrations, concurrency, data-loss, public APIs) earns more steps, an explicit decision, named risks, and verification; trivial work stays terse (steps alone are fine). Prefer this over a plain prose checklist for multi-step work.",
       parameters: objectSchema({
         steps: arraySchema("Ordered steps: strings or { title, detail, file } objects."),
         title: stringSchema("Short plan title."),
-        summary: stringSchema("One-paragraph summary of the goal/approach."),
+        summary: stringSchema("One-paragraph summary of the goal/approach + why this path (synthesis)."),
+        alternatives: arraySchema("Key decisions: strings or { option, tradeoff } objects — the approach chosen and why it beats the rejected one."),
+        risks: arraySchema("Failure modes / hidden assumptions of the riskiest steps (strings)."),
+        verification: arraySchema("Checks that prove it works + rollback trigger (strings)."),
       }, ["steps"]),
     },
   },
   {
     type: "function",
     function: {
+      name: "McpManage",
+      description: "Manage Model Context Protocol (MCP) servers so you can extend your own toolset live. Actions: 'list' (configured servers + live state + their tools), 'add' (register a server by command/args/env and connect it — its tools then become callable as mcp__<id>__<tool> on the NEXT round), 'connect'/'restart' (reconnect by id), 'disconnect' (stop a live session, keep config), 'enable'/'disable' (toggle + persist), 'remove' (delete config). MCP servers run real local processes (a command you specify, e.g. `npx -y @some/mcp-server`); treat them as trusted-but-side-effecting. After add/connect, call 'list' or check status to confirm 'connected' before relying on the new tools.",
+      parameters: objectSchema({
+        action: stringSchema("list | add | connect | restart | disconnect | enable | disable | remove"),
+        id: stringSchema("Server id (lowercase letters/digits/-/_, no '__'). Required for all actions except 'list'."),
+        name: stringSchema("Human-readable name (add)."),
+        command: stringSchema("Executable to spawn for the stdio transport, e.g. 'npx' (add)."),
+        args: arraySchema("Command arguments, e.g. ['-y','@modelcontextprotocol/server-filesystem','.'] (add)."),
+        env: objectSchema({}),
+        enabled: booleanSchema("Enable flag for enable/disable, or initial state for add (default true)."),
+      }, ["action"]),
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "WebFetch",
-      description: "Fetch a specific HTTP/HTTPS URL and return cleaned text plus metadata. Use for current docs, release notes, error pages, and user-provided links. Private network hosts are blocked unless explicitly allowed.",
+      description: "Fetch a specific HTTP/HTTPS URL and return cleaned text plus metadata. Use for current docs, release notes, error pages, and user-provided links. Localhost and private network hosts are always blocked.",
       parameters: objectSchema({
         url: stringSchema("The absolute HTTP or HTTPS URL to fetch."),
         maxBytes: numberSchema("Maximum response bytes to read, default 250000, maximum 1000000."),
         timeoutSecs: numberSchema("Request timeout in seconds, default 20, maximum 60."),
-        allowPrivateHosts: booleanSchema("Allow localhost/private IP targets. Default false; use only for explicit local URLs."),
       }, ["url"]),
     },
   },

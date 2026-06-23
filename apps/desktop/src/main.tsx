@@ -23,6 +23,24 @@ const queryClient = new QueryClient({
   },
 });
 
+// Suppress the native WebView right-click menu (Back / Reload / Save as / Print) —
+// it is a browser chrome leak that has no place in a desktop IDE. Editable fields
+// and elements that opt in via [data-native-contextmenu] keep the OS menu so text
+// copy/paste still works; the app's own context menus handle everything else.
+if (isTauriRuntime()) {
+  window.addEventListener(
+    "contextmenu",
+    (event) => {
+      const target = event.target as HTMLElement | null;
+      const editable = target?.closest?.(
+        "input, textarea, [contenteditable=''], [contenteditable='true'], [data-native-contextmenu]",
+      );
+      if (!editable) event.preventDefault();
+    },
+    { capture: true },
+  );
+}
+
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
 
 root.render(

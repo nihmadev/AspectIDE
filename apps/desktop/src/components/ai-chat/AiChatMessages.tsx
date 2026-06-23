@@ -1,6 +1,6 @@
 import { Brain, ChevronRight, Copy, SearchCheck } from "lucide-react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
-import { createContext, Fragment, memo, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, Fragment, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { lexer, type Token, type Tokens } from "marked";
 import { AiChatMessageActions } from "./AiChatMessageActions";
@@ -24,6 +24,10 @@ const coerceChatMessageText =
 const decodeChatDisplayText =
   chatDisplayText.decodeChatDisplayText
   ?? ((text: string | null | undefined) => (typeof text === "string" ? text : ""));
+
+const trimChatMessageEnd =
+  chatDisplayText.trimChatMessageEnd
+  ?? ((text: string) => text.replace(/\s+$/, ""));
 
 type AiChatMessagesProps = {
   canMutateHistory: boolean;
@@ -476,9 +480,16 @@ function AiReasoningBlock({ text, streaming, t }: {
 function MarkdownMessage({ content, t }: { content: string; t: TranslateFn }) {
   const safeContent = coerceChatMessageText(content);
   const [expanded, setExpanded] = useState(safeContent.length <= 30_000);
-  const normalizedContent = useMemo(() => decodeChatDisplayText(safeContent), [safeContent]);
+  const normalizedContent = useMemo(() => trimChatMessageEnd(decodeChatDisplayText(safeContent)), [safeContent]);
   const visibleContent = expanded ? normalizedContent : truncateMiddleForPreview(normalizedContent, 18_000, t);
-  const tokens = useMemo(() => tokenizeChatMarkdown(visibleContent), [visibleContent]);
+  const streaming = useContext(MarkdownStreamingContext);
+  // While tokens stream in at ~30-60/sec, re-lexing the growing markdown every
+  // time is the dominant per-token CPU cost on longer answers (O(n²) over the
+  // reply). Throttle the lexer input during streaming: the preview lags by at
+  // most ~1 frame of text, which is imperceptible for reading-speed text, and
+  // once the response settles the full text is lexed immediately.
+  const throttledVisible = useThrottledWhileStreaming(visibleContent, streaming, 160);
+  const tokens = useMemo(() => tokenizeChatMarkdown(throttledVisible), [throttledVisible]);
   return (
     <div className="ai-chat-message-content ai-chat-markdown" data-collapsed={!expanded || undefined}>
       {renderMarkdownBlocks(tokens, t)}
@@ -717,4 +728,43 @@ function truncateMiddleForPreview(content: string, maxChars: number, t: Translat
 
 function formatMessageTime(timestamp: number) {
   return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(timestamp);
+}
+
+/**
+ * Returns `value` passthrough when `active` is false (the settled state). While
+ * `active`, it syncs to the latest `value` but skips updates more frequent than
+ * `intervalMs` — the interval-gated copy becomes the derived-state input for
+ * expensive downstream computation (e.g. markdown lexing), while the true `value`
+ * is still accumulated elsewhere for correctness. On deactivation the latest
+ * `value` is emitted immediately, so the settled view is always complete.
+ */
+function useThrottledWhileStreaming(value: string, active: boolean, intervalMs: number): string {
+  const [throttled, setThrottled] = useState(value);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const latestRef = useRef(value);
+  latestRef.current = value;
+
+  useEffect(() => {
+    if (!active) {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      setThrottled(value);
+      return;
+    }
+    if (timerRef.current !== null) return; // already waiting
+    timerRef.current = setTimeout(() => {
+      timerRef.current = null;
+      setThrottled(latestRef.current);
+    }, intervalMs);
+    return () => {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [active, intervalMs, value]);
+
+  return active ? throttled : value;
 }

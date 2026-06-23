@@ -1,11 +1,13 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowUpCircle, BarChart3, Bot, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Loader2, Plus, RefreshCw, RotateCcw, Search, Settings, Share2, Trash2, Wand2, X } from "lucide-react";
+import { ArrowUpCircle, BarChart3, Bot, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, Code2, Cpu, Database, FileText, Globe, Languages, Loader2, Plug, Plus, RefreshCw, RotateCcw, Search, Server, Settings, Share2, Trash2, Wand2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
 import { SkillsSection } from "./settings/SkillsSection";
 import { MemorySection } from "./settings/MemorySection";
 import { WebResearchSection } from "./settings/WebResearchSection";
+import { SshSection } from "./settings/SshSection";
+import { McpSection } from "./settings/McpSection";
 import {
   AI_PREFERENCES_KEY,
   AI_PROVIDER_PRESETS,
@@ -79,7 +81,7 @@ import {
   type WordWrapSetting,
 } from "../lib/editorPreferences";
 import { displayPath } from "../lib/fileTree";
-import { LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from "../lib/i18n";
+import { loadDictionary, LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from "../lib/i18n";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
 import { useLuxStore } from "../lib/store";
@@ -91,7 +93,7 @@ const scope = "user" as const;
 
 // AI configuration is split into focused sections so runtime, instructions,
 // providers, and indexing do not compete in one mixed settings list.
-type SettingsSectionId = "general" | "editor" | "lsp" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-skills" | "ai-memory" | "ai-research" | "ai-providers" | "ai-indexing" | "ai-usage";
+type SettingsSectionId = "general" | "editor" | "lsp" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-skills" | "ai-memory" | "ai-research" | "ai-ssh" | "ai-mcp" | "ai-providers" | "ai-indexing" | "ai-usage";
 
 type SettingsSection = {
   id: SettingsSectionId;
@@ -123,7 +125,7 @@ const PROVIDER_PRESET_DESCRIPTION_KEYS: Record<string, MessageKey> = {
 const settingsNavGroups: Array<{ labelKey: MessageKey; sectionIds: SettingsSectionId[] }> = [
   { labelKey: "settings.group.workspace", sectionIds: ["general"] },
   { labelKey: "settings.group.editor", sectionIds: ["editor", "lsp"] },
-  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-skills", "ai-memory", "ai-research", "ai-providers", "ai-indexing", "ai-usage"] },
+  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-skills", "ai-memory", "ai-research", "ai-ssh", "ai-mcp", "ai-providers", "ai-indexing", "ai-usage"] },
 ];
 
 const settingsSections: SettingsSection[] = [
@@ -191,6 +193,20 @@ const settingsSections: SettingsSection[] = [
     keywords: ["web", "research", "search", "searxng", "duckduckgo", "perplexica", "sources", "поиск", "исследование"],
   },
   {
+    id: "ai-ssh",
+    titleKey: "settings.ssh.title",
+    descriptionKey: "settings.ssh.description",
+    icon: <Server size={16} />,
+    keywords: ["ssh", "scp", "sftp", "remote", "server", "openssh", "host", "known_hosts", "identity", "key", "ssh-agent", "удалённый", "сервер"],
+  },
+  {
+    id: "ai-mcp",
+    titleKey: "settings.mcp.title",
+    descriptionKey: "settings.mcp.description",
+    icon: <Plug size={16} />,
+    keywords: ["mcp", "model context protocol", "server", "servers", "tools", "stdio", "integration", "сервер", "инструменты"],
+  },
+  {
     id: "ai-providers",
     titleKey: "settings.providers.title",
     descriptionKey: "settings.providers.description",
@@ -237,7 +253,9 @@ export function SettingsDialog() {
 
   const persistLocale = useCallback(
     (nextLocale: Locale) => {
-      setLocale(nextLocale);
+      // Fetch the locale's split dictionary before flipping the active locale so
+      // the UI re-renders straight into the new language (no English flash).
+      void loadDictionary(nextLocale).finally(() => setLocale(nextLocale));
       setSaveState("saving");
       void luxCommands.settingsSet(scope, UI_LOCALE_KEY, nextLocale)
         .then(() => setSaveState("saved"))
@@ -358,7 +376,7 @@ export function SettingsDialog() {
                   <h2>{t(activeSection.titleKey)}</h2>
                   <p>{t(activeSection.descriptionKey)}</p>
                 </div>
-                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && activeSectionId !== "ai-usage" && activeSectionId !== "ai-skills" && activeSectionId !== "ai-memory" && activeSectionId !== "ai-research" && (
+                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && activeSectionId !== "ai-usage" && activeSectionId !== "ai-skills" && activeSectionId !== "ai-memory" && activeSectionId !== "ai-research" && activeSectionId !== "ai-ssh" && activeSectionId !== "ai-mcp" && (
                   <button className="settings-reset-button" type="button" onClick={() => resetSection(activeSectionId, persistEditorPreferences, persistAiPreferences, aiPreferences)}>
                     <RotateCcw size={14} /> {t("settings.reset", { group: t(activeSection.titleKey) })}
                   </button>
@@ -386,6 +404,8 @@ export function SettingsDialog() {
                 {activeSectionId === "ai-skills" && <SkillsSection workspace={workspace} t={t} />}
                 {activeSectionId === "ai-memory" && <MemorySection workspace={workspace} t={t} />}
                 {activeSectionId === "ai-research" && <WebResearchSection t={t} />}
+                {activeSectionId === "ai-ssh" && <SshSection t={t} />}
+                {activeSectionId === "ai-mcp" && <McpSection t={t} />}
                 {activeSectionId === "ai-usage" && <AiUsageSection workspace={workspace} t={t} />}
               </div>
             </main>
@@ -581,6 +601,7 @@ function EditorBehaviorSection({ onChange, preferences, t }: { onChange: (patch:
         ]} onChange={(wordWrap) => onChange({ wordWrap })} />
         <ToggleSetting label={t("settings.behavior.mouseWheelZoom.label")} detail={t("settings.behavior.mouseWheelZoom.detail")} checked={preferences.mouseWheelZoom} onChange={(mouseWheelZoom) => onChange({ mouseWheelZoom })} />
         <ToggleSetting label={t("settings.behavior.smoothScrolling.label")} detail={t("settings.behavior.smoothScrolling.detail")} checked={preferences.smoothScrolling} onChange={(smoothScrolling) => onChange({ smoothScrolling })} />
+        <ToggleSetting label={t("settings.behavior.autoOpenEditedFiles.label")} detail={t("settings.behavior.autoOpenEditedFiles.detail")} checked={preferences.autoOpenEditedFiles} onChange={(autoOpenEditedFiles) => onChange({ autoOpenEditedFiles })} />
       </SettingsGrid>
     </SettingsPanel>
   );
@@ -1468,15 +1489,23 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
     setRunningModelId(targetModelId);
     setProviderDiagnostic(null);
     try {
+      // Reasoning models reject an explicit `temperature` and the legacy
+      // `max_tokens` name (OpenAI o-series / gpt-5 return HTTP 400), and burn
+      // tokens thinking before they emit text — give them headroom via
+      // `max_completion_tokens` and no temperature; standard models keep the
+      // tight, cheap probe.
+      const isReasoningModel = editingModel.effortLevels.length > 0;
       const result = await luxCommands.aiProviderDiagnostic({
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey || null,
+        protocol: provider.protocol,
         payload: {
           model: editingModel.alias || editingModel.id,
           messages: [{ role: "user", content: "Reply with OK." }],
-          max_tokens: 8,
           stream: false,
-          temperature: 0,
+          ...(isReasoningModel
+            ? { max_completion_tokens: 256 }
+            : { max_tokens: 8, temperature: 0 }),
         },
       });
       // Discard the result if the user switched models (or left) mid-request,

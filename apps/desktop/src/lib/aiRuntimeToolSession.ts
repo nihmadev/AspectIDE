@@ -6,8 +6,8 @@ import { replaceAiSessionTodos } from "./aiSessionTodos";
 import { spawnSubagent, resolveSubagentType } from "./aiSubagents";
 import { countRunningSubagents } from "./aiSubagentRuns";
 import { resolveMaxParallelSubagents } from "./aiSubagentPolicy";
-import { booleanArg, clamp, isRecord, numberArg, stringArg, toolJson, topCounts, truncateText, type ToolResult, type UnknownRecord } from "./aiRuntimeShared";
-import { luxCommands } from "./tauri";
+import { booleanArg, clamp, isRecord, numberArg, stringArg, stringArrayArg, toolJson, topCounts, truncateText, type ToolResult, type UnknownRecord } from "./aiRuntimeShared";
+import { luxCommands, type McpServerConfig } from "./tauri";
 
 export type SessionTodoStatus = "pending" | "in_progress" | "completed" | "blocked" | "cancelled";
 
@@ -145,6 +145,18 @@ function normalizeLabeledEntry(value: unknown, labelKey: string): { label: strin
   };
 }
 
+/** Normalize a PresentPlan `alternatives` entry: a bare string or { option, tradeoff }. */
+function normalizePlanDecision(value: unknown): { option: string; tradeoff: string } | null {
+  if (typeof value === "string") {
+    const option = value.trim();
+    return option ? { option, tradeoff: "" } : null;
+  }
+  if (!isRecord(value)) return null;
+  const option = stringArg(value, "option", "").trim();
+  if (!option) return null;
+  return { option, tradeoff: stringArg(value, "tradeoff", "").trim() };
+}
+
 /**
  * AskUser (browser/dev TS turn-loop). Registers the question card and suspends on
  * a resolver until the user answers or dismisses. In Automatic mode it never
@@ -213,6 +225,14 @@ export async function presentPlanTool(args: UnknownRecord, input: AiChatSendInpu
   if (steps.length === 0) {
     throw new Error("PresentPlan requires at least one step (array of strings or { title, detail, file }).");
   }
+  // Structured reasoning phases (think-mcp parity): key decision(s), failure
+  // modes, and verification checks. Each is optional and accepts strings or objects.
+  const alternatives = (Array.isArray(args.alternatives) ? args.alternatives : [])
+    .map((entry) => normalizePlanDecision(entry))
+    .filter((entry): entry is { option: string; tradeoff: string } => Boolean(entry))
+    .slice(0, 8);
+  const risks = stringArrayArg(args, "risks").map((r) => r.trim()).filter(Boolean).slice(0, 12);
+  const verification = stringArrayArg(args, "verification").map((v) => v.trim()).filter(Boolean).slice(0, 12);
 
   setAiSessionGoal(input.chatSessionId, summary || title);
   replaceAiSessionTodos(input.chatSessionId, steps.map((step, index) => ({
@@ -224,6 +244,7 @@ export async function presentPlanTool(args: UnknownRecord, input: AiChatSendInpu
     notes: step.detail || undefined,
   })));
 
+  const { quality, coaching } = assessPlanQuality(title, summary, steps, alternatives, risks, verification);
   const autoStart = input.preferences.agentMode === "automatic";
   const { registerPendingPlan } = await import("./aiPendingPlan");
   registerPendingPlan({
@@ -233,9 +254,13 @@ export async function presentPlanTool(args: UnknownRecord, input: AiChatSendInpu
     title,
     summary,
     steps,
+    alternatives,
+    risks,
+    verification,
+    quality,
+    coaching,
     autoStart,
   });
-  const { quality, coaching } = assessPlanQuality(title, summary, steps);
   const baseGuidance = autoStart
     ? "Plan presented and auto-started (Automatic mode). Begin executing step 1 now; do not wait for confirmation."
     : "Plan presented to the user. Stop here and wait — the user will press Start to hand the plan to Agent mode. Do not begin editing yet.";
@@ -243,6 +268,71 @@ export async function presentPlanTool(args: UnknownRecord, input: AiChatSendInpu
     ? baseGuidance
     : `Plan quality ${quality.toFixed(2)}/1.0 — strengthen before/while executing: ${coaching.join(" ")}\n${baseGuidance}`;
   return toolJson("PresentPlan", { stepCount: steps.length, autoStart, quality, coaching, guidance });
+}
+
+/**
+ * McpManage (browser/dev TS turn-loop). Mirrors the Rust dispatch: manages MCP
+ * server configs, connects/disconnects, toggles enable, and reports live status.
+ */
+export async function mcpManageTool(args: UnknownRecord, _input: AiChatSendInput): Promise<ToolResult> {
+  const action = stringArg(args, "action", "").trim().toLowerCase() || "list";
+  const id = stringArg(args, "id", "").trim();
+  const { isTauriRuntime, luxCommands, MCP_SERVERS_KEY } = await import("./tauri");
+
+  if (!isTauriRuntime()) {
+    return toolJson("McpManage", { error: "MCP management requires the desktop runtime." });
+  }
+
+  const readConfigs = async (): Promise<McpServerConfig[]> => {
+    const value = await luxCommands.settingsGet("user", MCP_SERVERS_KEY).catch(() => null);
+    return Array.isArray(value?.value) ? (value.value as McpServerConfig[]) : [];
+  };
+
+  switch (action) {
+    case "list": {
+      const [configured, live] = await Promise.all([readConfigs(), luxCommands.mcpStatus()]);
+      return toolJson("McpManage", { configured, live });
+    }
+    case "add": {
+      if (!id) throw new Error("McpManage add requires 'id'.");
+      const command = stringArg(args, "command", "").trim();
+      if (!command) throw new Error("McpManage add requires 'command'.");
+      const serverArgs = stringArrayArg(args, "args").map((a) => a.trim()).filter(Boolean).slice(0, 64);
+      const env = isRecord(args.env)
+        ? (Object.fromEntries(Object.entries(args.env).filter(([, v]) => typeof v === "string")) as Record<string, string>)
+        : {};
+      const enabled = typeof args.enabled === "boolean" ? args.enabled : true;
+      const name = stringArg(args, "name", "").trim() || id;
+      const status = await luxCommands.mcpAdd({ id, name, command, args: serverArgs, env, enabled });
+      return toolJson("McpManage", status);
+    }
+    case "connect":
+    case "restart": {
+      if (!id) throw new Error(`McpManage ${action} requires 'id'.`);
+      const config = (await readConfigs()).find((c) => c.id === id);
+      if (!config) throw new Error(`MCP server '${id}' not found in settings.`);
+      const status = await luxCommands.mcpConnect(config);
+      return toolJson("McpManage", status);
+    }
+    case "disconnect": {
+      if (!id) throw new Error("McpManage disconnect requires 'id'.");
+      await luxCommands.mcpDisconnect(id);
+      return toolJson("McpManage", { id, state: "disconnected" });
+    }
+    case "enable":
+    case "disable": {
+      if (!id) throw new Error(`McpManage ${action} requires 'id'.`);
+      await luxCommands.mcpEnable(id, action === "enable");
+      return toolJson("McpManage", { id, enabled: action === "enable" });
+    }
+    case "remove": {
+      if (!id) throw new Error("McpManage remove requires 'id'.");
+      await luxCommands.mcpRemove(id);
+      return toolJson("McpManage", { id, removed: true });
+    }
+    default:
+      throw new Error(`Unknown McpManage action '${action}'. Use list|add|connect|restart|disconnect|enable|disable|remove.`);
+  }
 }
 
 const PLAN_RISK_MARKERS = [
@@ -259,26 +349,41 @@ const PLAN_VAGUE_LABELS = [
 
 /**
  * Deterministic, advisory plan-quality gate — mirror of the Rust `assess_plan_quality`
- * (itself a port of think-mcp's cycle gate). Scores decomposition depth, concreteness,
- * an explicit verification step, and rollback awareness for risky work; returns a
- * `[0,1]` score plus concrete coaching nudges. Never blocks execution.
+ * (itself a port of think-mcp's cycle gate). Scores the five reasoning phases
+ * (decompose · alternative · critique · synthesis · verification) into a `[0,1]`
+ * score plus concrete coaching nudges. Alternatives + critique are only expected on
+ * non-trivial/risky work. Never blocks execution.
  */
 function assessPlanQuality(
   title: string,
   summary: string,
   steps: { title: string; detail: string; file: string }[],
+  alternatives: { option: string; tradeoff: string }[],
+  risks: string[],
+  verification: string[],
 ): { quality: number; coaching: string[] } {
   const coaching: string[] = [];
-  const haystack = [title, summary, ...steps.flatMap((s) => [s.title, s.detail])].join("\n").toLowerCase();
+  const haystack = [
+    title,
+    summary,
+    ...steps.flatMap((s) => [s.title, s.detail]),
+    ...alternatives.flatMap((a) => [a.option, a.tradeoff]),
+    ...risks,
+    ...verification,
+  ].join("\n").toLowerCase();
   const riskHits = PLAN_RISK_MARKERS.filter((m) => haystack.includes(m)).length;
   const requiredSteps = Math.min(3 + riskHits, 8);
+  const expectsAlternatives = riskHits >= 1 || steps.length >= 5;
+  const expectsCritique = riskHits >= 1 || steps.length >= 4;
   let score = 1.0;
 
+  // 1. Decompose.
   if (steps.length < requiredSteps) {
-    score -= 0.25;
+    score -= 0.2;
     coaching.push(`Decompose further — ${steps.length} step(s) for ${riskHits > 0 ? "higher" : "this"}-risk work; aim for ~${requiredSteps}, each a concrete action on a named file/module.`);
   }
 
+  // 2. Concreteness.
   const vague = steps.filter((s) => {
     const t = s.title.toLowerCase();
     return PLAN_VAGUE_LABELS.some((v) => t === v || t.startsWith(v));
@@ -289,19 +394,38 @@ function assessPlanQuality(
     coaching.push(`Replace ${vague} vague step label(s) (e.g. 'implement logic', 'add documentation') with a specific action + its acceptance check.`);
   }
   if (steps.length >= 3 && withAnchor * 2 < steps.length) {
-    score -= 0.15;
+    score -= 0.1;
     coaching.push("Most steps lack a file or concrete detail — name the file/module each step touches and what proves it done.");
   }
 
-  const hasVerification = steps.some((s) => {
-    const t = `${s.title} ${s.detail}`.toLowerCase();
-    return ["test", "verif", "build", "typecheck", "lint", "run ", "check", "assert", "validate"].some((kw) => t.includes(kw));
-  });
-  if (!hasVerification) {
-    score -= 0.25;
-    coaching.push("Add a final verification step: the tests/build/checks that prove it works (plus a rollback trigger for risky changes).");
+  // 3. Alternative + synthesis — the key decision and why it wins.
+  const hasDecision = alternatives.some((a) => a.option.trim() !== "")
+    || ["instead of", "rather than", "trade-off", "tradeoff", "alternative", " vs ", "chose ", "chosen ", "decided ", "вместо", "альтернатив", "компромисс"].some((kw) => haystack.includes(kw));
+  if (expectsAlternatives && !hasDecision) {
+    score -= 0.2;
+    coaching.push("Name the key decision: the approach you chose and why it wins over the alternative(s) (the tradeoff). A plan that weighs options beats one that charges ahead with its first idea.");
   }
 
+  // 4. Critique — failure modes / hidden assumptions of the riskiest step.
+  const hasCritique = risks.some((r) => r.trim() !== "")
+    || ["risk", "fail", "assumption", "assume", "edge case", "race", "breaks if", "could break", "fallback", "риск", "провал", "допущен", "сломает"].some((kw) => haystack.includes(kw));
+  if (expectsCritique && !hasCritique) {
+    score -= 0.2;
+    coaching.push("Critique the riskiest step: list its failure modes and hidden assumptions — what breaks, under what input/timing, and how you'd catch it.");
+  }
+
+  // 5. Verification.
+  const hasVerification = verification.some((v) => v.trim() !== "")
+    || steps.some((s) => {
+      const t = `${s.title} ${s.detail}`.toLowerCase();
+      return ["test", "verif", "build", "typecheck", "lint", "run ", "check", "assert", "validate"].some((kw) => t.includes(kw));
+    });
+  if (!hasVerification) {
+    score -= 0.25;
+    coaching.push("Add explicit verification: the tests/build/checks that prove it works (plus a rollback trigger for risky changes).");
+  }
+
+  // Rollback awareness for genuinely risky work.
   if (riskHits >= 2) {
     const hasRollback = ["rollback", "revert", "checkpoint", "backup"].some((kw) => haystack.includes(kw));
     if (!hasRollback) {

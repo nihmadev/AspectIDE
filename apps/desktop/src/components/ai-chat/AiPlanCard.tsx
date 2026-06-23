@@ -1,4 +1,15 @@
-import { ChevronRight, FileCode, ListChecks, Loader2, Play, Sparkles } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronRight,
+  FileCode,
+  GitBranch,
+  Gauge,
+  ListChecks,
+  Loader2,
+  Play,
+  Sparkles,
+} from "lucide-react";
 import { useState } from "react";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 import type { PendingPlan } from "../../lib/aiPendingPlan";
@@ -15,12 +26,18 @@ type AiPlanCardProps = {
   t: TranslateFn;
 };
 
+/** Below this 5-phase quality score, the card surfaces the gate's coaching so the
+ * user can ask for a stronger plan before Start (soft gate — Start stays enabled). */
+const QUALITY_WARN_THRESHOLD = 0.75;
+
 /**
- * `PresentPlan` card. Renders a titled, expandable list of structured steps with
- * optional detail + file link per step. In Plan/Agent mode it shows a primary
- * "Start" button that hands the plan to Agent execution; in Automatic mode the
- * plan auto-starts, so instead of a button it shows a running indicator (the card
- * is purely informational there).
+ * `PresentPlan` card. Renders a titled, expandable list of structured steps plus
+ * the think-mcp reasoning phases when present — the key decision (alternatives),
+ * risks/failure modes, and verification. In Plan/Agent mode it shows a primary
+ * "Start" button that hands the plan to Agent execution; in Automatic mode the plan
+ * auto-starts, so it shows a running indicator instead. When the deterministic
+ * quality gate scored the plan low (and it is not auto-running), the card surfaces
+ * the coaching so the user can push for a sharper plan — a soft gate, never a block.
  */
 export function AiPlanCard({ plan, onStart, busy, agentMode, t }: AiPlanCardProps) {
   const [expanded, setExpanded] = useState<Set<number>>(() => new Set([0]));
@@ -28,6 +45,13 @@ export function AiPlanCard({ plan, onStart, busy, agentMode, t }: AiPlanCardProp
   // Trust the live mode too, not only the (snapshotted) plan.autoStart, so a plan
   // proposed while the backend saw a non-automatic mode still renders as auto here.
   const autoStart = plan.autoStart || agentMode === "automatic";
+
+  const alternatives = plan.alternatives ?? [];
+  const risks = plan.risks ?? [];
+  const verification = plan.verification ?? [];
+  const coaching = plan.coaching ?? [];
+  const quality = typeof plan.quality === "number" ? plan.quality : 1;
+  const showCoaching = !autoStart && coaching.length > 0 && quality < QUALITY_WARN_THRESHOLD;
 
   const toggleStep = (index: number) => {
     setExpanded((prev) => {
@@ -95,6 +119,66 @@ export function AiPlanCard({ plan, onStart, busy, agentMode, t }: AiPlanCardProp
           );
         })}
       </ol>
+
+      {alternatives.length > 0 && (
+        <section className="ai-plan-section ai-plan-section-decision">
+          <h4>
+            <GitBranch size={12} aria-hidden="true" />
+            {t("aiChat.plan.decision")}
+          </h4>
+          <ul>
+            {alternatives.map((decision, index) => (
+              <li key={`alt-${index}`}>
+                <strong>{decision.option}</strong>
+                {decision.tradeoff && <span> — {decision.tradeoff}</span>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {risks.length > 0 && (
+        <section className="ai-plan-section ai-plan-section-risks">
+          <h4>
+            <AlertTriangle size={12} aria-hidden="true" />
+            {t("aiChat.plan.risks")}
+          </h4>
+          <ul>
+            {risks.map((risk, index) => (
+              <li key={`risk-${index}`}>{risk}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {verification.length > 0 && (
+        <section className="ai-plan-section ai-plan-section-verify">
+          <h4>
+            <CheckCircle2 size={12} aria-hidden="true" />
+            {t("aiChat.plan.verification")}
+          </h4>
+          <ul>
+            {verification.map((check, index) => (
+              <li key={`verify-${index}`}>{check}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {showCoaching && (
+        <section className="ai-plan-coaching" role="note">
+          <span className="ai-plan-quality-badge" title={t("aiChat.plan.qualityLabel", { percent: Math.round(quality * 100) })}>
+            <Gauge size={12} aria-hidden="true" />
+            {t("aiChat.plan.qualityLabel", { percent: Math.round(quality * 100) })}
+          </span>
+          <p className="ai-plan-coaching-hint">{t("aiChat.plan.coachingHint")}</p>
+          <ul>
+            {coaching.map((tip, index) => (
+              <li key={`coach-${index}`}>{tip}</li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       <footer className="ai-plan-card-foot">
         {autoStart ? (

@@ -257,7 +257,6 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             req("url", "string", "URL."),
             opt("maxBytes", "number", ""),
             opt("timeoutSecs", "number", ""),
-            opt("allowPrivateHosts", "boolean", ""),
         ],
     ));
     tools.push(tool(
@@ -268,6 +267,11 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             opt("focus", "string", "web | academic | news | social | video | code (default web)."),
             opt("maxSources", "number", "How many ranked sources to return, default 6 (max 8)."),
         ],
+    ));
+    tools.push(tool(
+        "SshList",
+        "List active SSH sessions and the hosts defined in ~/.ssh/config, plus whether the OpenSSH client is available. Read-only; call this to discover connectable hosts before SshConnect.",
+        &[],
     ));
     tools.push(tool("TestHealth", "Run workspace tests.", &[]));
     tools.push(tool(
@@ -307,11 +311,14 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     if plan_capable {
         tools.push(tool(
             "PresentPlan",
-            "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution (do not edit before that). In Automatic mode execution auto-starts. Scale the plan to the task's complexity and risk — it is NOT a flat list of phases: decompose into concrete file-level steps (each step = a specific action on a named file/module with its acceptance check, never vague labels like 'implement business logic' or 'add documentation'); name the key decision and chosen alternative where one genuinely exists; flag the riskiest step and its failure mode; and end with an explicit verification step (the tests/build/checks that prove it works, plus a rollback trigger for risky changes). Riskier work (auth, payments, migrations, concurrency, data-loss, public APIs) earns more steps and explicit verification; trivial work stays terse. Prefer this over a plain prose checklist for multi-step work.",
+            "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution (do not edit before that). In Automatic mode execution auto-starts. Scale the plan to the task's complexity and risk — it is NOT a flat list of phases. A strong plan covers five reasoning phases (a deterministic quality gate scores them and coaches whatever is missing): (1) DECOMPOSE into concrete file-level `steps` (each = a specific action on a named file/module with its acceptance check, never vague labels like 'implement business logic'); (2) ALTERNATIVES — in `alternatives`, name the key decision(s): the approach you chose and why it wins over the option you rejected (the tradeoff); (3) CRITIQUE — in `risks`, the failure modes and hidden assumptions of the riskiest step (what breaks, under what input/timing); (4) SYNTHESIS — the chosen path's rationale in `summary`; (5) VERIFY — in `verification`, the tests/build/checks that prove it works, plus a rollback/recovery trigger for risky changes. Riskier work (auth, payments, migrations, concurrency, data-loss, public APIs) earns more steps, an explicit decision, named risks, and verification; trivial work stays terse (steps alone are fine). Prefer this over a plain prose checklist for multi-step work.",
             &[
                 req_arr("steps", "Ordered steps: strings or { title, detail, file } objects."),
                 opt("title", "string", "Short plan title."),
-                opt("summary", "string", "One-paragraph summary of the goal/approach."),
+                opt("summary", "string", "One-paragraph summary of the goal/approach + why this path (synthesis)."),
+                opt_arr("alternatives", "Key decisions: strings or { option, tradeoff } objects — the approach chosen and why it beats the rejected one."),
+                opt_arr("risks", "Failure modes / hidden assumptions of the riskiest steps (strings)."),
+                opt_arr("verification", "Checks that prove it works + rollback trigger (strings)."),
             ],
         ));
     }
@@ -391,6 +398,46 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             ],
         ));
         tools.push(tool(
+            "SshConnect",
+            "Open a non-interactive SSH session to a remote host and verify it. Use the host alias from ~/.ssh/config (see SshList), a hostname/IP, or user@host. Auth uses ssh-agent / default keys / an explicit identityFile — never an interactive password (Lux runs in BatchMode). Returns a sessionId for SshExec/SshTransfer plus the remote OS and home directory. This is the ONLY correct way to start SSH work; do not run `ssh` through Shell/TerminalWrite.",
+            &[
+                req("host", "string", "ssh_config alias, hostname/IP, or user@host."),
+                opt("user", "string", "Login user (overrides host/config)."),
+                opt("port", "number", "Port (default 22 or per ssh_config)."),
+                opt("identityFile", "string", "Path to a private key to use exclusively."),
+                opt("label", "string", "Friendly label for the session."),
+            ],
+        ));
+        tools.push(tool(
+            "SshExec",
+            "Run a command on an SSH session (from SshConnect) and return structured { exitCode, stdout, stderr, durationMs }. Runs in the session's sticky working directory; pass cwd to change it for this and following commands. Non-interactive and catastrophic-command guarded. Prefer this over Shell `ssh ...` for every remote command.",
+            &[
+                req("session", "string", "sessionId from SshConnect."),
+                req("command", "string", "Remote command to run."),
+                opt("cwd", "string", "Remote working directory (sticky for the session)."),
+                opt("timeoutSecs", "number", "Timeout in seconds, default 120, max 600."),
+            ],
+        ));
+        tools.push(tool(
+            "SshTransfer",
+            "Copy a file or directory between the workspace and a remote host over scp, for an SSH session. The local path is confined to the workspace.",
+            &[
+                req("session", "string", "sessionId from SshConnect."),
+                req("direction", "string", "\"upload\" (local→remote) or \"download\" (remote→local)."),
+                req("localPath", "string", "Workspace-relative or absolute path inside the workspace."),
+                req("remotePath", "string", "Absolute or login-relative path on the remote host."),
+                opt("recursive", "boolean", "Copy directories recursively."),
+            ],
+        ));
+        tools.push(tool(
+            "SshDisconnect",
+            "Close an SSH session (by sessionId) or every session (all=true).",
+            &[
+                opt("session", "string", "sessionId to close."),
+                opt("all", "boolean", "Close all sessions."),
+            ],
+        ));
+        tools.push(tool(
             "Goal",
             "Pin session goal and progress.",
             &[
@@ -414,6 +461,21 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 opt("subagent_type", "string", ""),
                 opt("model", "string", ""),
                 opt("resume", "string", ""),
+            ],
+        ));
+
+        // ── MCP self-management (agent/automatic): install, inspect, restart servers ──
+        tools.push(tool(
+            "McpManage",
+            "Manage Model Context Protocol (MCP) servers so you can extend your own toolset live. Actions: 'list' (configured servers + live state + their tools), 'add' (register a server by command/args/env and connect it — its tools then become callable as mcp__<id>__<tool> on the NEXT round), 'connect'/'restart' (reconnect by id), 'disconnect' (stop a live session, keep config), 'enable'/'disable' (toggle + persist), 'remove' (delete config). MCP servers run real local processes (a command you specify, e.g. `npx -y @some/mcp-server`); treat them as trusted-but-side-effecting. After add/connect, call 'list' or check status to confirm 'connected' before relying on the new tools.",
+            &[
+                req("action", "string", "list | add | connect | restart | disconnect | enable | disable | remove"),
+                opt("id", "string", "Server id (lowercase letters/digits/-/_, no '__'). Required for all actions except 'list'."),
+                opt("name", "string", "Human-readable name (add)."),
+                opt("command", "string", "Executable to spawn for the stdio transport, e.g. 'npx' (add)."),
+                opt_arr("args", "Command arguments, e.g. ['-y','@modelcontextprotocol/server-filesystem','.'] (add)."),
+                opt("env", "object", "Environment variables for the server process as a JSON object (add)."),
+                opt("enabled", "boolean", "Enable flag for enable/disable, or initial state for add (default true)."),
             ],
         ));
     }

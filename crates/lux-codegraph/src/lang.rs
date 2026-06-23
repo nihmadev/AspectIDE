@@ -10,7 +10,8 @@
 //! downstream (parsing, the graph, queries) is language-agnostic and needs no
 //! further change.
 
-use tree_sitter::Language;
+use std::sync::OnceLock;
+use tree_sitter::{Language, Query};
 
 /// A source language the code graph can parse.
 ///
@@ -27,6 +28,10 @@ pub enum Lang {
 }
 
 impl Lang {
+    /// Every language variant, for callers that must iterate the whole registry
+    /// (e.g. fingerprinting all `tags` queries for the parse cache).
+    pub const ALL: [Self; 4] = [Self::Rust, Self::TypeScript, Self::Tsx, Self::Python];
+
     /// Recognize a language from a lowercase-or-mixed file extension (no dot),
     /// e.g. `"rs"`, `"tsx"`, `"PY"`. Returns `None` for unsupported extensions.
     #[must_use]
@@ -91,6 +96,33 @@ impl Lang {
             Self::Tsx => "TSX",
             Self::Python => "Python",
         }
+    }
+
+    /// The compiled tags query for this language, cached behind a `OnceLock`.
+    /// A `tree_sitter::Query` is bound to the exact grammar it was compiled
+    /// against, so even though TS and TSX share one `.scm` source, each must be
+    /// compiled against its own grammar — hence one cache slot per variant (4),
+    /// compiled at most once each regardless of how many files are parsed across
+    /// cold opens and incremental edits. The `.scm` sources are `include_str!`ed
+    /// and test-asserted to compile, so a failure here is a logic bug worth
+    /// panicking on.
+    #[must_use]
+    pub fn compiled_tags_query(self) -> &'static Query {
+        static RUST_TAGS: OnceLock<Query> = OnceLock::new();
+        static TYPESCRIPT_TAGS: OnceLock<Query> = OnceLock::new();
+        static TSX_TAGS: OnceLock<Query> = OnceLock::new();
+        static PYTHON_TAGS: OnceLock<Query> = OnceLock::new();
+        let slot = match self {
+            Self::Rust => &RUST_TAGS,
+            Self::TypeScript => &TYPESCRIPT_TAGS,
+            Self::Tsx => &TSX_TAGS,
+            Self::Python => &PYTHON_TAGS,
+        };
+        slot.get_or_init(|| {
+            Query::new(&self.language(), self.tags_query()).unwrap_or_else(|error| {
+                panic!("{} tags query failed to compile: {error}", self.name())
+            })
+        })
     }
 }
 

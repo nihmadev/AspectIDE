@@ -20,13 +20,7 @@ export function AiAgentNowBar({ sessionId, sessionStatus, t }: AiAgentNowBarProp
   const busy = sessionStatus !== "idle" && sessionStatus !== "error";
   const phase = runningSubagent ? "subagent" : activity.phase !== "idle" ? activity.phase : busy ? mapSessionStatus(sessionStatus) : "idle";
 
-  if (phase === "idle") {
-    return (
-      <div className="ai-agent-now-bar" data-phase="idle">
-        <span>{t("aiChat.orchestration.nowIdle")}</span>
-      </div>
-    );
-  }
+  if (phase === "idle") return null;
 
   const label = runningSubagent
     ? `${runningSubagent.subagentType}: ${runningSubagent.description}`

@@ -10,10 +10,11 @@
 use std::path::{Component, Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
+use crate::cache::{self, FileMeta, PriorCache};
 use crate::graph::{CodeGraph, Confidence, Edge, EdgeKind, Node, NodeId};
 use crate::lang::Lang;
 use crate::parse::{parse_source, ParsedFile, RefKind};
@@ -47,9 +48,13 @@ pub enum IndexError {
 }
 
 /// One parsed source file. The language is re-derived from the path when needed
-/// (incremental update), so it isn't stored here.
+/// (incremental update), so it isn't stored here. `meta` is the `(size, mtime)`
+/// fingerprint captured when the file was last parsed — it travels into the
+/// on-disk cache so a later open can decide, by a cheap `stat`, whether this
+/// parse is still current and can be reused without reparsing.
 #[derive(Debug, Clone)]
 struct FileEntry {
+    meta: FileMeta,
     parsed: ParsedFile,
 }
 
@@ -126,30 +131,87 @@ pub struct Index {
     graph: CodeGraph,
     /// Build-walk admission policy, reused by the incremental path for parity.
     ignore: IgnorePolicy,
+    /// Whether the in-memory file set differs from what's on disk in the cache.
+    /// A 100%-cache-hit warm build leaves this `false` so the caller can skip
+    /// rewriting an identical (potentially large) cache; any parse, deletion, or
+    /// incremental edit sets it `true`. Cleared by [`Index::mark_cache_clean`]
+    /// after a successful save. Not persisted — purely a runtime write-skip hint.
+    cache_dirty: bool,
 }
 
 impl Index {
     /// Index every supported file under `root`, parsing in parallel on a pool
     /// bounded by [`lux_core::concurrency::scan_threads`] so the UI keeps a core.
     pub fn build(root: impl AsRef<Path>) -> Result<Self, IndexError> {
+        Self::build_inner(root.as_ref(), None)
+    }
+
+    /// Like [`Index::build`], but seeded from the persistent parse cache at
+    /// `cache_path`. Every file whose on-disk `(size, mtime)` still matches the
+    /// cache is reused **without reparsing**; only new or changed files hit
+    /// tree-sitter. On a large, mostly-unchanged workspace this turns a multi-second
+    /// cold build into a fast `stat`-and-diff warm build — the whole point of the
+    /// cache. A missing, stale, or corrupt cache falls back to a full build (the
+    /// load is best-effort and never fails the build).
+    ///
+    /// Persist the result afterwards with [`Index::save_cache`] so the next open is
+    /// fast too.
+    pub fn build_cached(
+        root: impl AsRef<Path>,
+        cache_path: impl AsRef<Path>,
+    ) -> Result<Self, IndexError> {
         let root = root.as_ref();
+        let prior = cache::load(cache_path.as_ref(), root);
+        Self::build_inner(root, prior)
+    }
+
+    /// Shared build path. `prior` is the loaded parse cache, if any; files it
+    /// covers (by matching fingerprint) are reused, the rest are parsed fresh.
+    fn build_inner(root: &Path, prior: Option<PriorCache>) -> Result<Self, IndexError> {
         if !root.is_dir() {
             return Err(IndexError::NotADirectory(root.to_path_buf()));
         }
         let paths = collect_source_files(root);
-        let parsed = parse_files_parallel(&paths)?;
-
-        let mut files = FxHashMap::default();
-        for (path, _lang, file) in parsed {
-            files.insert(path, FileEntry { parsed: file });
-        }
+        let (files, cache_dirty) = assemble_files(&paths, prior)?;
         let graph = build_graph(&files);
         Ok(Self {
             ignore: IgnorePolicy::build(root),
             root: root.to_path_buf(),
             files,
             graph,
+            cache_dirty,
         })
+    }
+
+    /// Whether the on-disk cache would differ from the current in-memory state —
+    /// i.e. whether [`Index::save_cache`] would actually change anything. `false`
+    /// after a fully-cached warm build with no edits, so callers can skip a
+    /// redundant whole-cache rewrite (the write-amplification that hurts on giant
+    /// workspaces).
+    #[must_use]
+    pub const fn is_cache_dirty(&self) -> bool {
+        self.cache_dirty
+    }
+
+    /// Mark the cache clean after the caller has successfully persisted it, so a
+    /// later transition (workspace close/switch, app quit) won't re-save an
+    /// identical cache until something actually changes again.
+    pub const fn mark_cache_clean(&mut self) {
+        self.cache_dirty = false;
+    }
+
+    /// Write the current per-file parses to the persistent cache at `cache_path`
+    /// (atomically). Pair with [`Index::build_cached`] on the next open. Best-effort
+    /// at the call site: a write failure leaves the previous cache intact and only
+    /// means the next open reparses more.
+    pub fn save_cache(&self, cache_path: impl AsRef<Path>) -> std::io::Result<()> {
+        cache::save(
+            cache_path.as_ref(),
+            &self.root,
+            self.files
+                .iter()
+                .map(|(path, entry)| (path.as_path(), entry.meta, &entry.parsed)),
+        )
     }
 
     /// The resolved, finalized code graph.
@@ -177,6 +239,7 @@ impl Index {
     pub fn update_file(&mut self, path: impl AsRef<Path>) -> bool {
         let changed = self.stage_file(path.as_ref());
         if changed {
+            self.cache_dirty = true;
             self.graph = build_graph(&self.files);
         }
         changed
@@ -192,6 +255,7 @@ impl Index {
             changed |= self.stage_file(path.as_ref());
         }
         if changed {
+            self.cache_dirty = true;
             self.graph = build_graph(&self.files);
         }
         changed
@@ -201,6 +265,7 @@ impl Index {
     /// file was present and removed.
     pub fn remove_file(&mut self, path: impl AsRef<Path>) -> bool {
         if self.files.remove(path.as_ref()).is_some() {
+            self.cache_dirty = true;
             self.graph = build_graph(&self.files);
             true
         } else {
@@ -219,17 +284,44 @@ impl Index {
         if self.ignore.is_ignored(&self.root, path) {
             return self.files.remove(path).is_some();
         }
-        let parsed = Lang::from_path(path).and_then(|lang| {
-            let metadata = std::fs::metadata(path).ok()?;
-            if metadata.len() > MAX_FILE_BYTES {
+        // The build walk (`collect_source_files`) does not follow symlinks — a
+        // symlinked entry's file type is `is_symlink()`, not `is_file()`, so it is
+        // never admitted. Mirror that here so a watcher event for an in-root symlink
+        // can't diverge the incremental graph from a fresh build.
+        if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return self.files.remove(path).is_some();
+        }
+        let entry = Lang::from_path(path).and_then(|lang| {
+            // Gate on the size first (cheap stat), then parse the bytes.
+            if FileMeta::of(path)?.size > MAX_FILE_BYTES {
                 return None;
             }
             let source = std::fs::read_to_string(path).ok()?;
-            parse_source(lang, &source).ok()
+            let parsed = parse_source(lang, &source).ok()?;
+            // Re-stat *after* the read so the stored fingerprint matches the bytes we
+            // actually parsed — not a pre-read stat that a concurrent write could
+            // have invalidated. Keeps the cache honest about what it holds.
+            let meta = FileMeta::of(path)?;
+            Some(FileEntry { meta, parsed })
         });
-        match parsed {
-            Some(parsed) => {
-                self.files.insert(path.to_path_buf(), FileEntry { parsed });
+        match entry {
+            Some(entry) => {
+                // Skip the graph rebuild when the parse is byte-for-byte identical
+                // to what we already hold. Autosave, format-on-save, and "touch"
+                // writes bump the file mtime without changing the symbols/refs the
+                // graph is built from; comparing `.parsed` (NOT `.meta`, whose mtime
+                // always differs) lets those no-op saves return `false` so the
+                // caller's `build_graph` over ALL files is avoided. The fresh
+                // fingerprint is still stored so the on-disk cache stays warm.
+                if let Some(existing) = self.files.get_mut(path) {
+                    if existing.parsed == entry.parsed {
+                        existing.meta = entry.meta;
+                        return false;
+                    }
+                    *existing = entry;
+                    return true;
+                }
+                self.files.insert(path.to_path_buf(), entry);
                 true
             }
             None => self.files.remove(path).is_some(),
@@ -239,42 +331,131 @@ impl Index {
 
 /// Walk `root` with standard ignore rules (.gitignore, hidden files, etc.),
 /// returning the paths of files in a language the graph understands.
+///
+/// The walk runs in **parallel** — bounded by [`lux_core::scan_threads`] so the UI
+/// keeps a core — because on a giant tree (the "thousand nested projects" case)
+/// directory traversal and the per-entry `stat` it implies are themselves a real
+/// cost, not just the parsing that follows. Each worker streams its hits down an
+/// MPSC channel to avoid lock contention; the resulting order is irrelevant
+/// because [`build_graph`] sorts paths for deterministic node ids.
 fn collect_source_files(root: &Path) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    let (tx, rx) = std::sync::mpsc::channel::<PathBuf>();
     // `WalkBuilder` honors .gitignore and skips hidden entries by default, which
     // matches the discovery policy elsewhere in the IDE (no node_modules/target).
-    for entry in WalkBuilder::new(root).build().flatten() {
-        let path = entry.path();
-        if entry.file_type().is_some_and(|t| t.is_file()) && Lang::from_path(path).is_some() {
-            paths.push(path.to_path_buf());
-        }
-    }
-    paths
+    WalkBuilder::new(root)
+        .threads(lux_core::scan_threads())
+        .build_parallel()
+        .run(|| {
+            let tx = tx.clone();
+            Box::new(move |entry| {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if entry.file_type().is_some_and(|t| t.is_file())
+                        && Lang::from_path(path).is_some()
+                    {
+                        let _ = tx.send(path.to_path_buf());
+                    }
+                }
+                WalkState::Continue
+            })
+        });
+    drop(tx); // close the channel so the drain below terminates
+    rx.into_iter().collect()
 }
 
-/// Parse every path in parallel on a pool capped at the scan-thread budget. Files
-/// that are too large, unreadable, or unparsable are skipped, never fatal.
-fn parse_files_parallel(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Lang, ParsedFile)>, IndexError> {
-    let threads = lux_core::scan_threads();
+/// Build the file map, reusing cached parses where the on-disk fingerprint still
+/// matches and parsing only the new/changed files. Three bounded-parallel passes:
+///
+/// 1. **stat + decide** (parallel): fingerprint every path and mark whether the
+///    prior cache has a matching entry. Pure reads — no mutation of `prior`.
+/// 2. **partition** (serial): move reused parses out of `prior` (no clone) into the
+///    result; collect the rest as work for pass 3.
+/// 3. **parse the diff** (parallel): read + tree-sitter only the files that changed
+///    or are new. Too-large/unreadable/unparsable files are skipped, never fatal.
+///
+/// All parallelism runs on a pool capped at the scan-thread budget so a huge build
+/// never saturates every core and stalls the UI.
+///
+/// Returns the file map plus a `cache_dirty` flag: `true` when the on-disk cache
+/// would differ from this build (no prior cache, any file parsed, or any prior
+/// entry not reused — a change or deletion), so the caller can skip rewriting an
+/// identical cache after a fully-cached warm build.
+fn assemble_files(
+    paths: &[PathBuf],
+    prior: Option<PriorCache>,
+) -> Result<(FxHashMap<PathBuf, FileEntry>, bool), IndexError> {
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
+        .num_threads(lux_core::scan_threads())
         .build()?;
-    let parsed = pool.install(|| {
+    let had_prior = prior.is_some();
+    let mut prior = prior.unwrap_or_default();
+    let prior_len = prior.len();
+
+    // Pass 1 — fingerprint every path and decide reuse against the prior cache.
+    // Reuse must also respect MAX_FILE_BYTES so this stays in lock-step with the
+    // parse path (Pass 3) and `stage_file`: an over-cap file is never admitted by
+    // any route. (Unreachable today — the cache can't contain an over-cap entry —
+    // but it closes the gap if the cap is ever lowered without a cache-version bump.)
+    let prior_ref = &prior;
+    let decisions: Vec<(PathBuf, FileMeta, bool)> = pool.install(|| {
         paths
             .par_iter()
             .filter_map(|path| {
-                let lang = Lang::from_path(path)?;
-                let metadata = std::fs::metadata(path).ok()?;
-                if metadata.len() > MAX_FILE_BYTES {
-                    return None;
-                }
-                let source = std::fs::read_to_string(path).ok()?;
-                let parsed = parse_source(lang, &source).ok()?;
-                Some((path.clone(), lang, parsed))
+                let meta = FileMeta::of(path)?;
+                let reuse = meta.size <= MAX_FILE_BYTES
+                    && prior_ref
+                        .get(path)
+                        .is_some_and(|(cached, _)| *cached == meta);
+                Some((path.clone(), meta, reuse))
             })
             .collect()
     });
-    Ok(parsed)
+
+    // Pass 2 — partition: reuse hits are moved straight out of the cache; the rest
+    // become parse work.
+    let mut files = FxHashMap::default();
+    files.reserve(decisions.len());
+    let mut to_parse: Vec<(PathBuf, FileMeta)> = Vec::new();
+    for (path, meta, reuse) in decisions {
+        if reuse {
+            if let Some((_, parsed)) = prior.remove(&path) {
+                files.insert(path, FileEntry { meta, parsed });
+                continue;
+            }
+        }
+        to_parse.push((path, meta));
+    }
+    drop(prior); // release the unused tail of the stale cache
+
+    // The set of files reused verbatim from the cache. If fewer than the prior
+    // held, some prior entries were changed or deleted → the on-disk cache is stale.
+    let reused = files.len();
+
+    // Pass 3 — parse only the changed/new files.
+    let parsed: Vec<(PathBuf, FileEntry)> = pool.install(|| {
+        to_parse
+            .par_iter()
+            .filter_map(|(path, meta)| {
+                if meta.size > MAX_FILE_BYTES {
+                    return None;
+                }
+                let lang = Lang::from_path(path)?;
+                let source = std::fs::read_to_string(path).ok()?;
+                let parsed = parse_source(lang, &source).ok()?;
+                // Re-stat after the read so the cached fingerprint matches the bytes
+                // we parsed, not a pre-read stat a concurrent write could invalidate.
+                let meta = FileMeta::of(path).unwrap_or(*meta);
+                Some((path.clone(), FileEntry { meta, parsed }))
+            })
+            .collect()
+    });
+    files.extend(parsed);
+
+    // Dirty when there was no cache to begin with, anything was (re)parsed, or some
+    // prior entry wasn't reused (a change or deletion). Only a 100%-reuse warm build
+    // with no deletions leaves the on-disk cache already-correct.
+    let cache_dirty = !had_prior || !to_parse.is_empty() || reused != prior_len;
+    Ok((files, cache_dirty))
 }
 
 /// Assemble a resolved [`CodeGraph`] from the parsed files: one node per
@@ -661,6 +842,181 @@ mod tests {
         assert_eq!(
             edges, 1,
             "parallel duplicate calls must collapse to one edge"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Persistent cache ──
+
+    const SPAN: crate::parse::Span = crate::parse::Span {
+        start_byte: 0,
+        end_byte: 0,
+        start_row: 0,
+        start_col: 0,
+        end_row: 0,
+        end_col: 0,
+    };
+
+    /// A parse that names `symbol` — used to seed a prior cache with content that
+    /// deliberately disagrees with what's on disk, so a reuse can be observed.
+    fn fabricated(symbol: &str) -> crate::parse::ParsedFile {
+        let mut parsed = crate::parse::ParsedFile::default();
+        parsed.symbols.push(crate::parse::RawSymbol {
+            name: symbol.to_string(),
+            kind: crate::parse::SymbolKind::Function,
+            span: SPAN,
+            name_span: SPAN,
+        });
+        parsed
+    }
+
+    #[test]
+    fn cache_hit_reuses_parse_without_reparsing() {
+        // A prior-cache entry whose fingerprint matches disk is used verbatim —
+        // even when its parse disagrees with the file's real contents. Proves the
+        // reuse path skips tree-sitter entirely on a hit (the win for warm opens).
+        let root = workspace(&[("a.rs", "fn from_disk() {}\n")]);
+        let path = root.join("a.rs");
+        let meta = super::FileMeta::of(&path).expect("stat");
+
+        let mut prior = crate::cache::PriorCache::default();
+        prior.insert(path, (meta, fabricated("from_cache")));
+
+        let index = super::Index::build_inner(&root, Some(prior)).expect("build");
+        assert_eq!(index.graph().nodes_by_name("from_cache").len(), 1);
+        assert_eq!(index.graph().nodes_by_name("from_disk").len(), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn cache_miss_reparses_from_disk() {
+        // A prior entry whose fingerprint does NOT match disk is rejected and the
+        // file is reparsed from its real contents.
+        let root = workspace(&[("a.rs", "fn from_disk() {}\n")]);
+        let path = root.join("a.rs");
+
+        let mut prior = crate::cache::PriorCache::default();
+        prior.insert(
+            path,
+            (
+                super::FileMeta {
+                    size: 0,
+                    mtime_ns: 0,
+                },
+                fabricated("from_cache"),
+            ),
+        );
+
+        let index = super::Index::build_inner(&root, Some(prior)).expect("build");
+        assert_eq!(index.graph().nodes_by_name("from_disk").len(), 1);
+        assert_eq!(index.graph().nodes_by_name("from_cache").len(), 0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn disk_cache_round_trips_and_tracks_changes() {
+        let root = workspace(&[("a.rs", "fn a() {}\n")]);
+        // The cache lives under `.lux/` (hidden), so the walk never indexes it.
+        let cache = root.join(".lux").join("cache").join("code-graph.bin");
+
+        let cold = Index::build(&root).expect("cold build");
+        cold.save_cache(&cache).expect("save cache");
+        assert!(cache.exists());
+
+        // Warm rebuild from cache reproduces the same graph.
+        let warm = Index::build_cached(&root, &cache).expect("warm build");
+        assert_eq!(warm.graph().nodes_by_name("a").len(), 1);
+        assert_eq!(warm.graph().node_count(), cold.graph().node_count());
+
+        // Editing the file changes its size → the entry is invalidated and the next
+        // warm build reparses it, picking up the new symbol and call edge.
+        std::fs::write(root.join("a.rs"), "fn a() { b(); }\nfn b() {}\n").unwrap();
+        let warm2 = Index::build_cached(&root, &cache).expect("warm build 2");
+        assert_eq!(warm2.graph().nodes_by_name("b").len(), 1);
+        assert_eq!(callees(&warm2, "a"), vec!["b"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn missing_cache_falls_back_to_full_build() {
+        let root = workspace(&[("a.rs", "fn solo() {}\n")]);
+        let cache = root.join(".lux").join("cache").join("code-graph.bin");
+
+        // No cache yet → full build with a correct result, which can then persist.
+        let index = Index::build_cached(&root, &cache).expect("build");
+        assert_eq!(index.graph().nodes_by_name("solo").len(), 1);
+        index.save_cache(&cache).expect("save");
+        assert!(cache.exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Dirty-gate (skip redundant cache writes) ──
+
+    #[test]
+    fn fresh_build_is_dirty_then_clean_warm_build() {
+        let root = workspace(&[("a.rs", "fn a() {}\n")]);
+        let cache = root.join(".lux").join("cache").join("code-graph.bin");
+
+        let cold = Index::build(&root).expect("cold");
+        assert!(cold.is_cache_dirty(), "a fresh build has nothing saved yet");
+        cold.save_cache(&cache).expect("save");
+
+        // 100% cache hit, no edits → not dirty, so the caller can skip re-saving.
+        let warm = Index::build_cached(&root, &cache).expect("warm");
+        assert!(
+            !warm.is_cache_dirty(),
+            "a fully-reused warm build must be clean"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn changed_or_deleted_file_marks_cache_dirty() {
+        let root = workspace(&[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")]);
+        let cache = root.join(".lux").join("cache").join("code-graph.bin");
+        Index::build(&root)
+            .expect("cold")
+            .save_cache(&cache)
+            .expect("save");
+
+        // An edit (size change) invalidates one entry → dirty.
+        std::fs::write(root.join("a.rs"), "fn a() { x(); }\nfn x() {}\n").unwrap();
+        assert!(Index::build_cached(&root, &cache)
+            .expect("warm")
+            .is_cache_dirty());
+
+        // Re-save the now-current cache, then delete a file → dirty again.
+        let resaved = Index::build_cached(&root, &cache).expect("warm");
+        resaved.save_cache(&cache).expect("save");
+        std::fs::remove_file(root.join("b.rs")).unwrap();
+        assert!(
+            Index::build_cached(&root, &cache)
+                .expect("warm")
+                .is_cache_dirty(),
+            "a deletion must mark the cache dirty"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn mark_cache_clean_then_incremental_edit_redirties() {
+        let root = workspace(&[("a.rs", "fn a() {}\n")]);
+        let mut index = Index::build(&root).expect("build");
+        index.mark_cache_clean();
+        assert!(!index.is_cache_dirty());
+
+        std::fs::write(root.join("a.rs"), "fn a() { y(); }\nfn y() {}\n").unwrap();
+        assert!(index.update_file(root.join("a.rs")));
+        assert!(
+            index.is_cache_dirty(),
+            "an incremental edit must re-dirty the cache"
         );
 
         std::fs::remove_dir_all(&root).ok();

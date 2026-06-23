@@ -76,12 +76,15 @@ export async function requestChatCompletion(
   if (!desktopRuntime && !browserPreviewRuntime) throw createDesktopRuntimeError("AI chat completion");
 
   const toolsEnabled = options.toolsEnabled ?? true;
+  const reasoning = reasoningPayload(input.selectedEffortId, input.provider);
   const payload = {
     model: input.selectedModel.alias || input.selectedModel.id,
     messages: applyPromptCacheBreakpoints(messages, input.selectedModel),
-    temperature: 0.2,
     stream: false,
-    ...reasoningPayload(input.selectedEffortId, input.provider),
+    // Reasoning models reject an explicit temperature (OpenAI o-series / gpt-5
+    // return HTTP 400) — send it only for standard models.
+    ...(Object.keys(reasoning).length === 0 ? { temperature: 0.2 } : {}),
+    ...reasoning,
     ...(desktopRuntime && toolsEnabled && options.tools?.length ? { tools: options.tools, tool_choice: "auto" } : {}),
   };
 
@@ -461,13 +464,17 @@ export function isAnthropicCacheModel(model: AiModelConfig): boolean {
   return id.includes("claude") || id.includes("anthropic");
 }
 
-export function reasoningPayload(effortId: string, provider: AiProviderConfig) {
+export function reasoningPayload(effortId: string, provider: AiProviderConfig): Record<string, unknown> {
   if (!effortId) return {};
   const normalizedEffort = effortId === "xhigh" && provider.protocol !== "local-proxy" ? "high" : effortId;
-  return {
-    reasoning_effort: normalizedEffort,
-    reasoning: { effort: normalizedEffort },
-  };
+  // Send the single field the provider expects, not both. OpenRouter's unified API
+  // takes `reasoning: { effort }`; every other OpenAI-compatible provider takes the
+  // OpenAI-standard `reasoning_effort` string. Sending the unknown `reasoning`
+  // object to a strict provider (OpenAI, DeepSeek, …) can 400.
+  if (provider.providerType === "openrouter") {
+    return { reasoning: { effort: normalizedEffort } };
+  }
+  return { reasoning_effort: normalizedEffort };
 }
 
 function throwIfAborted(signal: AbortSignal) {

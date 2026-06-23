@@ -173,7 +173,7 @@ export async function sendAiChatMessage(input: AiChatSendInput): Promise<AiChatM
     const requestedToolCalls = normalizeToolCalls(assistant.tool_calls);
     if (requestedToolCalls.length === 0) {
       if (deriveSegmentContent(timeline.snapshot().segments ?? []).trim().length === 0) {
-        timeline.appendText("Done.");
+        timeline.appendText("The turn produced no answer. Press **Retry** or rephrase your request.");
       }
       const finalMessage = assistantMessageWithTiming(assistantMessage, timeline.snapshot(), timing, turnUsage, input.selectedModel);
       input.onAssistantMessageUpdate(assistantMessage.id, finalMessage);

@@ -5,6 +5,7 @@ export type AiChatErrorKind =
   | "cancelled"
   | "timeout"
   | "rate-limit"
+  | "auth"
   | "provider"
   | "invalid-json"
   | "tool-rejected"
@@ -46,6 +47,19 @@ export function classifyAiChatError(error: unknown, t: TranslateFn): AiChatError
     return {
       kind: "rate-limit",
       message: t("aiChat.error.rateLimit", { detail }),
+      detail,
+      canRetry: true,
+      canRetryTools: false,
+      canOpenSettings: true,
+    };
+  }
+  // Auth/permission (401/403, bad or missing API key). Not the provider being down —
+  // retrying won't help until the key is fixed, so Automatic mode keeps retrying but
+  // surfaces a precise "check your API key" message + Settings rather than the generic.
+  if (/\b401\b|\b403\b|unauthorized|forbidden|invalid[ _-]?api[ _-]?key|incorrect api key|authentication_error|no api key|missing api key/.test(lower)) {
+    return {
+      kind: "auth",
+      message: t("aiChat.error.auth", { detail }),
       detail,
       canRetry: true,
       canRetryTools: false,

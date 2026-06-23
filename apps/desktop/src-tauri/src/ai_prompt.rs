@@ -197,6 +197,7 @@ fn tool_capability_map(
     ];
     if full_exec {
         lines.push("- Edit: StrReplace, PatchEngine (multi-file, one approval+rollback), Write, Delete, Checkpoint. Execute: Shell (catastrophic commands blocked in Rust), TerminalContext, TerminalWrite.".to_string());
+        lines.push("- SSH/remote (non-interactive; never run raw ssh/scp via Shell): SshList -> SshConnect -> SshExec / SshTransfer -> SshDisconnect.".to_string());
         lines.push("- Orchestrate: Goal, TodoWrite, Task (isolated subagent), AgentMessage (shared agent board — post/read findings so subagents don't repeat work).".to_string());
     }
     lines.push("- Memory & skills: RecallMemory/RememberMemory (durable per-project memory across sessions); ListSkills/UseSkill (reusable vetted procedures — prefer an existing skill over improvising).".to_string());
@@ -310,7 +311,7 @@ mod tests {
         // (deliberate features), while still guarding against an unbounded prompt.
         let prompt = build_system_prompt(&test_input());
         assert!(
-            prompt.len() <= 17_000,
+            prompt.len() <= 17_700,
             "agent prompt too long: {}",
             prompt.len()
         );
@@ -319,7 +320,7 @@ mod tests {
         auto_input.agent_mode = "automatic".to_string();
         let auto_prompt = build_system_prompt(&auto_input);
         assert!(
-            auto_prompt.len() <= 18_500,
+            auto_prompt.len() <= 19_200,
             "automatic prompt too long: {}",
             auto_prompt.len()
         );

@@ -36,6 +36,12 @@ const TCP_CONNECT_DELAY: Duration = Duration::from_millis(50);
 const DISCONNECT_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
 const DISCONNECT_POLL_DELAY: Duration = Duration::from_millis(25);
 const MAX_DAP_CONTENT_LENGTH: usize = 64 * 1024 * 1024;
+/// Upper bound on bytes we will buffer while still searching for the
+/// `\r\n\r\n` header terminator. A well-behaved adapter sends only a handful of
+/// short header lines, so any peer that streams more than this without ever
+/// terminating the header is treated as a protocol violation rather than being
+/// allowed to grow the read buffer without limit (a memory-exhaustion attack).
+const MAX_DAP_HEADER_LENGTH: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DapFrame {
@@ -74,6 +80,11 @@ pub enum DebugSessionUpdate {
 pub struct DebugSessionManager {
     update_tx: mpsc::UnboundedSender<DebugSessionUpdate>,
     sessions: BTreeMap<Uuid, DebugSession>,
+    /// Terminal sessions whose final state has already been observed during a
+    /// drain cycle. They are pruned from `sessions` on the following cycle so
+    /// the map cannot grow without bound, while still giving the frontend one
+    /// full cycle to read the terminal `Stopped`/`Error` state.
+    reaped_sessions: BTreeSet<Uuid>,
 }
 
 struct DebugSession {
@@ -91,6 +102,22 @@ struct DebugSession {
     pending_breakpoint_requests: BTreeMap<u64, PathBuf>,
     pending_responses: BTreeMap<u64, DapResponse>,
     threads: BTreeMap<u64, DebugThreadInfo>,
+}
+
+impl Drop for DebugSession {
+    /// Guarantees the adapter process (and any debuggee it controls) cannot
+    /// outlive the session — when the IDE quits, the session map is dropped and
+    /// every adapter receives a kill signal here. `kill_on_drop(true)` on the
+    /// spawned [`Command`] provides the same guarantee, but doing it explicitly
+    /// keeps teardown deterministic and also stops the stdout/stderr reader
+    /// tasks that would otherwise linger until their streams close on their own.
+    fn drop(&mut self) {
+        if !matches!(self.child.try_wait(), Ok(Some(_))) {
+            let _ = self.child.start_kill();
+        }
+        self.read_task.abort();
+        self.stderr_task.abort();
+    }
 }
 
 struct SpawnedDebugAdapter {
@@ -132,6 +159,7 @@ impl DebugSessionManager {
         Self {
             update_tx,
             sessions: BTreeMap::new(),
+            reaped_sessions: BTreeSet::new(),
         }
     }
 
@@ -198,7 +226,8 @@ impl DebugSessionManager {
             .current_dir(workspace_root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
@@ -243,17 +272,22 @@ impl DebugSessionManager {
         workspace_root: &Path,
         session_id: Uuid,
     ) -> AppResult<SpawnedDebugAdapter> {
-        let (args, port) = tcp_server_args_and_port(adapter).await?;
+        let (args, port, port_reservation) = tcp_server_args_and_port(adapter).await?;
         let mut command = Command::new(&adapter.command);
         command
             .args(&args)
             .current_dir(workspace_root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(CREATE_NO_WINDOW);
 
+        // Release the reserved loopback port (if any) at the last possible
+        // instant so the adapter can bind it with the smallest possible window
+        // for another process to steal it.
+        drop(port_reservation);
         let mut child = command.spawn()?;
         let stderr = child
             .stderr
@@ -629,6 +663,31 @@ impl DebugSessionManager {
             }
         }
         self.poll_exited_adapters();
+        self.prune_terminal_sessions();
+    }
+
+    /// Bounds the session map: a session that has been terminal for a full drain
+    /// cycle is removed. The one-cycle delay guarantees the frontend has already
+    /// received the terminal `Changed` event before the entry disappears, and
+    /// dropping the [`DebugSession`] runs its `Drop` (killing any lingering
+    /// adapter and aborting its reader tasks).
+    fn prune_terminal_sessions(&mut self) {
+        let terminal = self
+            .sessions
+            .iter()
+            .filter_map(|(id, session)| is_terminal_status(session.info.status).then_some(*id))
+            .collect::<Vec<_>>();
+
+        for session_id in terminal {
+            if self.reaped_sessions.insert(session_id) {
+                continue;
+            }
+            self.sessions.remove(&session_id);
+            self.reaped_sessions.remove(&session_id);
+        }
+
+        self.reaped_sessions
+            .retain(|session_id| self.sessions.contains_key(session_id));
     }
 
     fn poll_exited_adapters(&mut self) {
@@ -671,6 +730,13 @@ impl DebugSessionManager {
                 match message {
                     DapMessage::Response(response) if response.request_seq == request_seq => {
                         return self.apply_expected_response(session_id, response, command);
+                    }
+                    // A response for a different request that arrives first is
+                    // parked by `request_seq` rather than dropped, so the
+                    // pending waiter for that request can still claim it instead
+                    // of timing out on an adapter that answers out of order.
+                    DapMessage::Response(response) => {
+                        self.store_pending_response(session_id, response)?;
                     }
                     other => self.apply_message(session_id, other).await?,
                 }
@@ -1169,7 +1235,9 @@ async fn connect_tcp_debug_adapter(port: u16) -> AppResult<TcpStream> {
     )))
 }
 
-async fn tcp_server_args_and_port(adapter: &DebugAdapterInfo) -> AppResult<(Vec<String>, u16)> {
+async fn tcp_server_args_and_port(
+    adapter: &DebugAdapterInfo,
+) -> AppResult<(Vec<String>, u16, Option<TcpListener>)> {
     let Some((flag_index, value_index)) = tcp_server_port_arg_indices(&adapter.args) else {
         return Err(AppError::Service(format!(
             "debug adapter {} uses TCP transport without a configured port",
@@ -1183,13 +1251,18 @@ async fn tcp_server_args_and_port(adapter: &DebugAdapterInfo) -> AppResult<(Vec<
             adapter.name, args[flag_index], args[value_index]
         ))
     })?;
-    let port = if configured_port == 0 {
-        allocate_loopback_port().await?
+    // For an auto-allocated port (`0`) we keep the OS-assigned listener bound and
+    // hand it back so the caller can release it immediately before spawning the
+    // adapter, shrinking the bind/hand-off TOCTOU window to a single syscall.
+    let (port, reservation) = if configured_port == 0 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let port = listener.local_addr()?.port();
+        (port, Some(listener))
     } else {
-        configured_port
+        (configured_port, None)
     };
     args[value_index] = port.to_string();
-    Ok((args, port))
+    Ok((args, port, reservation))
 }
 
 fn tcp_server_port_arg_indices(args: &[String]) -> Option<(usize, usize)> {
@@ -1197,13 +1270,6 @@ fn tcp_server_port_arg_indices(args: &[String]) -> Option<(usize, usize)> {
         matches!(window, [flag, _] if flag == "--port" || flag == "-p")
             .then_some((index, index + 1))
     })
-}
-
-async fn allocate_loopback_port() -> AppResult<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
 }
 
 fn validate_breakpoint_session(session_id: Uuid, session: Option<&DebugSession>) -> AppResult<()> {
@@ -1555,6 +1621,18 @@ pub fn drain_dap_frames(buffer: &mut Vec<u8>) -> AppResult<Vec<DapFrame>> {
         let content = buffer[frame_start..frame_end].to_vec();
         buffer.drain(..frame_end);
         frames.push(DapFrame { content });
+    }
+
+    // The loop only exits without a complete header when `find_header_end`
+    // returns `None`. If the buffer has nonetheless grown past the header bound,
+    // the peer is streaming an un-terminated header — refuse it instead of
+    // letting the read buffer grow without limit. A buffer that still contains a
+    // header terminator here is a legitimately large frame body in transit and
+    // is bounded separately by `MAX_DAP_CONTENT_LENGTH`.
+    if buffer.len() > MAX_DAP_HEADER_LENGTH && find_header_end(buffer).is_none() {
+        return Err(AppError::Service(format!(
+            "DAP header exceeded {MAX_DAP_HEADER_LENGTH} bytes without a terminator"
+        )));
     }
 
     Ok(frames)
@@ -2252,12 +2330,16 @@ async fn read_dap_stdout<R>(
         let frames = match drain_dap_frames(&mut buffer) {
             Ok(frames) => frames,
             Err(error) => {
-                buffer.clear();
+                // A framing violation (bad/oversized Content-Length or an
+                // un-terminated header) means the byte stream is no longer
+                // trustworthy. Stop reading instead of looping — continuing
+                // would let a hostile peer keep replaying the violation and grow
+                // memory again. `buffer` is released as the loop unwinds.
                 let _ = update_tx.send(DebugSessionUpdate::Output {
                     session_id,
                     text: format!("debug adapter emitted invalid DAP frame: {error}\n"),
                 });
-                continue;
+                break;
             }
         };
 
@@ -2444,6 +2526,30 @@ mod tests {
             ]
             .concat()
         );
+    }
+
+    #[test]
+    fn drain_dap_frames_rejects_unterminated_header_beyond_bound() {
+        // A peer that never sends `\r\n\r\n` must not be able to grow the buffer
+        // without limit: once it crosses the header bound we return an error.
+        let mut buffer = vec![b'X'; MAX_DAP_HEADER_LENGTH + 1];
+
+        let error = drain_dap_frames(&mut buffer).expect_err("oversized header should be rejected");
+
+        assert!(error.to_string().contains("header"));
+    }
+
+    #[test]
+    fn drain_dap_frames_allows_large_body_in_transit() {
+        // A complete header whose declared body has not fully arrived must not
+        // be mistaken for an un-terminated header, even past the header bound.
+        let body_len = MAX_DAP_HEADER_LENGTH * 4;
+        let mut buffer = format!("Content-Length: {body_len}\r\n\r\n").into_bytes();
+        buffer.extend(std::iter::repeat_n(b'{', MAX_DAP_HEADER_LENGTH + 1));
+
+        let frames = drain_dap_frames(&mut buffer).expect("partial large body must be tolerated");
+
+        assert!(frames.is_empty());
     }
 
     #[test]
@@ -2907,12 +3013,15 @@ mod tests {
             status: DebugAdapterStatus::Available,
             error: None,
         };
-        let (args, port) = tcp_server_args_and_port(&adapter)
+        let (args, port, reservation) = tcp_server_args_and_port(&adapter)
             .await
             .expect("tcp adapter args should receive a concrete port");
 
         assert_ne!(port, 0);
         assert_eq!(args, vec!["--port".to_string(), port.to_string()]);
+        // An auto-allocated port is held until the adapter is launched, keeping
+        // the bind/hand-off window minimal.
+        assert!(reservation.is_some());
     }
 
     #[tokio::test]
@@ -2961,6 +3070,70 @@ mod tests {
             .is_some_and(|error| error.contains("debug adapter process exited")));
     }
 
+    #[tokio::test]
+    async fn wait_for_response_body_claims_out_of_order_responses() {
+        let (update_tx, _update_rx) = mpsc::unbounded_channel();
+        let mut manager = DebugSessionManager::new(update_tx);
+
+        let mut child = spawn_exiting_child(0);
+        let stdin = child.stdin.take().expect("test child stdin should exist");
+        let (message_tx, messages) = mpsc::unbounded_channel();
+        let info = debug_session_info(DebugSessionStatus::Running);
+        let session_id = info.id;
+        manager.sessions.insert(
+            session_id,
+            DebugSession {
+                info,
+                writer: DapWriter::Stdio(stdin),
+                child,
+                read_task: tokio::spawn(async {}),
+                stderr_task: tokio::spawn(async {}),
+                messages,
+                next_seq: 1,
+                disconnect_sent: false,
+                configuration_done_sent: true,
+                breakpoints_by_path: BTreeMap::new(),
+                resolved_breakpoints_by_path: BTreeMap::new(),
+                pending_breakpoint_requests: BTreeMap::new(),
+                pending_responses: BTreeMap::new(),
+                threads: BTreeMap::new(),
+            },
+        );
+
+        // The adapter answers request 2 before request 1. The waiter for request
+        // 1 must park the seq-2 response instead of dropping it.
+        message_tx
+            .send(DapMessage::Response(DapResponse {
+                request_seq: 2,
+                success: true,
+                command: "evaluate".to_string(),
+                message: None,
+                body: Some(json!({"result": "second"})),
+            }))
+            .expect("seq 2 response should enqueue");
+        message_tx
+            .send(DapMessage::Response(DapResponse {
+                request_seq: 1,
+                success: true,
+                command: "evaluate".to_string(),
+                message: None,
+                body: Some(json!({"result": "first"})),
+            }))
+            .expect("seq 1 response should enqueue");
+
+        let first = manager
+            .wait_for_response_body(session_id, 1, "evaluate")
+            .await
+            .expect("seq 1 response should resolve");
+        assert_eq!(first, Some(json!({"result": "first"})));
+
+        let second = manager
+            .wait_for_response_body(session_id, 2, "evaluate")
+            .await
+            .expect("parked seq 2 response should still resolve");
+        assert_eq!(second, Some(json!({"result": "second"})));
+    }
+
     fn debug_session_info(status: DebugSessionStatus) -> DebugSessionInfo {
         DebugSessionInfo {
             id: Uuid::new_v4(),
@@ -2982,7 +3155,8 @@ mod tests {
         command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
         command.spawn().expect("test child should spawn")
     }
 

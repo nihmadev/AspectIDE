@@ -99,22 +99,17 @@ pub async fn web_research(
     let fetches = to_fetch.iter().map(|hit| {
         let url = hit.url.clone();
         async move {
-            web_fetch::fetch(
-                url,
-                Some(PAGE_MAX_BYTES),
-                Some(PAGE_TIMEOUT_SECS),
-                Some(false),
-            )
-            .await
-            .map_or_else(
-                |_| (String::new(), None),
-                |page| {
-                    (
-                        page.text().to_string(),
-                        page.title().map(ToString::to_string),
-                    )
-                },
-            )
+            web_fetch::fetch(url, Some(PAGE_MAX_BYTES), Some(PAGE_TIMEOUT_SECS))
+                .await
+                .map_or_else(
+                    |_| (String::new(), None),
+                    |page| {
+                        (
+                            page.text().to_string(),
+                            page.title().map(ToString::to_string),
+                        )
+                    },
+                )
         }
     });
     let fetched: Vec<(String, Option<String>)> = futures_util::future::join_all(fetches).await;

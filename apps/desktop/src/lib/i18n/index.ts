@@ -12,7 +12,6 @@
 
 import { DEFAULT_LOCALE, type Locale } from "./config";
 import { messagesEn, type Messages, type MessageKey } from "./messages-en";
-import { messagesRu } from "./messages-ru";
 
 export type { Locale } from "./config";
 export { LOCALES, DEFAULT_LOCALE, UI_LOCALE_KEY, isLocale, normalizeLocale } from "./config";
@@ -20,13 +19,63 @@ export type { MessageKey } from "./messages-en";
 
 export type MessageParams = Record<string, string | number>;
 
-const DICTIONARIES: Record<Locale, Messages> = {
+// Only the default (English) dictionary is bundled eagerly. Non-default locale
+// dictionaries (e.g. the ~139 KB Russian one) are code-split and fetched on
+// demand via `loadDictionary`, so an English session never ships or parses them.
+// Until a locale loads, `translate` falls back per-key to English — the same
+// behavior as a missing key — so callers stay synchronous.
+const DICTIONARIES: Partial<Record<Locale, Messages>> = {
   en: messagesEn,
-  ru: messagesRu,
 };
 
+// Loaders for the lazily-bundled dictionaries. `en` is always resident, so it has
+// no loader. Each returns the chunk's `messages*` export.
+const DICTIONARY_LOADERS: Partial<Record<Locale, () => Promise<Messages>>> = {
+  ru: () => import("./messages-ru").then((module) => module.messagesRu),
+};
+
+const dictionaryLoads = new Map<Locale, Promise<void>>();
+
+/**
+ * Ensure `locale`'s dictionary is resident, fetching its split chunk once if
+ * needed. Resolves immediately for already-loaded locales (incl. `en`). Callers
+ * should `await`/chain this before switching the active locale so the first
+ * render after the switch already has the strings (no English flash). A failed
+ * load is swallowed — `translate` keeps falling back to English.
+ */
+export function loadDictionary(locale: Locale): Promise<void> {
+  if (DICTIONARIES[locale]) return Promise.resolve();
+  const existing = dictionaryLoads.get(locale);
+  if (existing) return existing;
+  const loader = DICTIONARY_LOADERS[locale];
+  if (!loader) return Promise.resolve();
+  const load = loader()
+    .then((messages) => {
+      DICTIONARIES[locale] = messages;
+    })
+    .catch(() => {
+      // Leave it unloaded; per-key English fallback covers the gap. Drop the
+      // cached rejection so a later attempt can retry.
+      dictionaryLoads.delete(locale);
+    });
+  dictionaryLoads.set(locale, load);
+  return load;
+}
+
+// Intl.PluralRules construction is ~18µs each; plural strings build one per
+// placeholder per render. Memoize per locale (≤2 today) — pure, behavior-stable.
+const pluralRulesByLocale = new Map<Locale, Intl.PluralRules>();
+function pluralRulesFor(locale: Locale): Intl.PluralRules {
+  let rules = pluralRulesByLocale.get(locale);
+  if (!rules) {
+    rules = new Intl.PluralRules(locale);
+    pluralRulesByLocale.set(locale, rules);
+  }
+  return rules;
+}
+
 export function translate(locale: Locale, key: MessageKey, params?: MessageParams): string {
-  const dictionary = DICTIONARIES[locale] ?? DICTIONARIES[DEFAULT_LOCALE];
+  const dictionary = DICTIONARIES[locale] ?? messagesEn;
   const template = dictionary[key] ?? messagesEn[key] ?? key;
   if (!params) return formatMessage(template, EMPTY_PARAMS, locale);
   return formatMessage(template, params, locale);
@@ -77,7 +126,7 @@ function renderPlaceholder(inner: string, params: MessageParams, locale: Locale)
     const branches = parseBranches(body);
     const count = toNumber(params[name]);
     const chosen = branches[`=${count}`]
-      ?? branches[new Intl.PluralRules(locale).select(count)]
+      ?? branches[pluralRulesFor(locale).select(count)]
       ?? branches.other
       ?? "";
     return renderSegment(chosen, params, locale, count);

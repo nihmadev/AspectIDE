@@ -16,6 +16,10 @@ pub struct GoalEvalInput {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    /// Provider wire protocol (`openai-compatible` or `anthropic`); selects the
+    /// transport so goal-run verdicts work on Anthropic providers too.
+    #[serde(default)]
+    pub protocol: String,
     /// Provider reasoning payload (`reasoning_effort` + reasoning.effort), or absent/`{}`
     /// when the active model has no effort levels. Merged into the request so the
     /// verdict is judged with the same reasoning depth as the main turn.
@@ -71,16 +75,17 @@ pub async fn ai_goal_eval_verdict(input: GoalEvalInput) -> Result<Option<GoalEva
             { "role": "system", "content": system },
             { "role": "user", "content": user },
         ],
-        "temperature": 0.1,
         "stream": true,
         "stream_options": { "include_usage": true },
     });
     crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
+    crate::ai_chat_backend::apply_temperature(&mut payload, input.reasoning.as_ref(), 0.1);
 
-    let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
+    let request = crate::ai_chat_backend::AiChatCompletionRequest::with_protocol(
         input.base_url.clone(),
         input.api_key.clone(),
         payload,
+        input.protocol.clone(),
     );
 
     // Stream: non-streaming requests hang against SSE-only providers/proxies. The

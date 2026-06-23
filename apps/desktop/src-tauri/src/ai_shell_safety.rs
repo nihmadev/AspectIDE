@@ -42,6 +42,21 @@ pub fn classify_shell_command(command: &str) -> ShellSafetyReport {
     let segments = split_segments(command);
     report.read_only = !segments.is_empty();
 
+    // Commands hidden inside substitutions — `$(…)`, backticks, `<(…)`/`>(…)` —
+    // execute too, yet never surface as a segment's first token, so
+    // `cat "$(rm -rf ~)"` would otherwise be judged solely on its outer `cat`.
+    // Classify their bodies as well: an inner catastrophic command blocks the
+    // whole line, and the mere presence of a substitution forbids read-only
+    // auto-approval (a prompt is still possible — this never blocks on its own).
+    let substitution_bodies = extract_substitutions(command);
+    if !substitution_bodies.is_empty() {
+        report.read_only = false;
+    }
+    let inner_segments: Vec<String> = substitution_bodies
+        .iter()
+        .flat_map(|body| split_segments(body))
+        .collect();
+
     // Whole-command risk: piping a download straight into a shell (the `|`
     // boundary would otherwise hide the `curl … | sh` combination).
     if (full.contains("curl ") || full.contains("wget "))
@@ -55,7 +70,7 @@ pub fn classify_shell_command(command: &str) -> ShellSafetyReport {
             .push("piping a download straight into a shell executes remote code".to_string());
     }
 
-    for segment in &segments {
+    for segment in segments.iter().chain(inner_segments.iter()) {
         let normalized = normalize(segment);
         if normalized.is_empty() {
             continue;
@@ -133,6 +148,74 @@ fn split_segments(command: &str) -> Vec<String> {
         .collect()
 }
 
+/// Pull out the bodies of every command/process substitution so the commands
+/// they hide are themselves classified. Handles `$( … )`, `` ` … ` ``,
+/// `<( … )` and `>( … )`, recursing into nested substitutions (depth-bounded
+/// against a pathological input). The bodies are returned verbatim; the caller
+/// re-splits and classifies them.
+fn extract_substitutions(command: &str) -> Vec<String> {
+    let mut bodies = Vec::new();
+    collect_substitutions(command, 0, &mut bodies);
+    bodies
+}
+
+fn collect_substitutions(command: &str, depth: usize, out: &mut Vec<String>) {
+    const MAX_DEPTH: usize = 8;
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let bytes = command.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            // `` `…` `` backtick substitution.
+            b'`' => {
+                if let Some(rel) = command[index + 1..].find('`') {
+                    let body = &command[index + 1..index + 1 + rel];
+                    out.push(body.to_string());
+                    collect_substitutions(body, depth + 1, out);
+                    index += 1 + rel + 1;
+                    continue;
+                }
+            }
+            // `$( … )` command/arithmetic substitution and `<( … )` / `>( … )`
+            // process substitution — all open with a sigil followed by `(`.
+            b'$' | b'<' | b'>' if bytes.get(index + 1) == Some(&b'(') => {
+                if let Some((body, end)) = capture_parenthesized(command, index + 2) {
+                    out.push(body.to_string());
+                    collect_substitutions(body, depth + 1, out);
+                    index = end;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+}
+
+/// Starting just after an opening `(`, return the balanced-paren body and the
+/// byte index just past its closing `)`. `None` if the parens never balance.
+fn capture_parenthesized(command: &str, start: usize) -> Option<(&str, usize)> {
+    let bytes = command.as_bytes();
+    let mut depth = 1usize;
+    let mut index = start;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&command[start..index], index + 1));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Lowercase + whitespace-collapsed copy for matching.
 fn normalize(segment: &str) -> String {
     segment
@@ -162,9 +245,12 @@ fn catastrophic_reason(normalized: &str) -> Option<String> {
         return Some("rm --no-preserve-root targets the entire filesystem".to_string());
     }
 
-    // rm -rf against filesystem root / home.
+    // rm -rf against filesystem root / home / a protected system directory.
+    // Every operand is checked (not just the last), after quote/slash/`$HOME`
+    // normalization, so `rm -rf "/"`, `rm -rf "$HOME"` and `rm -rf /etc /usr`
+    // can't slip through.
     if is_rm_recursive_force(normalized) {
-        if let Some(target) = rm_target(normalized) {
+        for target in rm_targets(normalized) {
             if is_dangerous_root_target(&target) {
                 return Some(format!(
                     "recursive force delete of a protected path: {target}"
@@ -230,20 +316,92 @@ fn flag_cluster_has(normalized: &str, needle: char) -> bool {
         .any(|token| token.starts_with('-') && !token.starts_with("--") && token.contains(needle))
 }
 
-/// Best-effort target of an `rm` command: the last non-flag argument.
-fn rm_target(normalized: &str) -> Option<String> {
+/// Every non-flag operand of an `rm` command, normalized for comparison
+/// (quotes stripped, a single trailing slash dropped, `$HOME`/`%USERPROFILE%`
+/// folded to `~`). `--` ends flag parsing so `rm -rf -- "/"` is still caught.
+fn rm_targets(normalized: &str) -> Vec<String> {
+    let mut flags_done = false;
     normalized
         .split(' ')
         .skip(1)
-        .filter(|token| !token.starts_with('-'))
-        .last()
-        .map(ToString::to_string)
+        .filter_map(|token| {
+            if !flags_done && token == "--" {
+                flags_done = true;
+                return None;
+            }
+            if !flags_done && token.starts_with('-') {
+                return None;
+            }
+            let normalized_target = normalize_path_operand(token);
+            (!normalized_target.is_empty()).then_some(normalized_target)
+        })
+        .collect()
 }
 
+/// Strip surrounding quotes, collapse a trailing slash, and fold the home
+/// directory env-vars to `~` so quoted / decorated forms compare equal to the
+/// bare dangerous targets.
+// The `${home}` / `${home}/*` literals are shell syntax matched verbatim, not
+// format placeholders.
+#[allow(clippy::literal_string_with_formatting_args)]
+fn normalize_path_operand(token: &str) -> String {
+    let mut path = token.trim_matches(|c| c == '"' || c == '\'').to_string();
+    // Fold home-directory references to a single canonical form.
+    for home in ["$home", "${home}", "%userprofile%", "$env:userprofile"] {
+        if path == home {
+            path = "~".to_string();
+        }
+    }
+    // Drop a single trailing slash (but keep "/" itself intact).
+    if path.len() > 1 {
+        if let Some(stripped) = path.strip_suffix('/') {
+            path = stripped.to_string();
+        }
+    }
+    path
+}
+
+// The `${home}` literals are shell syntax matched verbatim, not format args.
+#[allow(clippy::literal_string_with_formatting_args)]
 fn is_dangerous_root_target(target: &str) -> bool {
+    // A direct child of a multi-user home root wipes an entire user profile,
+    // e.g. `rm -rf /home/alice` / `/users/bob`. (`/root` is matched whole below.)
+    for home_root in ["/home", "/users"] {
+        if let Some(child) = target
+            .strip_prefix(home_root)
+            .and_then(|rest| rest.strip_prefix('/'))
+        {
+            if !child.is_empty() && !child.contains('/') {
+                return true;
+            }
+        }
+    }
     matches!(
         target,
-        "/" | "/*" | "~" | "~/" | "~/*" | "$home" | "${home}" | "/." | "/.*"
+        "/" | "/*"
+            | "~"
+            | "~/*"
+            | "$home"
+            | "${home}"
+            | "/."
+            | "/.*"
+            // Protected top-level system directories (and their glob form).
+            | "/etc" | "/etc/*"
+            | "/usr" | "/usr/*"
+            | "/bin" | "/bin/*"
+            | "/sbin" | "/sbin/*"
+            | "/lib" | "/lib/*"
+            | "/lib64" | "/lib64/*"
+            | "/boot" | "/boot/*"
+            | "/var" | "/var/*"
+            | "/opt" | "/opt/*"
+            | "/sys" | "/sys/*"
+            | "/proc" | "/proc/*"
+            | "/dev" | "/dev/*"
+            | "/root" | "/root/*"
+            | "/home" | "/home/*"
+            | "/srv" | "/srv/*"
+            | "/run" | "/run/*"
     )
 }
 
@@ -354,26 +512,24 @@ fn is_read_only_segment(normalized: &str) -> bool {
     // Read-only subcommands of common VCS/toolchains.
     match ft {
         "git" => {
-            let sub = normalized
-                .strip_prefix("git ")
-                .and_then(|rest| rest.split(' ').find(|t| !t.starts_with('-')))
-                .unwrap_or("");
-            matches!(
-                sub,
-                "status"
-                    | "log"
-                    | "diff"
-                    | "show"
-                    | "branch"
-                    | "remote"
-                    | "describe"
-                    | "rev-parse"
-                    | "blame"
-                    | "tag"
-                    | "ls-files"
-                    | "config"
-                    | "shortlog"
-            )
+            let rest = normalized.strip_prefix("git ").unwrap_or("");
+            let sub = rest.split(' ').find(|t| !t.starts_with('-')).unwrap_or("");
+            match sub {
+                "status" | "log" | "diff" | "show" | "branch" | "remote" | "describe"
+                | "rev-parse" | "blame" | "tag" | "ls-files" | "shortlog" => true,
+                // `git config` is NOT read-only by default: a write persists a hook
+                // (`core.pager`, `core.sshCommand`, `core.hooksPath`, `alias.*=!cmd`)
+                // that runs on the next git op — auto-approving that is RCE. Only the
+                // explicit read forms (`--get*`, `--list`/`-l`) stay read-only.
+                "config" => {
+                    (rest.contains("--get") || rest.contains("--list") || rest.contains(" -l"))
+                        && !rest.contains("--unset")
+                        && !rest.contains("--replace-all")
+                        && !rest.contains("--add")
+                        && !rest.contains("--edit")
+                }
+                _ => false,
+            }
         }
         "node" | "npm" | "pnpm" | "yarn" | "cargo" | "python" | "python3" | "rustc" | "go"
         | "deno" | "bun" => {
@@ -461,5 +617,51 @@ mod tests {
     #[test]
     fn compound_command_blocks_if_any_segment_dangerous() {
         assert!(blocked("npm run build && rm -rf /"));
+    }
+
+    #[test]
+    fn blocks_rm_inside_command_substitution() {
+        // H4: the catastrophic command is hidden in a substitution; it must
+        // still be caught, not judged on the outer `cat`/`echo`.
+        assert!(blocked("cat \"$(rm -rf ~)\""));
+        assert!(blocked("echo `rm -rf /`"));
+        assert!(blocked("echo $(echo a; rm -rf $HOME)"));
+        assert!(blocked("diff <(rm -rf /etc) /dev/null"));
+    }
+
+    #[test]
+    fn substitution_is_never_read_only() {
+        // H4: a substitution can run anything, so auto-approval is forbidden
+        // even when the outer command looks read-only.
+        assert!(!classify_shell_command("cat \"$(whoami)\"").read_only);
+        assert!(!classify_shell_command("echo `date`").read_only);
+        assert!(!classify_shell_command("ls $(pwd)").read_only);
+    }
+
+    #[test]
+    fn git_config_write_is_not_read_only() {
+        // H5: setting config persists a hook → RCE; must require a prompt.
+        assert!(!classify_shell_command("git config core.pager 'rm -rf ~'").read_only);
+        assert!(!classify_shell_command("git config --global alias.x '!sh'").read_only);
+        assert!(!classify_shell_command("git config core.hooksPath /tmp/evil").read_only);
+        // Pure reads stay read-only.
+        assert!(classify_shell_command("git config --get user.name").read_only);
+        assert!(classify_shell_command("git config --list").read_only);
+    }
+
+    #[test]
+    fn blocks_quoted_and_system_dir_rm() {
+        // H6: quoting and protected system dirs must not bypass the guard.
+        assert!(blocked("rm -rf \"/\""));
+        assert!(blocked("rm -rf \"$HOME\""));
+        assert!(blocked("rm -rf $HOME/"));
+        assert!(blocked("rm -rf /etc"));
+        assert!(blocked("rm -rf /usr /bin"));
+        assert!(blocked("rm -rf /boot/*"));
+        assert!(blocked("rm -rf /home/alice"));
+        assert!(blocked("rm -rf -- \"/\""));
+        // Scoped deletes still allowed.
+        assert!(!blocked("rm -rf ./build"));
+        assert!(!blocked("rm -rf target/debug"));
     }
 }

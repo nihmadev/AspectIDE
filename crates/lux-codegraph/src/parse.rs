@@ -7,7 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Node, Parser, Query, QueryCursor};
+use tree_sitter::{Node, Parser, QueryCursor};
 
 use crate::lang::Lang;
 
@@ -166,16 +166,16 @@ pub fn parse_source(lang: Lang, source: &str) -> Result<ParsedFile, ParseError> 
     let Some(tree) = parser.parse(source, None) else {
         return Err(ParseError::NoTree);
     };
-    let query = Query::new(&language, lang.tags_query()).map_err(|source| ParseError::Query {
-        lang: lang.name(),
-        source,
-    })?;
+    // Reuse the process-wide compiled query (one per language, behind a OnceLock)
+    // instead of recompiling the tags query for every parsed file — query
+    // compilation is the expensive tree-sitter step and dominated cold builds.
+    let query = lang.compiled_tags_query();
 
     let capture_names = query.capture_names();
     let bytes = source.as_bytes();
     let mut parsed = ParsedFile::default();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), bytes);
+    let mut matches = cursor.matches(query, tree.root_node(), bytes);
 
     while let Some(m) = matches.next() {
         // A definition match carries two captures: `name.<kind>` (the identifier)

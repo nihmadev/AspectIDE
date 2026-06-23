@@ -8,6 +8,7 @@ import { cancelAllSubagentRuns } from "./aiSubagentRuns";
 import { removePendingFileReviewsForSession } from "./aiPendingFileReview";
 import { clearPendingQuestionsForSession } from "./aiPendingQuestion";
 import { clearPendingPlansForSession } from "./aiPendingPlan";
+import { luxCommands } from "./tauri";
 
 /** Tear down in-memory AI chat side state when a session is deleted. */
 export function disposeAiChatSessionSideState(sessionId: string) {
@@ -22,4 +23,8 @@ export function disposeAiChatSessionSideState(sessionId: string) {
   clearPendingPlansForSession(sessionId);
   clearComposerSessionState(sessionId);
   clearAiRetryNotice(sessionId);
+
+  // Release the matching native (Rust) per-session maps too — the clears above
+  // only touch in-memory JS state. Fire-and-forget.
+  void luxCommands.aiSessionDispose(sessionId);
 }

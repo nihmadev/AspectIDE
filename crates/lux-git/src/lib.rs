@@ -246,18 +246,81 @@ pub fn create_branch(root: impl AsRef<Path>, name: &str) -> AppResult<GitStatus>
 /// HEAD vs working-tree text for one file, for the side-by-side diff view.
 /// `head_text` is empty for an untracked/new file (or empty repo); `working_text`
 /// is empty for a deleted file.
+///
+/// `path` is treated as workspace-relative and is confined to `root`: an absolute
+/// path or one that escapes via `..` is rejected so the panel can never read a
+/// file outside the repository.
 pub fn file_diff(root: impl AsRef<Path>, path: &str) -> AppResult<(String, String)> {
     let root = root.as_ref();
+    let absolute = confine_to_root(root, path)?;
+    // `git show HEAD:<path>` wants a repo-relative, forward-slash spec; build it
+    // from the validated path so traversal segments can never reach this arg.
+    let rel = relative_spec(root, &absolute);
     let head = git_command(root)
-        .args(["show", &format!("HEAD:{path}")])
+        .args(["show", &format!("HEAD:{rel}")])
         .output()?;
     let head_text = if head.status.success() {
         String::from_utf8_lossy(&head.stdout).to_string()
     } else {
         String::new()
     };
-    let working_text = std::fs::read_to_string(root.join(path)).unwrap_or_default();
+    let working_text = std::fs::read_to_string(&absolute).unwrap_or_default();
     Ok((head_text, working_text))
+}
+
+/// Join a workspace-relative `path` onto `root` and prove the result stays inside
+/// `root`, returning the absolute path. Rejects absolute inputs (which would make
+/// `Path::join` discard `root`) and any `..` traversal that escapes the workspace.
+///
+/// The path's own components are normalized before the check so a not-yet-existing
+/// file (e.g. a deleted worktree entry) still validates — only `root` needs to
+/// exist on disk to be canonicalized.
+fn confine_to_root(root: &Path, path: &str) -> AppResult<std::path::PathBuf> {
+    use std::path::Component;
+
+    let candidate = Path::new(path);
+    if candidate.is_absolute() {
+        return Err(AppError::InvalidPath(format!(
+            "path must be relative: {path}"
+        )));
+    }
+
+    let base = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut resolved = base.clone();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => resolved.push(segment),
+            Component::ParentDir => {
+                // Pop only within the workspace; never climb above `root`.
+                if !resolved.pop() || !resolved.starts_with(&base) {
+                    return Err(AppError::InvalidPath(format!(
+                        "path escapes workspace: {path}"
+                    )));
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(AppError::InvalidPath(format!(
+                    "path must be relative: {path}"
+                )));
+            }
+        }
+    }
+    if !resolved.starts_with(&base) {
+        return Err(AppError::InvalidPath(format!(
+            "path escapes workspace: {path}"
+        )));
+    }
+    Ok(resolved)
+}
+
+/// Derive the `root`-relative, forward-slash path for a git pathspec from an
+/// already-confined absolute path (falls back to the raw display form if the
+/// strip somehow fails — it won't for paths produced by `confine_to_root`).
+fn relative_spec(root: &Path, absolute: &Path) -> String {
+    let base = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let rel = absolute.strip_prefix(&base).unwrap_or(absolute);
+    rel.to_string_lossy().replace('\\', "/")
 }
 
 fn parse_branches(raw: &str) -> Vec<String> {

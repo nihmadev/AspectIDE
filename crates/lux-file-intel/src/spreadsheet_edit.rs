@@ -76,8 +76,9 @@ fn resolve_spreadsheet_save_path(path: &Path) -> PathBuf {
 /// Reject zip-container spreadsheets whose declared uncompressed payload would
 /// exhaust memory once calamine materializes a sheet. Non-zip formats (.xls
 /// CFB, flat .fods) carry no decompression amplification and are left to the
-/// loader.
-fn guard_decompression_bomb(path: &Path) -> AppResult<()> {
+/// loader. Shared with the preview path in `lib.rs`, which faces the same OOM
+/// vector via `worksheet_range`.
+pub fn guard_decompression_bomb(path: &Path) -> AppResult<()> {
     if !matches!(extension(path).as_str(), "xlsx" | "xlsm" | "xlsb" | "ods") {
         return Ok(());
     }

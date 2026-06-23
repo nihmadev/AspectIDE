@@ -508,6 +508,16 @@ export function evaluateGoalCondition(
     || refreshed.round >= refreshed.limits.maxRounds;
 
   if (limitReached) {
+    // Automatic mode is full autonomy: round/duration/token limits are advisory,
+    // never terminal. The run ends only when the task is verified complete or the
+    // user presses Stop — so keep going (no "final handoff" that could make the
+    // model wrap up early).
+    if (agentMode === "automatic") {
+      refreshed.lastEvaluatorReason = AUTOMATIC_NO_STOP_NUDGE;
+      goalRuns.set(sessionId, refreshed);
+      emit();
+      return { status: "continue", reason: refreshed.lastEvaluatorReason };
+    }
     if (!refreshed.budgetWrapupSent) {
       refreshed.budgetWrapupSent = true;
       refreshed.lastEvaluatorReason = "Budget threshold reached — requesting final handoff.";
@@ -535,12 +545,16 @@ export function evaluateGoalCondition(
       && ((assistant.toolCalls?.length ?? 0) === 0 || repeatedSnippet);
     if (lowOutput) {
       refreshed.noProgressTurns += 1;
-      if (refreshed.noProgressTurns >= refreshed.limits.noProgressTurnsBeforePause) {
+      // Automatic mode never auto-pauses (there is no user to run /goal resume) —
+      // it keeps going with a stronger nudge instead.
+      if (refreshed.noProgressTurns >= refreshed.limits.noProgressTurnsBeforePause && agentMode !== "automatic") {
         const reason = `Paused after ${refreshed.noProgressTurns} low-output turn(s) (${outputTokens} completion tokens). Run /goal resume to continue.`;
         pauseGoalRun(sessionId, reason);
         return { status: "paused", reason };
       }
-      refreshed.lastEvaluatorReason = `Low-output turn ${refreshed.noProgressTurns}/${refreshed.limits.noProgressTurnsBeforePause} — monitoring.`;
+      refreshed.lastEvaluatorReason = agentMode === "automatic"
+        ? `Low-output turn ${refreshed.noProgressTurns} — ${AUTOMATIC_NO_STOP_NUDGE}`
+        : `Low-output turn ${refreshed.noProgressTurns}/${refreshed.limits.noProgressTurnsBeforePause} — monitoring.`;
       monitoring = true;
       goalRuns.set(sessionId, refreshed);
       emit();
@@ -556,9 +570,12 @@ export function evaluateGoalCondition(
     stallSignals.set(stallKey, stallCount);
     if (stallCount >= 2) {
       stallSignals.delete(stallKey);
-      const reason = "Stopped — assistant stalled without verifiable progress.";
-      finishGoalRun(sessionId, "stopped", reason);
-      return { status: "stall", reason };
+      // Automatic mode is never stopped by a stall — clear the counter and push on.
+      if (agentMode !== "automatic") {
+        const reason = "Stopped — assistant stalled without verifiable progress.";
+        finishGoalRun(sessionId, "stopped", reason);
+        return { status: "stall", reason };
+      }
     }
   } else {
     stallSignals.delete(`${sessionId}:stall`);
@@ -680,6 +697,11 @@ export function evaluateGoalRunContinuation(
 /** Nudge injected when Automatic mode overrides a "blocked — needs user" verdict. */
 const AUTOMATIC_UNBLOCK_NUDGE =
   "Automatic mode: no user to unblock you. Choose the most reasonable option from the evidence, record it as an assumption, and continue toward the goal.";
+
+/** Nudge injected when Automatic mode overrides a budget/stall/low-output stop. The
+ *  run is fully autonomous: only task completion or the user's Stop ends it. */
+const AUTOMATIC_NO_STOP_NUDGE =
+  "Automatic mode: budgets are advisory and there is no user to stop you — keep working until the task is genuinely complete. Consolidate steps to stay efficient, verify with tools, and call Goal with status \"completed\" only when the completion condition is fully satisfied.";
 
 const stallSignals = new Map<string, number>();
 

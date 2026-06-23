@@ -14,6 +14,8 @@ import { AiAutomaticChecklist } from "./ai-chat/AiAutomaticChecklist";
 import { buildContextDropSummary } from "../lib/aiChatContextReport";
 import { aiChatErrorFromMessage, classifyAiChatError, type AiChatErrorPresentation } from "../lib/aiChatErrors";
 import { clearAiRetryNotice, setAiRetryNotice } from "../lib/aiRetryNotice";
+import { automaticRetryReason, nextAutomaticRetry, resetAutomaticRetry } from "../lib/aiAutomaticRetry";
+import { isAutomaticSocialOnlyMessage } from "../lib/aiAutomaticSocialMessage";
 
 import { AiChatSlashMenu } from "./ai-chat/AiChatSlashMenu";
 import { AiChatMentionMenu } from "./ai-chat/AiChatMentionMenu";
@@ -94,6 +96,8 @@ import { applyMentionSelection, mentionMenuVisible, parseMentionQuery, searchMen
 import { buildPlanHandoffUserMessage, extractPlanHandoffPayload } from "../lib/aiChatPlanHandoff";
 import { clearPendingPlan, getPendingPlanForSession, getPendingPlansSnapshot, subscribePendingPlans } from "../lib/aiPendingPlan";
 import { getPendingQuestionForSession, getPendingQuestionsSnapshot, settlePendingQuestion, subscribePendingQuestions } from "../lib/aiPendingQuestion";
+import { buildQueuedMessagePayload, dequeueFirstForSession, enqueueChatMessage, removeQueuedMessage, updateQueuedMessage, useAllQueuedMessages, type QueuedMessage } from "../lib/aiChatQueue";
+import { AiChatQueuedMessages } from "./ai-chat/AiChatQueuedMessages";
 import { readEditorDocumentAttachment, readSelectionAttachment } from "../lib/aiChatDocumentAttachment";
 import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
 import { runNativeChatTurn } from "../lib/aiNativeTurn";
@@ -165,10 +169,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const updateAiChatMessage = useLuxStore((state) => state.updateAiChatMessage);
   const openDocuments = useLuxStore((state) => state.openDocuments);
   const setAiChatOpen = useLuxStore((state) => state.setAiChatOpen);
-  const terminal = useLuxStore((state) => state.terminal);
-  const terminalSessions = useLuxStore((state) => state.terminalSessions);
-  const activeTerminalId = useLuxStore((state) => state.activeTerminalId);
-  const terminalOutputBuffers = useLuxStore((state) => state.terminalOutputBuffers);
+  // Terminal state is NOT subscribed here: `terminalOutputBuffers` changes on
+  // every PTY chunk, which would re-render this ~1800-line panel on every line of
+  // build/install output even while the chat is idle. It is only ever read when
+  // assembling a turn, so the send/restore callbacks read it lazily from
+  // `useLuxStore.getState()` at call time instead.
   const workspace = useLuxStore((state) => state.workspace);
   const fileEntries = useLuxStore((state) => state.fileEntries);
   const openSettingsSection = useLuxStore((state) => state.openSettingsSection);
@@ -276,6 +281,16 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     () => filterSlashCommands(message, t, projectSlashCommands),
     [message, projectSlashCommands, t],
   );
+  // The context-usage memo is recomputed on every streaming token with R1's
+  // coalescing (~30-60/sec), so we derive a cheap signature to skip it when only
+  // the streaming message's content grew (which doesn't change token-line
+  // proportions materially). Two writes to the same split produce the identical
+  // signature — and the full pass still runs on more significant history shape
+  // changes (like a fresh message or tool call).
+  const contextUsageKey = messages.length
+    + ":" + (messages[messages.length - 1]?.id ?? "")
+    + ":" + (messages[messages.length - 1]?.segments?.length ?? 0)
+    + ":" + (messages[messages.length - 1]?.toolCalls?.length ?? 0);
   const contextUsage = useMemo(() => buildAiChatContextUsageSummary({
     pinnedEditorPaths,
     aiIndexStatus: aiIndex.status,
@@ -290,7 +305,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     t,
     hasGlobalInstructions: aiPreferences.globalInstructions.trim().length > 0,
     hasProjectInstructions: projectInstructions.trim().length > 0,
-  }), [aiIndex.status, aiPreferences, attachments, message, messages, pinnedEditorPaths, runtimeInstructionText, selectedAgent, selectedModel, t, projectInstructions]);
+  }), [aiIndex.status, aiPreferences, attachments, contextUsageKey, message.length, pinnedEditorPaths, runtimeInstructionText, selectedAgent, selectedModel, t, projectInstructions]);
 
   useEffect(() => {
     loadChatCheckpointStore();
@@ -411,9 +426,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const resizeComposerTextarea = useCallback((target?: HTMLTextAreaElement | null) => {
     const textarea = target ?? textareaRef.current;
     if (!textarea) return;
-    const maxHeight = 132;
+    const maxHeight = 160;
     textarea.style.height = "auto";
-    const nextHeight = Math.min(maxHeight, Math.max(24, textarea.scrollHeight));
+    const nextHeight = Math.min(maxHeight, Math.max(34, textarea.scrollHeight));
     textarea.style.height = `${nextHeight}px`;
     textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
   }, []);
@@ -620,6 +635,8 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       goalContinuationTimersRef.current.delete(sessionId);
     }
     abortAiChatTurn(sessionId);
+    resetAutomaticRetry(sessionId);
+    clearAiRetryNotice(sessionId);
     stopGoalRun(sessionId);
     setAiChatSessionStatus(sessionId, "idle");
     setSendError(null);
@@ -653,6 +670,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       /** Force a turn checkpoint even on an override send (edit-resend): without it the
        *  re-sent user message has no checkpoint and stops being editable. */
       checkpoint?: boolean;
+      /** Send this text to the MODEL instead of the displayed message — lets a staged
+       *  "recommendation" carry its fold-in framing to the model while the chat bubble
+       *  shows only the clean text the user typed. */
+      modelMessageOverride?: string;
     },
   ) => {
     const isInternalSend = options?.internalSend === true;
@@ -833,6 +854,30 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
     if (sendBlocked && !options?.force && !options?.goalContinuation) return;
 
+    // Automatic mode = full autonomy: a real task should keep working across turns
+    // until the completion check passes, not stop after a single turn. Start a goal
+    // run keyed on the user's message so the existing continuation loop drives it.
+    // Skip greetings/small-talk and internal continuation/retry sends (which carry
+    // their own orchestration), and require provider/model/workspace to be ready.
+    if (
+      !isInternalSend
+      && !options?.goalOrchestration
+      && !options?.goalContinuation
+      && nextMessage
+      && !getActiveGoalRun(sessionId)
+      && !isAutomaticSocialOnlyMessage(nextMessage)
+      && selectedProvider
+      && selectedModel
+      && workspace
+      && useLuxStore.getState().aiPreferences.agentMode === "automatic"
+    ) {
+      const runPrefs = useLuxStore.getState().aiPreferences;
+      startGoalRun(sessionId, nextMessage, {
+        agentMode: runPrefs.agentMode,
+        toolRoundLimit: runPrefs.toolRoundLimit,
+      });
+    }
+
     const abortController = new AbortController();
     let workingHistory = overrideHistory ?? useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId)?.messages ?? [];
     const sessionSnapshot = useLuxStore.getState().aiChatSessions.find((session) => session.id === sessionId);
@@ -877,8 +922,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       ?? (options?.goalContinuation ? "continuation" : undefined);
     const isGoalOrchestration = orchestrationKind != null;
     const displayMessage = isGoalOrchestration ? "" : nextMessage;
-    const modelMessage = nextMessage;
+    const modelMessage = options?.modelMessageOverride ?? nextMessage;
     const runtimePreferences = useLuxStore.getState().aiPreferences;
+    // Read terminal context live at send time (it is intentionally not subscribed
+    // at the top of the component — see the note by the other store selectors).
+    const { terminal, terminalOutputBuffers, terminalSessions, activeTerminalId } = useLuxStore.getState();
     const currentAttachments = overrideMessage && !options?.useComposerAttachments ? [] : attachments;
     const messageAttachments = isGoalOrchestration ? [] : await buildMessageDisplayAttachments(currentAttachments);
     const userMessageId = crypto.randomUUID();
@@ -959,6 +1007,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     setAiChatSessionStatus(sessionId, "thinking");
 
     let completedAssistantMessage: AiChatMessage | undefined;
+    // Captured in catch so the finally block can decide whether Automatic mode
+    // should retry (and with what reason) instead of stopping the run.
+    let lastTurnError: AiChatErrorPresentation | null = null;
     try {
       const attachmentOptions = {
         includeVisionImage: aiPreferences.includeImages,
@@ -1027,6 +1078,18 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           if (!isActiveTurn()) return;
           setAiChatSessionStatus(sessionId, statusToSessionStatus(status));
         },
+        onUserMessageInjected: (text) => {
+          if (!isActiveTurn()) return;
+          // The user's mid-work message was folded into the running turn (Rust
+          // appended it between rounds). Render it as a user bubble in order so the
+          // transcript shows the steer the next answer responds to.
+          appendAiChatMessage(sessionId, {
+            id: crypto.randomUUID(),
+            role: "user",
+            content: text,
+            timestamp: Date.now(),
+          });
+        },
         onRetryNotice: (notice) => {
           if (!isActiveTurn()) return;
           if (notice) setAiRetryNotice(sessionId, notice);
@@ -1051,6 +1114,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       }
       if (!isActiveTurn()) return;
       const errorPresentation = classifyAiChatError(error, t);
+      lastTurnError = errorPresentation;
       const errorMessage = errorPresentation.message;
       const assistantError: AiChatMessage = {
         id: crypto.randomUUID(),
@@ -1071,13 +1135,72 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         goalContinuationTimersRef.current.delete(sessionId);
       }
       if (abortController.signal.aborted) {
+        // User pressed Stop — the only thing that ends Automatic's retry loop.
+        resetAutomaticRetry(sessionId);
         stopGoalRun(sessionId);
       } else {
         const sessionAfterTurn = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === sessionId);
         const turnFailed = sessionAfterTurn?.status === "error";
-        if (turnFailed) {
+        const automatic = useLuxStore.getState().aiPreferences.agentMode === "automatic";
+        if (turnFailed && automatic && lastTurnError) {
+          // Automatic mode never gives up: keep retrying the failed turn with
+          // escalating backoff until it succeeds or the user presses Stop. The goal
+          // run is NOT stopped. Keep the session in a busy state during the backoff
+          // so the Stop button stays available, and drop the scary error bubble.
+          const { attempt, delayMs } = nextAutomaticRetry(sessionId);
+          const errored = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === sessionId);
+          if (errored) {
+            const trimmed = stripTrailingErrorBubble(errored.messages, errored.lastError);
+            if (trimmed !== errored.messages) replaceAiChatMessages(sessionId, trimmed);
+          }
+          setAiChatSessionStatus(sessionId, "thinking");
+          if (useLuxStore.getState().activeAiChatSessionId === sessionId) setSendError(null);
+          setAiRetryNotice(sessionId, {
+            attempt,
+            maxAttempts: attempt,
+            reason: automaticRetryReason(lastTurnError.kind),
+            detail: lastTurnError.detail,
+            delayMs,
+          });
+          const retrySessionId = sessionId;
+          const handle = window.setTimeout(() => {
+            if (goalContinuationTimersRef.current.get(retrySessionId) !== handle) return;
+            goalContinuationTimersRef.current.delete(retrySessionId);
+            // Skip if another turn is already running, the session went away, or the
+            // user switched out of Automatic mid-backoff.
+            if (getAiChatTurnRuntimeSnapshot().sendingSessionId === retrySessionId) return;
+            if (useLuxStore.getState().aiPreferences.agentMode !== "automatic") return;
+            const live = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === retrySessionId);
+            if (!live || live.closedAt) return;
+            if (getActiveGoalRun(retrySessionId)) {
+              void handleSendRef.current(
+                buildGoalContinuationDirective(retrySessionId),
+                undefined,
+                { skipGoalSlash: true, goalOrchestration: "continuation", sessionId: retrySessionId, internalSend: true, force: true },
+              );
+              return;
+            }
+            // No goal run (e.g. a social turn): resume the failed turn directly,
+            // mirroring the manual retry — continue from preserved work, else replay.
+            const tail = live.messages[live.messages.length - 1];
+            if (tail?.role === "assistant" && messageHasAssistantWork(tail)) {
+              void handleSendRef.current(t("aiChat.retry.continue"), live.messages, { force: true, internalSend: true, sessionId: retrySessionId });
+              return;
+            }
+            const lastUserIndex = findLastUserMessageIndex(live.messages);
+            if (lastUserIndex >= 0) {
+              const draft = live.messages[lastUserIndex].content ?? "";
+              if (!draft.trim()) return;
+              const nextHistory = live.messages.slice(0, lastUserIndex);
+              replaceAiChatMessages(retrySessionId, nextHistory);
+              void handleSendRef.current(draft, nextHistory, { force: true, internalSend: true, sessionId: retrySessionId });
+            }
+          }, delayMs);
+          goalContinuationTimersRef.current.set(retrySessionId, handle);
+        } else if (turnFailed) {
           stopGoalRun(sessionId);
         } else {
+          resetAutomaticRetry(sessionId);
           const historyAfterTurn = sessionAfterTurn?.messages ?? [];
           const assistantTail = completedAssistantMessage ?? lastAssistantMessage(historyAfterTurn);
           recordGoalRunTurnUsage(sessionId, assistantTail?.turnUsage, assistantTail);
@@ -1101,6 +1224,25 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
               if (!live || isAiChatSessionBusyStatus(live.status) || live.status === "error") return;
               if (getAiChatTurnRuntimeSnapshot().sendingSessionId === continuationSessionId) return;
               if (!getActiveGoalRun(continuationSessionId)) return;
+              // Seamless mid-work injection: if the user staged a message while the
+              // agent was running, send it at THIS inter-turn gap instead of the
+              // silent goal-continuation directive — so a recommendation lands right
+              // after the current request, not after the whole run. The goal run is
+              // not stopped: when this injected turn finishes, the finally block
+              // re-evaluates and schedules the next continuation as usual.
+              const pendingStaged = dequeueFirstForSession(continuationSessionId);
+              if (pendingStaged) {
+                void handleSendRef.current(
+                  pendingStaged.text,
+                  undefined,
+                  {
+                    force: true,
+                    sessionId: continuationSessionId,
+                    modelMessageOverride: buildQueuedMessagePayload(pendingStaged),
+                  },
+                );
+                return;
+              }
               void handleSendRef.current(
                 buildGoalContinuationDirective(continuationSessionId, { budgetWrapup: continuation.budgetWrapup }),
                 undefined,
@@ -1147,7 +1289,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         }
       }
     }
-  }, [activeChatSession?.id, activeDocument, activeSessionBusy, activeSessionClosed, activeTerminalId, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, projectInstructions, replaceAiChatMessages, requestToolApproval, resizeComposerTextarea, runCompaction, selectedAgent, selectedModel, selectedProvider, setAiChatSessionContextBudgetReport, setAiChatSessionStatus, t, terminal, terminalOutputBuffers, terminalSessions, updateAiChatMessage, updateMessage, workspace]);
+  }, [activeChatSession?.id, activeDocument, activeSessionBusy, activeSessionClosed, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, projectInstructions, replaceAiChatMessages, requestToolApproval, resizeComposerTextarea, runCompaction, selectedAgent, selectedModel, selectedProvider, setAiChatSessionContextBudgetReport, setAiChatSessionStatus, t, updateAiChatMessage, updateMessage, workspace]);
 
   // Keep the freshest handleSend instance reachable from the deferred goal-continuation
   // timer so a delayed continuation turn picks up current provider/model/openDocuments/
@@ -1157,6 +1299,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
   const buildRestoreInput = useCallback(() => {
     if (!workspace || !selectedProvider || !selectedModel) return null;
+    const { terminal, terminalOutputBuffers, terminalSessions } = useLuxStore.getState();
     return buildCheckpointSendInput({
       activeDocument,
       aiPreferences,
@@ -1169,7 +1312,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       terminalSessions,
       workspace,
     });
-  }, [activeDocument, aiPreferences, locale, openDocuments, selectedModel, selectedProvider, terminal, terminalOutputBuffers, terminalSessions, workspace]);
+  }, [activeDocument, aiPreferences, locale, openDocuments, selectedModel, selectedProvider, workspace]);
 
   const showRestoreSuccess = useCallback((result: { restoredFileCount: number; removedTurnCheckpoints: number }) => {
     setRestoreNotice(t("aiChat.turnCheckpoint.restored", {
@@ -1398,8 +1541,76 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     }
     if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
+    // While the agent is busy, Enter stages the message into the per-session queue;
+    // it drains automatically when the current turn finishes (see the drain effect).
+    // Ctrl/Cmd+Enter also queues — both run verbatim as the next turn.
+    if (activeSessionBusy && activeAiChatSessionId && message.trim()) {
+      enqueueChatMessage(activeAiChatSessionId, message, "queued");
+      updateMessage("");
+      return;
+    }
     void handleSend();
-  }, [handleMentionSelect, handleSend, handleSlashSelect, mentionActiveIndex, mentionCandidates, mentionMenuOpen, mentionNavigated, slashActiveIndex, slashCommands, slashMenuOpen]);
+  }, [activeSessionBusy, activeAiChatSessionId, message, updateMessage, handleMentionSelect, handleSend, handleSlashSelect, mentionActiveIndex, mentionCandidates, mentionMenuOpen, mentionNavigated, slashActiveIndex, slashCommands, slashMenuOpen]);
+
+  // Drain each session's queue when THAT session's turn finishes — tracked per
+  // session id, not just the active one, so a queued message never strands when the
+  // user switches away from a busy chat (and switching tabs never falsely drains).
+  // One message per turn-completion edge: each queued item runs as its own follow-up
+  // turn (verbatim for "queued", wrapped for "recommendation"); the next drains when
+  // that turn ends, so a backlog processes sequentially in order.
+  const prevSessionBusyRef = useRef<Record<string, boolean>>({});
+  useEffect(() => {
+    const prev = prevSessionBusyRef.current;
+    const next: Record<string, boolean> = {};
+    for (const session of aiChatSessions) {
+      const busy = sendingSessionId === session.id || isAiChatSessionBusyStatus(session.status);
+      next[session.id] = busy;
+      if (prev[session.id] && !busy && !session.closedAt) {
+        const queued = dequeueFirstForSession(session.id);
+        if (queued) {
+          void handleSend(queued.text, undefined, {
+            force: true,
+            sessionId: session.id,
+            modelMessageOverride: buildQueuedMessagePayload(queued),
+          });
+        }
+      }
+    }
+    prevSessionBusyRef.current = next;
+  }, [aiChatSessions, sendingSessionId, handleSend]);
+
+  // Seamless mid-work injection: a "recommendation" staged while a turn is RUNNING is
+  // pushed straight into the live Rust turn loop (ai_inject_message), which folds it in
+  // as a user message at the next round boundary — so it lands during the work, in the
+  // gap between the agent's requests, not after the whole turn ends. "Queued" entries
+  // are left for the end-of-turn drain (they run verbatim as their own next turn).
+  const allQueuedMessages = useAllQueuedMessages();
+  const injectingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    for (const entry of allQueuedMessages) {
+      if (entry.mode !== "recommendation") continue;
+      if (injectingRef.current.has(entry.id)) continue;
+      const session = aiChatSessions.find((candidate) => candidate.id === entry.sessionId);
+      if (!session || session.closedAt) continue;
+      const running = sendingSessionId === entry.sessionId || isAiChatSessionBusyStatus(session.status);
+      if (!running) continue;
+      // Guard against double-inject across re-renders; remove from the queue only
+      // AFTER the inject is accepted so a failed call re-stages instead of vanishing.
+      injectingRef.current.add(entry.id);
+      void luxCommands.aiInjectMessage(entry.sessionId, entry.text)
+        .then(() => {
+          removeQueuedMessage(entry.id);
+          injectingRef.current.delete(entry.id);
+        })
+        .catch(() => {
+          // Inject failed — leave it queued (its mode flips to "queued" so the
+          // end-of-turn drain sends it as a follow-up turn instead of losing it).
+          updateQueuedMessage(entry.id, { mode: "queued" });
+          injectingRef.current.delete(entry.id);
+        });
+    }
+  }, [allQueuedMessages, aiChatSessions, sendingSessionId]);
 
   // In the dedicated Agent workspace the left rail already owns New chat,
   // History and the browser-preview button — so the in-chat header would only
@@ -1441,8 +1652,18 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     </div>
   );
 
+  const handleQueuedSendNow = useCallback((entry: QueuedMessage) => {
+    removeQueuedMessage(entry.id);
+    void handleSend(entry.text, undefined, {
+      force: true,
+      modelMessageOverride: buildQueuedMessagePayload(entry),
+    });
+  }, [handleSend]);
+
   const renderComposerContent = () => (
-    <AiChatComposer
+    <>
+      <AiChatQueuedMessages sessionId={activeAiChatSessionId} onSendNow={handleQueuedSendNow} t={t} />
+      <AiChatComposer
       activeSessionSending={showStopGeneration}
       disabled={activeSessionClosed}
       agentOptions={agentOptions}
@@ -1497,6 +1718,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       onContextCompact={() => void runCompaction(true)}
       onOpenSettings={() => openSettingsSection("ai-runtime")}
     />
+    </>
   );
 
   return (

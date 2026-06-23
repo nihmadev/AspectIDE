@@ -95,6 +95,8 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
     const cleanup = () => {
       unlisten?.();
       if (abortListener) input.abortSignal.removeEventListener("abort", abortListener);
+      // Cancel any coalesced streaming frame so no flush lands after settle.
+      timeline.dispose();
     };
 
     const settleResolve = (message: AiChatMessage) => {
@@ -144,6 +146,12 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             input.onRetryNotice?.(null);
           }
           input.onStatusChange?.(mapPhase(event.phase));
+          break;
+        case "userMessageInjected":
+          // A message the user staged mid-work was folded into the running turn at a
+          // round boundary. Render it as a user bubble (in order) so the transcript
+          // shows the steer that the next answer responds to.
+          input.onUserMessageInjected?.(event.text);
           break;
         case "streamDelta":
           // Accumulate this round's text/reasoning and hand the full current
@@ -252,6 +260,11 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             title: event.title,
             summary: event.summary,
             steps: event.steps,
+            alternatives: event.alternatives ?? [],
+            risks: event.risks ?? [],
+            verification: event.verification ?? [],
+            quality: event.quality ?? 1,
+            coaching: event.coaching ?? [],
             autoStart: event.autoStart,
           });
           break;
@@ -372,6 +385,10 @@ function buildRunTurnInput(input: AiChatSendInput, turnId: string, messageId: st
     agentMode: input.preferences.agentMode,
     toolRoundLimit: input.preferences.toolRoundLimit,
     toolApprovalMode: input.preferences.toolApprovalMode,
+    // User-configured deny/ask/allow permission rules must reach the native loop:
+    // they are the authoritative gate (deny is a hard block even in full-access /
+    // automatic). Without this the rules only ran on the dev-only TS path.
+    toolPermissionRules: input.preferences.toolPermissionRules,
     // Reasoning effort the TS path attaches via reasoningPayload() must also reach
     // the native Rust turn-loop, otherwise desktop requests silently drop the
     // effort on reasoning models. Empty object when the model has no effort levels.

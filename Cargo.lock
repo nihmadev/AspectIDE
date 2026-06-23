@@ -3110,8 +3110,10 @@ version = "0.1.0"
 dependencies = [
  "ignore",
  "lux-core",
+ "postcard",
  "rayon",
  "rustc-hash",
+ "serde",
  "streaming-iterator",
  "thiserror 2.0.18",
  "tree-sitter",
@@ -3147,7 +3149,7 @@ dependencies = [
 
 [[package]]
 name = "lux-desktop"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3170,6 +3172,7 @@ dependencies = [
  "lux-search",
  "lux-settings",
  "lux-skills",
+ "lux-ssh",
  "lux-terminal",
  "lux-workspace",
  "notify",
@@ -3323,10 +3326,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lux-ssh"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "uuid",
+]
+
+[[package]]
 name = "lux-terminal"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dunce",
  "lux-core",
  "portable-pty",
  "uuid",

@@ -1,6 +1,6 @@
-import { ChevronDown, ChevronUp, Filter, ListFilter, Plus, TerminalSquare, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronUp, Eraser, Filter, ListFilter, Plus, TerminalSquare, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { displayPath } from "../lib/fileTree";
 import type { MessageKey } from "../lib/i18n";
@@ -49,42 +49,77 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
   const [outputFilter, setOutputFilter] = useState("");
   const [outputChannel, setOutputChannel] = useState("All Channels");
   const [outputEntries, setOutputEntries] = useState<OutputEntry[]>([]);
-  const [terminalClearToken, setTerminalClearToken] = useState(0);
   const [terminalError, setTerminalError] = useState<string | null>(null);
   const [problemOpenError, setProblemOpenError] = useState<string | null>(null);
-  const [terminalMounted, setTerminalMounted] = useState(activeTab === "terminal");
+  // Per-session clear tokens so each xterm clears independently
+  const [terminalClearTokens, setTerminalClearTokens] = useState<Record<string, number>>({});
+  // Track which session xterms are mounted (keep them alive once created so
+  // session switching doesn't replay raw bytes into a fresh terminal, which
+  // garbles ANSI state).
+  const [mountedSessionIds, setMountedSessionIds] = useState<Set<string>>(new Set());
 
+  // Keep all active sessions mounted
   useEffect(() => {
-    if (activeTab === "terminal") setTerminalMounted(true);
-  }, [activeTab]);
+    setMountedSessionIds((prev) => {
+      const next = new Set(prev);
+      for (const session of terminalSessions) next.add(session.id);
+      return next;
+    });
+  }, [terminalSessions]);
 
   const terminalMutation = useMutation({
     mutationFn: async () => {
       if (!isTauriRuntime()) return null;
-      const created = await luxCommands.terminalCreate();
+      const created = await luxCommands.terminalCreate(undefined, undefined, undefined, undefined);
       return created;
     },
     onSuccess: (session) => {
       setTerminalError(null);
-      if (session) upsertTerminalSession(session, true);
+      if (session) {
+        upsertTerminalSession(session, true);
+        setMountedSessionIds((prev) => new Set(prev).add(session.id));
+      }
     },
     onError: (error) => setTerminalError(readErrorMessage(error)),
   });
 
-  const clearActiveTerminal = () => {
-    if (activeTerminalId) clearTerminalOutput(activeTerminalId);
-    setTerminalClearToken((value) => value + 1);
-  };
+  // Auto-spawn the first terminal when the user opens the Terminal tab and there
+  // are no sessions yet (keeps the "open terminal → shell is ready" UX). Guarded
+  // by a ref so it fires at most once per "empty" state; resets when sessions exist
+  // so closing every terminal and reopening the tab spawns a fresh one.
+  const autoSpawnedRef = useRef(false);
+  const spawnTerminal = terminalMutation.mutate;
+  const spawnPending = terminalMutation.isPending;
+  useEffect(() => {
+    if (activeTab !== "terminal") return;
+    if (terminalSessions.length > 0) { autoSpawnedRef.current = false; return; }
+    if (autoSpawnedRef.current || spawnPending) return;
+    if (!isTauriRuntime()) return;
+    autoSpawnedRef.current = true;
+    spawnTerminal();
+  }, [activeTab, terminalSessions.length, spawnTerminal, spawnPending]);
 
-  const closeActiveTerminal = () => {
+  const clearActiveTerminal = useCallback(() => {
+    if (activeTerminalId) {
+      clearTerminalOutput(activeTerminalId);
+      setTerminalClearTokens((prev) => ({ ...prev, [activeTerminalId]: (prev[activeTerminalId] ?? 0) + 1 }));
+    }
+  }, [activeTerminalId, clearTerminalOutput]);
+
+  const closeActiveTerminal = useCallback(() => {
     if (!terminal) return;
     const terminalId = terminal.id;
+    setMountedSessionIds((prev) => {
+      const next = new Set(prev);
+      next.delete(terminalId);
+      return next;
+    });
     if (isTauriRuntime()) {
       void luxCommands.terminalClose(terminalId).catch(() => undefined).finally(() => closeTerminalSession(terminalId));
     } else {
       closeTerminalSession(terminalId);
     }
-  };
+  }, [terminal, closeTerminalSession]);
 
   const openProblemMutation = useMutation({
     mutationFn: async (problem: WorkspaceDiagnostic) => ({ problem, document: await luxCommands.editorOpenFile(problem.path) }),
@@ -151,9 +186,8 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
                 <option key={session.id} value={session.id}>{terminalSessionLabel(session, index)}</option>
               ))}
             </select>
-            <PanelIconButton label={t("panel.terminal.new")} onClick={() => terminalMutation.mutate()} icon={<Plus size={15} />} disabled={terminalMutation.isPending} />
-            <PanelIconButton label={t("panel.terminal.clear")} onClick={clearActiveTerminal} icon={<Trash2 size={14} />} />
-            <PanelIconButton label={t("panel.terminal.closeActive")} onClick={closeActiveTerminal} icon={<X size={15} />} disabled={!terminal} />
+            <PanelIconButton label={t("panel.terminal.new")} onClick={() => terminalMutation.mutate()} icon={<Plus size={15} />} />            <PanelIconButton label={t("panel.terminal.clear")} onClick={clearActiveTerminal} icon={<Eraser size={15} />} disabled={!terminal} />
+            <PanelIconButton label={t("panel.terminal.closeActive")} onClick={closeActiveTerminal} icon={<Trash2 size={15} />} disabled={!terminal} />
           </>
         )}
         <PanelIconButton
@@ -170,11 +204,13 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
         openProblem={(problem) => openProblemMutation.mutate(problem)}
         problemOpenError={problemOpenError}
         outputEntries={outputEntries}
-        terminal={terminal}
-        terminalBufferText={activeTerminalId ? terminalOutputBuffers[activeTerminalId]?.text ?? "" : ""}
-        terminalClearToken={terminalClearToken}
+        activeTerminalId={activeTerminalId}
+        mountedSessionIds={mountedSessionIds}
+        terminalSessions={terminalSessions}
+        terminalOutputBuffers={terminalOutputBuffers}
+        terminalClearTokens={terminalClearTokens}
         terminalError={terminalError}
-        terminalMounted={terminalMounted}
+        t={t}
       />
     </section>
   );
@@ -238,11 +274,13 @@ function PanelContent({
   openProblem,
   problemOpenError,
   outputEntries,
-  terminal,
-  terminalBufferText,
-  terminalClearToken,
+  activeTerminalId,
+  mountedSessionIds,
+  terminalSessions,
+  terminalOutputBuffers,
+  terminalClearTokens,
   terminalError,
-  terminalMounted,
+  t,
 }: {
   activeTab: BottomPanelTab;
   filteredOutput: OutputEntry[];
@@ -250,11 +288,13 @@ function PanelContent({
   openProblem: (problem: WorkspaceDiagnostic) => void;
   problemOpenError: string | null;
   outputEntries: OutputEntry[];
-  terminal: TerminalSessionInfo | null;
-  terminalBufferText: string;
-  terminalClearToken: number;
+  activeTerminalId: string | null;
+  mountedSessionIds: Set<string>;
+  terminalSessions: TerminalSessionInfo[];
+  terminalOutputBuffers: Record<string, { text: string }>;
+  terminalClearTokens: Record<string, number>;
   terminalError: string | null;
-  terminalMounted: boolean;
+  t: TranslateFn;
 }) {
   return (
     <div className="bottom-panel-pages">
@@ -268,11 +308,84 @@ function PanelContent({
           <OutputPanel entries={filteredOutput} hasAnyEntries={outputEntries.length > 0} />
         </div>
       )}
-      {(activeTab === "terminal" || terminal || terminalMounted) && (
+      {/* Keep the terminal page mounted whenever sessions exist (hidden when another
+          tab is active) so switching tabs never disposes the xterms — disposing and
+          re-creating them would replay raw PTY bytes and garble the display. */}
+      {(activeTab === "terminal" || terminalSessions.length > 0) && (
         <div className="bottom-panel-page" aria-hidden={activeTab !== "terminal"} data-active={activeTab === "terminal"}>
-          <TerminalPanel bufferText={terminalBufferText} clearToken={terminalClearToken} error={terminalError} session={terminal} />
+          <TerminalPanel
+            activeTerminalId={activeTerminalId}
+            mountedSessionIds={mountedSessionIds}
+            terminalSessions={terminalSessions}
+            terminalOutputBuffers={terminalOutputBuffers}
+            terminalClearTokens={terminalClearTokens}
+            terminalError={terminalError}
+            t={t}
+          />
         </div>
       )}
+    </div>
+  );
+}
+
+function TerminalPanel({
+  activeTerminalId,
+  mountedSessionIds,
+  terminalSessions,
+  terminalOutputBuffers,
+  terminalClearTokens,
+  terminalError,
+  t,
+}: {
+  activeTerminalId: string | null;
+  mountedSessionIds: Set<string>;
+  terminalSessions: TerminalSessionInfo[];
+  terminalOutputBuffers: Record<string, { text: string }>;
+  terminalClearTokens: Record<string, number>;
+  terminalError: string | null;
+  t: TranslateFn;
+}) {
+  if (terminalSessions.length === 0) {
+    return (
+      <div className="bottom-panel-content empty-bottom-state">
+        <span>{t("panel.terminal.noSessions")}</span>
+        <span className="terminal-hint">{t("panel.terminal.pressPlusHint")}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="terminal-surface">
+      {terminalError ? <div className="terminal-error">{terminalError}</div> : null}
+      <div className="terminal-sessions-stack">
+        {terminalSessions.map((session) => {
+          // Only render xterm for sessions that have ever been mounted (keep them
+          // alive so ANSI state is preserved on switch). Unmounted sessions get a
+          // placeholder.
+          const mounted = mountedSessionIds.has(session.id);
+          const active = session.id === activeTerminalId;
+          return (
+            <div
+              key={session.id}
+              className="terminal-session-slot"
+              data-active={active || undefined}
+              aria-hidden={!active}
+            >
+              {mounted ? (
+                <XtermTerminal
+                  bufferText={terminalOutputBuffers[session.id]?.text ?? ""}
+                  clearToken={terminalClearTokens[session.id] ?? 0}
+                  session={session}
+                />
+              ) : (
+                <div className="terminal-session-placeholder">
+                  <span>{t("panel.terminal.notMounted")}</span>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -320,15 +433,6 @@ function OutputPanel({ entries, hasAnyEntries }: { entries: OutputEntry[]; hasAn
           <code>{entry.text}</code>
         </div>
       ))}
-    </div>
-  );
-}
-
-function TerminalPanel({ bufferText, clearToken, error, session }: { bufferText: string; clearToken: number; error: string | null; session: TerminalSessionInfo | null }) {
-  return (
-    <div className="terminal-surface">
-      {error ? <div className="terminal-error">{error}</div> : null}
-      <XtermTerminal bufferText={bufferText} clearToken={clearToken} session={session} />
     </div>
   );
 }

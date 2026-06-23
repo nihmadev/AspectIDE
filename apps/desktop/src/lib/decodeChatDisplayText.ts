@@ -1,1 +1,1 @@
-export { coerceChatMessageText, decodeChatDisplayText, stripGoalOrchestrationMarkers } from "./aiChatDisplayText";
+export { coerceChatMessageText, decodeChatDisplayText, stripGoalOrchestrationMarkers, trimChatMessageEnd } from "./aiChatDisplayText";

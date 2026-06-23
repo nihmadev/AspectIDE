@@ -1,4 +1,4 @@
-import type { AiTurnPlanStep } from "./tauri";
+import type { AiPlanDecision, AiTurnPlanStep } from "./tauri";
 
 /**
  * Ephemeral store for a proposed `PresentPlan` awaiting the user's "Start".
@@ -16,6 +16,16 @@ export type PendingPlan = {
   title: string;
   summary: string;
   steps: AiTurnPlanStep[];
+  /** Key design decisions: chosen approach + tradeoff vs the alternative(s). */
+  alternatives: AiPlanDecision[];
+  /** Failure modes / hidden assumptions the plan must survive (critique phase). */
+  risks: string[];
+  /** Checks that prove it works + rollback trigger (verification phase). */
+  verification: string[];
+  /** Deterministic 5-phase plan-quality score in [0,1]. */
+  quality: number;
+  /** Concrete coaching nudges for whatever the gate found missing. */
+  coaching: string[];
   /** True when the agent auto-starts execution (Automatic mode) — no Start button. */
   autoStart: boolean;
   createdAt: number;

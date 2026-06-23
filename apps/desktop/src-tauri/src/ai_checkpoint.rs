@@ -56,6 +56,15 @@ fn ws_key(root: &str) -> String {
     ai_semantic::normalize_slashes_pub(root.trim_end_matches('/')).to_lowercase()
 }
 
+/// Drop all in-session checkpoint snapshots for a workspace. Called on workspace
+/// close so a switched-away project's full-text snapshots (which can total tens of
+/// MB) don't linger in memory for the rest of the process lifetime.
+pub fn clear_workspace(root: &str) {
+    if let Ok(mut map) = store().lock() {
+        map.remove(&ws_key(root));
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointSummary {

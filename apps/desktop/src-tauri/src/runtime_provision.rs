@@ -38,6 +38,14 @@ const PYTHON_FTP_BASE: &str = "https://www.python.org/ftp/python";
 /// Pinned embeddable Python — embeddable builds exist only for specific patch
 /// releases; this is a current, widely-available 3.12.x.
 const PYTHON_EMBED_VERSION: &str = "3.12.8";
+/// SHA-256 of `python-{PYTHON_EMBED_VERSION}-embed-amd64.zip`, from python.org's
+/// signed SPDX manifest. Pinned because the embeddable zips have no `.sha256`
+/// sibling; keep in lockstep with `PYTHON_EMBED_VERSION` on every bump.
+const PYTHON_EMBED_SHA256_AMD64: &str =
+    "8d3f33be9eb810f23c102f08475af2854e50484b8e4e06275e937be61ce3d2fb";
+/// SHA-256 of `python-{PYTHON_EMBED_VERSION}-embed-arm64.zip` (same source).
+const PYTHON_EMBED_SHA256_ARM64: &str =
+    "d34db37675973785a2a539cd1c8dde1b6d45665f48c615ef55274b3798bf9fd3";
 const GET_PIP_URL: &str = "https://bootstrap.pypa.io/get-pip.py";
 
 /// Overall guard for a single provisioning run (download + extract + setup).
@@ -481,14 +489,26 @@ async fn provision_node(app: &AppHandle) -> Result<String, String> {
         ("linux", "tar.gz")
     };
     let stem = format!("node-{version}-{os_tag}-{arch}");
-    let url = format!("https://nodejs.org/dist/{version}/{stem}.{ext}");
+    let file_name = format!("{stem}.{ext}");
+    let url = format!("https://nodejs.org/dist/{version}/{file_name}");
+
+    // nodejs.org publishes a signed `SHASUMS256.txt` per release listing every
+    // artifact's SHA-256. Fetch it and pin to the line for *our* exact filename —
+    // tracks the dynamically-resolved LTS without baking in stale hashes.
+    progress(app, "node", 7, "Fetching checksums");
+    let shasums = fetch_text(
+        &client,
+        &format!("https://nodejs.org/dist/{version}/SHASUMS256.txt"),
+    )
+    .await?;
+    let checksum = Integrity::sha256(&shasum_for(&shasums, &file_name)?)?;
 
     let root = runtime_root(app)?;
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|e| e.to_string())?;
     let archive = root.join(format!("node-download.{ext}"));
-    download_to_file(app, "node", &client, &url, &archive, 8, 68).await?;
+    download_to_file(app, "node", &client, &url, &archive, 8, 68, checksum).await?;
 
     progress(app, "node", 70, "Extracting");
     let staging = root.join("node-staging");
@@ -535,6 +555,10 @@ struct GoFile {
     arch: String,
     #[serde(default)]
     kind: String,
+    /// Per-file SHA-256 (lowercase hex) published in the release index. Verified
+    /// against the downloaded archive before extraction.
+    #[serde(default)]
+    sha256: String,
 }
 
 async fn provision_go(app: &AppHandle) -> Result<String, String> {
@@ -575,13 +599,16 @@ async fn provision_go(app: &AppHandle) -> Result<String, String> {
         "tar.gz"
     };
     let url = format!("https://go.dev/dl/{}", file.filename);
+    // go.dev's release index ships a per-file SHA-256 — verify against it directly,
+    // so the pin tracks whatever stable version we resolved (never stale).
+    let checksum = Integrity::sha256(&file.sha256)?;
 
     let root = runtime_root(app)?;
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|e| e.to_string())?;
     let archive = root.join(format!("go-download.{ext}"));
-    download_to_file(app, "go", &client, &url, &archive, 8, 70).await?;
+    download_to_file(app, "go", &client, &url, &archive, 8, 70, checksum).await?;
 
     progress(app, "go", 72, "Extracting");
     let staging = root.join("go-staging");
@@ -627,8 +654,13 @@ async fn provision_rust(app: &AppHandle) -> Result<String, String> {
         (format!("{arch}-unknown-linux-gnu"), "rustup-init")
     };
     let url = format!("{RUSTUP_DIST_BASE}/{triple}/{bin_name}");
+    // rustup publishes a `.sha256` sibling next to every rustup-init binary.
+    // Fetch + enforce it before the installer is ever marked executable or run.
+    progress(app, "rust", 5, "Fetching checksum");
+    let sha_body = fetch_text(&client, &format!("{url}.sha256")).await?;
+    let checksum = Integrity::sha256(&lone_sha256(&sha_body)?)?;
     let installer = root.join(bin_name);
-    download_to_file(app, "rust", &client, &url, &installer, 6, 55).await?;
+    download_to_file(app, "rust", &client, &url, &installer, 6, 55, checksum).await?;
 
     #[cfg(unix)]
     {
@@ -688,11 +720,13 @@ async fn provision_python(app: &AppHandle) -> Result<String, String> {
     if !cfg!(windows) {
         return Err(auto_support(Runtime::Python).1);
     }
-    let arch = if std::env::consts::ARCH == "aarch64" {
-        "arm64"
-    } else {
-        "amd64"
+    // Pin the embeddable archive hash by arch; an unpinned arch fails closed.
+    let (arch, embed_sha) = match std::env::consts::ARCH {
+        "aarch64" => ("arm64", PYTHON_EMBED_SHA256_ARM64),
+        "x86_64" => ("amd64", PYTHON_EMBED_SHA256_AMD64),
+        other => return Err(format!("No pinned embeddable Python for arch {other}")),
     };
+    let checksum = Integrity::sha256(embed_sha)?;
     let client = http_client()?;
     let root = runtime_root(app)?;
     tokio::fs::create_dir_all(&root)
@@ -702,7 +736,7 @@ async fn provision_python(app: &AppHandle) -> Result<String, String> {
     let file = format!("python-{PYTHON_EMBED_VERSION}-embed-{arch}.zip");
     let url = format!("{PYTHON_FTP_BASE}/{PYTHON_EMBED_VERSION}/{file}");
     let archive = root.join("python-download.zip");
-    download_to_file(app, "python", &client, &url, &archive, 8, 60).await?;
+    download_to_file(app, "python", &client, &url, &archive, 8, 60, checksum).await?;
 
     progress(app, "python", 64, "Extracting");
     let dest = python_dir(app)?;
@@ -714,30 +748,62 @@ async fn provision_python(app: &AppHandle) -> Result<String, String> {
     // `import site` line in the `pythonXY._pth` file so pip/installed packages work.
     progress(app, "python", 78, "Enabling pip");
     enable_embeddable_site(&dest).await?;
-    // Bootstrap pip; tolerate failure — python.exe alone already counts as installed.
-    if let Ok(get_pip) = client.get(GET_PIP_URL).send().await {
-        if let Ok(body) = get_pip.bytes().await {
-            let script = dest.join("get-pip.py");
-            if tokio::fs::write(&script, &body).await.is_ok() {
-                if let Some(py) = crate::lsp_install::resolve_in_dir(&dest, "python") {
-                    let _ = run_command_env(
-                        &py,
-                        &[
-                            script.to_string_lossy().to_string(),
-                            "--no-warn-script-location".to_string(),
-                        ],
-                        Some(&dest),
-                        &[],
-                    )
-                    .await;
-                }
-                let _ = tokio::fs::remove_file(&script).await;
-            }
-        }
+    // Bootstrap pip — non-fatal (python.exe alone already counts as installed), but
+    // surface failures instead of silently dropping them so a broken pip is visible.
+    if let Err(why) = bootstrap_pip(&client, &dest).await {
+        tracing::warn!("Python pip bootstrap failed (continuing without pip): {why}");
     }
 
     progress(app, "python", 96, "Verifying");
     finalize_marker(app, Runtime::Python)
+}
+
+/// Fetch and run `get-pip.py` inside the managed embeddable Python so the `ty`
+/// language server's `pip` is available. Errors are returned (not swallowed) so the
+/// caller can log them; pip is optional, so the caller treats this as non-fatal.
+///
+/// `get-pip.py` is a rolling, unversioned bootstrap with no stable published hash,
+/// so a static pin would break on every upstream refresh. It is fetched over HTTPS
+/// from `PyPA` and executed only inside the isolated managed runtime dir.
+async fn bootstrap_pip(client: &reqwest::Client, dest: &Path) -> Result<(), String> {
+    let body = client
+        .get(GET_PIP_URL)
+        .send()
+        .await
+        .map_err(|e| format!("could not reach {GET_PIP_URL}: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("get-pip.py download error: {e}"))?
+        .bytes()
+        .await
+        .map_err(|e| format!("get-pip.py read failed: {e}"))?;
+    if body.is_empty() {
+        return Err("get-pip.py download was empty".to_string());
+    }
+
+    let script = dest.join("get-pip.py");
+    tokio::fs::write(&script, &body)
+        .await
+        .map_err(|e| format!("could not write get-pip.py: {e}"))?;
+    let py = crate::lsp_install::resolve_in_dir(dest, "python")
+        .ok_or("managed python.exe not found for pip bootstrap")?;
+    let result = run_command_env(
+        &py,
+        &[
+            script.to_string_lossy().to_string(),
+            "--no-warn-script-location".to_string(),
+        ],
+        Some(dest),
+        &[],
+    )
+    .await;
+    let _ = tokio::fs::remove_file(&script).await;
+
+    let step = result?;
+    if step.success {
+        Ok(())
+    } else {
+        Err(trim_output(&step.output, "get-pip.py exited with an error"))
+    }
 }
 
 /// Embeddable Python ships a `pythonXY._pth` with `#import site` commented out,
@@ -784,8 +850,55 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Integrity expectation for a download. Every provisioned runtime must declare
+/// one — a managed toolchain is prepended to PATH and (for rustup/get-pip) even
+/// executed, so unverified bytes are never extracted or run.
+enum Integrity {
+    /// Vendor-published SHA-256 (lowercase hex, 64 chars), enforced byte-for-byte.
+    Sha256(String),
+}
+
+impl Integrity {
+    /// Parse + normalize an expected hex digest, rejecting anything that is not a
+    /// well-formed SHA-256 so a malformed/empty pin fails closed (never skips).
+    fn sha256(expected: &str) -> Result<Self, String> {
+        let hex = expected.trim().to_ascii_lowercase();
+        if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "Refusing download: malformed SHA-256 checksum ({} chars)",
+                hex.len()
+            ));
+        }
+        Ok(Self::Sha256(hex))
+    }
+
+    /// Compare the digest of the fully-downloaded bytes against the expectation.
+    fn verify(&self, actual: &[u8; 32]) -> Result<(), String> {
+        let Self::Sha256(expected) = self;
+        let actual_hex = to_hex(actual);
+        // Constant-time-ish: both sides are fixed-width lowercase hex of equal len.
+        if actual_hex == *expected {
+            Ok(())
+        } else {
+            Err(format!(
+                "checksum mismatch — expected SHA-256 {expected}, got {actual_hex}"
+            ))
+        }
+    }
+}
+
 /// Stream a download to `dest`, emitting coarse progress between `from`..`to`
-/// percent based on Content-Length (falls back to an indeterminate label).
+/// percent based on Content-Length (falls back to an indeterminate label), and
+/// verifying its integrity before the bytes are ever exposed for extraction/exec.
+///
+/// The bytes land in a sibling `.part` file and are SHA-256'd inline (single pass,
+/// no extra read). Only after the digest matches `integrity` is the temp atomically
+/// renamed onto `dest`; any failure deletes the temp so a partial/forged download
+/// can never be promoted (defends both the no-integrity gap and partial-promotion).
+// Each argument is a distinct, meaningful input (progress identity, HTTP client,
+// source URL, destination, progress range, expected digest); a wrapper struct would
+// only relocate the same fields without adding clarity.
+#[allow(clippy::too_many_arguments)]
 async fn download_to_file(
     app: &AppHandle,
     id: &str,
@@ -794,9 +907,8 @@ async fn download_to_file(
     dest: &Path,
     from: u8,
     to: u8,
+    integrity: Integrity,
 ) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
     let response = client
         .get(url)
         .send()
@@ -807,15 +919,60 @@ async fn download_to_file(
     let total = response.content_length();
     progress(app, id, from, "Downloading");
 
-    let mut file = tokio::fs::File::create(dest)
+    let part = dest.with_extension("part");
+    // A stale `.part` from a previous aborted run must not be appended to.
+    let _ = tokio::fs::remove_file(&part).await;
+
+    // Hash + write streamed bytes together; bail (and clean up) on any error so we
+    // never leave a half-written temp that a later run might mistake for complete.
+    let result = stream_to_part(app, id, response, &part, total, from, to).await;
+    let digest = match result {
+        Ok(digest) => digest,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(e);
+        }
+    };
+
+    if let Err(why) = integrity.verify(&digest) {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(format!("Refusing to install {url}: {why}"));
+    }
+
+    // Verified — promote atomically into place.
+    let _ = tokio::fs::remove_file(dest).await;
+    tokio::fs::rename(&part, dest).await.map_err(|e| {
+        format!(
+            "Could not finalize verified download {}: {e}",
+            dest.display()
+        )
+    })
+}
+
+/// Stream `response` into `part`, returning the SHA-256 of everything written.
+/// Split out so the caller can guarantee `.part` cleanup on every error path.
+async fn stream_to_part(
+    app: &AppHandle,
+    id: &str,
+    response: reqwest::Response,
+    part: &Path,
+    total: Option<u64>,
+    from: u8,
+    to: u8,
+) -> Result<[u8; 32], String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut file = tokio::fs::File::create(part)
         .await
-        .map_err(|e| format!("Could not create {}: {e}", dest.display()))?;
+        .map_err(|e| format!("Could not create {}: {e}", part.display()))?;
+    let mut hasher = Sha256::new();
     let mut stream = response.bytes_stream();
     let mut downloaded: u64 = 0;
     let span = u64::from(to.saturating_sub(from));
     let mut last_percent = from;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("Download interrupted: {e}"))?;
+        hasher.update(&chunk);
         file.write_all(&chunk)
             .await
             .map_err(|e| format!("Write failed: {e}"))?;
@@ -829,7 +986,45 @@ async fn download_to_file(
         }
     }
     file.flush().await.map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(hasher.finalize())
+}
+
+/// Fetch a small vendor text resource (a checksum sibling/manifest) as a string.
+async fn fetch_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Could not fetch checksum ({url}): {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Checksum fetch error ({url}): {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("Malformed checksum response ({url}): {e}"))
+}
+
+/// Look up the SHA-256 for `file_name` in a `SHASUMS256.txt`-style manifest, whose
+/// lines are `<hex>␠␠<filename>` (filenames may carry a `*` binary-mode marker).
+fn shasum_for(manifest: &str, file_name: &str) -> Result<String, String> {
+    manifest
+        .lines()
+        .filter_map(|line| {
+            let (hash, name) = line.split_once(char::is_whitespace)?;
+            Some((hash.trim(), name.trim().trim_start_matches('*')))
+        })
+        .find(|(_, name)| *name == file_name)
+        .map(|(hash, _)| hash.to_string())
+        .ok_or_else(|| format!("No checksum for {file_name} in vendor manifest"))
+}
+
+/// Extract the digest from a `.sha256` sibling file, which is either a bare hex
+/// digest or the `<hex>␠␠<filename>` form. Returns the first whitespace-delimited
+/// token, leaving final validation to [`Integrity::sha256`].
+fn lone_sha256(body: &str) -> Result<String, String> {
+    body.split_whitespace()
+        .next()
+        .map(str::to_string)
+        .ok_or_else(|| "Empty .sha256 checksum file".to_string())
 }
 
 /// Extract a `.zip` or `.tar.gz` archive into `dest` (created fresh). Runs on a
@@ -1021,5 +1216,249 @@ fn go_arch() -> Option<&'static str> {
         "x86_64" => Some("amd64"),
         "aarch64" => Some("arm64"),
         _ => None,
+    }
+}
+
+// ── SHA-256 (FIPS 180-4) ──
+//
+// A tiny, dependency-free streaming SHA-256. Integrity verification is the whole
+// point of this module, so the hash lives here rather than pulling `sha2` into the
+// desktop crate's dependency surface just for download checks. Vetted against the
+// standard test vectors (empty / "abc" / 1e6×'a') plus padding-boundary streaming.
+
+/// Lowercase-hex encode a digest (no `hex` crate dependency).
+fn to_hex(bytes: &[u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
+/// Streaming SHA-256 state: incremental `update`, one-shot `finalize`.
+struct Sha256 {
+    state: [u32; 8],
+    block: [u8; 64],
+    block_len: usize,
+    msg_len: u64,
+}
+
+impl Sha256 {
+    const H0: [u32; 8] = [
+        0x6a09_e667,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
+    ];
+    #[rustfmt::skip]
+    const K: [u32; 64] = [
+        0x428a_2f98, 0x7137_4491, 0xb5c0_fbcf, 0xe9b5_dba5, 0x3956_c25b, 0x59f1_11f1, 0x923f_82a4,
+        0xab1c_5ed5, 0xd807_aa98, 0x1283_5b01, 0x2431_85be, 0x550c_7dc3, 0x72be_5d74, 0x80de_b1fe,
+        0x9bdc_06a7, 0xc19b_f174, 0xe49b_69c1, 0xefbe_4786, 0x0fc1_9dc6, 0x240c_a1cc, 0x2de9_2c6f,
+        0x4a74_84aa, 0x5cb0_a9dc, 0x76f9_88da, 0x983e_5152, 0xa831_c66d, 0xb003_27c8, 0xbf59_7fc7,
+        0xc6e0_0bf3, 0xd5a7_9147, 0x06ca_6351, 0x1429_2967, 0x27b7_0a85, 0x2e1b_2138, 0x4d2c_6dfc,
+        0x5338_0d13, 0x650a_7354, 0x766a_0abb, 0x81c2_c92e, 0x9272_2c85, 0xa2bf_e8a1, 0xa81a_664b,
+        0xc24b_8b70, 0xc76c_51a3, 0xd192_e819, 0xd699_0624, 0xf40e_3585, 0x106a_a070, 0x19a4_c116,
+        0x1e37_6c08, 0x2748_774c, 0x34b0_bcb5, 0x391c_0cb3, 0x4ed8_aa4a, 0x5b9c_ca4f, 0x682e_6ff3,
+        0x748f_82ee, 0x78a5_636f, 0x84c8_7814, 0x8cc7_0208, 0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7,
+        0xc671_78f2,
+    ];
+
+    const fn new() -> Self {
+        Self {
+            state: Self::H0,
+            block: [0; 64],
+            block_len: 0,
+            msg_len: 0,
+        }
+    }
+
+    /// Absorb `data`, compressing each completed 512-bit block.
+    fn update(&mut self, mut data: &[u8]) {
+        self.msg_len = self.msg_len.wrapping_add(data.len() as u64);
+        while !data.is_empty() {
+            let take = (64 - self.block_len).min(data.len());
+            self.block[self.block_len..self.block_len + take].copy_from_slice(&data[..take]);
+            self.block_len += take;
+            data = &data[take..];
+            if self.block_len == 64 {
+                self.compress();
+                self.block_len = 0;
+            }
+        }
+    }
+
+    /// Apply the standard `0x80`/zero/length padding and emit the 32-byte digest.
+    fn finalize(mut self) -> [u8; 32] {
+        let bit_len = self.msg_len.wrapping_mul(8).to_be_bytes();
+        self.update(&[0x80]);
+        // Pad with zeros until the block has room only for the 8-byte length.
+        while self.block_len != 56 {
+            self.update(&[0]);
+        }
+        self.update(&bit_len);
+        debug_assert_eq!(self.block_len, 0, "length word must close the block");
+
+        let mut out = [0u8; 32];
+        for (chunk, word) in out.chunks_exact_mut(4).zip(self.state) {
+            chunk.copy_from_slice(&word.to_be_bytes());
+        }
+        out
+    }
+
+    // `a`..`h` and `w`/`s0`/`s1` are the canonical SHA-256 working-variable names
+    // from FIPS 180-4; the index arithmetic (`w[i-15]`, `w[i-2]`, …) is the message
+    // schedule and can't be a plain iterator — renaming/rewriting would obscure the
+    // well-known algorithm.
+    #[allow(clippy::many_single_char_names, clippy::needless_range_loop)]
+    fn compress(&mut self) {
+        let mut w = [0u32; 64];
+        for (word, chunk) in w.iter_mut().zip(self.block.chunks_exact(4)) {
+            *word = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = h
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(Self::K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+
+        for (s, v) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *s = s.wrapping_add(v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sha256_hex(data: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(data);
+        to_hex(&h.finalize())
+    }
+
+    #[test]
+    fn sha256_known_vectors() {
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            sha256_hex(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+            "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"
+        );
+        let million = vec![b'a'; 1_000_000];
+        assert_eq!(
+            sha256_hex(&million),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    #[test]
+    fn sha256_streaming_matches_oneshot_across_block_boundaries() {
+        // Exercise the 0x80/length padding at and around the 56/64-byte edges.
+        for n in [0usize, 1, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128, 1000] {
+            let data = vec![0x61u8; n];
+            let oneshot = sha256_hex(&data);
+            let mut h = Sha256::new();
+            for chunk in data.chunks(7).filter(|c| !c.is_empty()) {
+                h.update(chunk);
+            }
+            assert_eq!(oneshot, to_hex(&h.finalize()), "stream mismatch at n={n}");
+        }
+    }
+
+    #[test]
+    fn integrity_normalizes_and_rejects_malformed() {
+        // Uppercase + surrounding whitespace are normalized to canonical lowercase.
+        let upper = "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855";
+        let Ok(Integrity::Sha256(hex)) = Integrity::sha256(&format!("  {upper}\n")) else {
+            panic!("valid digest rejected");
+        };
+        assert_eq!(hex, upper.to_ascii_lowercase());
+
+        assert!(Integrity::sha256("").is_err());
+        assert!(Integrity::sha256("deadbeef").is_err()); // too short
+        assert!(Integrity::sha256(&"z".repeat(64)).is_err()); // non-hex
+    }
+
+    #[test]
+    fn integrity_verify_detects_mismatch() {
+        let empty = Sha256::new().finalize();
+        let good =
+            Integrity::sha256("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+                .unwrap();
+        assert!(good.verify(&empty).is_ok());
+
+        let wrong =
+            Integrity::sha256("0000000000000000000000000000000000000000000000000000000000000000")
+                .unwrap();
+        assert!(wrong.verify(&empty).is_err());
+    }
+
+    #[test]
+    fn shasum_manifest_lookup() {
+        let manifest = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  node-v20.0.0-linux-x64.tar.gz
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  node-v20.0.0-win-x64.zip
+";
+        assert_eq!(
+            shasum_for(manifest, "node-v20.0.0-win-x64.zip").unwrap(),
+            "b".repeat(64)
+        );
+        assert!(shasum_for(manifest, "node-v20.0.0-darwin-arm64.tar.gz").is_err());
+    }
+
+    #[test]
+    fn lone_sha256_accepts_bare_and_named_forms() {
+        let bare = "c".repeat(64);
+        assert_eq!(lone_sha256(&format!("{bare}\n")).unwrap(), bare);
+        assert_eq!(
+            lone_sha256(&format!("{bare}  rustup-init.exe\n")).unwrap(),
+            bare
+        );
+        assert!(lone_sha256("   ").is_err());
+    }
+
+    #[test]
+    fn pinned_python_hashes_are_well_formed() {
+        // Guards against a typo when the pinned version is bumped.
+        assert!(Integrity::sha256(PYTHON_EMBED_SHA256_AMD64).is_ok());
+        assert!(Integrity::sha256(PYTHON_EMBED_SHA256_ARM64).is_ok());
     }
 }

@@ -18,6 +18,10 @@ const WATCH_DEBOUNCE_MS: u64 = 120;
 const WATCH_MAX_BATCHED_PATHS: usize = 512;
 const WATCH_EXCLUDED_COMPONENTS: &[&str] = &[
     ".git",
+    // IDE-managed metadata (parse cache, generated visualizations, …). Mirrors how
+    // the code-graph walk skips hidden dirs; without this, every cache write would
+    // wake the watcher and spawn a wasted incremental pass.
+    ".lux",
     ".next",
     ".turbo",
     ".vite",
@@ -29,7 +33,16 @@ const WATCH_EXCLUDED_COMPONENTS: &[&str] = &[
 
 pub type WorkspaceWatcher = RecommendedWatcher;
 
-pub fn start(app: &AppHandle, state: &State<'_, SharedState>, root: PathBuf) -> Result<(), String> {
+/// `generation` is the workspace generation captured at start time. Every batch
+/// this watcher dispatches is tagged with it, so once a newer workspace bumps the
+/// generation, this (now-stale) watcher's late events are discarded instead of
+/// merging old-workspace paths into the new index (M5).
+pub fn start(
+    app: &AppHandle,
+    state: &State<'_, SharedState>,
+    root: PathBuf,
+    generation: u64,
+) -> Result<(), String> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<PathBuf>();
     let watch_root = root.clone();
     let mut watcher = notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
@@ -59,7 +72,13 @@ pub fn start(app: &AppHandle, state: &State<'_, SharedState>, root: PathBuf) -> 
     *state.workspace_watcher.lock().map_err(lock_error)? = Some(watcher);
 
     let state_for_watcher = state.inner().clone();
-    tauri::async_runtime::spawn(forward_fs_events(app.clone(), state_for_watcher, root, rx));
+    tauri::async_runtime::spawn(forward_fs_events(
+        app.clone(),
+        state_for_watcher,
+        root,
+        rx,
+        generation,
+    ));
     Ok(())
 }
 
@@ -73,6 +92,7 @@ async fn forward_fs_events(
     state: Arc<super::AppState>,
     root: PathBuf,
     mut rx: UnboundedReceiver<PathBuf>,
+    generation: u64,
 ) {
     while let Some(first_path) = rx.recv().await {
         let mut paths = BTreeSet::new();
@@ -95,10 +115,9 @@ async fn forward_fs_events(
         }
 
         // Drive a single coalesced code-graph update for the whole batch, tagged
-        // with the current workspace generation so a stale result is discarded.
-        let generation = state
-            .workspace_generation
-            .load(std::sync::atomic::Ordering::SeqCst);
+        // with THIS watcher's captured generation (not the current one) so events
+        // that arrive after a workspace switch are discarded rather than merged
+        // into the new workspace's index (M5).
         if collapsed {
             // The batch overflowed and individual paths were dropped — a per-file
             // update can't know what changed, so rebuild the whole index.

@@ -11,6 +11,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Public GitHub project packaging: polished README, screenshots, contribution guide, issue templates, PR template, security policy, support notes, and dependency update config.
 - Brand assets under `docs/assets` for repository and app icon generation.
 
+## [1.0.7] - 2026-06-23
+
+### Added
+
+- Seamless mid-work message injection: a message staged while the agent is running can now be folded into the **live** turn at the next round boundary (native `ai_inject_message`), so a recommendation lands during the work — in the gap between the agent's requests — instead of waiting for the whole turn to finish. It renders as a user bubble in order, and never gets lost (a failed inject re-queues as a follow-up turn).
+- Live MCP self-service for the agent: a single `McpManage` tool lists / adds / connects / restarts / disconnects / enables / disables / removes MCP servers, so the model can install a capability it lacks (`add` installs + connects, then tools call as `mcp__<id>__<tool>`).
+- Queue plate redesign: per-message index badges, mode pills (queued vs recommendation), an accent rail, hover-revealed actions, and larger action buttons — full-width and compact.
+
+### Changed
+
+- Retry backoff is now a gentle linear ladder (1s, 3s, 6s, 9s, 12s, … up to ~10 attempts) instead of an exponential jump to the 30s cap on the third try; a server `Retry-After` still wins when present.
+- The system prompt drives the full force-multiplier toolset harder: RecallMemory at the start of non-trivial work, RememberMemory the moment something durable is learned, and WebResearch for anything external or uncertain — framed as a strength signal, not a fallback.
+- The integrated terminal was reworked to keep a live per-session xterm instance (no garbled raw-byte replay on session switch), auto-spawn the first session, keep the PTY alive across tab/panel toggles, and toggle with Ctrl+` (Ctrl+Ё). Cleaner full-bleed surface, themed scrollbar, and corrected icons (broom = clear, trash = close).
+
+### Fixed
+
+- Native turns no longer finish as "The turn produced no answer" when a provider ignores `stream:true` and returns a single non-SSE JSON body, or when a reasoning model completes with only thinking text and empty content — both are now parsed and surfaced (Anthropic `content:[{text}]` and OpenAI `choices` shapes).
+- Opening another project while one is already open no longer strands the loading plate: the folder is picked first (no overlay on click or cancel), and the `WorkspaceChanged` event is the single source of truth for the load stages.
+- Chat markdown no longer glues `**bold**` / `` `code` `` to adjacent words — the trailing-whitespace trim that ran per inline token is now applied only to the whole message.
+- Default WebView2 right-click menu is suppressed in the desktop runtime (copy/paste preserved in editable fields).
+- Shell and terminal now strip the verbatim `\\?\` Windows path prefix before launching, so `cmd.exe` opens in the workspace folder instead of falling back to `C:\Windows`.
+
+### Security
+
+- Mutating `McpManage` actions are gated through tool approval and the tool is agent/automatic-only; the Shell tool's anti-hang grace window prevents a backgrounded grandchild process from holding the pipe open for the full timeout.
+
 ## [1.0.4] - 2026-06-19
 
 ### Added

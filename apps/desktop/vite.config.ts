@@ -29,6 +29,13 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          // The Vite/Rolldown preload helper (`\0vite/preload-helper.js`) is a
+          // virtual module that does NOT contain "node_modules", so it used to
+          // fall through to `undefined` and get folded into whichever chunk first
+          // referenced it — `vendor-mermaid`. That welded the entire 2.6 MB
+          // diagram stack onto the entry chunk's eager modulepreload. Pinning it
+          // to its own tiny eager `runtime` chunk keeps the lazy chunks lazy.
+          if (id.includes("vite/preload-helper")) return "runtime";
           if (!id.includes("node_modules")) return undefined;
           if (id.includes("@tauri-apps")) return "vendor-tauri";
           if (id.includes("react") || id.includes("zustand") || id.includes("@tanstack")) return "vendor-react";
@@ -47,10 +54,19 @@ export default defineConfig({
           if (id.includes("elkjs")) return "vendor-graph-elk";
           if (id.includes("katex")) return "vendor-katex";
           if (id.includes("/d3-") || id.includes("d3-array") || id.includes("d3-scale") || id.includes("/d3/")) return "vendor-d3";
-          // Markdown/diagram sanitization + date helpers are pulled in by the same
-          // lazy preview surfaces as Mermaid; keep them with it so the generic
-          // `vendor` chunk stays small and eager.
-          if (id.includes("dompurify") || id.includes("/marked") || id.includes("dayjs")) return "vendor-mermaid";
+          // `marked` is pulled in eagerly by the AI-chat + markdown panes (lazy,
+          // but far more reachable than the diagram surface). Keep it — plus its
+          // sanitize/date helpers — in its own small chunk so opening chat or a
+          // markdown file does NOT drag the 1.9 MB mermaid chunk in for ~90 KB of
+          // markdown code.
+          if (id.includes("/marked") || id.includes("dompurify") || id.includes("dayjs")) return "vendor-markdown";
+          // Mermaid-only transitive deps. These otherwise fall through to the
+          // eager generic `vendor` chunk (~88% of its weight) even though they are
+          // only reachable from the lazy diagram render. Co-locate them with
+          // mermaid so they load on first diagram render, not at startup. Shared
+          // runtime libs (@floating-ui, scheduler, uuid, tslib) are deliberately
+          // NOT captured here.
+          if (/[\\/]node_modules[\\/](?:\.pnpm[\\/][^\\/]+[\\/]node_modules[\\/])?(?:lodash-es|es-toolkit|khroma|@iconify[\\/]utils|cose-base|layout-base|@braintree[\\/]sanitize-url|stylis|roughjs|ts-dedent|@upsetjs[\\/]venn\.js)([\\/]|$)/.test(id)) return "vendor-mermaid";
           // Animation runtime (framer-motion) — sizeable and only used by motion UI.
           if (id.includes("framer-motion") || id.includes("/motion-dom") || id.includes("/motion-utils")) return "vendor-motion";
           return "vendor";

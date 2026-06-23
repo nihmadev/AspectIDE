@@ -163,6 +163,47 @@ pub fn clear_read_files(session_id: &str) {
     }
 }
 
+// ── Lifecycle cleanup ──
+//
+// The goals/todos/read-files maps are process-global and keyed by session id, so
+// without an explicit purge they grow for the life of the process as sessions are
+// opened and closed. These clear the native state when the frontend disposes a
+// chat session or closes the workspace, matching the JS-side session teardown.
+
+/// Forget all native state for a single session.
+fn clear_session(session_id: &str) {
+    let key = session_id.trim();
+    if let Ok(mut g) = goals().lock() {
+        g.remove(key);
+    }
+    if let Ok(mut t) = todos().lock() {
+        t.remove(key);
+    }
+    if let Ok(mut r) = read_files().lock() {
+        r.remove(key);
+    }
+}
+
+/// Forget native state for every session (workspace close / shutdown).
+pub fn clear_all() {
+    if let Ok(mut g) = goals().lock() {
+        g.clear();
+    }
+    if let Ok(mut t) = todos().lock() {
+        t.clear();
+    }
+    if let Ok(mut r) = read_files().lock() {
+        r.clear();
+    }
+}
+
+/// Tauri command: release a disposed chat session's native goals/todos/read set.
+/// Called from the frontend when a chat session is deleted.
+#[tauri::command]
+pub fn ai_session_dispose(session_id: String) {
+    clear_session(&session_id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

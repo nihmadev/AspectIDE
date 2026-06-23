@@ -164,6 +164,80 @@ export type ResearchResponse = {
   notes: string[];
 };
 
+// ── SSH (lux-ssh) ──
+
+export type SshTransferDirection = "upload" | "download";
+
+export type SshTarget = {
+  host: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+};
+
+export type SshSession = {
+  id: string;
+  label: string;
+  target: SshTarget;
+  cwd: string;
+  system?: string;
+  remoteUser?: string;
+  createdAt: string;
+};
+
+export type SshConfigHost = {
+  alias: string;
+  hostname?: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+};
+
+export type SshConnectResult = {
+  session: SshSession;
+  note: string;
+};
+
+export type SshExecResult = {
+  sessionId: string;
+  command: string;
+  cwd: string;
+  exitCode: number | null;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  warnings: string[];
+};
+
+export type SshTransferResult = {
+  sessionId: string;
+  direction: SshTransferDirection;
+  localPath: string;
+  remotePath: string;
+  recursive: boolean;
+  success: boolean;
+  exitCode: number | null;
+  durationMs: number;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+};
+
+export type SshOverview = {
+  available: boolean;
+  version: string | null;
+  sessions: SshSession[];
+  configHosts: SshConfigHost[];
+  strictHostKey: boolean;
+  connectTimeoutSecs: number;
+};
+
+export type SshDisconnectResult = {
+  closed: number;
+  remaining: number;
+};
+
 // ── Skills (lux-skills) ──
 
 export type SkillScope = "project" | "global";
@@ -362,6 +436,9 @@ export type AiChatCompletionRequest = {
   baseUrl: string;
   apiKey?: string | null;
   payload: unknown;
+  /** Provider wire protocol. Omit or `openai-compatible` for the OpenAI Chat
+   *  Completions API; `anthropic` selects the Anthropic Messages API transport. */
+  protocol?: string;
 };
 
 export type AiChatCompletionResponse = {
@@ -653,9 +730,39 @@ let browserAiChatHistory: AiChatHistoryResponse = {
   recovered: false,
 };
 
+/** Settings key holding the configured MCP servers (mirrors mcp.rs MCP_SERVERS_KEY). */
+export const MCP_SERVERS_KEY = "ai.mcp.servers";
+
+export type McpServerConfig = {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+};
+
+export type McpToolInfo = {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+};
+
+export type McpServerStatus = {
+  id: string;
+  name: string;
+  state: "connected" | "connecting" | "error" | "disconnected";
+  error?: string;
+  tools: McpToolInfo[];
+};
+
 export const luxCommands = {
   workspaceOpen: (path: string) => invokeRequired<WorkspaceInfo>("workspace_open", { path }),
   workspaceClose: () => invokeRequired<void>("workspace_close"),
+  // Best-effort release of a disposed chat session's native goals/todos/read-set
+  // maps. Fire-and-forget: failure (e.g. command unavailable in a stripped build)
+  // must never block JS-side session teardown.
+  aiSessionDispose: (sessionId: string) => invokeOptional<void>("ai_session_dispose", { sessionId }, () => undefined),
   workspacePickFolder: () => invokeOptional<WorkspaceInfo | null>("workspace_pick_folder", undefined, () => null),
   fsReadDir: (path: string) => invokeRequired<FsEntry[]>("fs_read_dir", { path }),
   fsReadTree: (path: string) => invokeRequired<FsEntry[]>("fs_read_tree", { path }),
@@ -730,8 +837,8 @@ export const luxCommands = {
   aiChatCompletionStream: (request: AiChatCompletionStreamRequest) =>
     invokeRequired<AiChatCompletionStreamResponse>("ai_chat_completion_stream", { request }),
   aiChatCompletionStreamCancel: (streamId: string) => invokeRequired<void>("ai_chat_completion_stream_cancel", { streamId }),
-  webFetch: (url: string, maxBytes?: number | null, timeoutSecs?: number | null, allowPrivateHosts?: boolean | null) =>
-    invokeRequired<WebFetchResponse>("web_fetch", { url, maxBytes: maxBytes ?? null, timeoutSecs: timeoutSecs ?? null, allowPrivateHosts: allowPrivateHosts ?? null }),
+  webFetch: (url: string, maxBytes?: number | null, timeoutSecs?: number | null) =>
+    invokeRequired<WebFetchResponse>("web_fetch", { url, maxBytes: maxBytes ?? null, timeoutSecs: timeoutSecs ?? null }),
   testHealth: () => invokeRequired<TestHealthResponse>("test_health"),
   aiFileWrite: (path: string, text: string, overwrite = false, saveToDisk = true) =>
     invokeRequired<AiFileOperationResult>("ai_file_write", { path, text, overwrite, saveToDisk }),
@@ -777,13 +884,23 @@ export const luxCommands = {
   aiResolveTurnQuestion: (turnId: string, requestId: string, answer: { answer: string; cancelled: boolean }) =>
     invokeRequired<null>("ai_resolve_turn_question", { turnId, requestId, answer }),
   aiCancelTurn: (turnId: string) => invokeRequired<null>("ai_cancel_turn", { turnId }),
+  aiInjectMessage: (sessionId: string, text: string) => invokeRequired<null>("ai_inject_message", { sessionId, text }),
+  mcpConnectAll: () => invokeRequired<McpServerStatus[]>("mcp_connect_all"),
+  mcpConnect: (config: McpServerConfig) => invokeRequired<McpServerStatus>("mcp_connect", { config }),
+  mcpDisconnect: (id: string) => invokeRequired<null>("mcp_disconnect", { id }),
+  mcpStatus: () => invokeRequired<McpServerStatus[]>("mcp_status"),
+  mcpCall: (serverId: string, tool: string, args?: Record<string, unknown>) =>
+    invokeRequired<string>("mcp_call", { serverId, tool, arguments: args ?? {} }),
+  mcpAdd: (config: McpServerConfig) => invokeRequired<McpServerStatus>("mcp_add", { config }),
+  mcpRemove: (id: string) => invokeRequired<null>("mcp_remove", { id }),
+  mcpEnable: (id: string, enabled: boolean) => invokeRequired<null>("mcp_enable", { id, enabled }),
   aiGoalEvalVerdict: (input: {
     condition: string; transcript: string; openTodoSummaries: string[];
-    baseUrl: string; apiKey: string | null; model: string; reasoning: Record<string, unknown>;
+    baseUrl: string; apiKey: string | null; model: string; protocol: string; reasoning: Record<string, unknown>;
   }) => invokeRequired<{ satisfied: boolean; blocked: boolean; reason: string; source: string } | null>("ai_goal_eval_verdict", { input }),
   aiCompactionSummary: (input: {
     transcript: string; previousSummary: string; pinnedGoal: string; openTasks: string[];
-    baseUrl: string; apiKey: string | null; model: string; reasoning: Record<string, unknown>;
+    baseUrl: string; apiKey: string | null; model: string; protocol: string; reasoning: Record<string, unknown>;
   }) => invokeRequired<string>("ai_compaction_summary", { input }),
   aiCheckpoint: (action: string, options: {
     id?: string; label?: string; paths?: string[]; maxFiles?: number;
@@ -857,6 +974,15 @@ export const luxCommands = {
   skillsDiscoverImportable: () => invokeRequired<ImportableSkill[]>("skills_discover_importable"),
   skillsImport: (scope: SkillScope, slug: string, content: string) => invokeRequired<Skill>("skills_import", { scope, slug, content }),
   webResearch: (query: string, options?: ResearchOptions) => invokeRequired<ResearchResponse>("web_research", { query, options }),
+  sshConnect: (host: string, user?: string | null, port?: number | null, identityFile?: string | null, label?: string | null) =>
+    invokeRequired<SshConnectResult>("ssh_connect", { host, user: user ?? null, port: port ?? null, identityFile: identityFile ?? null, label: label ?? null }),
+  sshExec: (sessionId: string, command: string, cwd?: string | null, timeoutSecs?: number | null) =>
+    invokeRequired<SshExecResult>("ssh_exec", { sessionId, command, cwd: cwd ?? null, timeoutSecs: timeoutSecs ?? null }),
+  sshTransfer: (sessionId: string, direction: SshTransferDirection, localPath: string, remotePath: string, recursive?: boolean | null) =>
+    invokeRequired<SshTransferResult>("ssh_transfer", { sessionId, direction, localPath, remotePath, recursive: recursive ?? null }),
+  sshList: () => invokeRequired<SshOverview>("ssh_list"),
+  sshDisconnect: (sessionId?: string | null, all?: boolean | null) =>
+    invokeRequired<SshDisconnectResult>("ssh_disconnect", { sessionId: sessionId ?? null, all: all ?? null }),
   extensionsList: () => invokeRequired<ExtensionInfo[]>("extensions_list"),
   extensionsActivationPlan: () => invokeRequired<ExtensionActivationPlan>("extensions_activation_plan"),
   extensionsActivate: () => invokeRequired<ExtensionActivationReport>("extensions_activate"),
@@ -1073,8 +1199,13 @@ export type AiRunTurnInput = {
   agentMode: string;
   toolRoundLimit: number | null;
   toolApprovalMode: string;
-  /** Provider reasoning payload (reasoning_effort + reasoning.effort), or {} when
-   *  the model has no effort levels. Merged into the outgoing request by the native turn-loop. */
+  /** Authoritative deny/ask/allow permission rules. Evaluated in the native loop
+   *  before any approval prompt; deny is a hard block even in full-access/automatic. */
+  toolPermissionRules: string[];
+  /** Provider reasoning payload — a single field chosen per provider
+   *  (`reasoning_effort` for OpenAI-compatible, `reasoning.effort` for OpenRouter),
+   *  or {} when the model has no effort levels. The native turn-loop merges it into
+   *  the outgoing request and omits `temperature` whenever it is non-empty. */
   reasoning: Record<string, unknown>;
   /** True for Claude-family models: the native turn-loop tags the system prompt with a
    *  cache_control breakpoint for Anthropic prompt caching. */
@@ -1098,17 +1229,20 @@ export type AiRunTurnInput = {
 export type AiTurnQuestionOption = { label: string; description: string };
 /** One step of a PresentPlan proposal. */
 export type AiTurnPlanStep = { title: string; detail: string; file: string };
+/** A key design decision in a PresentPlan proposal: chosen approach + tradeoff. */
+export type AiPlanDecision = { option: string; tradeoff: string };
 
 /** Native turn-loop events emitted by the Rust `ai_run_turn` command. */
 export type AiTurnEvent =
   | { kind: "assistantCreated"; turnId: string; messageId: string }
   | { kind: "streamDelta"; turnId: string; content: string; reasoning: string }
   | { kind: "statusChange"; turnId: string; phase: string }
+  | { kind: "userMessageInjected"; turnId: string; text: string }
   | { kind: "toolCallStarted"; turnId: string; callId: string; tool: string; input: string }
   | { kind: "toolCallCompleted"; turnId: string; callId: string; status: string; output: string; error: string | null }
   | { kind: "approvalRequired"; turnId: string; requestId: string; tool: string; title: string; summary: string; preview: string; risk: string }
   | { kind: "questionRequired"; turnId: string; requestId: string; question: string; detail: string; options: AiTurnQuestionOption[]; multiSelect: boolean; allowCustom: boolean; htmlPreview: string }
-  | { kind: "planProposed"; turnId: string; planId: string; title: string; summary: string; steps: AiTurnPlanStep[]; autoStart: boolean }
+  | { kind: "planProposed"; turnId: string; planId: string; title: string; summary: string; steps: AiTurnPlanStep[]; alternatives: AiPlanDecision[]; risks: string[]; verification: string[]; quality: number; coaching: string[]; autoStart: boolean }
   | { kind: "turnUsage"; turnId: string; promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number }
   | { kind: "turnDone"; turnId: string; messageId: string; content: string; durationMs: number }
   | { kind: "turnError"; turnId: string; error: string }

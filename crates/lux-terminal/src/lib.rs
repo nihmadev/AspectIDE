@@ -73,7 +73,7 @@ impl TerminalService {
             .map_err(|error| AppError::Service(error.to_string()))?;
 
         let mut command = CommandBuilder::new(&info.shell);
-        command.cwd(&info.cwd);
+        command.cwd(launch_cwd(&info.cwd));
 
         let child = pair
             .slave
@@ -178,6 +178,17 @@ impl Drop for TerminalSession {
         // Reap the child so a SIGKILL-fallback exit does not leave a zombie.
         let _ = self.child.wait();
     }
+}
+
+/// Normalize a workspace path into a cwd a shell can actually `chdir` into.
+///
+/// Windows workspace roots are often canonicalized to the verbatim `\\?\E:\...`
+/// form. `cmd.exe` (and several other shells) refuse verbatim/UNC paths as a
+/// working directory and silently fall back to `C:\Windows`, so the terminal
+/// opens in the wrong place. `dunce::simplified` strips the `\\?\` prefix back to
+/// a plain `E:\...` path whenever it is safe to do so.
+fn launch_cwd(cwd: &std::path::Path) -> PathBuf {
+    dunce::simplified(cwd).to_path_buf()
 }
 
 fn read_pty_loop(session_id: Uuid, reader: &mut dyn Read, handler: &TerminalOutputHandler) {

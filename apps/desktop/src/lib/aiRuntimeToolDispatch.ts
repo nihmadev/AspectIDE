@@ -45,9 +45,10 @@ import {
 import { semanticSearch } from "./aiRuntimeSemanticSearch";
 import { secretGuard as runSecretGuard } from "./aiRuntimeSecretGuard";
 import { shellTool, terminalContextTool, terminalWriteTool } from "./aiRuntimeShellTools";
+import { sshConnectTool, sshDisconnectTool, sshExecTool, sshListTool, sshTransferTool } from "./aiRuntimeSshTools";
 import { requireToolApproval, type ToolExecutionUi } from "./aiRuntimeToolApproval";
 import { parseToolArguments } from "./aiRuntimeToolBridge";
-import { agentMessageTool, askUserTool, goalWrite, presentPlanTool, taskSubagentTool, todoWrite, type RuntimeToolSession } from "./aiRuntimeToolSession";
+import { agentMessageTool, askUserTool, goalWrite, mcpManageTool, presentPlanTool, taskSubagentTool, todoWrite, type RuntimeToolSession } from "./aiRuntimeToolSession";
 import { clamp, numberArg, stringArg, type ToolResult } from "./aiRuntimeShared";
 import { isRuntimeToolAllowed, readOnlyAgentModeToolDenyReason, type RuntimeToolName } from "./aiRuntimeTools";
 import { luxCommands } from "./tauri";
@@ -119,6 +120,16 @@ export async function runRuntimeTool(
       return terminalContextTool(args, input);
     case "TerminalWrite":
       return terminalWriteTool(args, input, ui);
+    case "SshConnect":
+      return sshConnectTool(args, input, ui);
+    case "SshExec":
+      return sshExecTool(args, input, ui);
+    case "SshTransfer":
+      return sshTransferTool(args, input, ui);
+    case "SshList":
+      return sshListTool();
+    case "SshDisconnect":
+      return sshDisconnectTool(args);
     case "Grep":
       return grepTool(args);
     case "ReadLints":
@@ -135,6 +146,8 @@ export async function runRuntimeTool(
       return askUserTool(args, input, call.id ?? `ask-${Date.now()}`);
     case "PresentPlan":
       return presentPlanTool(args, input, call.id ?? `plan-${Date.now()}`);
+    case "McpManage":
+      return mcpManageTool(args, input);
     case "WebFetch":
       return webFetchTool(args);
     case "SymbolContext":

@@ -12,15 +12,51 @@ export type AiChatStreamProgress = {
   reasoning: string;
 };
 
+// rAF/cancel resolved once. Falls back to a 16ms timer in any non-DOM context
+// (e.g. a headless test harness) so the timeline never throws there.
+const scheduleFrame: (cb: () => void) => number =
+  typeof requestAnimationFrame === "function"
+    ? (cb) => requestAnimationFrame(cb)
+    : (cb) => setTimeout(cb, 16) as unknown as number;
+const cancelFrame: (id: number) => void =
+  typeof cancelAnimationFrame === "function"
+    ? (id) => cancelAnimationFrame(id)
+    : (id) => clearTimeout(id);
+
 export function createTurnTimeline(emit: (patch: Partial<AiChatMessage>) => void) {
   const segments: AiMessageSegment[] = [];
   let activeReasoningId: string | null = null;
   let activeTextId: string | null = null;
+  let frameId: number | null = null;
+  let disposed = false;
 
   const find = (id: string | null) => (id ? segments.find((segment) => segment.id === id) ?? null : null);
 
-  const flush = () => {
-    emit(snapshotSegments(segments));
+  // Two flush cadences. `flushNow` emits synchronously and cancels any pending
+  // frame — used by every NON-streaming transition (round commit, tool start/
+  // update, append) so ordering vs tool calls and the final settle is exact.
+  // `flushStreaming` coalesces the per-token deltas to at most one emit per
+  // animation frame: during a response the Rust loop fires one StreamDelta per
+  // SSE token (tens-hundreds/sec), and without this each one rebuilt the store +
+  // re-lexed the whole markdown answer. Lossless because the full round text is
+  // re-accumulated in `roundContent`/`roundReasoning` on every delta regardless
+  // of when we flush.
+  const cancelFlush = () => {
+    if (frameId !== null) {
+      cancelFrame(frameId);
+      frameId = null;
+    }
+  };
+  const flushNow = () => {
+    cancelFlush();
+    if (!disposed) emit(snapshotSegments(segments));
+  };
+  const flushStreaming = () => {
+    if (disposed || frameId !== null) return;
+    frameId = scheduleFrame(() => {
+      frameId = null;
+      if (!disposed) emit(snapshotSegments(segments));
+    });
   };
 
   return {
@@ -47,7 +83,7 @@ export function createTurnTimeline(emit: (patch: Partial<AiChatMessage>) => void
           if (segment && segment.kind === "text") segment.text = progress.content;
         }
       }
-      flush();
+      flushStreaming();
     },
     commitRound(text: string, reasoning: string) {
       if (reasoning.trim()) {
@@ -84,35 +120,45 @@ export function createTurnTimeline(emit: (patch: Partial<AiChatMessage>) => void
         }
         activeTextId = null;
       }
-      flush();
+      flushNow();
     },
     appendText(text: string) {
       if (!text.trim()) return;
       activeTextId = crypto.randomUUID();
       segments.push({ kind: "text", id: activeTextId, text });
-      flush();
+      flushNow();
     },
     addToolCalls(calls: AiChatToolCall[]) {
       for (const toolCall of calls) {
         segments.push({ kind: "tool", id: toolCall.id, toolCall });
       }
-      flush();
+      flushNow();
     },
     updateToolCall(id: string, patch: Partial<AiChatToolCall>): AiChatToolCall | undefined {
       const segment = segments.find((entry) => entry.kind === "tool" && entry.toolCall.id === id);
       if (segment && segment.kind === "tool") {
         segment.toolCall = { ...segment.toolCall, ...patch };
-        flush();
+        flushNow();
         return segment.toolCall;
       }
-      flush();
+      flushNow();
       return undefined;
     },
     toolCalls() {
       return deriveSegmentToolCalls(segments);
     },
     snapshot(): Partial<AiChatMessage> {
+      // Drop any pending streaming frame: the caller emits the authoritative
+      // final patch right after this, so a trailing rAF must not fire afterward.
+      cancelFlush();
       return snapshotSegments(segments);
+    },
+    // Stop the timeline for good (turn settled, errored, or aborted). Cancels a
+    // pending streaming frame so no emit lands after the turn's `isActiveTurn`
+    // guard would have closed.
+    dispose() {
+      disposed = true;
+      cancelFlush();
     },
   };
 }

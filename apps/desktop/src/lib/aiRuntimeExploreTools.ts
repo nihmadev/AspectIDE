@@ -254,8 +254,8 @@ export async function webFetchTool(args: UnknownRecord): Promise<ToolResult> {
   if (!url) throw new Error("WebFetch requires a URL.");
   const maxBytes = clamp(numberArg(args, "maxBytes", 250_000), 1_024, 1_000_000);
   const timeoutSecs = clamp(numberArg(args, "timeoutSecs", 20), 1, 60);
-  const allowPrivateHosts = booleanArg(args, "allowPrivateHosts", false);
-  const response = await luxCommands.webFetch(url, maxBytes, timeoutSecs, allowPrivateHosts);
+  // SSRF guard is always on; no caller/model-controlled private-host bypass (H1).
+  const response = await luxCommands.webFetch(url, maxBytes, timeoutSecs);
   const scan = scanSecrets(response.text, response.finalUrl || response.url);
   return toolJson("WebFetch", {
     url: response.url,

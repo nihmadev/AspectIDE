@@ -22,6 +22,10 @@ pub struct CompactionSummaryInput {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    /// Provider wire protocol (`openai-compatible` or `anthropic`); selects the
+    /// transport so checkpoint summaries work on Anthropic providers too.
+    #[serde(default)]
+    pub protocol: String,
     /// Provider reasoning payload (`reasoning_effort` + reasoning.effort), or absent/`{}`
     /// when the active model has no effort levels. Merged into the request so the
     /// checkpoint summary is produced with the selected reasoning depth.
@@ -76,17 +80,24 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
             { "role": "system", "content": system },
             { "role": "user", "content": user_parts.join("\n\n") },
         ],
-        "temperature": 0.2,
         "stream": true,
         "stream_options": { "include_usage": true },
-        "max_tokens": max_tokens,
     });
     crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
+    crate::ai_chat_backend::apply_temperature(&mut payload, input.reasoning.as_ref(), 0.2);
+    // `max_tokens` is the legacy OpenAI name that reasoning models reject; the
+    // prompt already bounds summary length, so cap only standard models.
+    if !crate::ai_chat_backend::reasoning_present(input.reasoning.as_ref()) {
+        if let Some(target) = payload.as_object_mut() {
+            target.insert("max_tokens".to_string(), serde_json::json!(max_tokens));
+        }
+    }
 
-    let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
+    let request = crate::ai_chat_backend::AiChatCompletionRequest::with_protocol(
         input.base_url.clone(),
         input.api_key.clone(),
         payload,
+        input.protocol.clone(),
     );
 
     // Stream: a non-streaming request hangs against SSE-only providers/proxies, and

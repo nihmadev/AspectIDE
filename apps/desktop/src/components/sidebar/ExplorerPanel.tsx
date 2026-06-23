@@ -1,7 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { AlertTriangle, ChevronDown, ChevronRight, Copy, FilePlus2, Folder, FolderOpen, FolderPlus, Loader2, RefreshCw, Trash2 } from "lucide-react";
 import type { CSSProperties, DragEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent } from "react";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useEditorCloseGuard } from "../EditorCloseGuard";
 import { closedDocumentIdsForAllDocuments } from "../../lib/editorCloseTargets";
@@ -756,48 +756,22 @@ function TreeEntry({
           expanded={isExpanded}
           gitStatus={gitDecorations.get(key) ?? null}
           hasChildren={hasChildren}
+          isDirectory={isDirectory}
           isDragging={draggedEntry ? normalizePath(draggedEntry.entry.path) === key : false}
           isDropTarget={dropTargetPath === key}
           isSelected={selectedEntryPath === key}
-          onContextMenu={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            setSelectedEntryPath(key);
-            setContextMenu({ entry, source: "row", x: event.clientX, y: event.clientY });
-          }}
-          onDelete={() => requestDeleteEntry(entry)}
-          onDragEnd={endEntryDrag}
-          onDragStart={(event) => {
-            event.dataTransfer.effectAllowed = "move";
-            event.dataTransfer.setData("text/plain", entry.path);
-            startEntryDrag(entry);
-          }}
-          onDragEnter={isDirectory ? (event) => {
-            if (!dragOverDirectory(entry.path)) return;
-            event.preventDefault();
-            event.stopPropagation();
-            event.dataTransfer.dropEffect = "move";
-          } : undefined}
-          onDragOver={isDirectory ? (event) => {
-            if (!dragOverDirectory(entry.path)) return;
-            event.preventDefault();
-            event.stopPropagation();
-            event.dataTransfer.dropEffect = "move";
-          } : undefined}
-          onDragLeave={isDirectory ? (event) => {
-            if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-            dragLeaveDirectory(entry.path);
-          } : undefined}
-          onDrop={isDirectory ? (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            void dropEntryIntoDirectory(entry.path);
-          } : undefined}
-          onOpen={() => {
-            setSelectedEntryPath(key);
-            if (!isDirectory) openFile(entry.path);
-            else if (hasChildren || pendingParentKey === key) toggleDirectory(entry);
-          }}
+          pendingParentKey={pendingParentKey}
+          rowKey={key}
+          dragOverDirectory={dragOverDirectory}
+          dragLeaveDirectory={dragLeaveDirectory}
+          dropEntryIntoDirectory={dropEntryIntoDirectory}
+          endEntryDrag={endEntryDrag}
+          openFile={openFile}
+          requestDeleteEntry={requestDeleteEntry}
+          setContextMenu={setContextMenu}
+          setSelectedEntryPath={setSelectedEntryPath}
+          startEntryDrag={startEntryDrag}
+          toggleDirectory={toggleDirectory}
         />
       )}
       {isDirectory && isExpanded && (hasChildren || pendingParentKey === key) && (
@@ -840,7 +814,7 @@ function TreeEntry({
   );
 }
 
-function FileRow({
+const FileRow = memo(function FileRow({
   activePath,
   clipboardEntry,
   depth,
@@ -848,18 +822,22 @@ function FileRow({
   expanded,
   gitStatus,
   hasChildren,
+  isDirectory,
   isDragging,
   isDropTarget,
   isSelected,
-  onContextMenu,
-  onDelete,
-  onDragEnd,
-  onDragEnter,
-  onDragLeave,
-  onDragOver,
-  onDragStart,
-  onDrop,
-  onOpen,
+  pendingParentKey,
+  rowKey,
+  dragOverDirectory,
+  dragLeaveDirectory,
+  dropEntryIntoDirectory,
+  endEntryDrag,
+  openFile,
+  requestDeleteEntry,
+  setContextMenu,
+  setSelectedEntryPath,
+  startEntryDrag,
+  toggleDirectory,
 }: {
   activePath: string | null;
   clipboardEntry: ClipboardEntry | null;
@@ -868,23 +846,77 @@ function FileRow({
   expanded: boolean;
   gitStatus: GitDecoStatus | null;
   hasChildren: boolean;
+  isDirectory: boolean;
   isDragging: boolean;
   isDropTarget: boolean;
   isSelected: boolean;
-  onContextMenu: (event: MouseEvent<HTMLButtonElement>) => void;
-  onDelete: () => void;
-  onDragEnd: () => void;
-  onDragEnter?: (event: DragEvent<HTMLButtonElement>) => void;
-  onDragLeave?: (event: DragEvent<HTMLButtonElement>) => void;
-  onDragOver?: (event: DragEvent<HTMLButtonElement>) => void;
-  onDragStart: (event: DragEvent<HTMLButtonElement>) => void;
-  onDrop?: (event: DragEvent<HTMLButtonElement>) => void;
-  onOpen: () => void;
+  pendingParentKey: string | null;
+  rowKey: string;
+  dragOverDirectory: (targetDirectory: string) => boolean;
+  dragLeaveDirectory: (targetDirectory: string) => void;
+  dropEntryIntoDirectory: (targetDirectory: string) => Promise<void>;
+  endEntryDrag: () => void;
+  openFile: (path: string) => void;
+  requestDeleteEntry: (entry: FsEntry) => void;
+  setContextMenu: (contextMenu: ContextMenuState | null) => void;
+  setSelectedEntryPath: (path: string | null) => void;
+  startEntryDrag: (entry: FsEntry) => void;
+  toggleDirectory: (entry: FsEntry) => void;
 }) {
-  const isDirectory = entry.kind === "directory";
   const iconMeta = fileIconForName(entry.name);
   const Icon = isDirectory ? (expanded ? FolderOpen : Folder) : iconMeta.Icon;
-  const isCut = clipboardEntry?.operation === "cut" && normalizePath(clipboardEntry.entry.path) === normalizePath(entry.path);
+  const isCut = clipboardEntry?.operation === "cut" && normalizePath(clipboardEntry.entry.path) === rowKey;
+
+  // Handlers are built here from already-stable parent callbacks + this row's own
+  // `entry`, so they are recreated only when this row actually re-renders — which,
+  // thanks to the memo wrapper, happens only when one of this row's own props
+  // changes. A git/selection/drag change elsewhere in the tree no longer rebuilds
+  // every row's closures or re-renders unaffected rows.
+  const onOpen = () => {
+    setSelectedEntryPath(rowKey);
+    if (!isDirectory) openFile(entry.path);
+    else if (hasChildren || pendingParentKey === rowKey) toggleDirectory(entry);
+  };
+  const onContextMenu = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedEntryPath(rowKey);
+    setContextMenu({ entry, source: "row", x: event.clientX, y: event.clientY });
+  };
+  const onDragStart = (event: DragEvent<HTMLButtonElement>) => {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", entry.path);
+    startEntryDrag(entry);
+  };
+  const onDragEnter = isDirectory
+    ? (event: DragEvent<HTMLButtonElement>) => {
+        if (!dragOverDirectory(entry.path)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+      }
+    : undefined;
+  const onDragOver = isDirectory
+    ? (event: DragEvent<HTMLButtonElement>) => {
+        if (!dragOverDirectory(entry.path)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "move";
+      }
+    : undefined;
+  const onDragLeave = isDirectory
+    ? (event: DragEvent<HTMLButtonElement>) => {
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+        dragLeaveDirectory(entry.path);
+      }
+    : undefined;
+  const onDrop = isDirectory
+    ? (event: DragEvent<HTMLButtonElement>) => {
+        event.preventDefault();
+        event.stopPropagation();
+        void dropEntryIntoDirectory(entry.path);
+      }
+    : undefined;
 
   return (
     <div className="file-row-shell" style={{ "--tree-depth": depth } as CSSProperties}>
@@ -894,7 +926,7 @@ function FileRow({
         draggable
         role="treeitem"
         aria-expanded={isDirectory ? expanded : undefined}
-        data-active={activePath ? normalizePath(activePath) === normalizePath(entry.path) : false}
+        data-active={activePath ? normalizePath(activePath) === rowKey : false}
         data-cut={isCut}
         data-dragging={isDragging}
         data-drop-target={isDropTarget}
@@ -907,9 +939,9 @@ function FileRow({
           if (event.key !== "Delete") return;
           event.preventDefault();
           event.stopPropagation();
-          onDelete();
+          requestDeleteEntry(entry);
         }}
-        onDragEnd={onDragEnd}
+        onDragEnd={endEntryDrag}
         onDragEnter={onDragEnter}
         onDragLeave={onDragLeave}
         onDragOver={onDragOver}
@@ -923,7 +955,7 @@ function FileRow({
       </button>
     </div>
   );
-}
+});
 
 function CreateRow({
   create,

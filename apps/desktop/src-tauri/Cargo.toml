@@ -1,6 +1,6 @@
 [package]
 name = "lux-desktop"
-version = "1.0.6"
+version = "1.0.7"
 description = "Lux IDE desktop shell"
 edition.workspace = true
 license.workspace = true
@@ -35,6 +35,7 @@ lux-research = { path = "../../../crates/lux-research" }
 lux-search = { path = "../../../crates/lux-search" }
 lux-settings = { path = "../../../crates/lux-settings" }
 lux-skills = { path = "../../../crates/lux-skills" }
+lux-ssh = { path = "../../../crates/lux-ssh" }
 lux-terminal = { path = "../../../crates/lux-terminal" }
 lux-workspace = { path = "../../../crates/lux-workspace" }
 globset.workspace = true

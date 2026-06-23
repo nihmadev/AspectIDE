@@ -14,6 +14,9 @@ export type EditorPreferences = {
   smoothScrolling: boolean;
   renderWhitespace: RenderWhitespaceSetting;
   unicodeHighlightAmbiguousCharacters: boolean;
+  /** Auto-open (and focus) files the agent creates or edits. Off keeps the agent's
+   *  edits from stealing the editor / piling up tabs; already-open files still sync. */
+  autoOpenEditedFiles: boolean;
 };
 
 export const defaultEditorPreferences: EditorPreferences = {
@@ -27,6 +30,7 @@ export const defaultEditorPreferences: EditorPreferences = {
   smoothScrolling: true,
   renderWhitespace: "selection",
   unicodeHighlightAmbiguousCharacters: false,
+  autoOpenEditedFiles: true,
 };
 
 export function mergeEditorPreferences(current: EditorPreferences, patch: Partial<EditorPreferences>) {
@@ -48,6 +52,9 @@ export function normalizeEditorPreferences(value: unknown): EditorPreferences {
     unicodeHighlightAmbiguousCharacters: typeof source.unicodeHighlightAmbiguousCharacters === "boolean"
       ? source.unicodeHighlightAmbiguousCharacters
       : defaultEditorPreferences.unicodeHighlightAmbiguousCharacters,
+    autoOpenEditedFiles: typeof source.autoOpenEditedFiles === "boolean"
+      ? source.autoOpenEditedFiles
+      : defaultEditorPreferences.autoOpenEditedFiles,
   };
 }
 

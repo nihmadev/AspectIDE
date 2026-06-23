@@ -5,7 +5,7 @@ import {
   resolveAutoCompactThreshold,
   resolveContextUsageBudget,
 } from "./aiChatContextCompaction";
-import type { AiModelConfig, AiPreferences } from "./aiPreferences";
+import type { AiAgentMode, AiModelConfig, AiPreferences } from "./aiPreferences";
 import type { AiChatAttachmentInput, AiChatMessage } from "./aiChatTypes";
 import { normalizeVisibleReasoning } from "./aiChatReasoning";
 import { resolveContextCompactTriggerTokens } from "./aiModelContext";
@@ -65,6 +65,21 @@ const contextRowColors = {
   tools: "#7aa6a1",
 } as const;
 
+// The two system-prompt base texts vary only by agent mode (constant per mode,
+// never changes at runtime), so caching their token estimates avoids re-tokenizing
+// the same multi-KB string every time the context-usage memo fires.
+const basePromptTokenCache = new Map<AiAgentMode, number>();
+
+function cachedBasePromptTokens(mode: AiAgentMode): number {
+  let tokens = basePromptTokenCache.get(mode);
+  if (tokens === undefined) {
+    tokens = estimateTokens(luxSystemPromptBaseText(mode))
+      + (mode === "automatic" ? estimateTokens(automaticModeEnforcementPrompt) : 0);
+    basePromptTokenCache.set(mode, tokens);
+  }
+  return tokens;
+}
+
 export function buildAiChatContextUsageSummary({
   pinnedEditorPaths,
   aiIndexStatus,
@@ -91,8 +106,7 @@ hasGlobalInstructions,
   ].filter(Boolean).join(" · ");
   // The real system message is dominated by the Lux core prompt; count it so the
   // meter reflects the true system-prompt footprint instead of only agent metadata.
-  const basePromptTokens = estimateTokens(luxSystemPromptBaseText(preferences.agentMode))
-    + (preferences.agentMode === "automatic" ? estimateTokens(automaticModeEnforcementPrompt) : 0);
+  const basePromptTokens = cachedBasePromptTokens(preferences.agentMode);
   const systemTokens = basePromptTokens
     + estimateTokens([agentName, preferences.agentMode, agentInstruction, preferences.toolApprovalMode].join(" "));
   const modelTokens = estimateTokens(selectedModelAlias);

@@ -68,6 +68,7 @@ export async function requestGoalEvaluatorVerdict(input: {
         baseUrl: input.provider.baseUrl,
         apiKey: input.provider.apiKey || null,
         model: input.model.alias || input.model.id,
+        protocol: input.provider.protocol,
         reasoning: reasoningPayload(input.selectedEffortId, input.provider),
       });
       if (!verdict) return null;

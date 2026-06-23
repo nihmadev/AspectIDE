@@ -24,8 +24,17 @@ const goalOrchestrationMarkerLine = /^\s*(?:\[goal:(?:complete|blocked)\]|goal:(
 /** Strip silent goal markers before rendering assistant text. */
 export function stripGoalOrchestrationMarkers(text: string): string {
   if (!text) return text;
-  const stripped = text.replace(goalOrchestrationMarkerLine, "").replace(/\n{3,}/g, "\n\n");
-  return stripped.replace(/\s+$/, "");
+  // NOTE: must NOT trim trailing whitespace here. decodeChatDisplayText runs this on
+  // every individual inline markdown token (see AiChatMessages.textFromToken); trimming
+  // would eat the space between a word and an adjacent **bold**/`code`/[link] span,
+  // gluing them together ("через **PowerShell**" → "черезPowerShell"). The cosmetic
+  // end-of-message trim lives at the message level (trimChatMessageEnd).
+  return text.replace(goalOrchestrationMarkerLine, "").replace(/\n{3,}/g, "\n\n");
+}
+
+/** Trim trailing whitespace from a WHOLE assistant message (never a single token). */
+export function trimChatMessageEnd(text: string): string {
+  return text.replace(/\s+$/, "");
 }
 
 /** Decode `&quot;`, `&#34;`, etc. from model/provider text for safe React text rendering. */

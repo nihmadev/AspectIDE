@@ -1485,7 +1485,7 @@
 }
 
 .lsp-server-dot[data-state="installing"] {
-  background: #2f9bff;
+  background: var(--accent);
   animation: lsp-dot-pulse 1.2s ease-in-out infinite;
 }
 
@@ -1518,7 +1518,7 @@
 }
 
 .lsp-server-status[data-state="installing"] {
-  color: #2f9bff;
+  color: var(--accent);
 }
 
 .lsp-server-status[data-state="error"] {
@@ -1536,7 +1536,7 @@
 
 .lsp-server-progress-fill {
   height: 100%;
-  background: linear-gradient(90deg, #2f9bff, #4db8ff);
+  background: linear-gradient(90deg, var(--accent-strong), var(--accent));
   transition: width 0.3s ease;
 }
 

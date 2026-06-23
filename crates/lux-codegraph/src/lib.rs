@@ -35,6 +35,7 @@
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_wrap)]
 
+pub mod cache;
 pub mod community;
 pub mod detect;
 pub mod export;
@@ -46,6 +47,7 @@ pub mod parse;
 pub mod query;
 pub mod resolve;
 
+pub use cache::{FileMeta, CACHE_VERSION};
 pub use community::{detect as detect_communities, Community};
 pub use detect::{
     god_nodes, import_cycles, surprising_connections, GodNode, ImportCycle, Surprise,

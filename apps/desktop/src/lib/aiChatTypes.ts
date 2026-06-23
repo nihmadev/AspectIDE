@@ -13,7 +13,7 @@ export type AiToolApprovalDecision = "approved" | "rejected";
 
 export type AiToolApprovalRequest = {
   id: string;
-  tool: "Write" | "StrReplace" | "Delete" | "Shell" | "TerminalWrite" | "PatchEngine" | "Checkpoint" | "BrowserOpen" | "BrowserAct" | "BrowserChat" | "BrowserInstall";
+  tool: "Write" | "StrReplace" | "Delete" | "Shell" | "TerminalWrite" | "PatchEngine" | "Checkpoint" | "BrowserOpen" | "BrowserAct" | "BrowserChat" | "BrowserInstall" | "SshConnect" | "SshExec" | "SshTransfer";
   title: string;
   path: string;
   summary: string;
@@ -170,6 +170,9 @@ export type AiChatSendInput = {
   onAssistantMessage: (message: AiChatMessage) => void;
   onAssistantMessageUpdate: (messageId: string, patch: Partial<AiChatMessage>) => void;
   onStatusChange?: (status: AiChatRuntimeStatus) => void;
+  /** A user message was folded into the running turn mid-work (see ai_inject_message);
+   *  render it as a user bubble in order, before the answer that follows. */
+  onUserMessageInjected?: (text: string) => void;
   /** Live notice that a transient provider failure is being auto-retried. `null` clears it. */
   onRetryNotice?: (notice: AiChatRetryNotice | null) => void;
   onToolApproval: (request: AiToolApprovalRequest) => Promise<AiToolApprovalDecision>;

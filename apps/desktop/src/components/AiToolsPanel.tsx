@@ -17,6 +17,7 @@ import {
   Network,
   Pencil,
   Search,
+  Server,
   Shield,
   Sparkles,
   Target,
@@ -69,7 +70,19 @@ const categories: ToolCategory[] = [
       { id: "agent-message", name: "AgentMessage", status: "ready", icon: Network },
       { id: "ask-user", name: "AskUser", status: "ready", icon: MessageCircleQuestion },
       { id: "present-plan", name: "PresentPlan", status: "ready", icon: Sparkles },
+      { id: "mcp-manage", name: "McpManage", status: "ready", icon: Server },
       { id: "web-fetch", name: "WebFetch", status: "ready", icon: Network },
+    ],
+  },
+  {
+    id: "ssh",
+    accent: "#f4a259",
+    tools: [
+      { id: "ssh-connect", name: "SshConnect", status: "ready", icon: Server },
+      { id: "ssh-exec", name: "SshExec", status: "ready", icon: Server },
+      { id: "ssh-transfer", name: "SshTransfer", status: "ready", icon: Server },
+      { id: "ssh-list", name: "SshList", status: "ready", icon: Server },
+      { id: "ssh-disconnect", name: "SshDisconnect", status: "ready", icon: Server },
     ],
   },
   {

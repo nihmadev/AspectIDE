@@ -13,6 +13,63 @@ use super::SharedState;
 
 const GRAPH_EVENT: &str = "lux://code-graph";
 
+/// Location of the persistent parse cache for `root`:
+/// `<root>/.lux/cache/code-graph.bin`. `.lux` is hidden, so [`lux_codegraph`]'s own
+/// walk skips it — the cache never becomes a graph node or retriggers a rebuild.
+///
+/// Building through [`lux_codegraph::Index::build_cached`] against this path makes a
+/// warm open reuse every unchanged file's parse and reparse only what changed, so a
+/// workspace with thousands of nested projects pays the full tree-sitter cost once
+/// and is near-instant on every subsequent open.
+fn cache_path(root: &Path) -> PathBuf {
+    root.join(".lux").join("cache").join("code-graph.bin")
+}
+
+/// Build the index for `root` through the persistent cache and persist the result.
+///
+/// Runs on the blocking pool (the caller wraps it in `spawn_blocking`): both the
+/// parse and the cache write are blocking I/O. The save is best-effort — a write
+/// failure is logged and swallowed, never failing the build, since the only cost is
+/// that the next open reparses more.
+fn build_and_cache(root: &Path) -> Result<lux_codegraph::Index, lux_codegraph::IndexError> {
+    let cache = cache_path(root);
+    let mut index = lux_codegraph::Index::build_cached(root, &cache)?;
+    // Skip rewriting an identical cache after a fully-cached warm build — the
+    // whole-cache write is the write-amplification that bites on giant workspaces.
+    // (`!cache.exists()` is a defensive belt: dirty is already true when no prior
+    // cache loaded, but never skip the very first write.)
+    if index.is_cache_dirty() || !cache.exists() {
+        match index.save_cache(&cache) {
+            Ok(()) => index.mark_cache_clean(),
+            Err(error) => tracing::warn!(%error, "code-graph cache save failed"),
+        }
+    }
+    Ok(index)
+}
+
+/// Synchronous, best-effort cache flush for app exit, where we cannot `await`.
+///
+/// Uses non-blocking `try_lock` and plain `std::fs` I/O, so it is safe to call from
+/// the Tauri run-loop callback (no tokio runtime needed for the write). A contended
+/// lock or a write error just means the next open reparses this session's edits —
+/// the open-time cold-build cache still covers the unchanged bulk.
+pub fn flush_cache_blocking(state: &SharedState) {
+    let Ok(mut guard) = state.code_graph.try_lock() else {
+        return;
+    };
+    let Some(index) = guard.as_mut() else {
+        return;
+    };
+    if !index.is_cache_dirty() {
+        return; // on-disk cache already current
+    }
+    let cache = cache_path(index.root());
+    match index.save_cache(&cache) {
+        Ok(()) => index.mark_cache_clean(),
+        Err(error) => tracing::warn!(%error, "code-graph cache flush on exit failed"),
+    }
+}
+
 /// True when `generation` still matches the live workspace generation — i.e. the
 /// workspace this work was started for is still the open one. Background builds
 /// and incremental updates check this before committing so a stale result never
@@ -173,22 +230,21 @@ pub async fn code_graph_build(
     progress(&app, 10, "Collecting and parsing source files");
 
     let root_clone = root.clone();
-    let result =
-        match tokio::task::spawn_blocking(move || lux_codegraph::Index::build(&root_clone)).await {
-            Ok(Ok(index)) => index,
-            // Emit a terminal failure on every error path so the Settings card never
-            // gets stuck in "building" (it only leaves that state on a Finished event).
-            Ok(Err(error)) => {
-                let message = format!("Code graph build error: {error}");
-                emit_finished_error(&app, &message);
-                return Err(message);
-            }
-            Err(error) => {
-                let message = format!("Graph build task failed: {error}");
-                emit_finished_error(&app, &message);
-                return Err(message);
-            }
-        };
+    let result = match tokio::task::spawn_blocking(move || build_and_cache(&root_clone)).await {
+        Ok(Ok(index)) => index,
+        // Emit a terminal failure on every error path so the Settings card never
+        // gets stuck in "building" (it only leaves that state on a Finished event).
+        Ok(Err(error)) => {
+            let message = format!("Code graph build error: {error}");
+            emit_finished_error(&app, &message);
+            return Err(message);
+        }
+        Err(error) => {
+            let message = format!("Graph build task failed: {error}");
+            emit_finished_error(&app, &message);
+            return Err(message);
+        }
+    };
 
     let node_count = result.graph().node_count();
     let edge_count = result.graph().edge_count();
@@ -332,6 +388,35 @@ pub async fn code_graph_export_html(state: State<'_, SharedState>) -> Result<Str
     .await
 }
 
+/// Persist the current in-memory graph's parse cache, then drop it.
+///
+/// Called when a workspace closes or is replaced. The in-memory index carries the
+/// fresh `(size, mtime)` fingerprints of every file touched incrementally during
+/// the session, so saving here captures those edits on disk — the next open of that
+/// workspace reuses them instead of reparsing. Persisting only at these transitions
+/// (plus after a full build) keeps the cache warm without rewriting a large cache on
+/// every file save. The index is taken out of the mutex first, so the save runs off
+/// the async runtime holding no lock, and detached so neither close nor switch waits
+/// on the write.
+pub async fn persist_and_drop(state: &SharedState) {
+    let Some(index) = state.code_graph.lock().await.take() else {
+        return;
+    };
+    // Nothing changed since the last save — don't rewrite an identical cache.
+    if !index.is_cache_dirty() {
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || {
+            let cache = cache_path(index.root());
+            if let Err(error) = index.save_cache(&cache) {
+                tracing::warn!(%error, "code-graph cache save on close failed");
+            }
+        })
+        .await;
+    });
+}
+
 /// Background code-graph build triggered on workspace open. Spawns a detached
 /// tokio task so the workspace loads without waiting for the index. `generation`
 /// is the workspace generation at open time; the result is committed only if it
@@ -361,8 +446,7 @@ pub fn start_build_on_workspace(
         progress(&app, 10, "Collecting and parsing source files");
 
         let root_clone = root.clone();
-        let result =
-            tokio::task::spawn_blocking(move || lux_codegraph::Index::build(&root_clone)).await;
+        let result = tokio::task::spawn_blocking(move || build_and_cache(&root_clone)).await;
 
         match result {
             Ok(Ok(index)) => {

@@ -2,61 +2,43 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import { useLuxStore } from "../lib/store";
-import { isBrowserPreviewRuntime, isTauriRuntime, luxCommands, subscribeLuxEvents } from "../lib/tauri";
+import { isBrowserPreviewRuntime, isTauriRuntime, luxCommands } from "../lib/tauri";
 import type { TerminalSessionInfo } from "../lib/types";
 import "@xterm/xterm/css/xterm.css";
 
 const webPrompt = "$ ";
 
 type XtermTerminalProps = {
+  /**
+   * The FULL accumulated output buffer for this session. The always-on global
+   * terminalOutput listener (App.tsx) appends every PTY chunk into the store
+   * buffer synchronously, so this prop captures 100% of the output with no race.
+   * We render it incrementally (delta writes) — this is what makes a brand-new
+   * terminal show its shell prompt instead of staying blank.
+   */
   bufferText?: string;
   clearToken: number;
   session: TerminalSessionInfo | null;
-  onSessionCreated?: (session: TerminalSessionInfo) => void;
 };
 
-export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, session }: XtermTerminalProps) {
+export function XtermTerminal({ bufferText = "", clearToken, session }: XtermTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const fitFrameRef = useRef<number | null>(null);
   const sessionRef = useRef<TerminalSessionInfo | null>(session);
-  const bufferTextRef = useRef(bufferText);
-  const renderedSessionIdRef = useRef<string | null>(null);
+  // How many chars of bufferText have already been written to the canvas.
+  const writtenLenRef = useRef(0);
   const webPromptWrittenRef = useRef(false);
-  const onSessionCreatedRef = useRef(onSessionCreated);
-  const upsertTerminalSession = useLuxStore((state) => state.upsertTerminalSession);
   const appendTerminalOutput = useLuxStore((state) => state.appendTerminalOutput);
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
 
-  // Hold the callback in a ref so its identity churn can't re-trigger session
-  // creation: a parent passing an inline onSessionCreated would otherwise re-run
-  // the create effect before `session` updates and spawn a duplicate PTY.
-  useEffect(() => {
-    onSessionCreatedRef.current = onSessionCreated;
-  }, [onSessionCreated]);
-
-  useEffect(() => {
-    bufferTextRef.current = bufferText;
-  }, [bufferText]);
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    const sessionId = session?.id ?? null;
-    if (!terminal || renderedSessionIdRef.current === sessionId) return;
-    renderedSessionIdRef.current = sessionId;
-    webPromptWrittenRef.current = false;
-    terminal.clear();
-    if (bufferText) terminal.write(bufferText);
-    else if (!sessionId && isBrowserPreviewRuntime()) {
-      terminal.write(webPrompt);
-      webPromptWrittenRef.current = true;
-    }
-  }, [bufferText, session?.id]);
-
+  // Create the xterm instance once. The instance is kept alive for the lifetime
+  // of this session's slot (per-session component), so switching tabs/sessions
+  // never disposes it and never needs a raw-byte replay.
   useEffect(() => {
     const container = containerRef.current;
     if (!container || terminalRef.current) return;
@@ -99,9 +81,13 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
 
     terminalRef.current = terminal;
     fitRef.current = fitAddon;
-    renderedSessionIdRef.current = sessionRef.current?.id ?? null;
-    if (bufferTextRef.current) terminal.write(bufferTextRef.current);
-    else if (!sessionRef.current && isBrowserPreviewRuntime()) {
+
+    // Paint whatever output already exists for this session (e.g. created just
+    // before this instance mounted), then track from there.
+    if (bufferText) {
+      terminal.write(bufferText);
+      writtenLenRef.current = bufferText.length;
+    } else if (!session && isBrowserPreviewRuntime()) {
       terminal.write(webPrompt);
       webPromptWrittenRef.current = true;
     }
@@ -126,11 +112,15 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
     };
 
     scheduleFit();
+    // Focus so typing works immediately after open.
+    terminal.focus();
 
     terminal.onData((data) => {
       const activeSession = sessionRef.current;
       if (activeSession && isTauriRuntime()) {
-        void luxCommands.terminalWrite(activeSession.id, data);
+        // Write keystrokes to the PTY; the shell echoes them back through the
+        // global terminalOutput listener → store buffer → delta write below.
+        void luxCommands.terminalWrite(activeSession.id, data).catch(() => undefined);
         return;
       }
       if (!isBrowserPreviewRuntime()) return;
@@ -149,63 +139,39 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
         fitFrameRef.current = null;
       }
       observer.disconnect();
+      // Do NOT close the PTY here — the shell must outlive an unmount (tab switch /
+      // panel hide). It is closed explicitly via the close button or workspace close.
       terminal.dispose();
       terminalRef.current = null;
       fitRef.current = null;
-      sessionRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Incrementally paint new output: write only the suffix added since last time.
+  // This is the single display path — no async event subscription to race with.
   useEffect(() => {
-    let disposed = false;
-    const ensureSession = async () => {
-      const terminal = terminalRef.current;
-      if (!terminal) return;
-      if (session) return;
-      if (isBrowserPreviewRuntime()) {
-        if (!webPromptWrittenRef.current) {
-          terminal.write(webPrompt);
-          webPromptWrittenRef.current = true;
-        }
-        return;
-      }
-      const created = await luxCommands.terminalCreate(undefined, undefined, terminal.cols, terminal.rows);
-      if (!disposed) {
-        upsertTerminalSession(created, true);
-        onSessionCreatedRef.current?.(created);
-      } else {
-        void luxCommands.terminalClose(created.id).catch(() => undefined);
-      }
-    };
-    void ensureSession();
-    return () => {
-      disposed = true;
-    };
-  }, [session, upsertTerminalSession]);
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    const written = writtenLenRef.current;
+    if (bufferText.length === written) return;
+    if (bufferText.length > written && bufferText.startsWith(bufferText.slice(0, written))) {
+      // Normal append — write the delta.
+      terminal.write(bufferText.slice(written));
+      writtenLenRef.current = bufferText.length;
+    } else {
+      // Buffer shrank or diverged (clear / truncation) — repaint from scratch.
+      terminal.clear();
+      if (bufferText) terminal.write(bufferText);
+      writtenLenRef.current = bufferText.length;
+    }
+  }, [bufferText]);
 
-  useEffect(() => {
-    let disposed = false;
-    let dispose: (() => void) | undefined;
-    void subscribeLuxEvents((event) => {
-      if (event.type !== "terminalOutput") return;
-      if (event.session_id !== sessionRef.current?.id) return;
-      terminalRef.current?.write(event.data);
-    }).then((unlisten) => {
-      if (disposed) unlisten();
-      else dispose = unlisten;
-    }).catch((error: unknown) => {
-      terminalRef.current?.write(`\r\n${readErrorMessage(error)}\r\n`);
-    });
-
-    return () => {
-      disposed = true;
-      dispose?.();
-    };
-  }, []);
-
+  // Explicit clear (the broom button bumps clearToken).
   useEffect(() => {
     if (clearToken > 0) {
       terminalRef.current?.clear();
+      writtenLenRef.current = 0;
       if (!sessionRef.current && isBrowserPreviewRuntime()) {
         terminalRef.current?.write(webPrompt);
         webPromptWrittenRef.current = true;
@@ -213,9 +179,10 @@ export function XtermTerminal({ bufferText = "", clearToken, onSessionCreated, s
     }
   }, [clearToken]);
 
-  return <div className="xterm-host" ref={containerRef} />;
-}
+  // Refocus when this slot becomes the active session so the user can type right away.
+  useEffect(() => {
+    if (session) terminalRef.current?.focus();
+  }, [session?.id]);
 
-function readErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  return <div className="xterm-host" ref={containerRef} data-session-id={session?.id} />;
 }

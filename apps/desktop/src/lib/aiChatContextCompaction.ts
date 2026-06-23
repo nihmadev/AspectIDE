@@ -17,6 +17,15 @@ export const COMPACTION_CHECKPOINT_MARKER = "[Lux · context compacted]";
 export const TOOL_OUTPUT_PRUNE_MARKER = "[Lux · tool output pruned";
 export const PRESERVE_RECENT_MESSAGE_COUNT = 8;
 export const MIN_MESSAGES_FOR_COMPACTION = 8;
+/**
+ * Manual ("Compact now" / `/compact`) compaction must work at any moment, even in
+ * a short chat that is nowhere near the auto-compact threshold. Forced runs use a
+ * smaller preserve window and message floor so there is always something older to
+ * summarize instead of refusing with "too few messages". Auto-compaction keeps the
+ * larger, conservative values above.
+ */
+export const FORCED_PRESERVE_RECENT_MESSAGE_COUNT = 3;
+export const FORCED_MIN_MESSAGES_FOR_COMPACTION = 4;
 /** OpenCode-style prune: keep full tool output only on the latest N assistant turns. */
 export const PRESERVE_FULL_TOOL_OUTPUT_ASSISTANT_TURNS = 3;
 const MIN_TOOL_OUTPUT_CHARS_TO_PRUNE = 320;
@@ -113,8 +122,8 @@ export function shouldAutoCompactContext(params: {
   return tokens >= trigger;
 }
 
-export function buildCompactionFingerprint(messages: AiChatMessage[]) {
-  const slice = messages.slice(0, Math.max(0, messages.length - PRESERVE_RECENT_MESSAGE_COUNT));
+export function buildCompactionFingerprint(messages: AiChatMessage[], preserveCount = PRESERVE_RECENT_MESSAGE_COUNT) {
+  const slice = messages.slice(0, Math.max(0, messages.length - preserveCount));
   return slice.map((message) => `${message.id}:${estimateMessageTokens(message)}`).join("|");
 }
 
@@ -182,9 +191,14 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
   const triggerTokens = resolveContextCompactTriggerTokens(input.model, threshold);
   const tokensBefore = estimateHistoryTokens(prunedMessages);
   const force = input.force === true;
+  // Forced/manual compaction works at any moment: relax the message floor and
+  // preserve fewer recent turns so even a short chat has something older to
+  // summarize. Auto-compaction keeps the conservative defaults.
+  const minMessages = force ? FORCED_MIN_MESSAGES_FOR_COMPACTION : MIN_MESSAGES_FOR_COMPACTION;
+  const preserveCount = force ? FORCED_PRESERVE_RECENT_MESSAGE_COUNT : PRESERVE_RECENT_MESSAGE_COUNT;
   const eligible = prunedMessages.filter((message) => !isCompactionCheckpointMessage(message));
 
-  if (eligible.length < MIN_MESSAGES_FOR_COMPACTION) {
+  if (eligible.length < minMessages) {
     const onlyPruned = prunedMessages !== input.messages;
     return {
       messages: onlyPruned ? prunedMessages : input.messages,
@@ -214,7 +228,7 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
     };
   }
 
-  const preserveFrom = Math.max(0, prunedMessages.length - PRESERVE_RECENT_MESSAGE_COUNT);
+  const preserveFrom = Math.max(0, prunedMessages.length - preserveCount);
   const older = prunedMessages.slice(0, preserveFrom).filter((message) => !isCompactionCheckpointMessage(message));
   const recent = prunedMessages.slice(preserveFrom);
 
@@ -228,7 +242,7 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
     };
   }
 
-  const fingerprint = buildCompactionFingerprint(prunedMessages);
+  const fingerprint = buildCompactionFingerprint(prunedMessages, preserveCount);
   const now = Date.now();
   if (!force && input.compactionState) {
     if (input.compactionState.fingerprint === fingerprint) {
@@ -454,6 +468,7 @@ async function summarizeCompactionTranscript(input: {
       baseUrl: input.provider.baseUrl,
       apiKey: input.provider.apiKey || null,
       model: input.model.alias || input.model.id,
+      protocol: input.provider.protocol,
       reasoning: reasoningPayload(input.selectedEffortId, input.provider),
     });
     return truncateText(summary, MAX_SUMMARY_CHARS);

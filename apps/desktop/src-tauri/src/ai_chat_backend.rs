@@ -31,9 +31,9 @@ const fn retry_budget_for_status(status: u16) -> u32 {
     }
 }
 
-/// Connect/timeout/request errors: a persistent network fault won't clear in ten
-/// tries, so cap lower than the rate-limit budget while still riding out a blip.
-const NETWORK_RETRY_BUDGET: u32 = 4;
+/// Connect/timeout/request errors: ride the same ~10-attempt linear ladder so a
+/// transient network blip gets the full gentle backoff before surfacing.
+const NETWORK_RETRY_BUDGET: u32 = 9;
 /// Hard cap on the SSE reassembly buffer. A server that streams bytes without an
 /// event delimiter (`\n\n`) could otherwise grow this without bound; cutting at
 /// 8 MiB bounds memory against a misbehaving or malicious provider.
@@ -45,14 +45,32 @@ pub struct AiChatCompletionRequest {
     base_url: String,
     api_key: Option<String>,
     payload: Value,
+    /// Provider wire protocol (`openai-compatible` default, or `anthropic` for the
+    /// Anthropic Messages API). Selects the endpoint, auth headers, and request/
+    /// response translation. Defaults so older frontend payloads stay valid.
+    #[serde(default = "default_protocol")]
+    protocol: String,
+}
+
+fn default_protocol() -> String {
+    "openai-compatible".to_string()
 }
 
 impl AiChatCompletionRequest {
-    pub const fn new(base_url: String, api_key: Option<String>, payload: Value) -> Self {
+    /// Build a native completion request, pinning the provider protocol (e.g.
+    /// `"anthropic"`). An empty or unrecognized protocol behaves as
+    /// OpenAI-compatible.
+    pub const fn with_protocol(
+        base_url: String,
+        api_key: Option<String>,
+        payload: Value,
+        protocol: String,
+    ) -> Self {
         Self {
             base_url,
             api_key,
             payload,
+            protocol,
         }
     }
 }
@@ -156,6 +174,27 @@ pub fn merge_reasoning(payload: &mut Value, reasoning: Option<&Value>) {
     }
 }
 
+/// True when the frontend sent a non-empty reasoning blob — i.e. the active model
+/// is a reasoning model (non-reasoning models send `{}`). Reasoning models reject
+/// explicit sampling params and the legacy `max_tokens` name on several providers
+/// (`OpenAI` o-series / gpt-5 return HTTP 400), so callers gate those fields on this.
+pub fn reasoning_present(reasoning: Option<&Value>) -> bool {
+    matches!(reasoning, Some(Value::Object(map)) if !map.is_empty())
+}
+
+/// Insert the sampling `temperature` only for standard models. Reasoning models
+/// (non-empty reasoning blob) omit it and fall back to the provider default,
+/// avoiding the HTTP 400 reasoning models raise on an explicit non-default
+/// temperature. Pair with `merge_reasoning` at every native call site.
+pub fn apply_temperature(payload: &mut Value, reasoning: Option<&Value>, temperature: f64) {
+    if reasoning_present(reasoning) {
+        return;
+    }
+    if let Some(target) = payload.as_object_mut() {
+        target.insert("temperature".to_string(), serde_json::json!(temperature));
+    }
+}
+
 /// Build the `/models` listing endpoint from a provider base URL (`OpenAI` shape),
 /// mirroring `completion_endpoint` so trailing-slash and `/chat/completions` bases
 /// both resolve correctly.
@@ -244,7 +283,17 @@ pub async fn completion<R>(
 where
     R: FnMut(RetryNotice),
 {
-    let endpoint = completion_endpoint(&request.base_url)?;
+    let anthropic = crate::ai_anthropic::is_anthropic(&request.protocol);
+    let endpoint = if anthropic {
+        crate::ai_anthropic::messages_endpoint(&request.base_url)?
+    } else {
+        completion_endpoint(&request.base_url)?
+    };
+    let payload = if anthropic {
+        crate::ai_anthropic::to_anthropic_request(&request.payload)
+    } else {
+        request.payload.clone()
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
         .build()
@@ -258,14 +307,12 @@ where
 
     let mut attempt: u32 = 0;
     loop {
-        let mut builder = client
+        let builder = client
             .post(endpoint.as_str())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .header(reqwest::header::ACCEPT, "application/json")
-            .json(&request.payload);
-        if let Some(key) = &api_key {
-            builder = builder.bearer_auth(key);
-        }
+            .json(&payload);
+        let builder = apply_auth(builder, anthropic, api_key.as_deref());
 
         let send_result = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()).await;
         let response = match send_result {
@@ -342,6 +389,12 @@ where
                 format!("AI provider returned a non-JSON response (is the base URL correct?): {preview}")
             }
         })?;
+        // Map Anthropic's Messages response back to the OpenAI shape callers parse.
+        let body = if anthropic {
+            crate::ai_anthropic::from_anthropic_response(&body)
+        } else {
+            body
+        };
         return Ok(AiChatCompletionResponse { status, body });
     }
 }
@@ -370,12 +423,22 @@ where
     C: Fn() -> bool,
     R: FnMut(RetryNotice),
 {
-    let endpoint = completion_endpoint(&request.base_url)?;
+    let anthropic = crate::ai_anthropic::is_anthropic(&request.protocol);
+    let endpoint = if anthropic {
+        crate::ai_anthropic::messages_endpoint(&request.base_url)?
+    } else {
+        completion_endpoint(&request.base_url)?
+    };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
         .build()
         .map_err(|error| error.to_string())?;
-    let payload = stream_payload(request.payload);
+    let stream_ready = stream_payload(request.payload);
+    let payload = if anthropic {
+        crate::ai_anthropic::to_anthropic_request(&stream_ready)
+    } else {
+        stream_ready
+    };
     let api_key = request
         .api_key
         .as_deref()
@@ -387,14 +450,12 @@ where
     let response = {
         let mut attempt: u32 = 0;
         loop {
-            let mut builder = client
+            let builder = client
                 .post(endpoint.as_str())
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .header(reqwest::header::ACCEPT, "text/event-stream")
                 .json(&payload);
-            if let Some(key) = &api_key {
-                builder = builder.bearer_auth(key);
-            }
+            let builder = apply_auth(builder, anthropic, api_key.as_deref());
             let send = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()).await;
             let response = match send {
                 Err(_) => {
@@ -457,9 +518,20 @@ where
         }
     };
 
-    let mut accumulator = StreamAccumulator::default();
+    let mut accumulator = if anthropic {
+        StreamMode::Anthropic(AnthropicStreamAccumulator::default())
+    } else {
+        StreamMode::OpenAi(StreamAccumulator::default())
+    };
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
+    // Full decoded body, kept so a provider that ignores `stream:true` and returns a
+    // single non-SSE JSON object (some gateways do) can still be parsed below — the
+    // SSE loop would otherwise find no `data:` events and finalize an empty answer.
+    let mut raw_body = String::new();
+    // Whether any SSE `data:` event was actually ingested. If not, raw_body is parsed
+    // as a complete (non-streamed) response.
+    let mut ingested_event = false;
     // Carry an incomplete trailing UTF-8 sequence across chunks: bytes_stream()
     // splits on arbitrary byte boundaries, so decoding each chunk independently
     // would mangle multibyte code points (Cyrillic/CJK/emoji) into U+FFFD.
@@ -473,6 +545,10 @@ where
             break 'outer;
         }
         let bytes = chunk.map_err(|error| stream_chunk_error(&error))?;
+        // Keep a bounded copy of the raw body for the non-SSE fallback below.
+        if raw_body.len() < MAX_SSE_BUFFER {
+            raw_body.push_str(&String::from_utf8_lossy(&bytes));
+        }
         byte_tail.extend_from_slice(&bytes);
         // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
         // invalid byte (e.g. a stray 0xFF from a misbehaving provider) is replaced
@@ -516,6 +592,7 @@ where
                 break 'outer;
             }
             if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                ingested_event = true;
                 accumulator.ingest(&value, &mut on_delta);
             }
         }
@@ -538,12 +615,57 @@ where
             break;
         }
         if let Ok(value) = serde_json::from_str::<Value>(&data) {
+            ingested_event = true;
             accumulator.ingest(&value, &mut on_delta);
+        }
+    }
+
+    // Non-SSE fallback: some gateways ignore `stream:true` and return a single plain
+    // JSON object (no `data:` events). The SSE loops above then ingest nothing and the
+    // turn would finalize empty. Parse the whole raw body as a complete response and
+    // stream it through on_delta so the answer renders. Handles both the Anthropic
+    // shape ({content:[{type:text,…}]}) and the OpenAI shape ({choices:[…]}).
+    if !ingested_event {
+        let trimmed = raw_body.trim();
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            let normalized = if anthropic && value.get("choices").is_none() {
+                crate::ai_anthropic::from_anthropic_response(&value)
+            } else {
+                value
+            };
+            if let Some(message) = normalized
+                .get("choices")
+                .and_then(Value::as_array)
+                .and_then(|arr| arr.first())
+                .and_then(|c| c.get("message"))
+            {
+                let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+                let reasoning = message
+                    .get("reasoning_content")
+                    .or_else(|| message.get("reasoning"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !content.is_empty() || !reasoning.is_empty() {
+                    on_delta(content, reasoning);
+                }
+                return Ok(AiChatCompletionResponse {
+                    status: 200,
+                    body: normalized,
+                });
+            }
         }
     }
 
     // Emit any buffered partial `<think>` tail so the last fragment isn't dropped.
     accumulator.flush(&mut on_delta);
+
+    // A mid-stream operational error (Anthropic delivers overload/rate-limit/
+    // api_error as a typed SSE event on an already-200 stream) must fail the turn,
+    // not be finalized as a truncated success — route it through the same error/
+    // retry path as a non-200 connection-phase failure.
+    if let Some(error) = accumulator.stream_error() {
+        return Err(error.to_string());
+    }
 
     Ok(AiChatCompletionResponse {
         status: 200,
@@ -707,8 +829,15 @@ impl StreamAccumulator {
     }
 
     fn merge_tool_call(&mut self, call: &Value) {
+        // A single response never has more than a handful of tool calls. Clamp the
+        // attacker-controlled `index` to a hard ceiling so a hostile endpoint
+        // streaming `{"index":4e9}` can't drive the `while push` loop into a
+        // multi-gigabyte allocation / abort (H8).
+        const MAX_TOOL_CALLS: usize = 256;
         let index = match call.get("index").and_then(Value::as_u64) {
-            Some(value) => usize::try_from(value).unwrap_or(0),
+            Some(value) => usize::try_from(value)
+                .unwrap_or(usize::MAX)
+                .min(MAX_TOOL_CALLS - 1),
             // No explicit index: extend the most recent call (or start the first).
             None => self.tool_calls.len().saturating_sub(1),
         };
@@ -767,6 +896,233 @@ impl StreamAccumulator {
             body["usage"] = usage;
         }
         body
+    }
+}
+
+/// Reassembles an Anthropic Messages SSE stream into the same OpenAI-style response
+/// body the rest of the transport expects. Anthropic emits typed events
+/// (`message_start`, `content_block_start/delta/stop`, `message_delta`, …) keyed by
+/// content-block `index`; text → answer, `thinking` → reasoning, `tool_use` +
+/// `input_json_delta` → an `OpenAI` tool call whose arguments stream as a JSON
+/// fragment. Mixed text/tool blocks keep their content-block index; empty (text)
+/// slots are filtered out of the final tool-call list.
+#[derive(Default)]
+struct AnthropicStreamAccumulator {
+    content: String,
+    reasoning: String,
+    tool_calls: Vec<StreamToolCall>,
+    stop_reason: Option<String>,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read: u64,
+    cache_creation: u64,
+    /// A mid-stream `error` event (overload / rate limit / `api_error`). Anthropic
+    /// delivers these on an already-200 stream, so the connection-phase status
+    /// check can't catch them; the caller must surface this as a failure instead
+    /// of finalizing a truncated answer as success.
+    error: Option<String>,
+}
+
+impl AnthropicStreamAccumulator {
+    fn ingest<F: FnMut(&str, &str)>(&mut self, value: &Value, on_delta: &mut F) {
+        match value.get("type").and_then(Value::as_str).unwrap_or("") {
+            "message_start" => {
+                if let Some(usage) = value.pointer("/message/usage") {
+                    self.input_tokens += usage
+                        .get("input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    self.cache_read += usage
+                        .get("cache_read_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                    self.cache_creation += usage
+                        .get("cache_creation_input_tokens")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                }
+            }
+            "content_block_start" => {
+                let block = value.get("content_block");
+                if block.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
+                    let index = block_index(value);
+                    self.ensure_slot(index);
+                    let slot = &mut self.tool_calls[index];
+                    if let Some(id) = block.and_then(|b| b.get("id")).and_then(Value::as_str) {
+                        slot.id = id.to_string();
+                    }
+                    if let Some(name) = block.and_then(|b| b.get("name")).and_then(Value::as_str) {
+                        slot.name = name.to_string();
+                    }
+                    // A tool_use that ships its full input up front (no streamed
+                    // input_json_delta) seeds arguments here.
+                    if let Some(input) = block.and_then(|b| b.get("input")) {
+                        if input.as_object().is_some_and(|object| !object.is_empty()) {
+                            slot.arguments = input.to_string();
+                        }
+                    }
+                }
+            }
+            "content_block_delta" => {
+                let delta = value.get("delta");
+                match delta.and_then(|d| d.get("type")).and_then(Value::as_str) {
+                    Some("text_delta") => {
+                        if let Some(text) =
+                            delta.and_then(|d| d.get("text")).and_then(Value::as_str)
+                        {
+                            self.content.push_str(text);
+                            on_delta(text, "");
+                        }
+                    }
+                    Some("thinking_delta") => {
+                        if let Some(text) = delta
+                            .and_then(|d| d.get("thinking"))
+                            .and_then(Value::as_str)
+                        {
+                            self.reasoning.push_str(text);
+                            on_delta("", text);
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        if let Some(fragment) = delta
+                            .and_then(|d| d.get("partial_json"))
+                            .and_then(Value::as_str)
+                        {
+                            let index = block_index(value);
+                            self.ensure_slot(index);
+                            self.tool_calls[index].arguments.push_str(fragment);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            "message_delta" => {
+                if let Some(reason) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                    self.stop_reason = Some(reason.to_string());
+                }
+                if let Some(output) = value
+                    .pointer("/usage/output_tokens")
+                    .and_then(Value::as_u64)
+                {
+                    self.output_tokens += output;
+                }
+            }
+            // Anthropic streams operational failures as a typed event on an
+            // already-200 stream (often after some tokens). Capture the first one so
+            // the caller fails the turn instead of returning truncated content.
+            "error" if self.error.is_none() => {
+                let detail = value.pointer("/error/message").and_then(Value::as_str);
+                let kind = value.pointer("/error/type").and_then(Value::as_str);
+                self.error = Some(match (kind, detail) {
+                    (Some(kind), Some(detail)) => {
+                        format!("AI provider stream error ({kind}): {detail}")
+                    }
+                    (Some(kind), None) => format!("AI provider stream error: {kind}"),
+                    (None, Some(detail)) => format!("AI provider stream error: {detail}"),
+                    (None, None) => "AI provider stream error".to_string(),
+                });
+            }
+            // ping / content_block_stop / message_stop carry nothing to fold.
+            _ => {}
+        }
+    }
+
+    fn ensure_slot(&mut self, index: usize) {
+        // Bound an attacker-controlled content-block index the same way the OpenAI
+        // accumulator clamps tool-call indices.
+        const MAX_TOOL_CALLS: usize = 256;
+        let index = index.min(MAX_TOOL_CALLS - 1);
+        while self.tool_calls.len() <= index {
+            self.tool_calls.push(StreamToolCall::default());
+        }
+    }
+
+    fn into_response_body(self) -> Value {
+        let mut message = serde_json::json!({
+            "role": "assistant",
+            "content": self.content,
+        });
+        if !self.reasoning.is_empty() {
+            message["reasoning_content"] = Value::String(self.reasoning);
+        }
+        let tool_calls: Vec<Value> = self
+            .tool_calls
+            .into_iter()
+            .filter(|tc| !tc.id.is_empty() || !tc.name.is_empty())
+            .map(|tc| {
+                serde_json::json!({
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.name,
+                        "arguments": if tc.arguments.is_empty() { "{}".to_string() } else { tc.arguments },
+                    },
+                })
+            })
+            .collect();
+        let has_tools = !tool_calls.is_empty();
+        if has_tools {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+        serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": message,
+                "finish_reason": crate::ai_anthropic::finish_reason(self.stop_reason.as_deref(), has_tools),
+            }],
+            "usage": crate::ai_anthropic::anthropic_usage(self.input_tokens, self.output_tokens, Some(&serde_json::json!({
+                "cache_read_input_tokens": self.cache_read,
+                "cache_creation_input_tokens": self.cache_creation,
+            }))),
+        })
+    }
+}
+
+/// `index` field of an Anthropic content-block event, defaulting to 0.
+fn block_index(value: &Value) -> usize {
+    value
+        .get("index")
+        .and_then(Value::as_u64)
+        .and_then(|v| usize::try_from(v).ok())
+        .unwrap_or(0)
+}
+
+/// Streaming accumulator that adapts to the provider protocol so the single SSE
+/// reassembly loop in `completion_streaming` stays protocol-agnostic.
+enum StreamMode {
+    OpenAi(StreamAccumulator),
+    Anthropic(AnthropicStreamAccumulator),
+}
+
+impl StreamMode {
+    fn ingest<F: FnMut(&str, &str)>(&mut self, value: &Value, on_delta: &mut F) {
+        match self {
+            Self::OpenAi(acc) => acc.ingest(value, on_delta),
+            Self::Anthropic(acc) => acc.ingest(value, on_delta),
+        }
+    }
+
+    fn flush<F: FnMut(&str, &str)>(&mut self, on_delta: &mut F) {
+        // Only the OpenAI accumulator buffers a partial inline-think tail.
+        if let Self::OpenAi(acc) = self {
+            acc.flush(on_delta);
+        }
+    }
+
+    /// A mid-stream operational error captured during ingest (Anthropic only).
+    /// `None` means the stream completed without a typed error event.
+    fn stream_error(&self) -> Option<&str> {
+        match self {
+            Self::Anthropic(acc) => acc.error.as_deref(),
+            Self::OpenAi(_) => None,
+        }
+    }
+
+    fn into_response_body(self) -> Value {
+        match self {
+            Self::OpenAi(acc) => acc.into_response_body(),
+            Self::Anthropic(acc) => acc.into_response_body(),
+        }
     }
 }
 
@@ -919,7 +1275,17 @@ pub fn history_save(
 pub async fn provider_diagnostic(
     request: AiChatCompletionRequest,
 ) -> Result<AiProviderDiagnosticResponse, String> {
-    let endpoint = completion_endpoint(&request.base_url)?;
+    let anthropic = crate::ai_anthropic::is_anthropic(&request.protocol);
+    let endpoint = if anthropic {
+        crate::ai_anthropic::messages_endpoint(&request.base_url)?
+    } else {
+        completion_endpoint(&request.base_url)?
+    };
+    let payload = if anthropic {
+        crate::ai_anthropic::to_anthropic_request(&request.payload)
+    } else {
+        request.payload.clone()
+    };
     let model = request
         .payload
         .get("model")
@@ -931,20 +1297,17 @@ pub async fn provider_diagnostic(
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| error.to_string())?;
-    let mut builder = client
+    let builder = client
         .post(endpoint)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(reqwest::header::ACCEPT, "application/json")
-        .json(&request.payload);
-
-    if let Some(api_key) = request
+        .json(&payload);
+    let api_key = request
         .api_key
         .as_deref()
         .map(str::trim)
-        .filter(|key| !key.is_empty())
-    {
-        builder = builder.bearer_auth(api_key);
-    }
+        .filter(|key| !key.is_empty());
+    let builder = apply_auth(builder, anthropic, api_key);
 
     match timeout(Duration::from_secs(25), builder.send()).await {
         Ok(Ok(response)) => {
@@ -1038,6 +1401,27 @@ fn recover_history_temp_file(path: &Path) -> Result<(), String> {
     std::fs::rename(&temporary_path, path).map_err(|error| error.to_string())
 }
 
+/// Attach provider auth to a request builder. Anthropic uses `x-api-key` plus the
+/// required `anthropic-version` header; every other (OpenAI-compatible) provider
+/// uses bearer auth.
+fn apply_auth(
+    builder: reqwest::RequestBuilder,
+    anthropic: bool,
+    api_key: Option<&str>,
+) -> reqwest::RequestBuilder {
+    if anthropic {
+        let builder = builder.header("anthropic-version", crate::ai_anthropic::ANTHROPIC_VERSION);
+        return match api_key {
+            Some(key) => builder.header("x-api-key", key),
+            None => builder,
+        };
+    }
+    match api_key {
+        Some(key) => builder.bearer_auth(key),
+        None => builder,
+    }
+}
+
 fn completion_endpoint(base_url: &str) -> Result<String, String> {
     let trimmed = base_url.trim();
     if trimmed.is_empty() {
@@ -1074,11 +1458,17 @@ fn is_transient_reqwest_error(error: &reqwest::Error) -> bool {
 }
 
 /// Exponential backoff: 0.5s, 1s, 2s … capped at the retry ceiling.
+/// Automatic-retry backoff: a gentle LINEAR ladder instead of an exponential jump.
+/// attempt 0 → 1s, then +3s per step: 1, 3, 6, 9, 12, 15, … capped at the ceiling.
+/// This rides out a blip without the old "wait 30s on the 3rd try" cliff, and the
+/// ladder is shallow enough that all ~10 attempts fit a reasonable window.
 fn backoff_delay(attempt: u32) -> Duration {
-    let secs = (1u64 << attempt)
-        .saturating_mul(500)
-        .min(MAX_RETRY_DELAY_SECS * 1000);
-    Duration::from_millis(secs)
+    let secs = if attempt == 0 {
+        1
+    } else {
+        (3 * u64::from(attempt)).min(MAX_RETRY_DELAY_SECS)
+    };
+    Duration::from_secs(secs)
 }
 
 async fn sleep_backoff(attempt: u32) {
@@ -1098,11 +1488,9 @@ fn transient_retry_delay(
     if let Some(delay) = retry_after_delay(headers) {
         return delay;
     }
-    if status == 429 {
-        // 3s, 6s, … capped at the ceiling.
-        let secs = (3u64 << attempt).min(MAX_RETRY_DELAY_SECS);
-        return Duration::from_secs(secs);
-    }
+    // 429 and the rest share the linear ladder (1s, 3s, 6s, …). A server-provided
+    // Retry-After above always wins when present.
+    let _ = status;
     backoff_delay(attempt)
 }
 
@@ -1260,7 +1648,12 @@ async fn stream_completion(
 
             let status = response.status().as_u16();
             if status >= 400 {
-                if attempt < MAX_TRANSIENT_RETRIES && is_transient_status(status) {
+                // Per-status retry budget: a 403/4xx is not a transient blip, so it
+                // gets a small budget (4) rather than the full rate-limit budget (9),
+                // matching `completion_streaming` (M6 — previously 403 was hammered
+                // up to 9×).
+                let budget = retry_budget_for_status(status);
+                if attempt < budget && is_transient_status(status) {
                     let delay = retry_after_delay(response.headers())
                         .unwrap_or_else(|| backoff_delay(attempt));
                     tokio::time::sleep(delay).await;
@@ -1610,19 +2003,18 @@ mod tests {
     #[test]
     fn rate_limit_without_header_uses_longer_floor() {
         let empty = reqwest::header::HeaderMap::new();
-        // 429 with no Retry-After: 3s, then 6s — long enough to matter and to show.
+        // All transient statuses share the linear ladder now: 1s, then 3s, 6s, …
         assert_eq!(
             transient_retry_delay(429, &empty, 0),
-            Duration::from_secs(3)
+            Duration::from_secs(1)
         );
         assert_eq!(
             transient_retry_delay(429, &empty, 1),
-            Duration::from_secs(6)
+            Duration::from_secs(3)
         );
-        // Other transient statuses keep the quick generic backoff.
         assert_eq!(
             transient_retry_delay(503, &empty, 0),
-            Duration::from_millis(500)
+            Duration::from_secs(1)
         );
         // A Retry-After header always wins, even for 429.
         let mut headers = reqwest::header::HeaderMap::new();
@@ -1704,8 +2096,8 @@ mod tests {
         // Edge 403 / request-timeout statuses clear less often → fewer tries.
         assert_eq!(retry_budget_for_status(403), 4);
         assert_eq!(retry_budget_for_status(408), 4);
-        // A dead socket shouldn't burn the full budget.
-        assert_eq!(NETWORK_RETRY_BUDGET, 4);
+        // Network blips ride the full ~10-attempt ladder now.
+        assert_eq!(NETWORK_RETRY_BUDGET, 9);
     }
 
     #[test]
@@ -1732,9 +2124,12 @@ mod tests {
 
     #[test]
     fn backoff_grows_and_caps() {
-        assert_eq!(backoff_delay(0), Duration::from_millis(500));
-        assert_eq!(backoff_delay(1), Duration::from_secs(1));
-        assert_eq!(backoff_delay(2), Duration::from_secs(2));
+        // Linear ladder: 1s, then +3s per step (1, 3, 6, 9, 12, …).
+        assert_eq!(backoff_delay(0), Duration::from_secs(1));
+        assert_eq!(backoff_delay(1), Duration::from_secs(3));
+        assert_eq!(backoff_delay(2), Duration::from_secs(6));
+        assert_eq!(backoff_delay(3), Duration::from_secs(9));
+        assert_eq!(backoff_delay(4), Duration::from_secs(12));
         // Large attempt is clamped to the ceiling, never overflows.
         assert!(backoff_delay(40) <= Duration::from_secs(MAX_RETRY_DELAY_SECS));
     }
@@ -1808,5 +2203,90 @@ mod tests {
         );
         let body = acc.into_response_body();
         assert_eq!(body["usage"]["total_tokens"], 15);
+    }
+
+    #[test]
+    fn anthropic_stream_accumulates_text_thinking_and_tool_use() {
+        let mut acc = AnthropicStreamAccumulator::default();
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut on_delta = |c: &str, r: &str| {
+            content.push_str(c);
+            reasoning.push_str(r);
+        };
+        let events = [
+            serde_json::json!({ "type": "message_start", "message": { "usage": { "input_tokens": 20, "cache_read_input_tokens": 4 } } }),
+            serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "let me think" } }),
+            serde_json::json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "Hello " } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "world" } }),
+            serde_json::json!({ "type": "content_block_start", "index": 2, "content_block": { "type": "tool_use", "id": "tu1", "name": "Read" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 2, "delta": { "type": "input_json_delta", "partial_json": "{\"path\":" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 2, "delta": { "type": "input_json_delta", "partial_json": "\"a.rs\"}" } }),
+            serde_json::json!({ "type": "message_delta", "delta": { "stop_reason": "tool_use" }, "usage": { "output_tokens": 9 } }),
+            serde_json::json!({ "type": "message_stop" }),
+        ];
+        for event in &events {
+            acc.ingest(event, &mut on_delta);
+        }
+        assert_eq!(content, "Hello world");
+        assert_eq!(reasoning, "let me think");
+        let body = acc.into_response_body();
+        assert_eq!(body["choices"][0]["message"]["content"], "Hello world");
+        assert_eq!(
+            body["choices"][0]["message"]["reasoning_content"],
+            "let me think"
+        );
+        let call = &body["choices"][0]["message"]["tool_calls"][0];
+        assert_eq!(call["id"], "tu1");
+        assert_eq!(call["function"]["name"], "Read");
+        assert_eq!(call["function"]["arguments"], "{\"path\":\"a.rs\"}");
+        assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(body["usage"]["prompt_tokens"], 20);
+        assert_eq!(body["usage"]["completion_tokens"], 9);
+        assert_eq!(body["usage"]["total_tokens"], 29);
+        assert_eq!(body["usage"]["cache_read_input_tokens"], 4);
+    }
+
+    #[test]
+    fn anthropic_stream_plain_text_has_stop_finish_and_no_tools() {
+        let mut acc = AnthropicStreamAccumulator::default();
+        let mut noop = |_: &str, _: &str| {};
+        for event in [
+            serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "done" } }),
+            serde_json::json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 2 } }),
+        ] {
+            acc.ingest(&event, &mut noop);
+        }
+        let body = acc.into_response_body();
+        assert_eq!(body["choices"][0]["finish_reason"], "stop");
+        assert!(body["choices"][0]["message"].get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn anthropic_stream_captures_mid_stream_error_event() {
+        let mut acc = AnthropicStreamAccumulator::default();
+        let mut noop = |_: &str, _: &str| {};
+        for event in [
+            serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "text" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "partial" } }),
+            serde_json::json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } }),
+        ] {
+            acc.ingest(&event, &mut noop);
+        }
+        // The error is captured so the caller fails the turn instead of returning
+        // the truncated "partial" content as a success.
+        let error = acc.error.clone().expect("error event should be captured");
+        assert!(error.contains("overloaded_error"));
+        assert!(error.contains("Overloaded"));
+        // The StreamMode wrapper surfaces it to completion_streaming.
+        let mode = StreamMode::Anthropic(acc);
+        assert!(mode.stream_error().is_some());
+        // The OpenAI accumulator never reports a stream error.
+        assert!(StreamMode::OpenAi(StreamAccumulator::default())
+            .stream_error()
+            .is_none());
     }
 }

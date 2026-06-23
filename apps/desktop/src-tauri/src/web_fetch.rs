@@ -1,8 +1,9 @@
 use std::{
-    net::{IpAddr, ToSocketAddrs},
+    net::{IpAddr, SocketAddr, ToSocketAddrs},
     time::Duration,
 };
 
+use futures_util::StreamExt;
 use reqwest::redirect::Policy;
 use serde::Serialize;
 use tokio::time::timeout;
@@ -47,62 +48,46 @@ pub async fn fetch(
     url: String,
     max_bytes: Option<u64>,
     timeout_secs: Option<u64>,
-    allow_private_hosts: Option<bool>,
 ) -> Result<WebFetchResponse, String> {
     let started = std::time::Instant::now();
-    let url = validate_url(&url)?;
-    let allow_private_hosts = allow_private_hosts.unwrap_or(false);
-    if !allow_private_hosts {
-        reject_private_host(&url).await?;
-    }
-
+    let initial = validate_url(&url)?;
     let max_bytes = max_bytes
         .unwrap_or(DEFAULT_MAX_BYTES)
         .clamp(1_024, MAX_BYTES);
     let timeout_secs = timeout_secs
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
         .clamp(1, MAX_TIMEOUT_SECS);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .redirect(ssrf_redirect_policy())
-        .user_agent(USER_AGENT)
-        .build()
-        .map_err(|error| error.to_string())?;
 
-    let response = timeout(
-        Duration::from_secs(timeout_secs + 5),
-        client.get(url.clone()).send(),
-    )
-    .await
-    .map_err(|_| "WebFetch request timed out".to_string())?
-    .map_err(|error| error.to_string())?;
-    let status = response.status().as_u16();
-    let final_url = response.url().to_string();
-    if !allow_private_hosts {
-        reject_private_host(response.url()).await?;
-    }
+    // The model never gets to disable the SSRF guard: `allow_private` is hard
+    // `false` here (H1). DNS is resolved once and pinned per hop, redirects are
+    // followed manually with the guard re-applied on every hop, and the body is
+    // capped during streaming — so rebinding (H2), redirect-to-private (H3) and
+    // unbounded buffering (M3) are all closed.
+    let guarded = fetch_guarded(GuardedRequest {
+        initial,
+        accept: None,
+        accept_language: false,
+        user_agent: USER_AGENT,
+        use_native_tls: false,
+        timeout_secs,
+        max_bytes: usize::try_from(max_bytes).unwrap_or(usize::MAX),
+        allow_private: false,
+    })
+    .await?;
 
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(ToString::to_string);
-    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
-    let truncated = bytes.len() as u64 > max_bytes;
-    let visible = &bytes[..usize::min(bytes.len(), max_bytes as usize)];
-    let raw_text = String::from_utf8_lossy(visible).to_string();
-    let text = normalize_text(&raw_text, content_type.as_deref());
+    let raw_text = String::from_utf8_lossy(&guarded.body).to_string();
+    let text = normalize_text(&raw_text, guarded.content_type.as_deref());
     let title = extract_html_title(&raw_text);
 
     Ok(WebFetchResponse {
-        url: url.to_string(),
-        final_url,
-        status,
-        content_type,
+        url: url.trim().to_string(),
+        final_url: guarded.final_url.to_string(),
+        status: guarded.status,
+        content_type: guarded.content_type,
         title,
         text,
-        bytes_read: visible.len() as u64,
-        truncated,
+        bytes_read: guarded.body.len() as u64,
+        truncated: guarded.truncated,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }
@@ -119,74 +104,213 @@ pub async fn fetch_text(
     max_bytes: usize,
     allow_private: bool,
 ) -> Result<String, String> {
-    let parsed = validate_url(url)?;
-    if !allow_private {
-        reject_private_host(&parsed).await?;
-    }
+    let initial = validate_url(url)?;
     let timeout_secs = timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
-    // Search providers (DuckDuckGo especially) fingerprint the TLS ClientHello and
-    // serve a content-free challenge page to reqwest's default rustls stack — the
-    // request returns 200 with ~14KB and zero result anchors. The platform-native
-    // TLS backend (Schannel / Secure Transport / vendored OpenSSL) presents a
-    // browser-like handshake that passes, returning the real results page. Normal
-    // WebFetch keeps rustls; only this search path opts into native TLS.
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(timeout_secs))
-        .redirect(ssrf_redirect_policy())
-        .user_agent(SEARCH_USER_AGENT)
-        .use_native_tls()
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response = timeout(
-        Duration::from_secs(timeout_secs + 5),
-        client
-            .get(parsed.clone())
-            .header(reqwest::header::ACCEPT, accept)
-            .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
-            .send(),
-    )
-    .await
-    .map_err(|_| "search request timed out".to_string())?
-    .map_err(|error| error.to_string())?;
-    if !allow_private {
-        reject_private_host(response.url()).await?;
+    // `allow_private` here is NOT model-controlled — it is set from user config
+    // (a self-hosted SearxNG on localhost/LAN is explicitly trusted); the public
+    // DuckDuckGo fallback keeps the guard on. Search providers fingerprint the
+    // rustls ClientHello and serve a challenge page, so the search path opts into
+    // the platform-native TLS backend (see `fetch_guarded`).
+    let guarded = fetch_guarded(GuardedRequest {
+        initial,
+        accept: Some(accept.to_string()),
+        accept_language: true,
+        user_agent: SEARCH_USER_AGENT,
+        use_native_tls: true,
+        timeout_secs,
+        max_bytes,
+        allow_private,
+    })
+    .await?;
+    if !(200..300).contains(&guarded.status) {
+        return Err(format!("search provider returned HTTP {}", guarded.status));
     }
-    if !response.status().is_success() {
-        return Err(format!(
-            "search provider returned HTTP {}",
-            response.status().as_u16()
-        ));
-    }
-    let bytes = response.bytes().await.map_err(|error| error.to_string())?;
-    let visible = &bytes[..usize::min(bytes.len(), max_bytes)];
-    Ok(String::from_utf8_lossy(visible).into_owned())
+    Ok(String::from_utf8_lossy(&guarded.body).into_owned())
 }
 
-/// Redirect policy that re-checks SSRF on EVERY hop, not just the first/final URL.
-/// `Policy::limited` would follow a 302 into a private/metadata host before the
-/// caller's final-URL guard runs; this rejects literal localhost/private-IP hops
-/// synchronously (a redirect callback cannot await DNS — the caller's async
-/// `reject_private_host` still covers DNS-resolved privates on the first/last hop).
-fn ssrf_redirect_policy() -> Policy {
-    Policy::custom(|attempt| {
-        let host = attempt.url().host_str().unwrap_or("");
-        if host.trim().is_empty() {
-            return attempt.stop();
+/// Parameters for a single SSRF-guarded fetch.
+struct GuardedRequest {
+    initial: reqwest::Url,
+    accept: Option<String>,
+    accept_language: bool,
+    user_agent: &'static str,
+    use_native_tls: bool,
+    timeout_secs: u64,
+    max_bytes: usize,
+    allow_private: bool,
+}
+
+/// Outcome of a guarded fetch: final hop, status, content-type, capped body.
+struct GuardedResponse {
+    final_url: reqwest::Url,
+    status: u16,
+    content_type: Option<String>,
+    body: Vec<u8>,
+    truncated: bool,
+}
+
+const MAX_REDIRECTS: usize = 5;
+
+/// The SSRF-safe fetch core shared by [`fetch`] and [`fetch_text`].
+///
+/// Closes the structural SSRF holes in one place: for every hop it resolves the
+/// host once, rejects any resolved private IP (unless `allow_private`), and pins
+/// the connection to exactly those vetted IPs via `ClientBuilder::resolve_to_addrs`
+/// so reqwest cannot re-resolve to a different (private) address at connect time
+/// (H2 rebinding). Redirects are followed manually — `Policy::none()` — so each
+/// `Location` is re-validated with full DNS before the next request (H3). The body
+/// is read as a stream and cut off the moment it exceeds `max_bytes` (M3), and an
+/// oversized `Content-Length` is rejected up front.
+async fn fetch_guarded(req: GuardedRequest) -> Result<GuardedResponse, String> {
+    let mut current = req.initial;
+    let mut redirects = 0usize;
+
+    loop {
+        // Resolve + validate this hop, and obtain the exact IPs to pin to.
+        let pinned = resolve_and_screen(&current, req.allow_private).await?;
+        let host = current
+            .host_str()
+            .ok_or_else(|| "WebFetch URL must include a host".to_string())?
+            .to_string();
+
+        let mut builder = reqwest::Client::builder()
+            .timeout(Duration::from_secs(req.timeout_secs))
+            .redirect(Policy::none())
+            .user_agent(req.user_agent)
+            .resolve_to_addrs(&host, &pinned);
+        if req.use_native_tls {
+            builder = builder.use_native_tls();
         }
-        let lower = host.trim_end_matches('.').to_ascii_lowercase();
-        if lower == "localhost" || lower.ends_with(".localhost") {
-            return attempt.error("redirect blocked: localhost host");
+        let client = builder.build().map_err(|error| error.to_string())?;
+
+        let mut request = client.get(current.clone());
+        if let Some(accept) = &req.accept {
+            request = request.header(reqwest::header::ACCEPT, accept.clone());
         }
-        if let Ok(ip) = host.parse::<IpAddr>() {
-            if is_private_ip(ip) {
-                return attempt.error("redirect blocked: private IP");
+        if req.accept_language {
+            request = request.header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9");
+        }
+
+        let response = timeout(Duration::from_secs(req.timeout_secs + 5), request.send())
+            .await
+            .map_err(|_| "WebFetch request timed out".to_string())?
+            .map_err(|error| error.to_string())?;
+
+        let status = response.status();
+        // Follow redirects ourselves so each target is re-screened with DNS.
+        if status.is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .ok_or_else(|| "WebFetch redirect missing Location header".to_string())?;
+            let next = current
+                .join(location)
+                .map_err(|error| format!("WebFetch redirect URL invalid: {error}"))?;
+            match next.scheme() {
+                "http" | "https" => {}
+                scheme => {
+                    return Err(format!("WebFetch redirect to unsupported scheme: {scheme}"));
+                }
+            }
+            redirects += 1;
+            if redirects > MAX_REDIRECTS {
+                return Err("WebFetch exceeded the redirect limit".to_string());
+            }
+            current = next;
+            continue;
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToString::to_string);
+        // Reject an oversized declared length before reading a single byte.
+        if let Some(declared) = response.content_length() {
+            if declared > req.max_bytes as u64 * 8 {
+                return Err("WebFetch response Content-Length exceeds the limit".to_string());
             }
         }
-        if attempt.previous().len() >= 5 {
-            return attempt.stop();
+
+        let (body, truncated) = read_capped(response, req.max_bytes).await?;
+        return Ok(GuardedResponse {
+            final_url: current,
+            status: status.as_u16(),
+            content_type,
+            body,
+            truncated,
+        });
+    }
+}
+
+/// Stream a response body, stopping the moment it exceeds `max_bytes`. The cap is
+/// enforced *during* the read so a hostile/endless body never fully materializes.
+async fn read_capped(
+    response: reqwest::Response,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, bool), String> {
+    let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut truncated = false;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        let remaining = max_bytes.saturating_sub(body.len());
+        if chunk.len() >= remaining {
+            body.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
         }
-        attempt.follow()
+        body.extend_from_slice(&chunk);
+    }
+    Ok((body, truncated))
+}
+
+/// Resolve a URL's host to socket addresses, reject private targets (unless
+/// explicitly allowed), and return the vetted IPs to pin the connection to.
+async fn resolve_and_screen(
+    url: &reqwest::Url,
+    allow_private: bool,
+) -> Result<Vec<SocketAddr>, String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "WebFetch URL must include a host".to_string())?
+        .to_string();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "WebFetch URL has no usable port".to_string())?;
+
+    if !allow_private && is_localhost_name(&host) {
+        return Err("WebFetch blocks localhost/private hosts by default".to_string());
+    }
+
+    // A bare IP literal needs no DNS — screen it directly.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if !allow_private && is_private_ip(ip) {
+            return Err(
+                "WebFetch blocks localhost/private network addresses by default".to_string(),
+            );
+        }
+        return Ok(vec![SocketAddr::new(ip, port)]);
+    }
+
+    let lookup_host = host.clone();
+    let addresses = tokio::task::spawn_blocking(move || {
+        (lookup_host.as_str(), port)
+            .to_socket_addrs()
+            .map(Iterator::collect::<Vec<_>>)
+            .map_err(|error| error.to_string())
     })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    if addresses.is_empty() {
+        return Err("WebFetch host did not resolve to any address".to_string());
+    }
+    if !allow_private && addresses.iter().any(|socket| is_private_ip(socket.ip())) {
+        return Err("WebFetch blocks localhost/private network addresses by default".to_string());
+    }
+    Ok(addresses)
 }
 
 fn validate_url(url: &str) -> Result<reqwest::Url, String> {
@@ -207,34 +331,6 @@ fn validate_url(url: &str) -> Result<reqwest::Url, String> {
         return Err("WebFetch URL host is empty".to_string());
     }
     Ok(parsed)
-}
-
-async fn reject_private_host(url: &reqwest::Url) -> Result<(), String> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| "WebFetch URL must include a host".to_string())?
-        .to_string();
-    if is_localhost_name(&host) {
-        return Err("WebFetch blocks localhost/private hosts by default".to_string());
-    }
-    let port = url
-        .port_or_known_default()
-        .ok_or_else(|| "WebFetch URL has no usable port".to_string())?;
-    let addresses = tokio::task::spawn_blocking(move || {
-        (host.as_str(), port)
-            .to_socket_addrs()
-            .map(|iter| iter.map(|socket| socket.ip()).collect::<Vec<_>>())
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    if addresses.is_empty() {
-        return Err("WebFetch host did not resolve to any address".to_string());
-    }
-    if addresses.iter().any(|ip| is_private_ip(*ip)) {
-        return Err("WebFetch blocks localhost/private network addresses by default".to_string());
-    }
-    Ok(())
 }
 
 fn is_localhost_name(host: &str) -> bool {

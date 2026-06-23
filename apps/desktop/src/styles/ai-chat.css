@@ -1538,6 +1538,10 @@
   background: transparent;
   padding: 2px 0;
   border-radius: 0;
+  color: var(--text-0);
+  font-size: 13.5px;
+  line-height: 1.7;
+  letter-spacing: 0.001em;
 }
 
 .ai-chat-message-content[data-collapsed="true"] {
@@ -1636,6 +1640,202 @@
 /* Live thinking timer — sits immediately after the "Thinking…/Thought" label (not
    pinned to the far edge), steady (no pulse), tabular so the width does not jitter as
    it counts. Muted when frozen, accented while thinking. */
+/* ── Queued / recommendation messages (staged while the agent is busy) ── */
+.ai-chat-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+  max-width: 768px;
+  margin: 0 auto 8px;
+  padding: 10px 12px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  background: var(--surface-1);
+  box-shadow: var(--shadow-sm);
+}
+
+.ai-chat-queue-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 2px;
+  color: var(--text-2);
+  font: 600 10px/1 var(--font-ui);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ai-chat-queue-head svg {
+  color: var(--accent, #6b8afd);
+}
+
+.ai-chat-queue-head-hint {
+  margin-left: auto;
+  color: var(--text-3);
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+
+.ai-chat-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ai-chat-queue-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 5px 4px 10px;
+  border-radius: 9px;
+  background: var(--surface-2, var(--surface-0));
+  border: 1px solid var(--border-subtle);
+  transition: border-color 0.14s ease, background 0.14s ease;
+}
+
+.ai-chat-queue-chip::before {
+  /* Accent rail on the left edge — neutral for queued, accent for recommendation. */
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 2.5px;
+  border-radius: 0 3px 3px 0;
+  background: var(--border-strong);
+  transition: background 0.14s ease;
+}
+
+.ai-chat-queue-chip:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+}
+
+.ai-chat-queue-chip[data-mode="recommendation"] {
+  border-color: color-mix(in srgb, var(--accent, #6b8afd) 38%, var(--border-subtle));
+}
+
+.ai-chat-queue-chip[data-mode="recommendation"]::before {
+  background: var(--accent, #6b8afd);
+}
+
+.ai-chat-queue-chip-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: var(--hover-soft);
+  color: var(--text-3);
+  font: 600 10px/1 var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-chat-queue-chip-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  color: var(--text-0);
+  font: 400 12.5px/1.4 var(--font-ui);
+}
+
+.ai-chat-queue-chip-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 2px 7px 2px 6px;
+  border-radius: 999px;
+  background: var(--hover-soft);
+  color: var(--text-3);
+  font: 600 9px/1.4 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ai-chat-queue-chip-tag svg {
+  flex: 0 0 auto;
+}
+
+.ai-chat-queue-chip[data-mode="recommendation"] .ai-chat-queue-chip-tag {
+  background: color-mix(in srgb, var(--accent, #6b8afd) 18%, transparent);
+  color: var(--accent, #6b8afd);
+}
+
+.ai-chat-queue-chip-body {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-chat-queue-chip-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  resize: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-0);
+  font: 400 12.5px/1.5 var(--font-ui);
+  outline: none;
+}
+
+.ai-chat-queue-chip-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 3px;
+  /* Actions stay subtle until the row is hovered (less visual noise). */
+  opacity: 0.5;
+  transition: opacity 0.14s ease;
+}
+
+.ai-chat-queue-chip:hover .ai-chat-queue-chip-actions,
+.ai-chat-queue-chip:focus-within .ai-chat-queue-chip-actions,
+.ai-chat-queue-chip[data-editing] .ai-chat-queue-chip-actions {
+  opacity: 1;
+}
+
+.ai-chat-queue-chip-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--icon-muted);
+  cursor: pointer;
+  transition: color 0.12s ease, background 0.12s ease;
+}
+
+.ai-chat-queue-chip-actions button:hover {
+  color: var(--text-0);
+  background: var(--hover-soft);
+}
+
+.ai-chat-queue-chip-actions .ai-chat-queue-chip-danger:hover {
+  color: var(--danger, #e5484d);
+  background: color-mix(in srgb, var(--danger, #e5484d) 14%, transparent);
+}
+
+.ai-chat-queue-chip-actions .ai-chat-queue-chip-mode[data-active] {
+  color: var(--accent, #6b8afd);
+  background: color-mix(in srgb, var(--accent, #6b8afd) 16%, transparent);
+}
+
+.ai-chat-queue-chip-actions .ai-chat-queue-chip-mode:hover {
+  color: var(--accent, #6b8afd);
+}
+
 .ai-reasoning-elapsed {
   margin-left: -2px;
   color: var(--text-3, var(--icon-muted));
@@ -1808,12 +2008,12 @@
 }
 
 .ai-chat-inline-code {
-  padding: 1px 4px;
-  border: 1px solid #353535;
-  border-radius: 4px;
-  background: #171717;
-  color: #f2d18b;
-  font: 11px/1.35 var(--font-mono);
+  padding: 1.5px 5px;
+  border: 1px solid #313131;
+  border-radius: 5px;
+  background: #1c1c1c;
+  color: #c8d4f0;
+  font: 11.5px/1.35 var(--font-mono);
 }
 
 .ai-chat-code-block {
@@ -2237,10 +2437,10 @@
 .ai-chat-composer {
   position: relative;
   display: grid;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
-  max-height: min(236px, 42vh);
-  padding: 8px 10px;
+  max-height: min(300px, 48vh);
+  padding: 10px 14px;
   border: 1px solid var(--composer-border);
   border-radius: var(--radius-lg);
   background: var(--composer-bg);
@@ -2496,8 +2696,8 @@
 
 .ai-chat-composer textarea {
   width: 100%;
-  min-height: 24px;
-  max-height: 132px;
+  min-height: 34px;
+  max-height: 160px;
   padding: 0;
   resize: none;
   border: 0;
@@ -2505,7 +2705,7 @@
   overflow-y: hidden;
   background: transparent;
   color: #e6e6e6;
-  font: 12px/1.5 var(--font-ui);
+  font: 13px/1.6 var(--font-ui);
 }
 
 .ai-chat-composer textarea::placeholder {
@@ -3192,11 +3392,20 @@
 }
 
 .ai-send-button {
-  width: 28px;
+  width: 30px;
+  height: 30px;
   background: #ececec;
   color: #181818;
+  border-radius: var(--radius-sm);
+  transition: all 120ms ease, transform 100ms ease;
 }
-
+.ai-send-button:not(:disabled):hover {
+  background: #ffffff;
+  transform: scale(1.06);
+}
+.ai-send-button:not(:disabled):active {
+  transform: scale(0.96);
+}
 .ai-send-button:disabled {
   background: #303030;
   color: #777777;
@@ -4351,6 +4560,119 @@
 .ai-plan-step-file:hover {
   border-color: var(--border-strong);
   color: var(--text-1);
+}
+
+/* ── Reasoning-phase sections (decision / risks / verification) ── */
+.ai-plan-section {
+  padding: 9px 13px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ai-plan-section h4 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  color: var(--text-3);
+  font: 600 10px/1 var(--font-ui);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ai-plan-section ul {
+  margin: 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-plan-section li {
+  position: relative;
+  padding-left: 13px;
+  color: var(--text-2);
+  font: 11.5px/1.5 var(--font-ui);
+}
+
+.ai-plan-section li::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 8px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentcolor;
+  opacity: 0.55;
+}
+
+.ai-plan-section-decision li strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.ai-plan-section-decision h4 {
+  color: var(--accent, #7ea8d8);
+}
+
+.ai-plan-section-risks h4 {
+  color: var(--warning, #d8a657);
+}
+
+.ai-plan-section-verify h4 {
+  color: var(--success, #87b386);
+}
+
+/* ── Soft-gate coaching (low quality score, manual modes only) ── */
+.ai-plan-coaching {
+  margin: 0;
+  padding: 10px 13px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--warning-softer, rgba(216, 166, 87, 0.08));
+}
+
+.ai-plan-quality-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--warning-softer, rgba(216, 166, 87, 0.16));
+  color: var(--warning, #d8a657);
+  font: 600 10.5px/1 var(--font-ui);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-plan-coaching-hint {
+  margin: 8px 0 5px;
+  color: var(--text-2);
+  font: 600 11px/1.4 var(--font-ui);
+}
+
+.ai-plan-coaching ul {
+  margin: 0;
+  padding: 0 0 0 2px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ai-plan-coaching li {
+  position: relative;
+  padding-left: 13px;
+  color: var(--text-3);
+  font: 11px/1.5 var(--font-ui);
+}
+
+.ai-plan-coaching li::before {
+  content: "→";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--warning, #d8a657);
+  opacity: 0.7;
 }
 
 .ai-plan-card-foot {

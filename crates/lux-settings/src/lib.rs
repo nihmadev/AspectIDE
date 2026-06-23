@@ -5,9 +5,12 @@
 use std::{
     cmp::Reverse,
     collections::BTreeMap,
+    ffi::OsString,
     fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use chrono::Utc;
@@ -29,7 +32,19 @@ pub struct SettingsStore {
 impl SettingsStore {
     pub fn load(path: PathBuf) -> AppResult<Self> {
         let values = if path.exists() {
-            serde_json::from_str(&fs::read_to_string(&path)?).unwrap_or_default()
+            let raw = fs::read_to_string(&path)?;
+            match serde_json::from_str(&raw) {
+                Ok(values) => values,
+                // A corrupt `settings.json` must never silently collapse to an empty
+                // map: the next `set()` would persist that emptiness and erase every
+                // saved setting for good. Move the bad file aside (preserving it as a
+                // recoverable backup) before starting from defaults, so the original
+                // is never overwritten blind.
+                Err(error) => {
+                    quarantine_corrupt(&path, &error);
+                    BTreeMap::new()
+                }
+            }
         } else {
             BTreeMap::new()
         };
@@ -90,8 +105,16 @@ impl SettingsStore {
             return Ok(Vec::new());
         }
 
-        let mut workspaces: Vec<RecentWorkspace> =
-            serde_json::from_str(&fs::read_to_string(path)?).unwrap_or_default();
+        let raw = fs::read_to_string(&path)?;
+        let mut workspaces: Vec<RecentWorkspace> = match serde_json::from_str(&raw) {
+            Ok(workspaces) => workspaces,
+            // Same invariant as `load`: never let a corrupt recents file silently
+            // become an empty list that the next write then makes permanent.
+            Err(error) => {
+                quarantine_corrupt(&path, &error);
+                Vec::new()
+            }
+        };
         workspaces.sort_by_key(|workspace| Reverse(workspace.last_opened_at));
         Ok(workspaces)
     }
@@ -144,13 +167,27 @@ impl SettingsStore {
     }
 }
 
+/// Per-process sequence making each temporary file name unique (see [`write_atomic`]).
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// Writes `contents` to `path` atomically by streaming to a sibling temporary
 /// file, flushing it to disk, then renaming over the target. Same-directory
 /// rename replaces the destination atomically (Windows `MoveFileEx` with
 /// `MOVEFILE_REPLACE_EXISTING`), so an interrupted write can never leave the
 /// target truncated.
+///
+/// The temp file name is unique per writer (`<path>.<pid>.<seq>.tmp`): a fixed
+/// `.tmp` would let two concurrent instances writing the same settings clobber
+/// each other's in-progress file and install a torn result. Each writer now owns
+/// its own scratch file and the rename makes last-write-win cleanly.
 fn write_atomic(path: &Path, contents: &[u8]) -> AppResult<()> {
-    let tmp = path.with_extension("json.tmp");
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(
+        ".{}.{}.tmp",
+        std::process::id(),
+        TMP_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let tmp = PathBuf::from(tmp);
     {
         let mut file = File::create(&tmp)?;
         file.write_all(contents)?;
@@ -158,6 +195,35 @@ fn write_atomic(path: &Path, contents: &[u8]) -> AppResult<()> {
     }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Moves a corrupt JSON file aside to `<path>.corrupt-<unix_ts>` so a parse
+/// failure can never trigger silent, permanent data loss: the original bytes are
+/// preserved for recovery, and the caller starts from a clean default that will
+/// be written to the now-vacant original path. Best-effort by design — if the
+/// rename itself fails we still log, and on the next `set()` the original is left
+/// in place rather than overwritten blind.
+fn quarantine_corrupt(path: &Path, error: &serde_json::Error) {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+
+    let mut backup = path.as_os_str().to_owned();
+    backup.push(OsString::from(format!(".corrupt-{suffix}")));
+    let backup = PathBuf::from(backup);
+
+    match fs::rename(path, &backup) {
+        Ok(()) => eprintln!(
+            "lux-settings: {} is corrupt ({error}); backed up to {} and reset to defaults",
+            path.display(),
+            backup.display()
+        ),
+        Err(rename_error) => eprintln!(
+            "lux-settings: {} is corrupt ({error}) and could not be backed up ({rename_error}); \
+             leaving it untouched and using defaults this session",
+            path.display()
+        ),
+    }
 }
 
 #[must_use]
@@ -550,6 +616,65 @@ mod tests {
         assert!(profile.bindings.iter().any(|binding| binding.command
             == "editor.action.fontZoomOut"
             && binding.key == "Ctrl+-"));
+    }
+
+    #[test]
+    fn corrupt_settings_are_quarantined_not_silently_wiped() {
+        let temp = tempdir().expect("temp dir should be created");
+        let settings_path = temp.path().join("settings.json");
+        fs::write(&settings_path, b"{ this is not valid json")
+            .expect("corrupt settings should be written");
+
+        // Loading must not panic, and must not leave the corrupt file in place to be
+        // blindly overwritten: it is moved aside so the bytes stay recoverable.
+        let store = SettingsStore::load(settings_path).expect("corrupt load should recover");
+        assert!(store.get(SettingsScope::User, "any.key").is_none());
+
+        let backups: Vec<_> = fs::read_dir(temp.path())
+            .expect("temp dir should be readable")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.corrupt-")
+            })
+            .collect();
+        assert_eq!(
+            backups.len(),
+            1,
+            "corrupt file should be backed up exactly once"
+        );
+        assert_eq!(
+            fs::read(backups[0].path()).expect("backup should be readable"),
+            b"{ this is not valid json",
+            "backup must preserve the original corrupt bytes"
+        );
+    }
+
+    #[test]
+    fn corrupt_recent_workspaces_are_quarantined_not_silently_wiped() {
+        let temp = tempdir().expect("temp dir should be created");
+        let recents_path = temp.path().join(RECENT_WORKSPACES_FILE);
+        fs::write(&recents_path, b"]not json[").expect("corrupt recents should be written");
+        let store =
+            SettingsStore::load(temp.path().join("settings.json")).expect("settings should load");
+
+        let workspaces = store
+            .recent_workspaces()
+            .expect("corrupt recents should recover to empty");
+        assert!(workspaces.is_empty());
+
+        let backup_exists = fs::read_dir(temp.path())
+            .expect("temp dir should be readable")
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("recent-workspaces.json.corrupt-")
+            });
+        assert!(backup_exists, "corrupt recents file should be backed up");
     }
 
     fn workspace(name: &str, root: PathBuf) -> WorkspaceInfo {

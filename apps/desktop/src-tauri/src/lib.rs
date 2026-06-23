@@ -28,6 +28,7 @@ mod file_intel;
 mod git;
 mod lsp;
 mod lsp_install;
+mod mcp;
 mod media_intel;
 mod memory;
 mod research;
@@ -35,6 +36,7 @@ mod runtime_provision;
 mod search;
 mod settings;
 mod skills;
+mod ssh;
 mod terminal;
 mod test_health;
 mod updater;
@@ -43,6 +45,7 @@ mod web_fetch;
 mod workspace_watcher;
 
 mod ai_a2a;
+mod ai_anthropic;
 mod ai_chat_backend;
 mod ai_checkpoint;
 mod ai_compaction;
@@ -130,6 +133,10 @@ struct AppState {
     debug: tokio::sync::Mutex<Option<lux_dap::DebugSessionManager>>,
     settings: Mutex<Option<SettingsStore>>,
     terminals: Mutex<Option<Arc<TerminalService>>>,
+    /// In-memory table of live SSH connection profiles for the AI `Ssh*` tools.
+    /// No long-running remote process or credential is held — each command runs a
+    /// fresh non-interactive `ssh`, so this is just routing + sticky-cwd state.
+    ssh: lux_ssh::SshRegistry,
     code_graph: tokio::sync::Mutex<Option<lux_codegraph::Index>>,
     /// Currently-open per-project memory store, keyed by its on-disk path. Reopened
     /// lazily when the active workspace (hence the db path) changes, so each project
@@ -177,17 +184,21 @@ async fn workspace_open(
     *state.documents.lock().map_err(lock_error)? = DocumentStore::default();
     lsp::clear_diagnostics(&app, &state)?;
     *state.workspace.lock().map_err(lock_error)? = Some(workspace.clone());
-    if let Err(error) = workspace_watcher::start(&app, &state, workspace.root.clone()) {
-        tracing::warn!(%error, "workspace file watcher unavailable");
-    }
     // Switching workspaces: invalidate any in-flight build and drop the old graph
     // so queries return "not built yet" rather than the previous workspace's data
-    // during the rebuild window.
+    // during the rebuild window. Bump the generation BEFORE starting the watcher so
+    // the watcher tags its batches with this workspace's generation (M5) — a watcher
+    // started under the old generation would let late old-workspace events merge in.
     let generation = state
         .workspace_generation
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         + 1;
-    *state.code_graph.lock().await = None;
+    if let Err(error) = workspace_watcher::start(&app, &state, workspace.root.clone(), generation) {
+        tracing::warn!(%error, "workspace file watcher unavailable");
+    }
+    // Persist the outgoing workspace's parse cache (capturing this session's
+    // incremental edits) before dropping the graph, so reopening it is fast.
+    code_graph::persist_and_drop(state.inner()).await;
     // Kick off a background code-graph build — it streams progress on
     // `lux://code-graph`, never blocks workspace load, and only commits if this
     // generation is still current when it finishes.
@@ -215,7 +226,17 @@ async fn workspace_close(app: AppHandle, state: State<'_, SharedState>) -> Resul
     state
         .workspace_generation
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    *state.code_graph.lock().await = None;
+    // Persist this session's parse cache before dropping the graph so the next open
+    // of this workspace reuses it.
+    code_graph::persist_and_drop(state.inner()).await;
+    // Release in-memory per-session/per-workspace AI state for the closing
+    // workspace so it doesn't accumulate for the life of the process.
+    if let Ok(guard) = state.workspace.lock() {
+        if let Some(workspace) = guard.as_ref() {
+            ai_checkpoint::clear_workspace(&workspace.root.to_string_lossy());
+        }
+    }
+    ai_session::clear_all();
     *state.workspace.lock().map_err(lock_error)? = None;
     *state.documents.lock().map_err(lock_error)? = DocumentStore::default();
     lsp::clear_diagnostics(&app, &state)?;
@@ -425,9 +446,9 @@ async fn web_fetch(
     url: String,
     max_bytes: Option<u64>,
     timeout_secs: Option<u64>,
-    allow_private_hosts: Option<bool>,
 ) -> Result<web_fetch::WebFetchResponse, String> {
-    web_fetch::fetch(url, max_bytes, timeout_secs, allow_private_hosts).await
+    // No private-host bypass is exposed: the SSRF guard is always on (H1).
+    web_fetch::fetch(url, max_bytes, timeout_secs).await
 }
 
 #[tauri::command]
@@ -547,6 +568,27 @@ pub fn run() {
                 .terminals
                 .lock()
                 .map_err(|_| "terminals lock poisoned")? = Some(terminal_service);
+            // Bring up enabled MCP servers in the background so their tools are live
+            // for the agent without blocking app startup on the handshakes.
+            {
+                let mcp_state = state.inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    let configs: Vec<mcp::McpServerConfig> = mcp_state
+                        .settings
+                        .lock()
+                        .ok()
+                        .and_then(|guard| {
+                            guard.as_ref().and_then(|store| {
+                                store.get(lux_core::SettingsScope::User, mcp::MCP_SERVERS_KEY)
+                            })
+                        })
+                        .and_then(|setting| serde_json::from_value(setting.value).ok())
+                        .unwrap_or_default();
+                    for config in configs.into_iter().filter(|config| config.enabled) {
+                        let _ = mcp::connect_server(config).await;
+                    }
+                });
+            }
             let (diagnostics_tx, mut diagnostics_rx) = tokio::sync::mpsc::unbounded_channel();
             let (debug_tx, mut debug_rx) = tokio::sync::mpsc::unbounded_channel();
             *state.lsp.blocking_lock() = Some(lux_lsp::LspManager::new(diagnostics_tx));
@@ -641,6 +683,19 @@ pub fn run() {
             skills::skills_discover_importable,
             skills::skills_import,
             research::web_research,
+            mcp::mcp_connect_all,
+            mcp::mcp_connect,
+            mcp::mcp_disconnect,
+            mcp::mcp_status,
+            mcp::mcp_call,
+            mcp::mcp_add,
+            mcp::mcp_remove,
+            mcp::mcp_enable,
+            ssh::ssh_connect,
+            ssh::ssh_exec,
+            ssh::ssh_transfer,
+            ssh::ssh_list,
+            ssh::ssh_disconnect,
             ai_a2a::ai_blackboard_post,
             ai_a2a::ai_blackboard_read,
             ai_a2a::ai_blackboard_clear,
@@ -655,10 +710,12 @@ pub fn run() {
             ai_session::ai_session_goal_set,
             ai_session::ai_session_todos_get,
             ai_session::ai_session_todos_set,
+            ai_session::ai_session_dispose,
             ai_turn::ai_run_turn,
             ai_turn::ai_resolve_turn_approval,
             ai_turn::ai_resolve_turn_question,
             ai_turn::ai_cancel_turn,
+            ai_turn::ai_inject_message,
             ai_workspace::ai_repo_map,
             ai_workspace::ai_workspace_index,
             ai_symbol_context,
@@ -731,8 +788,24 @@ pub fn run() {
             updater::update_check,
             updater::update_install,
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Lux IDE");
+        .build(tauri::generate_context!())
+        .expect("failed to build Lux IDE")
+        .run(|app_handle, event| {
+            // On app exit, synchronously flush the code-graph parse cache so a
+            // session's incremental edits survive to the next open. The normal
+            // open/close path already persists; this covers a plain quit (the
+            // window can be destroyed without a `workspace_close`). Best-effort.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(state) = app_handle.try_state::<SharedState>() {
+                    code_graph::flush_cache_blocking(state.inner());
+                    // Kill debug-adapter children (codelldb/debugpy + the debuggee)
+                    // on a plain quit: a window-destroy exit skips `workspace_close`,
+                    // so without this they outlive the IDE (H9). `kill_on_drop` is
+                    // only a backstop — the session map may not drop before exit.
+                    tauri::async_runtime::block_on(debug::stop_all(&state));
+                }
+            }
+        });
 }
 
 fn log_plugin() -> tauri::plugin::TauriPlugin<tauri::Wry> {

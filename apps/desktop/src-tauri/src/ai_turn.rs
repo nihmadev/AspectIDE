@@ -17,7 +17,7 @@
 //! `ai_resolve_turn_approval(turn_id, request_id, decision)` which sends the
 //! decision through the channel, unblocking the loop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
@@ -41,21 +41,36 @@ fn question_channels() -> &'static Mutex<HashMap<String, oneshot::Sender<Questio
 /// Registry of turn ids the UI has asked to cancel. The model↔tool loop checks
 /// this at every round boundary and after each tool call so a Stop actually
 /// halts streaming + side-effecting tools instead of letting the turn run on.
-fn cancelled_turns() -> &'static Mutex<HashSet<String>> {
-    static CANCELLED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    CANCELLED.get_or_init(|| Mutex::new(HashSet::new()))
+fn cancelled_turns() -> &'static Mutex<CancelRegistry> {
+    static CANCELLED: OnceLock<Mutex<CancelRegistry>> = OnceLock::new();
+    CANCELLED.get_or_init(|| Mutex::new(CancelRegistry::default()))
+}
+
+/// Bounded set of cancelled turn ids with FIFO eviction. The previous design
+/// `clear()`-ed the *whole* set at a cap, which could wipe the flag of a turn
+/// that was just cancelled but hadn't yet observed it — un-cancelling a live
+/// turn (M4). Evicting only the OLDEST ids keeps the bound while guaranteeing a
+/// freshly-inserted cancel is never dropped.
+#[derive(Default)]
+struct CancelRegistry {
+    ids: HashSet<String>,
+    order: VecDeque<String>,
 }
 
 /// Mark a turn cancelled so the loop (and any running subagent) stops ASAP.
 fn mark_turn_cancelled(turn_id: &str) {
-    if let Ok(mut set) = cancelled_turns().lock() {
-        // A running loop consumes a genuine cancel within milliseconds; only
-        // stale/late/never-run ids accumulate. Bound the set so a stream of
-        // spurious late cancels can't leak unbounded for the process lifetime.
-        if set.len() >= 128 {
-            set.clear();
+    /// Far above any realistic count of concurrently-tracked turns; only
+    /// never-consumed ids accumulate, and the oldest are the safe ones to drop.
+    const CAP: usize = 256;
+    if let Ok(mut reg) = cancelled_turns().lock() {
+        if reg.ids.insert(turn_id.to_string()) {
+            reg.order.push_back(turn_id.to_string());
         }
-        set.insert(turn_id.to_string());
+        while reg.order.len() > CAP {
+            if let Some(oldest) = reg.order.pop_front() {
+                reg.ids.remove(&oldest);
+            }
+        }
     }
 }
 
@@ -64,14 +79,59 @@ fn mark_turn_cancelled(turn_id: &str) {
 fn is_turn_cancelled(turn_id: &str) -> bool {
     cancelled_turns()
         .lock()
-        .is_ok_and(|set| set.contains(turn_id))
+        .is_ok_and(|reg| reg.ids.contains(turn_id))
 }
 
 /// Drop the cancellation flag for a finished turn so the set never grows
 /// unbounded (also lets a future turn reusing the id start clean).
 fn clear_turn_cancelled(turn_id: &str) {
-    if let Ok(mut set) = cancelled_turns().lock() {
-        set.remove(turn_id);
+    if let Ok(mut reg) = cancelled_turns().lock() {
+        if reg.ids.remove(turn_id) {
+            reg.order.retain(|id| id != turn_id);
+        }
+    }
+}
+
+/// Messages the UI staged WHILE a turn was running, keyed by session id. The
+/// model↔tool loop drains them at each round boundary and appends them as `user`
+/// messages — so a "recommendation" the user types mid-work reaches the model at
+/// the very next inter-round gap instead of waiting for the whole turn to end.
+fn pending_injections() -> &'static Mutex<HashMap<String, VecDeque<String>>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, VecDeque<String>>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Queue a user message for injection into the running turn of `session_id`.
+pub fn enqueue_injection(session_id: &str, text: String) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if let Ok(mut map) = pending_injections().lock() {
+        map.entry(session_id.to_string())
+            .or_default()
+            .push_back(text);
+    }
+}
+
+/// Take all messages staged for `session_id`, clearing the queue.
+fn drain_injections(session_id: &str) -> Vec<String> {
+    if let Ok(mut map) = pending_injections().lock() {
+        if let Some(queue) = map.get_mut(session_id) {
+            let drained: Vec<String> = queue.drain(..).collect();
+            if drained.is_empty() {
+                return drained;
+            }
+            map.remove(session_id);
+            return drained;
+        }
+    }
+    Vec::new()
+}
+
+/// Drop any leftover staged messages for a session (turn ended without draining).
+fn clear_injections(session_id: &str) {
+    if let Ok(mut map) = pending_injections().lock() {
+        map.remove(session_id);
     }
 }
 
@@ -113,6 +173,38 @@ fn parse_cached_prompt_tokens(usage: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
+/// Fold one response's `usage` object into the running per-turn totals,
+/// normalizing across provider shapes (`OpenAI` `*_tokens`, Anthropic
+/// `input_tokens`/`output_tokens`). `total_tokens` is DERIVED from
+/// prompt+completion when the provider omits it (Anthropic does), so the reported
+/// total stays consistent across providers and rounds instead of summing a field
+/// only some providers send (L9).
+fn accumulate_usage(
+    usage: &serde_json::Value,
+    prompt: &mut u64,
+    completion: &mut u64,
+    total: &mut u64,
+    cached: &mut u64,
+) {
+    let round_prompt = usage
+        .get("prompt_tokens")
+        .or_else(|| usage.get("input_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let round_completion = usage
+        .get("completion_tokens")
+        .or_else(|| usage.get("output_tokens"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    *prompt += round_prompt;
+    *completion += round_completion;
+    *total += usage
+        .get("total_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(round_prompt + round_completion);
+    *cached += parse_cached_prompt_tokens(usage);
+}
+
 // ── Event types (Rust → UI) ──
 
 #[derive(Debug, Clone, Serialize)]
@@ -133,6 +225,11 @@ pub enum TurnEvent {
     /// Status phase changed (thinking, streaming, running-tools, waiting-approval).
     #[serde(rename_all = "camelCase")]
     StatusChange { turn_id: String, phase: String },
+
+    /// A user message staged mid-turn was folded into the running conversation at a
+    /// round boundary — the UI renders it as a user bubble before the next answer.
+    #[serde(rename_all = "camelCase")]
+    UserMessageInjected { turn_id: String, text: String },
 
     /// Tool call started.
     #[serde(rename_all = "camelCase")]
@@ -196,6 +293,16 @@ pub enum TurnEvent {
         title: String,
         summary: String,
         steps: Vec<PlanStep>,
+        /// Key design decisions: chosen approach + tradeoff vs the alternative(s).
+        alternatives: Vec<PlanDecision>,
+        /// Failure modes / hidden assumptions the plan must survive (critique phase).
+        risks: Vec<String>,
+        /// Checks that prove it works + rollback trigger (verification phase).
+        verification: Vec<String>,
+        /// Deterministic plan-quality score in `[0,1]` from the 5-phase gate.
+        quality: f64,
+        /// Concrete coaching nudges for whatever the gate found missing.
+        coaching: Vec<String>,
         /// True when the turn-loop will proceed to execute without waiting (Automatic).
         auto_start: bool,
     },
@@ -263,6 +370,20 @@ pub struct PlanStep {
     pub file: String,
 }
 
+/// A key design decision in a `PresentPlan` proposal: the chosen approach plus
+/// why it wins over the alternative(s). Ported from think-mcp's `alternative` +
+/// `synthesis` reasoning phases — the part of a plan that proves the model
+/// weighed tradeoffs instead of charging ahead with its first idea.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanDecision {
+    /// The chosen approach (e.g. "Server-side cursor pagination").
+    pub option: String,
+    /// Why it wins / what it costs vs the alternative(s).
+    #[serde(default)]
+    pub tradeoff: String,
+}
+
 /// Risk markers that demand a deeper, verified plan (ported from think-mcp's
 /// complexity heuristic). Their presence in the goal/steps raises the bar for how
 /// many concrete steps and explicit verification the plan must carry.
@@ -308,8 +429,23 @@ const PLAN_VAGUE_LABELS: &[&str] = &[
 /// Deterministic, advisory plan-quality assessment — the think-mcp cycle gate
 /// applied to a `PresentPlan`. Returns a score in `[0,1]` plus concrete coaching
 /// nudges for whatever is missing. Never blocks; it only tells the model how to
-/// make the plan sharper (decompose, name verification, cover the riskiest step).
-fn assess_plan_quality(title: &str, summary: &str, steps: &[PlanStep]) -> (f64, Vec<String>) {
+/// make the plan sharper.
+///
+/// Scores the five reasoning phases think-mcp's `cycle.service.ts` gate demands —
+/// **decompose · alternative · critique · synthesis · verification** — folded into
+/// a `[0,1]` score. `decompose`/`synthesis` live in `steps`+`summary`; the other
+/// three phases are first-class structured inputs (`alternatives`, `risks`,
+/// `verification`) but the gate also accepts the same content expressed in prose so
+/// a plan is never punished for phrasing. Alternatives + critique are only
+/// *expected* on non-trivial/risky work, so simple plans stay terse.
+fn assess_plan_quality(
+    title: &str,
+    summary: &str,
+    steps: &[PlanStep],
+    alternatives: &[PlanDecision],
+    risks: &[String],
+    verification: &[String],
+) -> (f64, Vec<String>) {
     let mut coaching: Vec<String> = Vec::new();
     let haystack = {
         let mut s = format!("{title}\n{summary}");
@@ -319,6 +455,20 @@ fn assess_plan_quality(title: &str, summary: &str, steps: &[PlanStep]) -> (f64, 
             s.push('\n');
             s.push_str(&step.detail);
         }
+        for alt in alternatives {
+            s.push('\n');
+            s.push_str(&alt.option);
+            s.push('\n');
+            s.push_str(&alt.tradeoff);
+        }
+        for risk in risks {
+            s.push('\n');
+            s.push_str(risk);
+        }
+        for check in verification {
+            s.push('\n');
+            s.push_str(check);
+        }
         s.to_lowercase()
     };
     let risk_hits = PLAN_RISK_MARKERS
@@ -327,11 +477,16 @@ fn assess_plan_quality(title: &str, summary: &str, steps: &[PlanStep]) -> (f64, 
         .count();
     // Riskier work needs more decomposition: 3 steps baseline, +1 per risk marker, capped.
     let required_steps = (3 + risk_hits).min(8);
+    // Alternatives/critique only matter once the work is big or risky enough to
+    // carry a real design decision — don't nag a 2-step chore for tradeoffs.
+    let expects_alternatives = risk_hits >= 1 || steps.len() >= 5;
+    let expects_critique = risk_hits >= 1 || steps.len() >= 4;
 
-    // 1. Decomposition depth.
     let mut score = 1.0_f64;
+
+    // 1. Decompose — enough concrete steps for the risk.
     if steps.len() < required_steps {
-        score -= 0.25;
+        score -= 0.2;
         coaching.push(format!(
             "Decompose further — {} step(s) for {}-risk work; aim for ~{}, each a concrete action on a named file/module.",
             steps.len(),
@@ -361,37 +516,89 @@ fn assess_plan_quality(title: &str, summary: &str, steps: &[PlanStep]) -> (f64, 
         ));
     }
     if steps.len() >= 3 && with_anchor * 2 < steps.len() {
-        score -= 0.15;
+        score -= 0.1;
         coaching.push(
             "Most steps lack a file or concrete detail — name the file/module each step touches and what proves it done.".to_string(),
         );
     }
 
-    // 3. Verification — a complete plan ends with an explicit check.
-    let has_verification = steps.iter().any(|s| {
-        let t = format!("{} {}", s.title, s.detail).to_lowercase();
-        [
-            "test",
-            "verif",
-            "build",
-            "typecheck",
-            "lint",
-            "run ",
-            "check",
-            "assert",
-            "validate",
+    // 3. Alternative + synthesis — name the key decision and why it wins.
+    let has_decision = alternatives.iter().any(|a| !a.option.trim().is_empty())
+        || [
+            "instead of",
+            "rather than",
+            "trade-off",
+            "tradeoff",
+            "alternative",
+            " vs ",
+            "chose ",
+            "chosen ",
+            "decided ",
+            "вместо",
+            "альтернатив",
+            "компромисс",
         ]
         .iter()
-        .any(|kw| t.contains(kw))
-    });
-    if !has_verification {
-        score -= 0.25;
+        .any(|kw| haystack.contains(kw));
+    if expects_alternatives && !has_decision {
+        score -= 0.2;
         coaching.push(
-            "Add a final verification step: the tests/build/checks that prove it works (plus a rollback trigger for risky changes).".to_string(),
+            "Name the key decision: the approach you chose and why it wins over the alternative(s) (the tradeoff). A plan that weighs options beats one that charges ahead with its first idea.".to_string(),
         );
     }
 
-    // 4. Rollback awareness for genuinely risky work.
+    // 4. Critique — failure modes / hidden assumptions of the riskiest step.
+    let has_critique = risks.iter().any(|r| !r.trim().is_empty())
+        || [
+            "risk",
+            "fail",
+            "assumption",
+            "assume",
+            "edge case",
+            "race",
+            "breaks if",
+            "could break",
+            "fallback",
+            "риск",
+            "провал",
+            "допущен",
+            "сломает",
+        ]
+        .iter()
+        .any(|kw| haystack.contains(kw));
+    if expects_critique && !has_critique {
+        score -= 0.2;
+        coaching.push(
+            "Critique the riskiest step: list its failure modes and hidden assumptions — what breaks, under what input/timing, and how you'd catch it.".to_string(),
+        );
+    }
+
+    // 5. Verification — an explicit check that proves it works.
+    let has_verification = verification.iter().any(|v| !v.trim().is_empty())
+        || steps.iter().any(|s| {
+            let t = format!("{} {}", s.title, s.detail).to_lowercase();
+            [
+                "test",
+                "verif",
+                "build",
+                "typecheck",
+                "lint",
+                "run ",
+                "check",
+                "assert",
+                "validate",
+            ]
+            .iter()
+            .any(|kw| t.contains(kw))
+        });
+    if !has_verification {
+        score -= 0.25;
+        coaching.push(
+            "Add explicit verification: the tests/build/checks that prove it works (plus a rollback trigger for risky changes).".to_string(),
+        );
+    }
+
+    // Rollback awareness for genuinely risky work.
     if risk_hits >= 2 {
         let has_rollback = haystack.contains("rollback")
             || haystack.contains("revert")
@@ -575,6 +782,13 @@ pub struct TurnInput {
     pub agent_mode: String,
     pub tool_round_limit: Option<u32>,
     pub tool_approval_mode: String,
+    /// User-configured deny/ask/allow permission rules (`deny:Write(*.env)`, …).
+    /// The native loop's authoritative gate: a Deny is a hard block even in
+    /// full-access/automatic mode, an Allow skips the prompt, an Ask always
+    /// prompts. Empty when unset. (Closes C2 — previously the engine ran only on
+    /// the dev-only TS path, so the shipped app enforced nothing.)
+    #[serde(default)]
+    pub tool_permission_rules: Vec<String>,
     /// Provider reasoning payload (e.g. `{"reasoning_effort":"high","reasoning":{"effort":"high"}}`),
     /// computed on the frontend per provider/model. Empty object when the model has no
     /// effort levels. Its keys are merged into every outgoing request payload so the
@@ -655,17 +869,25 @@ pub async fn ai_run_turn(
         .unwrap_or_else(|| serde_json::Value::String(input.message.clone()));
     messages.push(serde_json::json!({ "role": "user", "content": user_content }));
 
-    // Runtime tool definitions — generated natively in Rust, filtered by mode.
-    let tools = crate::ai_tool_defs::runtime_tool_definitions(
+    // Runtime tool definitions — generated natively in Rust, filtered by mode, plus
+    // the live tools of any connected MCP server (namespaced mcp__<server>__<tool>).
+    let mut tools = crate::ai_tool_defs::runtime_tool_definitions(
         &input.agent_mode,
         input.agent_browser_enabled,
     );
+    if matches!(input.agent_mode.as_str(), "agent" | "automatic") {
+        tools.extend(crate::mcp::agent_tool_definitions().await);
+    }
 
     let mut final_content = String::new();
     let mut usage_prompt: u64 = 0;
     let mut usage_completion: u64 = 0;
     let mut usage_total: u64 = 0;
     let mut usage_cached: u64 = 0;
+    // True only when the model ended the turn by answering (no tool calls). When it
+    // instead exhausts `max_rounds` mid-work, `final_content` may be stale text from
+    // an early round; the recovery turn below then refreshes it (L8).
+    let mut completed_naturally = false;
 
     // ── Model ↔ tool loop ──
     for _round in 0..max_rounds {
@@ -695,7 +917,6 @@ pub async fn ai_run_turn(
         let mut payload = serde_json::json!({
             "model": input.model,
             "messages": messages,
-            "temperature": 0.2,
             "stream": true,
             // OpenAI-compatible providers only emit the final usage chunk when
             // include_usage is set; without it TurnUsage would never fire.
@@ -705,11 +926,14 @@ pub async fn ai_run_turn(
         });
         // Honor the user's selected reasoning effort (parity with the TS turn path).
         crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
+        // Standard models only — reasoning models reject an explicit temperature.
+        crate::ai_chat_backend::apply_temperature(&mut payload, input.reasoning.as_ref(), 0.2);
 
-        let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
+        let request = crate::ai_chat_backend::AiChatCompletionRequest::with_protocol(
             input.base_url.clone(),
             input.api_key.clone(),
             payload,
+            input.prompt_input.provider_protocol.clone(),
         );
 
         // Stream tokens live: each SSE delta is forwarded as its own StreamDelta
@@ -781,29 +1005,26 @@ pub async fn ai_run_turn(
 
         // Accumulate token usage if the provider reported it.
         if let Some(usage) = response.body.get("usage") {
-            usage_prompt += usage
-                .get("prompt_tokens")
-                .or_else(|| usage.get("input_tokens"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            usage_completion += usage
-                .get("completion_tokens")
-                .or_else(|| usage.get("output_tokens"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            usage_total += usage
-                .get("total_tokens")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            usage_cached += parse_cached_prompt_tokens(usage);
+            accumulate_usage(
+                usage,
+                &mut usage_prompt,
+                &mut usage_completion,
+                &mut usage_total,
+                &mut usage_cached,
+            );
         }
 
         let assistant = parse_assistant_message(&response.body);
 
         // Content was already streamed token-by-token via the on_delta callback
         // above; just record the final text (the frontend accumulated the deltas).
+        // If the model produced ONLY reasoning (empty content — common for reasoning
+        // models on a trivial prompt), fall back to the thinking text so the turn
+        // shows a real answer instead of "The turn produced no answer".
         if !assistant.content.is_empty() {
             final_content = assistant.content.clone();
+        } else if final_content.trim().is_empty() && !assistant.reasoning.trim().is_empty() {
+            final_content = assistant.reasoning.clone();
         }
 
         // A Stop pressed while the model was streaming sets the flag but cannot
@@ -823,9 +1044,35 @@ pub async fn ai_run_turn(
             return Ok(());
         }
 
-        // No tool calls → turn is done.
+        // No tool calls → the model would end the turn here. But if the user staged a
+        // message mid-work, fold it in NOW and run another round so the model answers
+        // it before the turn closes — otherwise a recommendation sent during the final
+        // round would be silently dropped (then wiped by clear_injections on TurnDone).
         if assistant.tool_calls.is_empty() {
-            break;
+            let injected = drain_injections(&input.session_id);
+            if injected.is_empty() {
+                completed_naturally = true;
+                break;
+            }
+            // Commit the assistant's just-streamed answer so the conversation stays
+            // well-formed, then append the staged user message(s) and loop again.
+            if !assistant.content.is_empty() {
+                messages.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": assistant.content.clone(),
+                }));
+            }
+            for text in injected {
+                let _ = emit_turn_event(
+                    &app,
+                    &TurnEvent::UserMessageInjected {
+                        turn_id: turn_id.clone(),
+                        text: text.clone(),
+                    },
+                );
+                messages.push(serde_json::json!({ "role": "user", "content": text }));
+            }
+            continue;
         }
 
         // Append assistant message with tool_calls to conversation.
@@ -859,7 +1106,9 @@ pub async fn ai_run_turn(
                 },
             );
 
-            let result = execute_tool(&app, &state, &input, &turn_id, true, tc).await;
+            // Box the per-tool future: `execute_tool` is a large state machine
+            // (every tool arm) and would otherwise blow the `large_futures` budget.
+            let result = Box::pin(execute_tool(&app, &state, &input, &turn_id, true, tc)).await;
 
             let (status, output, error) = match result {
                 Ok(output) => ("success".to_string(), output, None),
@@ -902,14 +1151,32 @@ pub async fn ai_run_turn(
                 return Ok(());
             }
         }
+
+        // Inter-round injection: fold in any messages the user staged mid-work so a
+        // recommendation reaches the model at THIS gap, not after the whole turn.
+        // Appended as user messages after the round's tool results so the model sees
+        // them on its next call; the UI is told to render the bubbles in order.
+        for injected in drain_injections(&input.session_id) {
+            let _ = emit_turn_event(
+                &app,
+                &TurnEvent::UserMessageInjected {
+                    turn_id: turn_id.clone(),
+                    text: injected.clone(),
+                },
+            );
+            messages.push(serde_json::json!({ "role": "user", "content": injected }));
+        }
     }
 
     // The model ended the turn with no answer text — it may have only run tools, hit
     // the round limit, or returned an empty completion. Give it exactly one tool-free
     // turn (tool_choice "none" forces prose) to produce its final response, streamed
-    // live so it renders as the answer instead of a bare "Done.". A normal turn (with
-    // text) skips this entirely and pays nothing; it never loops.
-    if final_content.trim().is_empty() && !is_turn_cancelled(&turn_id) {
+    // live so it renders as the answer instead of a bare "Done.". A normal turn that
+    // finished by answering (`completed_naturally`) skips this entirely and pays
+    // nothing; it never loops. When the round limit was hit instead, refresh even a
+    // non-empty `final_content` so the answer reflects the latest work, not stale
+    // text from an early round (L8).
+    if (final_content.trim().is_empty() || !completed_naturally) && !is_turn_cancelled(&turn_id) {
         let _ = emit_turn_event(
             &app,
             &TurnEvent::StatusChange {
@@ -920,17 +1187,18 @@ pub async fn ai_run_turn(
         let mut payload = serde_json::json!({
             "model": input.model,
             "messages": messages,
-            "temperature": 0.2,
             "stream": true,
             "stream_options": { "include_usage": true },
             "tools": tools,
             "tool_choice": "none",
         });
         crate::ai_chat_backend::merge_reasoning(&mut payload, input.reasoning.as_ref());
-        let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
+        crate::ai_chat_backend::apply_temperature(&mut payload, input.reasoning.as_ref(), 0.2);
+        let request = crate::ai_chat_backend::AiChatCompletionRequest::with_protocol(
             input.base_url.clone(),
             input.api_key.clone(),
             payload,
+            input.prompt_input.provider_protocol.clone(),
         );
         let stream_app = app.clone();
         let stream_turn_id = turn_id.clone();
@@ -972,32 +1240,29 @@ pub async fn ai_run_turn(
         .await
         {
             if let Some(usage) = response.body.get("usage") {
-                usage_prompt += usage
-                    .get("prompt_tokens")
-                    .or_else(|| usage.get("input_tokens"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                usage_completion += usage
-                    .get("completion_tokens")
-                    .or_else(|| usage.get("output_tokens"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                usage_total += usage
-                    .get("total_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(0);
-                usage_cached += parse_cached_prompt_tokens(usage);
+                accumulate_usage(
+                    usage,
+                    &mut usage_prompt,
+                    &mut usage_completion,
+                    &mut usage_total,
+                    &mut usage_cached,
+                );
             }
             let parsed = parse_assistant_message(&response.body);
             if !parsed.content.trim().is_empty() {
                 final_content = parsed.content;
+            } else if final_content.trim().is_empty() && !parsed.reasoning.trim().is_empty() {
+                // Recovery also came back reasoning-only — surface the thinking text
+                // rather than the canned placeholder.
+                final_content = parsed.reasoning;
             }
         }
     }
 
     let duration_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
     if final_content.trim().is_empty() {
-        final_content = "Done.".to_string();
+        final_content =
+            "The turn produced no answer. Press **Retry** or rephrase your request.".to_string();
     }
     if usage_prompt > 0 || usage_completion > 0 || usage_total > 0 {
         let _ = emit_turn_event(
@@ -1015,8 +1280,11 @@ pub async fn ai_run_turn(
             },
         );
     }
-    // Turn finished normally — drop any stale cancellation flag for this id.
+    // Turn finished normally — drop any stale cancellation flag for this id and
+    // discard anything staged but not yet drained (it would target a dead turn;
+    // the frontend re-queues it for the next turn instead).
     clear_turn_cancelled(&turn_id);
+    clear_injections(&input.session_id);
     let _ = emit_turn_event(
         &app,
         &TurnEvent::TurnDone {
@@ -1040,10 +1308,21 @@ pub fn ai_cancel_turn(turn_id: String) {
     cancel_questions_for_turn(&turn_id);
 }
 
+/// Stage a user message for injection into the session's running turn. The
+/// model↔tool loop folds it in at the next round boundary (see `enqueue_injection`).
+#[tauri::command]
+pub fn ai_inject_message(session_id: String, text: String) {
+    enqueue_injection(&session_id, text);
+}
+
 // ── Response parsing ──
 
 struct ParsedAssistant {
     content: String,
+    /// The model's thinking text (`reasoning_content` / Anthropic-translated
+    /// `thinking`). Kept so a reasoning-only completion — empty `content`, all
+    /// thought — can fall back to it instead of finishing as "no answer".
+    reasoning: String,
     tool_calls: Vec<ParsedToolCall>,
 }
 
@@ -1066,6 +1345,14 @@ fn parse_assistant_message(body: &serde_json::Value) -> ParsedAssistant {
         .and_then(|c| c.as_str())
         .unwrap_or("")
         .to_string();
+    // Reasoning models can finish a trivial prompt with empty content and only
+    // thinking text; read it back (OpenAI streams it as reasoning_content) so the
+    // turn can fall back to it instead of surfacing a bare "no answer".
+    let reasoning = message
+        .and_then(|m| m.get("reasoning_content").or_else(|| m.get("reasoning")))
+        .and_then(|c| c.as_str())
+        .unwrap_or("")
+        .to_string();
     let tool_calls = message
         .and_then(|m| m.get("tool_calls"))
         .and_then(|tc| tc.as_array())
@@ -1073,6 +1360,7 @@ fn parse_assistant_message(body: &serde_json::Value) -> ParsedAssistant {
         .unwrap_or_default();
     ParsedAssistant {
         content,
+        reasoning,
         tool_calls,
     }
 }
@@ -1138,9 +1426,10 @@ async fn execute_tool(
         serde_json::from_str(&tc.arguments).unwrap_or_else(|_| serde_json::json!({}));
 
     // Automatic mode is full autonomy: every side-effecting tool runs without a
-    // human approval prompt (catastrophic-shell and path guards still apply, and
-    // deny permission rules are enforced separately). Treating it as full-access
-    // here means Write/StrReplace/PatchEngine/Delete/Shell/Browser/Checkpoint never
+    // human approval prompt (catastrophic-shell and path guards still apply).
+    // `require_tool_approval` still evaluates the user's permission rules first, so
+    // a `deny:` rule is a hard block even here. Treating the mode as full-access
+    // means Write/StrReplace/PatchEngine/Delete/Shell/Browser/Checkpoint never
     // suspend the loop waiting for the user. Other modes keep the user's setting.
     let is_automatic = input.agent_mode == "automatic";
     let effective_approval_mode: &str = if is_automatic {
@@ -1150,6 +1439,128 @@ async fn execute_tool(
     };
 
     match tc.name.as_str() {
+        // ── MCP proxy: mcp__<server>__<tool> → the connected server's tool ──
+        name if name.starts_with("mcp__") => {
+            let rest = &name["mcp__".len()..];
+            let (server, tool) = rest
+                .split_once("__")
+                .ok_or_else(|| format!("malformed MCP tool name: {name}"))?;
+            // MCP tools are opaque third-party code (fs/shell/net): gate them like
+            // any side-effecting tool (H7). Rules match against `Mcp(server/tool)`,
+            // e.g. `deny:Mcp(*)` blocks all, `allow:Mcp(github/*)` trusts a server.
+            let mcp_target = format!("{server}/{tool}");
+            let preview = serde_json::to_string(&args).unwrap_or_default();
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                effective_approval_mode,
+                interactive,
+                "Mcp",
+                &format!("Call MCP tool {mcp_target}"),
+                &preview.chars().take(400).collect::<String>(),
+                "execute",
+                &input.tool_permission_rules,
+                &mcp_target,
+                false,
+            )
+            .await?;
+            crate::mcp::call_tool(server, tool, args).await
+        }
+        // ── MCP self-management: install / inspect / restart servers ──
+        "McpManage" => {
+            let action = json_str(&args, "action").to_lowercase();
+            let id = json_str(&args, "id");
+            // 'list' is read-only; every mutating action runs a process or writes
+            // config, so gate them through the approval flow like other side effects.
+            if action != "list" {
+                let preview = serde_json::to_string(&args).unwrap_or_default();
+                require_tool_approval(
+                    app,
+                    turn_id,
+                    tc,
+                    effective_approval_mode,
+                    interactive,
+                    "McpManage",
+                    &format!("MCP {action} {id}"),
+                    &preview.chars().take(400).collect::<String>(),
+                    "execute",
+                    &input.tool_permission_rules,
+                    &format!("manage/{action}"),
+                    false,
+                )
+                .await?;
+            }
+            match action.as_str() {
+                "list" => {
+                    let configs = crate::mcp::read_mcp_config(state);
+                    let live = crate::mcp::all_status().await;
+                    Ok(serde_json::json!({ "configured": configs, "live": live }).to_string())
+                }
+                "add" => {
+                    let id = id.trim();
+                    if id.is_empty() {
+                        return Err("McpManage add requires 'id'.".to_string());
+                    }
+                    let command = json_str(&args, "command");
+                    if command.trim().is_empty() {
+                        return Err("McpManage add requires 'command'.".to_string());
+                    }
+                    let server_args = json_str_array(&args, "args", 64);
+                    let env = args
+                        .get("env")
+                        .and_then(|v| v.as_object())
+                        .map(|m| {
+                            m.iter()
+                                .filter_map(|(k, v)| {
+                                    v.as_str().map(|s| (k.clone(), s.to_string()))
+                                })
+                                .collect::<std::collections::HashMap<String, String>>()
+                        })
+                        .unwrap_or_default();
+                    let enabled = args
+                        .get("enabled")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(true);
+                    let name = json_str_opt(&args, "name").unwrap_or_else(|| id.to_string());
+                    let config = crate::mcp::McpServerConfig {
+                        id: id.to_string(),
+                        name,
+                        command,
+                        args: server_args,
+                        env,
+                        enabled,
+                    };
+                    let status = crate::mcp::mcp_add(state.clone(), config).await?;
+                    serde_json::to_string(&status).map_err(|e| e.to_string())
+                }
+                "connect" | "restart" => {
+                    let configs = crate::mcp::read_mcp_config(state);
+                    let config = configs
+                        .into_iter()
+                        .find(|c| c.id == id)
+                        .ok_or_else(|| format!("MCP server '{id}' not found"))?;
+                    let status = crate::mcp::connect_server(config).await?;
+                    serde_json::to_string(&status).map_err(|e| e.to_string())
+                }
+                "disconnect" => {
+                    crate::mcp::disconnect_server(&id).await;
+                    Ok(serde_json::json!({ "id": id, "state": "disconnected" }).to_string())
+                }
+                "enable" | "disable" => {
+                    let enabled = action == "enable";
+                    crate::mcp::mcp_enable(state.clone(), id.clone(), enabled).await?;
+                    Ok(serde_json::json!({ "id": id, "enabled": enabled }).to_string())
+                }
+                "remove" => {
+                    crate::mcp::mcp_remove(state.clone(), id.clone()).await?;
+                    Ok(serde_json::json!({ "id": id, "removed": true }).to_string())
+                }
+                other => Err(format!(
+                    "Unknown McpManage action '{other}'. Use list|add|connect|restart|disconnect|enable|disable|remove."
+                )),
+            }
+        }
         // ── Natively ported tools (Stage 1) ──
         "SemanticSearch" => {
             let query = json_str(&args, "query");
@@ -1203,6 +1614,26 @@ async fn execute_tool(
             let command = json_str(&args, "command");
             let cwd = json_str_opt(&args, "cwd");
             let timeout_secs = args.get("timeoutSecs").and_then(serde_json::Value::as_u64);
+            // Gate Shell like every other side-effecting tool (C1). Permission
+            // rules run first; only a command classified read-only auto-approves
+            // at the default tier (mirrors the TS `autoApproveOnDefault`).
+            // Catastrophic commands are still refused inside `ai_shell` itself.
+            let read_only = crate::ai_shell_safety::classify_shell_command(&command).read_only;
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                effective_approval_mode,
+                interactive,
+                "Shell",
+                &format!("Run: {}", command.chars().take(80).collect::<String>()),
+                &command.chars().take(400).collect::<String>(),
+                "execute",
+                &input.tool_permission_rules,
+                &command,
+                read_only,
+            )
+            .await?;
             let result = crate::ai_tools::ai_shell(
                 state.clone(),
                 command,
@@ -1288,6 +1719,9 @@ async fn execute_tool(
                 } else {
                     "create"
                 },
+                &input.tool_permission_rules,
+                &path,
+                false,
             )
             .await?;
             let result = crate::ai_tools::ai_file_write(
@@ -1337,6 +1771,9 @@ async fn execute_tool(
                     new_text.chars().take(200).collect::<String>()
                 ),
                 "modify",
+                &input.tool_permission_rules,
+                &path,
+                false,
             )
             .await?;
             let result = crate::ai_tools::ai_file_str_replace(
@@ -1368,6 +1805,9 @@ async fn execute_tool(
                 &format!("Delete {path}"),
                 &path,
                 "delete",
+                &input.tool_permission_rules,
+                &path,
+                false,
             )
             .await?;
             let result = crate::ai_tools::ai_file_delete(
@@ -1512,6 +1952,9 @@ async fn execute_tool(
                     &format!("{} operations", operations.len()),
                     "multi-file patch",
                     "modify",
+                    &input.tool_permission_rules,
+                    &guarded_paths.join(" "),
+                    false,
                 )
                 .await?;
             }
@@ -1565,11 +2008,8 @@ async fn execute_tool(
             }
             let max_bytes = args.get("maxBytes").and_then(serde_json::Value::as_u64);
             let timeout_secs = args.get("timeoutSecs").and_then(serde_json::Value::as_u64);
-            let allow_private = args
-                .get("allowPrivateHosts")
-                .and_then(serde_json::Value::as_bool);
-            let result =
-                crate::web_fetch::fetch(url, max_bytes, timeout_secs, allow_private).await?;
+            // No `allowPrivateHosts`: the model cannot disable the SSRF guard (H1).
+            let result = crate::web_fetch::fetch(url, max_bytes, timeout_secs).await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "WebResearch" => {
@@ -1603,6 +2043,136 @@ async fn execute_tool(
             let result = crate::research::web_research(state.clone(), query, Some(options)).await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
+
+        // ── SSH tools (system OpenSSH via lux-ssh) ──
+        "SshConnect" => {
+            let host = json_str(&args, "host");
+            if host.trim().is_empty() {
+                return Err(
+                    "SshConnect requires a host (alias, hostname/IP, or user@host).".to_string(),
+                );
+            }
+            let user = json_str_opt(&args, "user");
+            let port = args
+                .get("port")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|value| u16::try_from(value).ok());
+            let identity_file = json_str_opt(&args, "identityFile");
+            let label = json_str_opt(&args, "label");
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                effective_approval_mode,
+                interactive,
+                "SshConnect",
+                &format!("Open SSH connection to {host}"),
+                &host,
+                "execute",
+                &input.tool_permission_rules,
+                &host,
+                false,
+            )
+            .await?;
+            let result = Box::pin(crate::ssh::ssh_connect(
+                state.clone(),
+                host,
+                user,
+                port,
+                identity_file,
+                label,
+            ))
+            .await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "SshExec" => {
+            let session_id = json_str(&args, "session");
+            let command = json_str(&args, "command");
+            if command.trim().is_empty() {
+                return Err("SshExec requires a non-empty command.".to_string());
+            }
+            let cwd = json_str_opt(&args, "cwd");
+            let timeout_secs = args.get("timeoutSecs").and_then(serde_json::Value::as_u64);
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                effective_approval_mode,
+                interactive,
+                "SshExec",
+                &format!(
+                    "Run on SSH session: {}",
+                    command.chars().take(80).collect::<String>()
+                ),
+                &command.chars().take(200).collect::<String>(),
+                "execute",
+                &input.tool_permission_rules,
+                &command,
+                false,
+            )
+            .await?;
+            let result = Box::pin(crate::ssh::ssh_exec(
+                state.clone(),
+                session_id,
+                command,
+                cwd,
+                timeout_secs,
+            ))
+            .await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "SshTransfer" => {
+            let session_id = json_str(&args, "session");
+            let direction_raw = json_str(&args, "direction").to_ascii_lowercase();
+            let direction = match direction_raw.as_str() {
+                "upload" => lux_ssh::TransferDirection::Upload,
+                "download" => lux_ssh::TransferDirection::Download,
+                _ => {
+                    return Err(
+                        "SshTransfer direction must be \"upload\" or \"download\".".to_string()
+                    )
+                }
+            };
+            let local_path = json_str(&args, "localPath");
+            let remote_path = json_str(&args, "remotePath");
+            let recursive = args.get("recursive").and_then(serde_json::Value::as_bool);
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                effective_approval_mode,
+                interactive,
+                "SshTransfer",
+                &format!("scp {direction_raw}: {local_path} <-> {remote_path}"),
+                &format!("{local_path}  {remote_path}"),
+                "execute",
+                &input.tool_permission_rules,
+                &format!("{local_path} {remote_path}"),
+                false,
+            )
+            .await?;
+            let result = Box::pin(crate::ssh::ssh_transfer(
+                state.clone(),
+                session_id,
+                direction,
+                local_path,
+                remote_path,
+                recursive,
+            ))
+            .await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "SshList" => {
+            let result = Box::pin(crate::ssh::ssh_list(state.clone())).await?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "SshDisconnect" => {
+            let session_id = json_str_opt(&args, "session");
+            let all = args.get("all").and_then(serde_json::Value::as_bool);
+            let result = crate::ssh::ssh_disconnect(state.clone(), session_id, all)?;
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+
         "TestHealth" => {
             let root = crate::workspace_root(state)?;
             let result = crate::test_health::run(root).await?;
@@ -1638,6 +2208,9 @@ async fn execute_tool(
                     &tc.name,
                     &browser_args.join(" "),
                     "execute",
+                    &input.tool_permission_rules,
+                    &browser_args.join(" "),
+                    false,
                 )
                 .await?;
             }
@@ -1903,6 +2476,45 @@ async fn execute_tool(
             if steps.is_empty() {
                 return Err("PresentPlan requires at least one step (array of strings or { title, detail, file }).".to_string());
             }
+            // Structured reasoning phases (think-mcp parity): the key decision(s),
+            // the failure modes, and the verification checks. Each accepts strings
+            // or objects and is optional — the gate only expects them on risky work.
+            let alternatives: Vec<PlanDecision> = args
+                .get("alternatives")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| {
+                            if let Some(option) = v.as_str() {
+                                let option = option.trim();
+                                if option.is_empty() {
+                                    return None;
+                                }
+                                return Some(PlanDecision {
+                                    option: option.to_string(),
+                                    tradeoff: String::new(),
+                                });
+                            }
+                            let option = v.get("option")?.as_str()?.trim().to_string();
+                            if option.is_empty() {
+                                return None;
+                            }
+                            Some(PlanDecision {
+                                option,
+                                tradeoff: v
+                                    .get("tradeoff")
+                                    .and_then(|d| d.as_str())
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string(),
+                            })
+                        })
+                        .take(8)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let risks: Vec<String> = json_str_array(&args, "risks", 12);
+            let verification: Vec<String> = json_str_array(&args, "verification", 12);
             // Pin the plan as the session goal + task list so the rail reflects it
             // immediately, regardless of mode.
             if summary.trim().is_empty() {
@@ -1932,7 +2544,14 @@ async fn execute_tool(
             // coaching nudges into the tool result. Advisory, never blocking — in
             // Automatic the plan auto-starts, so a hard gate would stall execution;
             // instead the model sees concrete gaps and can self-correct in-flight.
-            let (quality, coaching) = assess_plan_quality(&title, &summary, &steps);
+            let (quality, coaching) = assess_plan_quality(
+                &title,
+                &summary,
+                &steps,
+                &alternatives,
+                &risks,
+                &verification,
+            );
 
             let auto_start = input.agent_mode == "automatic";
             let plan_id = format!("plan-{}", tc.id);
@@ -1944,6 +2563,11 @@ async fn execute_tool(
                     title,
                     summary,
                     steps: steps.clone(),
+                    alternatives,
+                    risks,
+                    verification,
+                    quality,
+                    coaching: coaching.clone(),
                     auto_start,
                 },
             );
@@ -2406,6 +3030,9 @@ async fn execute_tool(
                 "Write to terminal",
                 &data.chars().take(120).collect::<String>(),
                 "execute",
+                &input.tool_permission_rules,
+                &data,
+                false,
             )
             .await?;
             crate::terminal::terminal_write(state.clone(), session_id, data.clone())?;
@@ -2568,6 +3195,9 @@ async fn execute_tool(
                     "Restore checkpoint",
                     id.as_deref().unwrap_or("latest"),
                     "modify",
+                    &input.tool_permission_rules,
+                    id.as_deref().unwrap_or("latest"),
+                    false,
                 )
                 .await?;
             }
@@ -2748,7 +3378,6 @@ async fn run_subagent(
         let mut payload = serde_json::json!({
             "model": parent.model,
             "messages": messages,
-            "temperature": 0.2,
             "stream": true,
             "stream_options": { "include_usage": true },
             "tools": tools,
@@ -2756,10 +3385,12 @@ async fn run_subagent(
         });
         // Subagents inherit the parent turn's reasoning effort.
         crate::ai_chat_backend::merge_reasoning(&mut payload, parent.reasoning.as_ref());
-        let request = crate::ai_chat_backend::AiChatCompletionRequest::new(
+        crate::ai_chat_backend::apply_temperature(&mut payload, parent.reasoning.as_ref(), 0.2);
+        let request = crate::ai_chat_backend::AiChatCompletionRequest::with_protocol(
             parent.base_url.clone(),
             parent.api_key.clone(),
             payload,
+            parent.prompt_input.provider_protocol.clone(),
         );
         // Use the streaming transport (the same one the parent turn uses). A
         // non-streaming request hangs against providers/local proxies that only
@@ -2829,6 +3460,15 @@ async fn run_subagent(
 }
 
 /// Check permission rules + mode, then prompt the UI for approval if needed.
+//
+// The authoritative gate runs here for EVERY side-effecting tool on the native
+// loop (C1/C2/H7): the user's deny/ask/allow rules are evaluated first — a Deny
+// is a hard block even in full-access/automatic, an Allow skips the prompt, an
+// Ask forces one. `permission_input` is the glob target (`deny:Write(*.env)`
+// matches a path, `deny:Shell(curl *)` a command). `auto_approve` lets a call
+// that is intrinsically safe (e.g. a read-only shell command) skip the prompt
+// when no rule intervened, mirroring the TS `autoApproveOnDefault`.
+//
 // Approval context (tool, summary, preview, risk) is passed positionally; bundling into a
 // struct would only shift the boilerplate to every call site without improving clarity.
 #[allow(clippy::too_many_arguments)]
@@ -2842,9 +3482,25 @@ async fn require_tool_approval(
     summary: &str,
     preview: &str,
     risk: &str,
+    rules: &[String],
+    permission_input: &str,
+    auto_approve: bool,
 ) -> Result<(), String> {
-    // Full-access mode → always approved.
-    if approval_mode == "full-access" {
+    // Permission rules are authoritative and evaluated BEFORE mode, so a deny
+    // applies even in full-access / automatic mode and an explicit allow runs
+    // without a prompt.
+    let force_ask = match crate::ai_permissions::evaluate(tool, permission_input, rules).decision {
+        crate::ai_permissions::PermissionDecision::Deny => {
+            return Err(format!("{tool} is blocked by a permission rule."));
+        }
+        crate::ai_permissions::PermissionDecision::Allow => return Ok(()),
+        crate::ai_permissions::PermissionDecision::Ask => true,
+        crate::ai_permissions::PermissionDecision::Default => false,
+    };
+
+    // No rule forced a prompt: an intrinsically-safe call (read-only shell) and
+    // full-access mode both auto-approve.
+    if !force_ask && (auto_approve || approval_mode == "full-access") {
         return Ok(());
     }
     // Non-interactive callers (subagents) have no UI to approve through: the
@@ -3034,6 +3690,23 @@ fn json_usize(value: &serde_json::Value, key: &str, default: usize) -> usize {
         .map_or(default, |v| usize::try_from(v).unwrap_or(default))
 }
 
+/// Collect a JSON string array at `key`, trimming, dropping empties, capped at `max`.
+fn json_str_array(value: &serde_json::Value, key: &str, max: usize) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .take(max)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3054,6 +3727,41 @@ mod tests {
         }
     }
 
+    fn decision(option: &str, tradeoff: &str) -> PlanDecision {
+        PlanDecision {
+            option: option.to_string(),
+            tradeoff: tradeoff.to_string(),
+        }
+    }
+
+    #[test]
+    fn parse_reads_reasoning_when_content_empty() {
+        // A reasoning model can finish a trivial prompt with empty content and only
+        // thinking text. parse_assistant_message must expose that reasoning so the
+        // turn can fall back to it instead of surfacing a bare "no answer".
+        let body = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "", "reasoning_content": "Hi there" },
+                "finish_reason": "stop",
+            }],
+        });
+        let parsed = parse_assistant_message(&body);
+        assert!(parsed.content.is_empty());
+        assert_eq!(parsed.reasoning, "Hi there");
+    }
+
+    #[test]
+    fn parse_reads_alternate_reasoning_field() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": serde_json::Value::Null, "reasoning": "thinking..." },
+            }],
+        });
+        let parsed = parse_assistant_message(&body);
+        assert_eq!(parsed.reasoning, "thinking...");
+    }
+
     #[test]
     fn plan_gate_flags_vague_and_missing_verification() {
         let steps = vec![
@@ -3061,7 +3769,7 @@ mod tests {
             step("Implement business logic", "", ""),
             step("Add documentation", "", ""),
         ];
-        let (quality, coaching) = assess_plan_quality("Build a thing", "", &steps);
+        let (quality, coaching) = assess_plan_quality("Build a thing", "", &steps, &[], &[], &[]);
         assert!(quality < 0.6, "vague plan should score low, got {quality}");
         assert!(coaching.iter().any(|c| c.contains("vague")));
         assert!(coaching.iter().any(|c| c.contains("verification")));
@@ -3086,11 +3794,109 @@ mod tests {
                 "tests/test_moderation.py",
             ),
         ];
-        let (quality, coaching) =
-            assess_plan_quality("Moderation bot", "aiogram + SQLAlchemy", &steps);
+        let (quality, coaching) = assess_plan_quality(
+            "Moderation bot",
+            "aiogram + SQLAlchemy",
+            &steps,
+            &[],
+            &[],
+            &[],
+        );
         assert!(
             quality >= 0.8,
             "concrete plan should score high, got {quality}: {coaching:?}"
+        );
+    }
+
+    #[test]
+    fn plan_gate_flags_missing_alternatives_and_critique_on_risky_work() {
+        // Risk markers (auth/token) raise the bar: a plan with no named decision and
+        // no failure-mode analysis must be coached on both, even if otherwise concrete.
+        let steps = vec![
+            step(
+                "Add auth guard",
+                "Validate the bearer token in auth/guard.rs",
+                "auth/guard.rs",
+            ),
+            step(
+                "Wire login route",
+                "POST /login issues a token in auth/login.rs",
+                "auth/login.rs",
+            ),
+            step("Verify", "cargo test auth:: passes", "auth/login.rs"),
+        ];
+        let (_quality, coaching) =
+            assess_plan_quality("Add auth", "token-based login", &steps, &[], &[], &[]);
+        assert!(
+            coaching
+                .iter()
+                .any(|c| c.to_lowercase().contains("key decision")),
+            "risky plan must nudge a key decision: {coaching:?}"
+        );
+        assert!(
+            coaching
+                .iter()
+                .any(|c| c.to_lowercase().contains("failure mode")),
+            "risky plan must nudge critique: {coaching:?}"
+        );
+    }
+
+    #[test]
+    fn plan_gate_rewards_full_five_phase_plan() {
+        // Risky-enough work (auth) so alternatives + critique are expected, now with
+        // a named decision, explicit risks, and verification — the complete 5-phase
+        // plan should score high with no alternatives/critique coaching left.
+        let steps = vec![
+            step(
+                "Add guard",
+                "Validate the bearer credential in auth/guard.rs",
+                "auth/guard.rs",
+            ),
+            step(
+                "Wire login route",
+                "POST /login issues a session in routes/login.rs",
+                "routes/login.rs",
+            ),
+            step(
+                "Hash storage",
+                "Store argon2 hashes in db/users.rs",
+                "db/users.rs",
+            ),
+            step(
+                "Verify",
+                "cargo test auth:: + manual login smoke",
+                "routes/login.rs",
+            ),
+        ];
+        let alternatives = vec![decision(
+            "Stateless sessions",
+            "Chosen over a shared store — simpler, at the cost of revocation latency",
+        )];
+        let risks = vec![
+            "Replay if the clock skews — short TTL mitigates it".to_string(),
+            "Assumes argon2 is present at build time".to_string(),
+        ];
+        let verification = vec![
+            "cargo test auth:: passes".to_string(),
+            "Checkpoint before deploy; revert on failure".to_string(),
+        ];
+        let (quality, coaching) = assess_plan_quality(
+            "Add login",
+            "session-based auth",
+            &steps,
+            &alternatives,
+            &risks,
+            &verification,
+        );
+        assert!(
+            quality >= 0.8,
+            "complete 5-phase plan should score high, got {quality}: {coaching:?}"
+        );
+        assert!(
+            !coaching
+                .iter()
+                .any(|c| c.to_lowercase().contains("key decision")),
+            "decision is named — no alternatives coaching expected: {coaching:?}"
         );
     }
 
@@ -3109,7 +3915,8 @@ mod tests {
             ),
             step("Verify", "cargo test auth:: passes", "auth/login.rs"),
         ];
-        let (_quality, coaching) = assess_plan_quality("Auth + payment migration", "", &steps);
+        let (_quality, coaching) =
+            assess_plan_quality("Auth + payment migration", "", &steps, &[], &[], &[]);
         assert!(
             coaching
                 .iter()

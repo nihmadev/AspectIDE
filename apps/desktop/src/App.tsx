@@ -15,7 +15,7 @@ import { ensureBundledAgentBrowserLatest } from "./lib/agentBrowserAutoUpdate";
 import { AI_PREFERENCES_KEY, normalizeAiPreferences } from "./lib/aiPreferences";
 import { buildAiProjectIndexSnapshot } from "./lib/aiProjectIndex";
 import { closedDocumentIdsForAllDocuments, closedDocumentIdsForDocumentInGroup } from "./lib/editorCloseTargets";
-import { normalizeLocale, UI_LOCALE_KEY } from "./lib/i18n";
+import { loadDictionary, normalizeLocale, UI_LOCALE_KEY } from "./lib/i18n";
 import { resetEditorFontZoom, toggleEditorMinimap, toggleEditorWordWrap, zoomEditorFontIn, zoomEditorFontOut } from "./lib/editorPreferenceCommands";
 import { EDITOR_PREFERENCES_KEY, normalizeEditorPreferences } from "./lib/editorPreferences";
 import { buildFileTreeDirectories, normalizePath } from "./lib/fileTree";
@@ -25,7 +25,6 @@ import { maybeAutoInstallLanguageServers, resetLspAutoInstallAttempts } from "./
 import { bootstrapManagedRuntimes } from "./lib/runtimeBootstrap";
 import { createEmptyAiIndexState, createIdleProjectLoadState, isAiChatSessionBusyStatus, useLuxStore, type Activity } from "./lib/store";
 import { luxCommands, subscribeLuxEvents } from "./lib/tauri";
-import { pickAndOpenWorkspace } from "./lib/workspaceActions";
 import type { RecentWorkspace, WorkspaceInfo } from "./lib/types";
 
 const BottomPanel = lazy(() => import("./components/BottomPanel").then((module) => ({ default: module.BottomPanel })));
@@ -56,7 +55,22 @@ export function App() {
   const locale = useLuxStore((state) => state.locale);
   const aiPreferences = useLuxStore((state) => state.aiPreferences);
   const aiIndex = useLuxStore((state) => state.aiIndex);
-  const aiChatSessions = useLuxStore((state) => state.aiChatSessions);
+  // Cheap persist signal instead of full `aiChatSessions` subscription. The
+  // full array gets a new identity on every store mutation (incl. per-token
+  // streaming updates before R1's coalescing), which would re-render the app
+  // root on every token. This string only flips when session shape changes in
+  // a way that warrants a persist — count, ids, close, dirty — so the root
+  // skips pure streaming/info noise.
+  const aiChatPersistSignal = useLuxStore((state) => {
+    let sig = "";
+    let idx = 0;
+    for (const s of state.aiChatSessions) {
+      idx++;
+      sig += s.id + ":" + (s.closedAt ?? 0) + ":" + s.messages.length + ":" + (s.status === "idle" || s.status === "error" ? "0" : "1") + ";";
+      if (idx >= 4) { sig += state.aiChatSessions.length.toString(); break; }
+    }
+    return sig;
+  });
   const activeAiChatSessionId = useLuxStore((state) => state.activeAiChatSessionId);
   const setAiPreferences = useLuxStore((state) => state.setAiPreferences);
   const setAiIndex = useLuxStore((state) => state.setAiIndex);
@@ -80,6 +94,7 @@ export function App() {
   const toggleSidebar = useLuxStore((state) => state.toggleSidebar);
   const toggleAiChat = useLuxStore((state) => state.toggleAiChat);
   const openBottomPanel = useLuxStore((state) => state.openBottomPanel);
+  const toggleBottomPanel = useLuxStore((state) => state.toggleBottomPanel);
   const closeDocumentInActiveGroup = useLuxStore((state) => state.closeDocumentInActiveGroup);
   const splitActiveEditor = useLuxStore((state) => state.splitActiveEditor);
   const selectNextDocument = useLuxStore((state) => state.selectNextDocument);
@@ -136,15 +151,18 @@ export function App() {
 
   const openProject = () => {
     requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
-      setProjectLoad({ active: true, error: null, progress: 4, root: null, stage: "opening", workspaceName: null });
-      void pickAndOpenWorkspace().then((workspace) => {
-        if (workspace) {
-          setProjectLoad({ active: true, error: null, progress: 12, root: workspace.root, stage: "opening", workspaceName: workspace.name });
-          setWorkspace(workspace);
+      // Pick the folder FIRST — the loading overlay must not appear on click or while
+      // the system dialog is open (and never at all if the user cancels).
+      void luxCommands.workspacePickFolder().then((picked) => {
+        if (!picked) return;
+        setProjectLoad({ active: true, error: null, progress: 8, root: picked.root, stage: "opening", workspaceName: picked.name });
+        // workspace_open emits WorkspaceChanged → the event listener calls setWorkspace,
+        // which is the single source of truth driving the load stages (files → ready).
+        // Calling setWorkspace / setProjectLoad again here would re-trigger the workspace
+        // effect mid-flight and strand the overlay at "opening" — the stuck-plate bug.
+        return luxCommands.workspaceOpen(picked.root).then(() => {
           refreshRecentWorkspaces(setRecentWorkspaces);
-          return;
-        }
-        setProjectLoad(createIdleProjectLoadState());
+        });
       }).catch((error) => setProjectLoad({ active: false, error: readErrorMessage(error), progress: 0, root: null, stage: "error", workspaceName: null }));
     }, { title: "Save changes before opening another folder?" });
   };
@@ -164,9 +182,8 @@ export function App() {
   const openRecentWorkspace = (root: string) => {
     requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
       setProjectLoad({ active: true, error: null, progress: 8, root, stage: "opening", workspaceName: null });
-      void luxCommands.workspaceOpen(root).then((workspace) => {
-        setProjectLoad({ active: true, error: null, progress: 12, root: workspace.root, stage: "opening", workspaceName: workspace.name });
-        setWorkspace(workspace);
+      // WorkspaceChanged event drives setWorkspace + the load stages — see openProject.
+      void luxCommands.workspaceOpen(root).then(() => {
         refreshRecentWorkspaces(setRecentWorkspaces);
       }).catch(() => {
         setProjectLoad({ active: false, error: "Failed to open recent project.", progress: 0, root, stage: "error", workspaceName: null });
@@ -223,13 +240,20 @@ export function App() {
       window.clearTimeout(aiChatPersistTimerRef.current);
       aiChatPersistTimerRef.current = null;
     }
-    if (aiChatSessions.some((session) => isAiChatSessionBusyStatus(session.status))) return;
+    // Read the real array imperatively — it's only used inside the delayed
+    // callback. The signal just wakes the effect when persistence-relevant
+    // shape changes happen (session count, close, message count cross).
+    const sessions = useLuxStore.getState().aiChatSessions;
+    if (sessions.some((session) => isAiChatSessionBusyStatus(session.status))) return;
 
     aiChatPersistTimerRef.current = window.setTimeout(() => {
       aiChatPersistTimerRef.current = null;
+      // Re-read at save time so we capture the final settled state after any
+      // busy→idle transition within the 450ms debounce window.
+      const current = useLuxStore.getState().aiChatSessions;
       void saveAiChatHistory({
         activeSessionId: activeAiChatSessionId,
-        sessions: aiChatSessions,
+        sessions: current,
       }).then(() => saveChatCheckpointStore()).catch(reportAiChatHistoryError);
     }, 450);
 
@@ -239,7 +263,7 @@ export function App() {
         aiChatPersistTimerRef.current = null;
       }
     };
-  }, [activeAiChatSessionId, aiChatSessions]);
+  }, [activeAiChatSessionId, aiChatPersistSignal]);
 
   useEffect(() => {
     void luxCommands.settingsGet("user", AI_PREFERENCES_KEY)
@@ -262,7 +286,11 @@ export function App() {
 
     void luxCommands.settingsGet("user", UI_LOCALE_KEY)
       .then((setting) => {
-        if (setting) setLocale(normalizeLocale(setting.value));
+        if (!setting) return;
+        const next = normalizeLocale(setting.value);
+        // Load the locale's split dictionary first so the switch lands with its
+        // strings already resident (no English flash for non-default locales).
+        void loadDictionary(next).finally(() => setLocale(next));
       })
       .catch(() => undefined);
   }, [setAiPreferences, setEditorPreferences, setLocale]);
@@ -503,7 +531,16 @@ export function App() {
         }
       }
       if (event.type === "editorDocumentClosed") closeDocument(event.document.id);
-      if (event.type === "editorDocumentChanged") upsertDocument(event.document);
+      if (event.type === "editorDocumentChanged") {
+        // Auto-open: agent file edits arrive only as this event (user-initiated
+        // opens call upsertDocument themselves), so gating it here suppresses the
+        // agent stealing focus / piling up tabs. Already-open files still sync.
+        if (useLuxStore.getState().editorPreferences.autoOpenEditedFiles) {
+          upsertDocument(event.document);
+        } else {
+          updateOpenDocuments([event.document]);
+        }
+      }
       if (event.type === "editorDocumentsChanged") updateOpenDocuments(event.documents);
       if (event.type === "editorDocumentEdited") applyDocumentEdits(event.document.id, [], event.document);
       if (event.type === "editorDiagnosticsChanged") setDiagnosticsForPath(event.path, event.diagnostics);
@@ -540,6 +577,7 @@ export function App() {
         editorGroups,
         newUntitledFile,
         openBottomPanel,
+        toggleBottomPanel,
         openProject,
         openDocuments,
         requestCloseDocuments,
@@ -558,7 +596,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeDocumentId, activeEditorGroupId, closeDocumentInActiveGroup, editorGroups, openBottomPanel, openDocuments, requestCloseDocuments, selectNextDocument, selectPreviousDocument, setActiveActivity, setCommandPaletteOpen, setSettingsOpen, setSidebarVisible, splitActiveEditor, toggleAiChat, toggleSidebar, upsertDocument, workspace]);
+  }, [activeDocumentId, activeEditorGroupId, closeDocumentInActiveGroup, editorGroups, openBottomPanel, toggleBottomPanel, openDocuments, requestCloseDocuments, selectNextDocument, selectPreviousDocument, setActiveActivity, setCommandPaletteOpen, setSettingsOpen, setSidebarVisible, splitActiveEditor, toggleAiChat, toggleSidebar, upsertDocument, workspace]);
 
   if (!workspace) {
     if (workspaceMode === "agent") {
@@ -682,6 +720,7 @@ type KeybindingCommandContext = {
   editorGroups: ReturnType<typeof useLuxStore.getState>["editorGroups"];
   newUntitledFile: () => void;
   openBottomPanel: ReturnType<typeof useLuxStore.getState>["openBottomPanel"];
+  toggleBottomPanel: ReturnType<typeof useLuxStore.getState>["toggleBottomPanel"];
   openProject: () => void;
   openDocuments: ReturnType<typeof useLuxStore.getState>["openDocuments"];
   requestCloseDocuments: ReturnType<typeof useEditorCloseGuard>["requestCloseDocuments"];
@@ -760,7 +799,7 @@ function runKeybindingCommand(command: string, context: KeybindingCommandContext
       context.toggleAiChat();
       break;
     case "workbench.action.terminal.toggleTerminal":
-      context.openBottomPanel("terminal");
+      context.toggleBottomPanel("terminal");
       break;
     case "workbench.action.closeActiveEditor":
       if (context.activeDocumentId) {
