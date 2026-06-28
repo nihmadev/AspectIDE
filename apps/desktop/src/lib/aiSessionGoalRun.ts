@@ -12,6 +12,7 @@ import { buildGoalContinuationOrchestrationBlock } from "./aiGoalRunPromptBlocks
 import { getAiSessionGoal } from "./aiSessionGoal";
 import { listAiSessionTodos } from "./aiSessionTodos";
 import { isFullExecutionAgentMode, type AiAgentMode, type AiToolRoundLimit } from "./aiPreferences";
+import { describeLoopSignature, recordTurnToolSignatures, resetToolLoopDetector } from "./aiLoopDetector";
 
 export type GoalRunPhase = "running" | "paused" | "completed" | "stopped" | "max_rounds" | "blocked";
 
@@ -46,6 +47,12 @@ export type GoalRunState = {
   lastAccountedAssistantMessageId: string | null;
   /** Shown in orchestration rail — why the next silent turn is running (Codex/Claude-style). */
   lastEvaluatorReason: string | null;
+  /** True once any tool call has run during this goal run (used to reject premature completion). */
+  everUsedTools: boolean;
+  /** True once a premature [goal:complete] has been challenged, so we only challenge once. */
+  completionChallenged: boolean;
+  /** Automatic-mode wall-clock ceiling in minutes (from preferences); undefined = none. */
+  hardStopMinutes?: number;
 };
 
 export type { GoalRunLimits };
@@ -157,6 +164,7 @@ export function resumeGoalRun(sessionId: string) {
   run.completedAt = null;
   run.noProgressTurns = 0;
   stallSignals.delete(`${sessionId}:stall`);
+  resetToolLoopDetector(sessionId);
   run.budgetWrapupSent = false;
   run.blockedReason = null;
   run.stopReason = null;
@@ -175,13 +183,14 @@ export function startGoalRun(
     agentMode: AiAgentMode;
     toolRoundLimit: AiToolRoundLimit;
     limits?: Partial<GoalRunLimits>;
+    preferences?: { goalRunMaxTokens?: number | null; goalRunMaxRounds?: number | null; automaticModeHardStopMinutes?: number | null };
   },
 ): GoalRunState | null {
   if (!isFullExecutionAgentMode(options.agentMode)) return null;
   const trimmedGoal = goal.trim();
   if (!trimmedGoal) return null;
   const limits = mergeGoalRunLimits(
-    resolveDefaultGoalRunLimits(options.toolRoundLimit, trimmedGoal),
+    resolveDefaultGoalRunLimits(options.toolRoundLimit, trimmedGoal, options.preferences),
     options.limits ?? {},
   );
   const run: GoalRunState = {
@@ -209,6 +218,9 @@ export function startGoalRun(
     history: [],
     lastAccountedAssistantMessageId: null,
     lastEvaluatorReason: "Starting first turn toward the completion condition.",
+    everUsedTools: false,
+    completionChallenged: false,
+    hardStopMinutes: options.preferences?.automaticModeHardStopMinutes ?? undefined,
   };
   pushGoalHistory(
     run,
@@ -216,6 +228,7 @@ export function startGoalRun(
     `Limits: ${limits.maxRounds} rounds, ${Math.round(limits.maxDurationMs / 1000)}s, ${limits.maxTokens.toLocaleString()} tokens.`,
   );
   stallSignals.delete(`${sessionId}:stall`);
+  resetToolLoopDetector(sessionId);
   goalRuns.set(sessionId, run);
   emit();
   return run;
@@ -228,6 +241,7 @@ export function stopGoalRun(sessionId: string) {
     run.phase = "stopped";
     run.completedAt = Date.now();
   }
+  resetToolLoopDetector(sessionId);
   goalRuns.set(sessionId, run);
   emit();
 }
@@ -250,6 +264,7 @@ function finishGoalRun(sessionId: string, phase: Exclude<GoalRunPhase, "running"
 export function disposeGoalRun(sessionId: string) {
   goalRuns.delete(sessionId);
   stallSignals.delete(`${sessionId}:stall`);
+  resetToolLoopDetector(sessionId);
   emit();
 }
 
@@ -406,6 +421,11 @@ function parseGoalToolOutput(output: string | undefined) {
 
 export function syncGoalRunFromAssistantMessage(sessionId: string, message: AiChatMessage | null) {
   if (!message?.toolCalls?.length) return;
+  const run = goalRuns.get(sessionId);
+  if (run && !run.everUsedTools) {
+    run.everUsedTools = true;
+    goalRuns.set(sessionId, run);
+  }
   for (const call of message.toolCalls) {
     if (call.tool !== "Goal" || call.status !== "success" || !call.output) continue;
     const parsed = parseGoalToolOutput(call.output);
@@ -499,8 +519,66 @@ export function evaluateGoalCondition(
   }
 
   if (detectGoalCompleteMarker(assistant) || refreshed.progress >= 100) {
+    // Guard against premature completion: a [goal:complete] declared on a very early
+    // round with no tool work at all is almost always the model claiming victory
+    // without doing anything. Challenge it once and require a verification turn before
+    // accepting. (progress >= 100 from the Goal tool is trusted — that's explicit.)
+    const markerOnly = detectGoalCompleteMarker(assistant) && refreshed.progress < 100;
+    const noWorkYet = !refreshed.everUsedTools
+      && (assistant?.toolCalls?.length ?? 0) === 0
+      && refreshed.round <= 2;
+    if (markerOnly && noWorkYet && !refreshed.completionChallenged) {
+      refreshed.completionChallenged = true;
+      refreshed.lastEvaluatorReason =
+        "You signaled completion, but no tools have run and the run just started. Do not declare done without evidence: make the actual changes, then read/test the result to verify, and only then mark complete.";
+      goalRuns.set(sessionId, refreshed);
+      emit();
+      return { status: "continue", reason: refreshed.lastEvaluatorReason };
+    }
     finishGoalRun(sessionId, "completed", refreshed.completionSummary ?? "Completion condition satisfied.");
     return { status: "satisfied", reason: refreshed.completionSummary ?? "Completion condition satisfied." };
+  }
+
+  // Tool-call loop guard — evaluated BEFORE the advisory-limit branch so it runs on
+  // every turn, including automatic mode (which deliberately blows past advisory
+  // round/token/duration budgets). recordTurnToolSignatures is the only place the
+  // loop ring buffer is fed, so it must see every turn or the detector goes blind.
+  // A warning-level loop gets a corrective nudge; a critical loop pauses the run
+  // (non-automatic) or forces a strategy change (automatic) so an autonomous run
+  // can't spin forever burning tokens.
+  const loop = recordTurnToolSignatures(sessionId, assistant?.toolCalls);
+  if (loop.critical) {
+    resetToolLoopDetector(sessionId);
+    const what = describeLoopSignature(loop.signature);
+    if (agentMode === "automatic") {
+      refreshed.lastEvaluatorReason =
+        `Loop detected: you called ${what} ${loop.count}× with no progress. STOP repeating it — take a different approach, or if truly stuck, record the blocker and move to the next part of the task. ${AUTOMATIC_NO_STOP_NUDGE}`;
+      goalRuns.set(sessionId, refreshed);
+      emit();
+      return { status: "continue", reason: refreshed.lastEvaluatorReason };
+    }
+    const reason = `Paused: detected a tool loop — ${what} repeated ${loop.count}×. Run /goal resume to continue.`;
+    pauseGoalRun(sessionId, reason);
+    return { status: "paused", reason };
+  }
+  if (loop.looping) {
+    refreshed.lastEvaluatorReason =
+      `You are repeating ${describeLoopSignature(loop.signature)} (${loop.count}×). Change approach — the same call keeps producing the same result.`;
+    goalRuns.set(sessionId, refreshed);
+    emit();
+    return { status: "continue", reason: refreshed.lastEvaluatorReason };
+  }
+
+  // Hard wall-clock ceiling for automatic mode — a TRUE ceiling, evaluated every turn
+  // independent of the advisory budgets (not only once another limit already tripped).
+  const hardStopMinutes = refreshed.hardStopMinutes;
+  if (agentMode === "automatic" && typeof hardStopMinutes === "number") {
+    const elapsedMs = Date.now() - refreshed.startedAt;
+    if (elapsedMs >= hardStopMinutes * 60_000) {
+      const reason = `Hard stop: ${hardStopMinutes} minute${hardStopMinutes !== 1 ? "s" : ""} elapsed in automatic mode.`;
+      finishGoalRun(sessionId, "max_rounds", reason);
+      return { status: "max_rounds", reason };
+    }
   }
 
   const limitReached = goalRunDurationExceeded(refreshed)

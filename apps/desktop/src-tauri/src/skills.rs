@@ -141,54 +141,76 @@ pub struct ImportableSkill {
     pub content: String,
 }
 
-/// External skill directories to scan for importable skills (Claude Code / Codex,
-/// global + project). Only existing dirs are returned by the caller.
-fn external_skill_sources(
-    app: &AppHandle,
-    state: &State<'_, SharedState>,
-) -> Vec<(String, SkillScope, PathBuf)> {
+/// External skill directories to scan for importable skills (Claude Code, Codex,
+/// `OpenClaw`, Hermes). All imports land in the user's global library, so every
+/// source is hinted Global. Only existing dirs are scanned by the caller.
+fn external_skill_sources(app: &AppHandle) -> Vec<(String, SkillScope, PathBuf)> {
     let mut sources = Vec::new();
     if let Ok(home) = app.path().home_dir() {
+        let skills = |dir: &str| home.join(dir).join("skills");
+        sources.push(("Claude".to_string(), SkillScope::Global, skills(".claude")));
+        sources.push(("Codex".to_string(), SkillScope::Global, skills(".codex")));
         sources.push((
-            "Claude (global)".to_string(),
+            "OpenClaw".to_string(),
             SkillScope::Global,
-            home.join(".claude").join("skills"),
+            skills(".openclaw"),
         ));
-        sources.push((
-            "Codex (global)".to_string(),
-            SkillScope::Global,
-            home.join(".codex").join("skills"),
-        ));
-    }
-    if let Ok(root) = workspace_root(state) {
-        sources.push((
-            "Claude (project)".to_string(),
-            SkillScope::Project,
-            root.join(".claude").join("skills"),
-        ));
-        sources.push((
-            "Codex (project)".to_string(),
-            SkillScope::Project,
-            root.join(".codex").join("skills"),
-        ));
+        sources.push(("Hermes".to_string(), SkillScope::Global, skills(".hermes")));
     }
     sources
 }
 
-/// Auto-discover skills sitting in other agents' folders (Claude/Codex) so the
-/// user can import them with one click.
+/// Discover skills under `root`, descending one extra level so Hermes's
+/// category-organized layout (`~/.hermes/skills/<category>/<name>/SKILL.md`) is
+/// covered alongside the flat `<root>/<name>/SKILL.md` form. Deduped by slug
+/// (the flat hit wins; on a leaf-name collision across categories the
+/// first-scanned wins) — matching that import writes one file per slug anyway.
+fn discover_external_root(hint: SkillScope, root: &PathBuf) -> Vec<lux_skills::Skill> {
+    use std::collections::BTreeMap;
+    let mut by_slug: BTreeMap<String, lux_skills::Skill> = BTreeMap::new();
+    if let Ok(flat) = lux_skills::discover_skills(&[(hint, root.clone())]) {
+        for skill in flat {
+            by_slug.entry(skill.slug.clone()).or_insert(skill);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            // Skip dirs that are themselves a skill (have a SKILL.md) — already
+            // captured by the flat pass; only descend into category folders.
+            if path.join("SKILL.md").is_file() || path.join("skill.md").is_file() {
+                continue;
+            }
+            if let Ok(nested) = lux_skills::discover_skills(&[(hint, path)]) {
+                for skill in nested {
+                    by_slug.entry(skill.slug.clone()).or_insert(skill);
+                }
+            }
+        }
+    }
+    by_slug.into_values().collect()
+}
+
+/// Auto-discover skills sitting in other agents' folders (Claude, Codex,
+/// `OpenClaw`, Hermes) so the user can import them — individually or all at once —
+/// into the global library.
+// Tauri command: the Result is kept for IPC error-channel symmetry even though
+// discovery swallows per-source errors and always succeeds.
+#[allow(clippy::unnecessary_wraps)]
 #[tauri::command]
 pub fn skills_discover_importable(
     app: AppHandle,
-    state: State<'_, SharedState>,
+    _state: State<'_, SharedState>,
 ) -> Result<Vec<ImportableSkill>, String> {
     let mut out = Vec::new();
-    for (source, hint, root) in external_skill_sources(&app, &state) {
+    for (source, hint, root) in external_skill_sources(&app) {
         if !root.is_dir() {
             continue;
         }
-        let skills = lux_skills::discover_skills(&[(hint, root)]).map_err(String::from)?;
-        for skill in skills {
+        for skill in discover_external_root(hint, &root) {
             let content = std::fs::read_to_string(&skill.path).unwrap_or_default();
             if content.trim().is_empty() {
                 continue;

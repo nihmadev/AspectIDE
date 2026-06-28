@@ -142,6 +142,11 @@ jobs:
             artifact: lux-ide-linux
             bundle_args: --bundles appimage,deb,rpm
             target_args: ""
+          - label: macOS
+            os: macos-latest
+            artifact: lux-ide-macos
+            bundle_args: --bundles dmg,app
+            target_args: --target universal-apple-darwin
     runs-on: ${{ matrix.os }}
     # Surface the optional code-signing secrets as job env so step `if:` guards can
     # detect their presence. When unset, signing steps skip and unsigned installers

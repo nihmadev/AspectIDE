@@ -14,7 +14,7 @@ import { AiAutomaticChecklist } from "./ai-chat/AiAutomaticChecklist";
 import { buildContextDropSummary } from "../lib/aiChatContextReport";
 import { aiChatErrorFromMessage, classifyAiChatError, type AiChatErrorPresentation } from "../lib/aiChatErrors";
 import { clearAiRetryNotice, setAiRetryNotice } from "../lib/aiRetryNotice";
-import { automaticRetryReason, nextAutomaticRetry, resetAutomaticRetry } from "../lib/aiAutomaticRetry";
+import { automaticRetryReason, isTransientRetryKind, nextAutomaticRetry, resetAutomaticRetry } from "../lib/aiAutomaticRetry";
 import { isAutomaticSocialOnlyMessage } from "../lib/aiAutomaticSocialMessage";
 
 import { AiChatSlashMenu } from "./ai-chat/AiChatSlashMenu";
@@ -187,6 +187,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     setAttachments,
     pinnedEditorPaths,
     attachFiles,
+    attachWorkspacePath,
     attachMention,
     attachSelection,
     attachEditorDocument,
@@ -275,7 +276,27 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const modelSupportsEffort = Boolean(selectedModel?.effortLevels.length);
   const agentOptions = aiPreferences.agentProfiles.map((profile) => ({ label: profile.name, value: profile.id }));
   const providerOptions = aiPreferences.providers.map((provider) => ({ label: provider.name, value: provider.id }));
-  const modelOptions = selectedProvider?.models.map((model) => ({ label: model.name, value: model.id })) ?? [];
+  // Composite picker value separator. Newline never appears in a provider/model id,
+  // so `providerId\nmodelId` round-trips unambiguously (split on the first newline).
+  const MODEL_VALUE_SEP = "\n";
+  // Unified model picker: every provider's models in one grouped, searchable list.
+  // The value is a composite providerId + modelId so selecting a model from another
+  // provider switches both at once. Junk models the user hid are filtered out (except
+  // the active one, which stays so the picker always reflects the real selection).
+  const selectedModelValue = `${aiPreferences.selectedProviderId}${MODEL_VALUE_SEP}${aiPreferences.selectedModelId}`;
+  const hiddenModelSet = useMemo(() => new Set(aiPreferences.hiddenModelIds), [aiPreferences.hiddenModelIds]);
+  const modelOptions = useMemo(() => {
+    const options: { label: string; value: string; group?: string }[] = [];
+    const multiProvider = aiPreferences.providers.length > 1;
+    for (const provider of aiPreferences.providers) {
+      for (const model of provider.models) {
+        const value = `${provider.id}${MODEL_VALUE_SEP}${model.id}`;
+        if (hiddenModelSet.has(value) && value !== selectedModelValue) continue;
+        options.push({ label: model.name, value, group: multiProvider ? provider.name : undefined });
+      }
+    }
+    return options;
+  }, [aiPreferences.providers, hiddenModelSet, selectedModelValue]);
   const effortOptions = selectedModel?.effortLevels.map((effort) => ({ label: effort.label, value: effort.id })) ?? [];
   const slashCommands = useMemo(
     () => filterSlashCommands(message, t, projectSlashCommands),
@@ -411,10 +432,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     void luxCommands.settingsSet("user", AI_PREFERENCES_KEY, nextPreferences).catch(() => undefined);
   }, [aiPreferences, setAiPreferences]);
 
-  const updateModel = useCallback((selectedModelId: string) => {
-    updateAiPreference({ selectedModelId });
-  }, [updateAiPreference]);
-
   const updateProvider = useCallback((selectedProviderId: string) => {
     const provider = getAiProvider(aiPreferences.providers, selectedProviderId) ?? null;
     const nextModelId = provider?.models.some((model) => model.id === aiPreferences.selectedModelId)
@@ -422,6 +439,26 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       : provider?.models[0]?.id;
     updateAiPreference(nextModelId ? { selectedProviderId, selectedModelId: nextModelId } : { selectedProviderId });
   }, [aiPreferences.providers, aiPreferences.selectedModelId, updateAiPreference]);
+
+  // Composite model selection: "providerId\nmodelId" → switch provider + model atomically.
+  const selectComposedModel = useCallback((composite: string) => {
+    const sep = composite.indexOf("\n");
+    if (sep < 0) { updateAiPreference({ selectedModelId: composite }); return; }
+    const selectedProviderId = composite.slice(0, sep);
+    const selectedModelId = composite.slice(sep + 1);
+    updateAiPreference({ selectedProviderId, selectedModelId });
+  }, [updateAiPreference]);
+
+  const hideComposedModel = useCallback((composite: string) => {
+    const current = useLuxStore.getState().aiPreferences;
+    const activeValue = `${current.selectedProviderId}\n${current.selectedModelId}`;
+    if (composite === activeValue || current.hiddenModelIds.includes(composite)) return;
+    updateAiPreference({ hiddenModelIds: [...current.hiddenModelIds, composite] });
+  }, [updateAiPreference]);
+
+  const showHiddenModels = useCallback(() => {
+    updateAiPreference({ hiddenModelIds: [] });
+  }, [updateAiPreference]);
 
   const resizeComposerTextarea = useCallback((target?: HTMLTextAreaElement | null) => {
     const textarea = target ?? textareaRef.current;
@@ -602,7 +639,8 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const handleComposerDragOver = (event: DragEvent<HTMLDivElement>) => {
     const hasFiles = event.dataTransfer.types.includes("Files");
     const hasEditorTab = dragEventHasEditorTab(event.dataTransfer);
-    if (!hasFiles && !hasEditorTab) return;
+    const hasWorkspacePath = event.dataTransfer.types.includes("application/x-lux-path");
+    if (!hasFiles && !hasEditorTab && !hasWorkspacePath) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
     setDraggingFiles(true);
@@ -611,11 +649,18 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const handleComposerDrop = (event: DragEvent<HTMLDivElement>) => {
     const editorTabId = readEditorTabDrop(event.dataTransfer);
     const hasFiles = event.dataTransfer.types.includes("Files");
-    if (!editorTabId && !hasFiles) return;
+    const workspacePath = event.dataTransfer.types.includes("application/x-lux-path")
+      ? event.dataTransfer.getData("application/x-lux-path")
+      : "";
+    const workspaceKind = event.dataTransfer.types.includes("application/x-lux-kind")
+      ? event.dataTransfer.getData("application/x-lux-kind")
+      : "";
+    if (!editorTabId && !hasFiles && !workspacePath) return;
     event.preventDefault();
     setDraggingFiles(false);
     if (editorTabId) attachEditorDocument(editorTabId);
     if (hasFiles) attachFiles(event.dataTransfer.files);
+    if (workspacePath && !hasFiles) void attachWorkspacePath(workspacePath, workspaceKind === "directory" ? "folder" : "file");
   };
 
   const handleComposerPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -674,6 +719,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
        *  "recommendation" carry its fold-in framing to the model while the chat bubble
        *  shows only the clean text the user typed. */
       modelMessageOverride?: string;
+      /** Queue flush / send-now: this turn's text comes from the queue, not the live
+       *  composer, so leave the user's in-progress draft + attachments untouched. */
+      keepComposerDraft?: boolean;
     },
   ) => {
     const isInternalSend = options?.internalSend === true;
@@ -832,6 +880,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           agentMode: runPreferences.agentMode,
           toolRoundLimit: runPreferences.toolRoundLimit,
           limits: goalSlash.limits,
+          preferences: {
+            goalRunMaxTokens: runPreferences.goalRunMaxTokens,
+            goalRunMaxRounds: runPreferences.goalRunMaxRounds,
+            automaticModeHardStopMinutes: runPreferences.automaticModeHardStopMinutes,
+          },
         });
         updateMessage("");
         setRestoreNotice(t("aiChat.slash.goalRunStarted"));
@@ -875,6 +928,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       startGoalRun(sessionId, nextMessage, {
         agentMode: runPrefs.agentMode,
         toolRoundLimit: runPrefs.toolRoundLimit,
+        preferences: {
+          goalRunMaxTokens: runPrefs.goalRunMaxTokens,
+          goalRunMaxRounds: runPrefs.goalRunMaxRounds,
+          automaticModeHardStopMinutes: runPrefs.automaticModeHardStopMinutes,
+        },
       });
     }
 
@@ -990,9 +1048,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         });
       }
       pinToBottom();
-      // Review requests don't originate from the composer, so leave the user's draft and
-      // pending attachments intact instead of clearing them.
-      if (!options?.reviewRequest) {
+      // Review requests and queue flushes don't originate from the live composer,
+      // so leave the user's in-progress draft and pending attachments intact
+      // instead of clearing them (a queued message auto-sending must not wipe text
+      // the user is typing right now).
+      if (!options?.reviewRequest && !options?.keepComposerDraft) {
         setLastUserDraft(displayMessage);
         setComposerDraft(sessionId, "");
         setComposerAttachments(sessionId, []);
@@ -1141,13 +1201,23 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       } else {
         const sessionAfterTurn = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === sessionId);
         const turnFailed = sessionAfterTurn?.status === "error";
-        const automatic = useLuxStore.getState().aiPreferences.agentMode === "automatic";
-        if (turnFailed && automatic && lastTurnError) {
-          // Automatic mode never gives up: keep retrying the failed turn with
-          // escalating backoff until it succeeds or the user presses Stop. The goal
-          // run is NOT stopped. Keep the session in a busy state during the backoff
-          // so the Stop button stays available, and drop the scary error bubble.
-          const { attempt, delayMs } = nextAutomaticRetry(sessionId);
+        const agentMode = useLuxStore.getState().aiPreferences.agentMode;
+        const automatic = agentMode === "automatic";
+        // Retry the failed turn with an escalating 3/6/9… ladder. Automatic mode never
+        // gives up. Manual/plan modes auto-recover transient transport failures (provider
+        // down, stream interrupted, timeout, rate-limit) for up to the retry budget, then
+        // surface the error so the user can intervene — this is the "works in all modes"
+        // ladder, not an automatic-only behavior.
+        const transientRetryable = Boolean(lastTurnError && isTransientRetryKind(lastTurnError.kind));
+        const retryPlan = (turnFailed && lastTurnError && (automatic || transientRetryable))
+          ? nextAutomaticRetry(sessionId)
+          : null;
+        const willRetry = retryPlan !== null && (automatic || !retryPlan.exhausted);
+        if (willRetry && retryPlan && lastTurnError) {
+          // Keep retrying the failed turn with escalating backoff. The goal run is NOT
+          // stopped. Keep the session busy during the backoff so Stop stays available,
+          // and drop the scary error bubble while a recovery is in flight.
+          const { attempt, maxAttempts, delayMs } = retryPlan;
           const errored = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === sessionId);
           if (errored) {
             const trimmed = stripTrailingErrorBubble(errored.messages, errored.lastError);
@@ -1157,7 +1227,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           if (useLuxStore.getState().activeAiChatSessionId === sessionId) setSendError(null);
           setAiRetryNotice(sessionId, {
             attempt,
-            maxAttempts: attempt,
+            maxAttempts,
             reason: automaticRetryReason(lastTurnError.kind),
             detail: lastTurnError.detail,
             delayMs,
@@ -1166,10 +1236,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           const handle = window.setTimeout(() => {
             if (goalContinuationTimersRef.current.get(retrySessionId) !== handle) return;
             goalContinuationTimersRef.current.delete(retrySessionId);
-            // Skip if another turn is already running, the session went away, or the
-            // user switched out of Automatic mid-backoff.
+            // Skip if another turn is already running or the session went away. A mode
+            // switch mid-backoff no longer cancels the retry — the ladder is bounded in
+            // manual/plan and the task should still reach a valid result.
             if (getAiChatTurnRuntimeSnapshot().sendingSessionId === retrySessionId) return;
-            if (useLuxStore.getState().aiPreferences.agentMode !== "automatic") return;
             const live = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === retrySessionId);
             if (!live || live.closedAt) return;
             if (getActiveGoalRun(retrySessionId)) {
@@ -1198,6 +1268,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           }, delayMs);
           goalContinuationTimersRef.current.set(retrySessionId, handle);
         } else if (turnFailed) {
+          // Non-retryable error, or the manual/plan retry budget is exhausted: the error
+          // bubble is already shown; clear the backoff streak and stop any goal run.
+          resetAutomaticRetry(sessionId);
           stopGoalRun(sessionId);
         } else {
           resetAutomaticRetry(sessionId);
@@ -1544,9 +1617,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     // While the agent is busy, Enter stages the message into the per-session queue;
     // it drains automatically when the current turn finishes (see the drain effect).
     // Ctrl/Cmd+Enter also queues — both run verbatim as the next turn.
+    // Don't clear the composer input after enqueue — the user may want to type
+    // a second message immediately while the first is still queued (input independence).
     if (activeSessionBusy && activeAiChatSessionId && message.trim()) {
       enqueueChatMessage(activeAiChatSessionId, message, "queued");
-      updateMessage("");
       return;
     }
     void handleSend();
@@ -1572,6 +1646,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
             force: true,
             sessionId: session.id,
             modelMessageOverride: buildQueuedMessagePayload(queued),
+            keepComposerDraft: true,
           });
         }
       }
@@ -1657,6 +1732,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     void handleSend(entry.text, undefined, {
       force: true,
       modelMessageOverride: buildQueuedMessagePayload(entry),
+      keepComposerDraft: true,
     });
   }, [handleSend]);
 
@@ -1695,18 +1771,27 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       message={message}
       modelOptions={modelOptions}
       modelSupportsEffort={modelSupportsEffort}
+      modelSearchPlaceholder={t("aiChat.model.searchPlaceholder")}
+      modelSearchEmptyHint={t("aiChat.model.searchEmpty")}
+      onHideModel={hideComposedModel}
+      hideModelLabel={t("aiChat.model.hide")}
+      modelFooter={aiPreferences.hiddenModelIds.length > 0 ? (
+        <button type="button" className="compact-dropdown-footer-action" onClick={showHiddenModels}>
+          {t("aiChat.model.showHidden", { count: aiPreferences.hiddenModelIds.length })}
+        </button>
+      ) : undefined}
       providerOptions={providerOptions}
       selectedProviderId={selectedProvider?.id ?? aiPreferences.selectedProviderId}
       preferences={aiPreferences}
       removeAttachment={removeAttachment}
-      selectedModelId={selectedModel?.id ?? aiPreferences.selectedModelId}
+      selectedModelId={selectedModelValue}
       selectedProviderReady={Boolean(selectedProvider && selectedModel)}
       setContextOpen={setContextOpen}
       setDraggingFiles={setDraggingFiles}
       t={t}
       textareaRef={textareaRef}
       updateAiPreference={updateAiPreference}
-      updateModel={updateModel}
+      updateModel={selectComposedModel}
       updateProvider={updateProvider}
       voiceInput={voiceInput}
       mentionMenuOpen={mentionMenuOpen}

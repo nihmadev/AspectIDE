@@ -2,16 +2,21 @@ import { AlertCircle, Check, FolderOpen, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { ProjectLoadSummary } from "../lib/projectLoadPresentation";
 import { useTranslation } from "../lib/i18n/useTranslation";
+import { WorkspaceSkeleton } from "./WorkspaceSkeleton";
 
 type ProjectLoadingStatusProps = {
   onDismissError: () => void;
   summary: ProjectLoadSummary;
+  /** Show the shimmering IDE-shell skeleton behind the card. Enable when the real
+   *  workbench isn't on screen yet (opening / first scan), not for background
+   *  indexing where the workbench is already rendered. */
+  showSkeleton?: boolean;
 };
 
 const PROGRESS_SMOOTH_MS = 420;
 const EXIT_MS = 260;
 
-export function ProjectLoadingStatus({ onDismissError, summary }: ProjectLoadingStatusProps) {
+export function ProjectLoadingStatus({ onDismissError, summary, showSkeleton = false }: ProjectLoadingStatusProps) {
   const { t } = useTranslation();
   const targetProgress = Math.max(0, Math.min(100, summary.progress));
   const [displayProgress, setDisplayProgress] = useState(targetProgress);
@@ -74,6 +79,13 @@ export function ProjectLoadingStatus({ onDismissError, summary }: ProjectLoading
       aria-live="polite"
       aria-busy={summary.active}
     >
+      <div
+        className="project-load-topbar"
+        aria-hidden="true"
+        data-indeterminate={summary.active && boundedProgress < 99 ? "true" : undefined}
+        style={{ ["--load-progress" as string]: `${boundedProgress}%` }}
+      />
+      {showSkeleton && <WorkspaceSkeleton />}
       <div className="project-load-scrim" aria-hidden="true" />
       <article className="project-load-card" aria-label={t("projectLoading.screenLabel")}>
         <header className="project-load-header">

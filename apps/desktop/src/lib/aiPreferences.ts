@@ -43,6 +43,16 @@ export type AiPreferences = {
   toolRoundLimit: AiToolRoundLimit;
   /** Max concurrent Task subagents per chat session (agent-managed). */
   maxParallelSubagents: number;
+  /** Goal-run token budget (null = default 200k for normal, 80k for exploratory). */
+  goalRunMaxTokens: number | null;
+  /** Goal-run max rounds (null = default 32, exploratory = min(maxRounds,6)). */
+  goalRunMaxRounds: number | null;
+  /** Automatic mode hard stop in minutes (null = unlimited). */
+  automaticModeHardStopMinutes: number | null;
+  /** Composite "providerId + modelId" keys hidden from the composer model picker. */
+  hiddenModelIds: string[];
+  /** User has seen the Telegram community welcome banner. */
+  seenTelegramNotice: boolean;
   showResponseDuration: boolean;
   /**
    * Token-economy ("caveman") mode. When on, a terse-output directive is appended
@@ -452,6 +462,11 @@ export const defaultAiPreferences: AiPreferences = {
   contextAutoCompactThreshold: DEFAULT_CONTEXT_AUTO_COMPACT_THRESHOLD,
   toolRoundLimit: defaultAiToolRoundLimit,
   maxParallelSubagents: defaultMaxParallelSubagents,
+  goalRunMaxTokens: null,
+  goalRunMaxRounds: null,
+  automaticModeHardStopMinutes: null,
+  hiddenModelIds: [],
+  seenTelegramNotice: false,
   showResponseDuration: true,
   // Token economy ships ON by default: terse "caveman" output that drops filler/
   // pleasantries to save output tokens while keeping code, paths, errors, tool work,
@@ -537,6 +552,13 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
     ),
     toolRoundLimit: normalizeToolRoundLimit(resolveToolRoundLimitSource(source)),
     maxParallelSubagents: clampInteger(source.maxParallelSubagents, maxParallelSubagentsMin, maxParallelSubagentsMax, defaultMaxParallelSubagents),
+    goalRunMaxTokens: typeof source.goalRunMaxTokens === "number" ? clampInteger(source.goalRunMaxTokens, 10_000, 500_000, 200_000) : source.goalRunMaxTokens === null ? null : defaultAiPreferences.goalRunMaxTokens,
+    goalRunMaxRounds: typeof source.goalRunMaxRounds === "number" ? clampInteger(source.goalRunMaxRounds, 8, 80, 32) : source.goalRunMaxRounds === null ? null : defaultAiPreferences.goalRunMaxRounds,
+    automaticModeHardStopMinutes: typeof source.automaticModeHardStopMinutes === "number" ? clampInteger(source.automaticModeHardStopMinutes, 15, 480, 60) : source.automaticModeHardStopMinutes === null ? null : defaultAiPreferences.automaticModeHardStopMinutes,
+    hiddenModelIds: Array.isArray(source.hiddenModelIds)
+      ? [...new Set(source.hiddenModelIds.filter((id): id is string => typeof id === "string" && id.length > 0))].slice(-500)
+      : defaultAiPreferences.hiddenModelIds,
+    seenTelegramNotice: typeof source.seenTelegramNotice === "boolean" ? source.seenTelegramNotice : defaultAiPreferences.seenTelegramNotice,
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
     tokenEconomyEnabled: typeof source.tokenEconomyEnabled === "boolean" ? source.tokenEconomyEnabled : defaultAiPreferences.tokenEconomyEnabled,
     lspAutoInstall: typeof source.lspAutoInstall === "boolean" ? source.lspAutoInstall : defaultAiPreferences.lspAutoInstall,

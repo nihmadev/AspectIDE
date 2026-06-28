@@ -148,6 +148,9 @@ export function App() {
     ],
   );
   const dismissProjectLoadError = () => setProjectLoad(createIdleProjectLoadState());
+  // Show the IDE-shell skeleton only while a project is first resolving/scanning,
+  // before the real workbench is on screen. Background indexing keeps the workbench.
+  const showLoadSkeleton = projectLoadSummary.stage === "opening" || projectLoadSummary.stage === "files";
 
   const openProject = () => {
     requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
@@ -607,7 +610,7 @@ export function App() {
             projectLoad={projectLoadSummary}
             onOpenProject={openProject}
           />
-          <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
+          <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} showSkeleton={showLoadSkeleton} />
           <DeferredCommandPalette open={commandPaletteOpen} />
           <DeferredSettingsDialog open={settingsOpen} />
         </div>
@@ -618,7 +621,7 @@ export function App() {
       <div className="app-shell no-project-shell">
         <TitleBar />
         <div className="no-project-main" data-panel-maximized={bottomPanelMaximized}>
-          <div className="no-project-workbench">
+          <div className="no-project-workbench" aria-hidden={projectLoadSummary.stage === "opening" || undefined}>
             <Group orientation="horizontal" className="main-panels">
               <Panel minSize="360px">
                 {hasOpenDocuments ? (
@@ -645,7 +648,7 @@ export function App() {
           </div>
           {bottomPanelOpen && <DeferredBottomPanel isMaximized={bottomPanelMaximized} onToggleMaximized={toggleBottomPanelMaximized} />}
         </div>
-        <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
+        <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} showSkeleton={showLoadSkeleton} />
         <StatusBar />
         <DeferredCommandPalette open={commandPaletteOpen} />
         <DeferredSettingsDialog open={settingsOpen} />
@@ -662,7 +665,7 @@ export function App() {
           projectLoad={projectLoadSummary}
           onOpenProject={openProject}
         />
-        <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
+        <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} showSkeleton={showLoadSkeleton} />
         <DeferredCommandPalette open={commandPaletteOpen} />
         <DeferredSettingsDialog open={settingsOpen} />
         <UpdateNoticeHost />
@@ -701,7 +704,7 @@ export function App() {
           )}
         </Group>
       </div>
-      <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} />
+      <ProjectLoadingStatus summary={projectLoadSummary} onDismissError={dismissProjectLoadError} showSkeleton={showLoadSkeleton} />
       <StatusBar />
       <DeferredCommandPalette open={commandPaletteOpen} />
       <DeferredSettingsDialog open={settingsOpen} />

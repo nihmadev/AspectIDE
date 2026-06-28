@@ -41,13 +41,28 @@ export function inferContextTokensFromModelRef(modelRef: string) {
   return null;
 }
 
+function inferKnownModelContextTokens(model: AiModelConfig) {
+  return inferContextTokensFromModelRef([
+    model.alias,
+    model.id,
+    model.name,
+  ].filter(Boolean).join(" "));
+}
+
 export function resolveModelContextTokens(model: AiModelConfig | null | undefined) {
   if (!model) return DEFAULT_MODEL_CONTEXT_TOKENS;
-  if (typeof model.contextTokens === "number" && model.contextTokens > 0) {
-    return clampModelContextTokens(model.contextTokens);
-  }
-  const inferred = inferContextTokensFromModelRef(model.alias || model.id || model.name);
-  return inferred ?? DEFAULT_MODEL_CONTEXT_TOKENS;
+
+  const inferred = inferKnownModelContextTokens(model);
+  const configured = typeof model.contextTokens === "number" && model.contextTokens > 0
+    ? clampModelContextTokens(model.contextTokens)
+    : null;
+
+  // Provider discovery may return stale or rounded limits (e.g. 239K for a known
+  // 400K model). Never let that make the UI claim "100% Full" while known model
+  // metadata says there is still room. Keep larger configured values so custom
+  // endpoints with extended context still work.
+  if (inferred != null && configured != null) return Math.max(inferred, configured);
+  return inferred ?? configured ?? DEFAULT_MODEL_CONTEXT_TOKENS;
 }
 
 export function resolveContextCompactTriggerTokens(model: AiModelConfig | null | undefined, threshold: number) {

@@ -24,6 +24,7 @@
 
 .lux-mem-empty,
 .lux-skill-none,
+.lux-skill-empty,
 .lux-mem-none {
   margin: 0;
   padding: 14px 14px;
@@ -601,6 +602,53 @@
 }
 
 /* ── skill importer ── */
+.lux-skill-import-note {
+  margin: 2px 0 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.lux-skill-import-success {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--success) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  font-size: 12px;
+}
+.lux-skill-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+.lux-skill-import-head .lux-skill-import-h {
+  margin: 0;
+}
+.lux-skill-import-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+.lux-skill-import-all:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.lux-skill-import-all:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
 .lux-skill-import-h {
   margin: 4px 0 0;
   color: var(--text-2);

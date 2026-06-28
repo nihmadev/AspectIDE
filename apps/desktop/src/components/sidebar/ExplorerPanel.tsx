@@ -884,8 +884,13 @@ const FileRow = memo(function FileRow({
     setContextMenu({ entry, source: "row", x: event.clientX, y: event.clientY });
   };
   const onDragStart = (event: DragEvent<HTMLButtonElement>) => {
-    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.effectAllowed = "copyMove";
     event.dataTransfer.setData("text/plain", entry.path);
+    // Precise marker so drop targets (e.g. the AI composer) can accept a workspace
+    // file/folder drag without clobbering ordinary text drops, plus the entry kind
+    // so a directory is attached as a folder mention, not run through the file path.
+    event.dataTransfer.setData("application/x-lux-path", entry.path);
+    event.dataTransfer.setData("application/x-lux-kind", entry.kind);
     startEntryDrag(entry);
   };
   const onDragEnter = isDirectory

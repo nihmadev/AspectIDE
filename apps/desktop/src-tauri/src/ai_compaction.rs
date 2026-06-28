@@ -6,8 +6,8 @@
 
 use serde::Deserialize;
 
-const MAX_SUMMARY_CHARS: usize = 12_000;
-const MAX_TRANSCRIPT_CHARS: usize = 48_000;
+const MAX_SUMMARY_CHARS: usize = 18_000;
+const MAX_TRANSCRIPT_CHARS: usize = 84_000;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -39,11 +39,13 @@ pub struct CompactionSummaryInput {
 pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<String, String> {
     let max_tokens = MAX_SUMMARY_CHARS / 4;
     let system = format!(
-        "You compress IDE pair-programming chat history into a durable checkpoint.\n\
-         Preserve: task goal, constraints, decisions, files/paths, tool outcomes, errors, and the exact next step.\n\
-         Do not invent facts. Do not add filler. Use markdown headings.\n\
-         Required sections: ## Task goal, ## Progress, ## Key decisions, ## Files and tools, ## Open items / next step\n\
-         Stay under {max_tokens} tokens."
+        "You compress IDE pair-programming chat history into a durable checkpoint for a coding agent.\n\
+         This is not a casual summary. It is the ONLY memory the agent will have for older turns, so quality after compaction must be no lower than before it.\n\
+         Preserve exactly: the task goal, the latest user direction, every active task with its status, constraints, decisions, files/paths touched, tool outcomes, errors/blockers, verification results, and the precise next step.\n\
+         Never replace concrete facts with vague prose. Do not invent facts. Do not omit unresolved bugs or tasks. Do not say 'see above'.\n\
+         If the transcript and the pinned goal/open tasks conflict, include both and mark the conflict.\n\
+         Required markdown sections, in this exact order: ## Task goal, ## Latest user direction, ## Open tasks, ## Progress, ## Key decisions / constraints, ## Files and tools, ## Errors / blockers, ## Critical preserved facts, ## Open items / next step.\n\
+         Prefer preserving facts over being short, but stay under {max_tokens} tokens."
     );
 
     let mut user_parts: Vec<String> = Vec::new();

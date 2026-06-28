@@ -1095,6 +1095,42 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
         <SegmentedSetting<AiToolApprovalMode> label={t("settings.aiRuntime.toolApproval.label")} detail={t("settings.aiRuntime.toolApproval.detail")} value={preferences.toolApprovalMode} options={AI_TOOL_APPROVAL_MODES.map((mode) => ({ label: t(`settings.aiRuntime.toolApproval.${mode}` as MessageKey), value: mode }))} onChange={(toolApprovalMode) => onChange({ toolApprovalMode })} />
         <SegmentedSetting<AiFileEditTrustMode> label={t("settings.aiRuntime.fileEditTrust.label")} detail={t("settings.aiRuntime.fileEditTrust.detail")} value={preferences.fileEditTrustMode} options={AI_FILE_EDIT_TRUST_MODES.map((mode) => ({ label: t(`settings.aiRuntime.fileEditTrust.${mode}` as MessageKey), value: mode }))} onChange={(fileEditTrustMode) => onChange({ fileEditTrustMode })} />
         <ToolRoundLimitSetting label={t("settings.aiRuntime.toolRoundLimit.label")} detail={t("settings.aiRuntime.toolRoundLimit.detail")} value={preferences.toolRoundLimit} min={aiToolRoundLimitMin} max={aiToolRoundLimitMax} step={1} fallbackLimitedValue={defaultLimitedAiToolRoundLimit} unlimitedLabel={t("settings.aiRuntime.toolRoundLimit.unlimited")} limitedLabel={t("settings.aiRuntime.toolRoundLimit.limited")} onChange={(toolRoundLimit) => onChange({ toolRoundLimit })} />
+        <ToolRoundLimitSetting
+          label={t("settings.aiRuntime.goalRunMaxTokens.label")}
+          detail={t("settings.aiRuntime.goalRunMaxTokens.detail")}
+          value={preferences.goalRunMaxTokens}
+          min={10_000}
+          max={500_000}
+          step={10_000}
+          fallbackLimitedValue={200_000}
+          unlimitedLabel={t("settings.aiRuntime.limit.default")}
+          limitedLabel={t("settings.aiRuntime.limit.custom")}
+          onChange={(goalRunMaxTokens) => onChange({ goalRunMaxTokens })}
+        />
+        <ToolRoundLimitSetting
+          label={t("settings.aiRuntime.goalRunMaxRounds.label")}
+          detail={t("settings.aiRuntime.goalRunMaxRounds.detail")}
+          value={preferences.goalRunMaxRounds}
+          min={8}
+          max={80}
+          step={2}
+          fallbackLimitedValue={32}
+          unlimitedLabel={t("settings.aiRuntime.limit.default")}
+          limitedLabel={t("settings.aiRuntime.limit.custom")}
+          onChange={(goalRunMaxRounds) => onChange({ goalRunMaxRounds })}
+        />
+        <ToolRoundLimitSetting
+          label={t("settings.aiRuntime.automaticModeHardStop.label")}
+          detail={t("settings.aiRuntime.automaticModeHardStop.detail")}
+          value={preferences.automaticModeHardStopMinutes}
+          min={15}
+          max={480}
+          step={15}
+          fallbackLimitedValue={60}
+          unlimitedLabel={t("settings.aiRuntime.limit.unlimited")}
+          limitedLabel={t("settings.aiRuntime.limit.custom")}
+          onChange={(automaticModeHardStopMinutes) => onChange({ automaticModeHardStopMinutes })}
+        />
         <NumberSetting
           label={t("settings.aiRuntime.maxParallelSubagents.label")}
           detail={t("settings.aiRuntime.maxParallelSubagents.detail")}
@@ -2065,6 +2101,10 @@ function resetSection(sectionId: SettingsSectionId, resetEditor: (preferences: E
       toolApprovalMode: defaultAiPreferences.toolApprovalMode,
       toolRoundLimit: defaultAiPreferences.toolRoundLimit,
       maxParallelSubagents: defaultAiPreferences.maxParallelSubagents,
+      goalRunMaxTokens: defaultAiPreferences.goalRunMaxTokens,
+      goalRunMaxRounds: defaultAiPreferences.goalRunMaxRounds,
+      automaticModeHardStopMinutes: defaultAiPreferences.automaticModeHardStopMinutes,
+      hiddenModelIds: defaultAiPreferences.hiddenModelIds,
       showResponseDuration: defaultAiPreferences.showResponseDuration,
       contextAutoCompactEnabled: defaultAiPreferences.contextAutoCompactEnabled,
       contextAutoCompactThreshold: defaultAiPreferences.contextAutoCompactThreshold,

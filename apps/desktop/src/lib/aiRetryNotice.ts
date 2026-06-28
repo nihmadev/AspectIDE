@@ -3,6 +3,8 @@
 // persisted session list. Mirrors the aiTurnActivity store shape: a tiny
 // external store the chat surfaces subscribe to via useSyncExternalStore.
 
+import { AUTOMATIC_RETRY_MAX_ATTEMPTS } from "./aiAutomaticRetry";
+
 export type AiRetryReason =
   | "rate-limited"
   | "server"
@@ -65,17 +67,28 @@ function normalizeReason(reason: string): AiRetryReason {
   return KNOWN_REASONS.has(reason as AiRetryReason) ? (reason as AiRetryReason) : "generic";
 }
 
+function normalizeAttempt(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(AUTOMATIC_RETRY_MAX_ATTEMPTS, Math.round(value)));
+}
+
+function normalizeMaxAttempts(value: number, attempt: number): number {
+  if (!Number.isFinite(value)) return AUTOMATIC_RETRY_MAX_ATTEMPTS;
+  return Math.max(AUTOMATIC_RETRY_MAX_ATTEMPTS, attempt, Math.round(value));
+}
+
 /** Record (or update) the active retry notice for a session. */
 export function setAiRetryNotice(
   sessionId: string,
   notice: { attempt: number; maxAttempts: number; reason: string; detail: string; delayMs: number },
 ) {
+  const attempt = normalizeAttempt(notice.attempt);
   noticeBySession.set(sessionId, {
-    attempt: notice.attempt,
-    maxAttempts: notice.maxAttempts,
+    attempt,
+    maxAttempts: normalizeMaxAttempts(notice.maxAttempts, attempt),
     reason: normalizeReason(notice.reason),
     detail: notice.detail,
-    delayMs: notice.delayMs,
+    delayMs: Math.max(0, Number.isFinite(notice.delayMs) ? notice.delayMs : 0),
     updatedAt: Date.now(),
   });
   emit();

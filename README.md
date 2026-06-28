@@ -57,17 +57,48 @@ The project is early alpha. The core workbench is real and usable for developmen
 
 ## Architecture
 
+The desktop shell is one Tauri 2 application; the product engine is a Cargo workspace of focused, mostly I/O-free crates that the shell wraps in Tauri commands and `lux://event` payloads.
+
 ```text
-apps/desktop        Tauri 2 shell, React workbench, Monaco, xterm.js
-crates/lux-core     shared DTOs, typed events, generated TypeScript bindings
-crates/lux-editor   Rust document store and edit/save lifecycle
-crates/lux-fs       filesystem/workspace operations
-crates/lux-search   workspace search service
-crates/lux-terminal Rust PTY service
-crates/lux-lsp      language server lifecycle and LSP translation
-crates/lux-dap      debug adapter discovery and DAP protocol helpers
-crates/lux-settings persisted settings and keybinding profiles
-crates/lux-extensions extension manifest discovery and contribution points
+apps/desktop          Tauri 2 shell, React workbench, Monaco, xterm.js
+```
+
+Core and runtime:
+
+```text
+crates/lux-core       shared DTOs, typed errors/events, scan concurrency, generated TypeScript bindings
+crates/lux-workspace  workspace open/normalize and metadata
+crates/lux-fs         filesystem mutations and recursive workspace scanning with file watching
+crates/lux-editor     document store and open/edit/save/save-as lifecycle
+crates/lux-search     parallel workspace search with include/exclude, regex, and whole-word filters
+crates/lux-terminal   PTY service backing the integrated terminal
+crates/lux-ssh        non-interactive OpenSSH/scp argument building, ~/.ssh/config discovery, session registry
+crates/lux-git        Git status and diff plumbing over the system git binary
+crates/lux-settings   persisted settings, recent workspaces, and keybinding profiles
+```
+
+Language and code intelligence:
+
+```text
+crates/lux-lsp        language server lifecycle, transport framing, and LSP request/response translation
+crates/lux-dap        debug adapter discovery and DAP protocol transport helpers
+crates/lux-file-intel office/PDF/spreadsheet/archive/database extraction and structured file previews
+crates/lux-codegraph  tree-sitter structural code graph: symbols, kinded edges, resolve, metrics, query
+```
+
+AI:
+
+```text
+crates/lux-memory     per-project durable agent memory (SQLite + FTS5, relevance/importance/recency ranking)
+crates/lux-skills     discoverable Markdown skill modules (project and global scope) for the agent
+crates/lux-research   Perplexica-style web research core: search-URL building, result parsing, lexical rerank
+```
+
+Infrastructure:
+
+```text
+crates/lux-extensions WASM extension host: manifest discovery, contribution points, sandboxed activation
+crates/lux-bench      deterministic core-performance gate for indexing, search, and event batching
 ```
 
 Read the architecture contract in [docs/architecture/rust-first-boundaries.md](docs/architecture/rust-first-boundaries.md) and the milestone plan in [docs/architecture/milestones.md](docs/architecture/milestones.md).
@@ -135,3 +166,7 @@ If you are new to the codebase, start with docs, reproducible bugs, focused UI p
 ## License
 
 Lux IDE is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+## Community
+
+Join the discussion on Telegram: [https://t.me/lux_ide](https://t.me/lux_ide)

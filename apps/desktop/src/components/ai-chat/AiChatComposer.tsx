@@ -1,5 +1,5 @@
 import { Bot, Brain, CornerDownLeft, Mic, Paperclip, SendHorizontal, Server, Sparkles, Square, X } from "lucide-react";
-import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, RefObject } from "react";
+import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from "react";
 import { CompactDropdown } from "../CompactDropdown";
 import { AiChatSlashMenu } from "./AiChatSlashMenu";
 import { AiChatMentionMenu } from "./AiChatMentionMenu";
@@ -25,6 +25,7 @@ export type AiComposerVoiceState = {
 type SelectOption = {
   label: string;
   value: string;
+  group?: string;
 };
 
 type AiChatComposerProps = {
@@ -67,6 +68,11 @@ type AiChatComposerProps = {
   slashMenuRef: RefObject<HTMLDivElement | null>;
   modelOptions: SelectOption[];
   modelSupportsEffort: boolean;
+  modelSearchPlaceholder?: string;
+  modelSearchEmptyHint?: string;
+  onHideModel?: (value: string) => void;
+  hideModelLabel?: string;
+  modelFooter?: ReactNode;
   providerOptions: SelectOption[];
   selectedProviderId: string;
   preferences: AiPreferences;
@@ -123,6 +129,11 @@ export function AiChatComposer({
   slashMenuRef,
   modelOptions,
   modelSupportsEffort,
+  modelSearchPlaceholder,
+  modelSearchEmptyHint,
+  onHideModel,
+  hideModelLabel,
+  modelFooter,
   providerOptions,
   selectedProviderId,
   preferences,
@@ -191,6 +202,14 @@ export function AiChatComposer({
         {voiceInput.voiceError && (
           <div className="ai-composer-voice-error">{voiceInput.voiceError}</div>
         )}
+        {compacting && (
+          <div className="ai-composer-compacting" role="status" aria-live="polite">
+            <span className="ai-composer-compacting-bar" aria-hidden="true">
+              <span /><span /><span />
+            </span>
+            <span className="ai-composer-compacting-label">{t("aiChat.composer.compacting")}</span>
+          </div>
+        )}
         <textarea
           ref={textareaRef}
           value={message}
@@ -249,6 +268,12 @@ export function AiChatComposer({
             value={selectedModelId}
             options={modelOptions}
             onChange={updateModel}
+            searchable
+            searchPlaceholder={modelSearchPlaceholder}
+            searchEmptyLabel={modelSearchEmptyHint}
+            onHideOption={onHideModel}
+            hideOptionLabel={hideModelLabel}
+            footer={modelFooter}
           />
           {modelSupportsEffort && (
             <CompactDropdown

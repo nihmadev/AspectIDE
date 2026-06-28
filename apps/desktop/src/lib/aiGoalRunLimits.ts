@@ -44,13 +44,16 @@ const GOAL_FLAG_SPECS: Record<string, { key: keyof GoalRunLimits; scale?: number
 export function resolveDefaultGoalRunLimits(
   toolRoundLimit: AiToolRoundLimit,
   goal?: string,
+  preferences?: { goalRunMaxTokens?: number | null; goalRunMaxRounds?: number | null },
 ): GoalRunLimits {
   const exploratory = goal ? isExploratoryGoalRun(goal) : false;
-  const maxRounds = resolveGoalRunMaxRounds(toolRoundLimit, goal);
+  const maxRounds = preferences?.goalRunMaxRounds ?? resolveGoalRunMaxRounds(toolRoundLimit, goal);
+  const defaultMaxTokens = exploratory ? 80_000 : 200_000;
+  const maxTokens = preferences?.goalRunMaxTokens ?? defaultMaxTokens;
   return mergeGoalRunLimits({
     maxRounds,
     maxDurationMs: exploratory ? 8 * 60_000 : 15 * 60_000,
-    maxTokens: exploratory ? 80_000 : 200_000,
+    maxTokens,
     minDelayMs: 1500,
     noProgressTokenThreshold: 50,
     noProgressTurnsBeforePause: 2,

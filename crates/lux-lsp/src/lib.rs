@@ -1285,7 +1285,7 @@ impl From<&LanguageServerInfo> for LanguageServerDefinition {
 
 fn session_language_id(language_id: &str) -> &str {
     match language_id {
-        "javascript" => "typescript",
+        "javascript" | "javascriptreact" | "typescriptreact" => "typescript",
         other => other,
     }
 }

@@ -978,11 +978,23 @@
   line-height: 1.4;
 }
 
+.provider-model-search {
+  margin: 8px 0 6px;
+}
+
 .provider-model-rows {
   display: grid;
   gap: 0;
   max-height: 280px;
   overflow: auto;
+}
+
+.provider-model-search-empty {
+  margin: 0;
+  padding: 12px 4px;
+  color: var(--text-2);
+  font-size: 12px;
+  text-align: center;
 }
 
 .provider-model-row {

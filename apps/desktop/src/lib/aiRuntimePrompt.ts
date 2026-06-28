@@ -176,4 +176,40 @@ function compactHistoryMessageContent(message: AiChatMessage) {
   return parts.join("\n\n");
 }
 
+/**
+ * Map a stored chat message to the `{role, content}` the native Rust turn-loop
+ * hands to the model. Unlike a bare `content` copy (what the native path used to
+ * send), this FOLDS the assistant's reasoning + tool results into the text — so a
+ * turn that was stopped mid-work, whose progress lives only in `toolCalls`/
+ * `segments` and not in `content`, still tells the model what it already did when
+ * the user later says "continue"/"продолжи". Returns "" for a message with no
+ * usable content (an empty assistant shell left by a hung/stopped turn); the
+ * caller filters those out so they never poison the next turn's history.
+ */
+export function buildNativeHistoryContent(message: AiChatMessage): string {
+  if (isCompactionCheckpointMessage(message)) return message.content;
+  if (isGoalOrchestrationMessage(message)) return message.content;
+  const parts: string[] = [];
+  if (message.content.trim()) parts.push(truncateText(message.content, maxHistoryMessageChars));
+  const toolCalls = message.toolCalls?.filter((call) => call.output || call.error) ?? [];
+  if (toolCalls.length > 0) {
+    parts.push(`Tool results:\n${toolCalls.slice(-12).map((call) => {
+      const detail = call.error ? `error: ${call.error}` : call.output ?? "";
+      return `- ${call.tool} (${call.status}): ${truncateText(detail, maxHistoryToolOutputChars)}`;
+    }).join("\n")}`);
+  }
+  if (parts.length === 0) {
+    const reasoning = normalizeVisibleReasoning(message.reasoning);
+    if (reasoning) parts.push(`[reasoning]\n${truncateText(reasoning, 1_200)}`);
+  }
+  // A user turn that carried only attachments (no typed text) is stored with an
+  // empty `content`. Never let it fold to "" — the caller drops empty entries, and
+  // dropping a user turn loses the turn boundary (and can leave history starting
+  // with an assistant message, which the Anthropic API rejects with a 400).
+  if (parts.length === 0 && message.role === "user") {
+    return (message.attachments?.length ?? 0) > 0 ? "(Attachments only — no text message.)" : "";
+  }
+  return parts.join("\n\n");
+}
+
 export const activeDocumentContextMaxChars = maxActiveDocumentChars;

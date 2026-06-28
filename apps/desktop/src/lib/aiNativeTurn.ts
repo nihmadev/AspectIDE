@@ -2,7 +2,9 @@ import type { AiChatMessage, AiChatSendInput, AiToolApprovalRequest } from "./ai
 import { createTurnTimeline } from "./aiChatTimeline";
 import { isAnthropicCacheModel, reasoningPayload } from "./aiChatTransport";
 import { attachTurnCostEstimate } from "./aiTurnUsage";
-import { buildUserContent } from "./aiRuntimePrompt";
+import { normalizeRepeatedOutput } from "./aiOutputNormalizer";
+import { buildNativeHistoryContent, buildUserContent } from "./aiRuntimePrompt";
+import { pruneStaleToolOutputs } from "./aiChatContextCompaction";
 import { bridgeNativeToolCompleted, bridgeNativeToolStarted } from "./aiNativeOrchestrationBridge";
 import { captureNativeEditBefore, NATIVE_FILE_EDIT_TOOLS, registerNativeEditReview } from "./aiNativeFileReview";
 import { clearPendingQuestionsForSession, registerPendingQuestion } from "./aiPendingQuestion";
@@ -66,7 +68,6 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
     segments: [],
     timestamp: Date.now(),
   };
-  const pendingApprovals = new Map<string, (decision: "approved" | "rejected") => void>();
   let resolved = false;
   const startedAt = Date.now();
 
@@ -228,6 +229,17 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             approveLabel: "Approve",
             rejectLabel: "Reject",
           };
+          // Flip the (already-running) tool call to the "approval" state so the
+          // inline Approve/Reject card AND the global approval banner render — they
+          // only appear for a tool call with status "approval" + an approval object.
+          // Without this the native loop emitted ApprovalRequired and blocked on its
+          // Rust-side oneshot forever while the UI showed no buttons, so any tool
+          // needing approval (Default/Ask mode, or an `ask:` permission rule) looked
+          // like it "started but never responded". The buttons resolve the promise
+          // below, which forwards the decision to Rust and unblocks the loop. The
+          // following ToolCallCompleted moves it off "approval" (success or, on
+          // reject, error).
+          timeline.updateToolCall(event.requestId, { status: "approval", approval: request });
           // Bridge UI approval back to Rust via the resolve command.
           void input.onToolApproval(request).then((decision) => {
             const normalized = decision === "approved" ? "approved" : "rejected";
@@ -291,12 +303,16 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           roundContent = "";
           roundReasoning = "";
           const snapshot = timeline.snapshot();
+          // Defend against runaway repetition (a flood of identical blocks/lines)
+          // before the message is committed to history — a safety net, not a filter.
+          const rawFinalContent = snapshot.content?.trim() ? snapshot.content : (event.content || "");
+          const normalizedContent = normalizeRepeatedOutput(rawFinalContent).text;
           const finalMessage: AiChatMessage = {
             ...assistantMessage,
             ...snapshot,
             // Prefer the timeline's derived content; fall back to the final event
             // content only if streaming produced no text segment.
-            content: snapshot.content?.trim() ? snapshot.content : (event.content || ""),
+            content: normalizedContent,
             turnUsage: assistantMessage.turnUsage,
             responseDurationMs: event.durationMs || (Date.now() - startedAt),
           };
@@ -339,8 +355,8 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
     }
     abortListener = () => {
       void luxCommands.aiCancelTurn(turnId).catch(() => undefined);
-      // Reject pending approvals so the Rust loop unblocks.
-      pendingApprovals.forEach((fn) => fn("rejected"));
+      // Pending tool approvals are rejected by the caller's abortAiChatTurn →
+      // rejectAllAiToolApprovals (aiChatTurnRuntime), which unblocks the Rust loop.
       settleReject(new DOMException("AI request was cancelled", "AbortError"));
     };
     input.abortSignal.addEventListener("abort", abortListener, { once: true });
@@ -378,7 +394,17 @@ function buildRunTurnInput(input: AiChatSendInput, turnId: string, messageId: st
     // terminal snapshot, and vision `image_url` parts) so the native turn-loop
     // delivers everything the dev/browser TS path does — including images.
     userContent: buildUserContent(input),
-    history: input.history.map((message) => ({ role: message.role, content: message.content })),
+    // Fold each turn's reasoning + tool results into its content so a manual Stop →
+    // "continue" gives the model its own prior work (a hung turn's progress lives
+    // only in toolCalls, which the bare {role,content} map used to discard). Prune
+    // stale tool outputs first to bound the folded payload (older outputs collapse
+    // to a re-runnable marker; the latest few turns keep full output). Drop only
+    // EMPTY ASSISTANT shells — never a user turn, which would lose the turn
+    // boundary and can leave history starting with an assistant message (an
+    // Anthropic 400).
+    history: pruneStaleToolOutputs(input.history)
+      .map((message) => ({ role: message.role, content: buildNativeHistoryContent(message) }))
+      .filter((entry) => entry.role === "user" || entry.content.trim().length > 0),
     baseUrl: input.provider.baseUrl,
     apiKey: input.provider.apiKey || null,
     model: selectedModelAlias,

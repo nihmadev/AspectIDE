@@ -9,8 +9,16 @@ import {
 import { setComposerAttachments } from "./aiChatComposerSession";
 import { documentDisplayPath, documentTitle } from "./documents";
 import { formatSelectionLabel, getEditorSelectionSnapshot } from "./editorSelectionBridge";
+import { isVisionImagePath } from "./aiFileContext";
+import { luxCommands } from "./tauri";
 import type { AiMentionCandidate } from "./aiChatMentions";
 import type { DocumentSnapshot } from "./types";
+
+function baseName(path: string) {
+  const normalized = path.replace(/[\\/]+$/, "");
+  const segment = normalized.split(/[\\/]/).pop();
+  return segment && segment.length > 0 ? segment : normalized;
+}
 
 /**
  * Owns the composer's attachment list and the actions that mutate it (file drops,
@@ -61,6 +69,52 @@ export function useAiChatComposerAttachments({
       return nextAttachments;
     });
   };
+
+  // Attach a workspace file or folder dragged from the IDE's own file tree (path on
+  // `text/plain` + `application/x-lux-path`, entry kind on `application/x-lux-kind`).
+  // A folder becomes a folder mention — never run through the image encoder (a
+  // directory literally named "shots.png" must not be decoded). A file image is
+  // decoded into a real File via the vision encoder so it flows through the same
+  // preview + vision-send path as an OS drop; any other file becomes a path mention.
+  const attachWorkspacePath = useCallback(async (rawPath: string, kind: "file" | "folder" = "file") => {
+    const path = rawPath.trim();
+    if (!path) return;
+    const name = baseName(path);
+    if (kind === "file" && isVisionImagePath(path)) {
+      try {
+        const encoded = await luxCommands.aiVisionEncode({ path, format: "auto", maxDimension: 2048 });
+        if (encoded?.dataUrl) {
+          const blob = await (await fetch(encoded.dataUrl)).blob();
+          // Deterministic, path-derived lastModified so re-dropping the same workspace
+          // image collapses onto one card (revoke-on-replace fires) instead of leaking
+          // a fresh preview URL each time.
+          const stableMtime = Math.abs([...path].reduce((hash, char) => (hash * 31 + char.charCodeAt(0)) | 0, 0));
+          const file = new File([blob], name, { type: blob.type || encoded.mimeType || "image/png", lastModified: stableMtime });
+          const next = createComposerFileAttachment(file);
+          setAttachments((current) => {
+            const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
+            const existing = byId.get(next.id);
+            if (existing?.kind === "file") revokeComposerAttachmentPreview(existing);
+            byId.set(next.id, next);
+            const nextAttachments = [...byId.values()];
+            setComposerAttachments(sessionId, nextAttachments);
+            return nextAttachments;
+          });
+          return;
+        }
+      } catch {
+        // Fall through to a path mention if the image can't be decoded.
+      }
+    }
+    const mention = createComposerMentionAttachment({ mentionType: kind, name, path });
+    setAttachments((current) => {
+      const byId = new Map(current.map((attachment) => [attachment.id, attachment]));
+      byId.set(mention.id, mention);
+      const nextAttachments = [...byId.values()];
+      setComposerAttachments(sessionId, nextAttachments);
+      return nextAttachments;
+    });
+  }, [sessionId]);
 
   const attachMention = useCallback((candidate: AiMentionCandidate) => {
     const next = createComposerMentionAttachment({
@@ -132,6 +186,7 @@ export function useAiChatComposerAttachments({
     setAttachments,
     pinnedEditorPaths,
     attachFiles,
+    attachWorkspacePath,
     attachMention,
     attachSelection,
     attachEditorDocument,

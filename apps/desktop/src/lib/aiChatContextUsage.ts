@@ -2,6 +2,7 @@ import {
   estimateHistoryTokens,
   estimateTokens,
   isCompactionCheckpointMessage,
+  pruneStaleToolOutputs,
   resolveAutoCompactThreshold,
   resolveContextUsageBudget,
 } from "./aiChatContextCompaction";
@@ -92,20 +93,23 @@ export function buildAiChatContextUsageSummary({
   selectedModel,
   selectedModelAlias,
   t,
-hasGlobalInstructions,
-    hasProjectInstructions,
-  }: BuildContextUsageInput): AiChatContextUsageSummary & AiChatContextUsageMeta {
+  hasGlobalInstructions,
+  hasProjectInstructions,
+}: BuildContextUsageInput): AiChatContextUsageSummary & AiChatContextUsageMeta {
   const contextTokenBudget = resolveContextUsageBudget(selectedModel);
   const autoCompactThresholdPercent = Math.round(resolveAutoCompactThreshold(preferences) * 100);
   const compactTriggerTokens = resolveContextCompactTriggerTokens(selectedModel, preferences.contextAutoCompactThreshold);
-  const hasInstructions = (hasGlobalInstructions === true || hasProjectInstructions === true);
+  const hasInstructions = hasGlobalInstructions === true || hasProjectInstructions === true;
   const systemDetail = [
     agentName || preferences.agentMode,
     preferences.toolApprovalMode === "full-access" ? "full-access" : "default",
     hasInstructions ? t("aiChat.context.withInstructions") : "",
   ].filter(Boolean).join(" · ");
-  // The real system message is dominated by the Lux core prompt; count it so the
-  // meter reflects the true system-prompt footprint instead of only agent metadata.
+  // The context meter must estimate what is actually sent next, not the raw stored
+  // transcript. Older bulky tool outputs are replaced with small reload markers by
+  // the turn/compaction pipeline, so counting raw history can show fake values like
+  // "320K / 239K" while the next request is far smaller.
+  const promptConversation = pruneStaleToolOutputs(conversation);
   const basePromptTokens = cachedBasePromptTokens(preferences.agentMode);
   const systemTokens = basePromptTokens
     + estimateTokens([agentName, preferences.agentMode, agentInstruction, preferences.toolApprovalMode].join(" "));
@@ -113,17 +117,17 @@ hasGlobalInstructions,
   const indexTokens = preferences.projectIndexingEnabled && aiIndexStatus !== "disabled" ? estimateTokens([aiIndexStatus, String(preferences.maxIndexedFiles)].join(" ")) : 0;
   const pinnedEditorTokens = pinnedEditorPaths.reduce((sum, path) => sum + estimateTokens(path), 0);
   const attachmentTokens = attachments.reduce((sum, attachment) => sum + estimateAttachmentTokens(attachment), 0);
-  const compactionTokens = conversation.filter(isCompactionCheckpointMessage).reduce((sum, entry) => sum + estimateTokens(entry.content), 0);
-  const historyTokens = conversation.reduce((sum, entry) => {
+  const compactionTokens = promptConversation.filter(isCompactionCheckpointMessage).reduce((sum, entry) => sum + estimateTokens(entry.content), 0);
+  const historyTokens = promptConversation.reduce((sum, entry) => {
     if (isCompactionCheckpointMessage(entry)) return sum;
     return sum + estimateTokens(entry.content) + estimateTokens(normalizeVisibleReasoning(entry.reasoning) ?? "");
   }, 0);
-  const toolTokens = conversation.reduce((sum, entry) => sum + (entry.toolCalls?.reduce((toolSum, call) => toolSum
+  const toolTokens = promptConversation.reduce((sum, entry) => sum + (entry.toolCalls?.reduce((toolSum, call) => toolSum
     + estimateTokens(call.tool) + estimateTokens(call.input ?? "") + estimateTokens(call.output ?? "") + estimateTokens(call.error ?? ""), 0) ?? 0), 0);
-  const conversationTokens = estimateHistoryTokens(conversation);
+  const conversationTokens = estimateHistoryTokens(promptConversation);
   const inputTokens = Math.max(estimateTokens(message), message.trim() ? 80 : 0);
-  const messageCount = conversation.length;
-  const toolCount = conversation.reduce((sum, entry) => sum + (entry.toolCalls?.length ?? 0), 0);
+  const messageCount = promptConversation.length;
+  const toolCount = promptConversation.reduce((sum, entry) => sum + (entry.toolCalls?.length ?? 0), 0);
   const rawRows: Omit<AiChatContextUsageRow, "percent">[] = [
     { color: contextRowColors.system, detail: systemDetail, id: "system", label: t("aiChat.context.system"), tokens: systemTokens },
     { color: contextRowColors.model, detail: selectedModelAlias, id: "model", label: t("aiChat.model.label"), tokens: modelTokens },
@@ -168,5 +172,4 @@ export function formatAiChatContextValue(row: AiChatContextUsageRow) {
 function estimateAttachmentTokens(attachment: AiChatContextAttachment) {
   return estimateTokens(attachment.name) + Math.max(1, Math.ceil(attachment.size / 1024));
 }
-
 

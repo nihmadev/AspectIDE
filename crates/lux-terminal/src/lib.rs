@@ -20,9 +20,47 @@ pub type TerminalOutputHandler = Arc<dyn Fn(Uuid, String) + Send + Sync + 'stati
 #[must_use]
 pub fn default_shell() -> String {
     if cfg!(target_os = "windows") {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".to_string())
+        // Users expect a PowerShell experience on Windows, not legacy cmd.exe. Prefer
+        // PowerShell 7 (`pwsh.exe`) when it is on PATH, then Windows PowerShell
+        // (`powershell.exe`, always present), and only fall back to COMSPEC/cmd if
+        // somehow neither resolves.
+        find_on_path("pwsh.exe")
+            .or_else(|| find_on_path("powershell.exe"))
+            .map(|path| path.to_string_lossy().into_owned())
+            .or_else(|| std::env::var("COMSPEC").ok())
+            .unwrap_or_else(|| "powershell.exe".to_string())
     } else {
         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
+    }
+}
+
+/// Resolve an executable name against the `PATH` directories (Windows helper).
+#[cfg(target_os = "windows")]
+fn find_on_path(exe: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(exe))
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn find_on_path(_exe: &str) -> Option<PathBuf> {
+    None
+}
+
+/// Extra launch arguments for known interactive shells. PowerShell prints a banner
+/// on startup that clutters the first screen; `-NoLogo` suppresses it. cmd.exe and
+/// POSIX shells get no extra args.
+fn shell_launch_args(shell: &str) -> Vec<&'static str> {
+    let lower = shell.to_ascii_lowercase();
+    let stem = std::path::Path::new(&lower)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(lower.as_str());
+    if stem == "pwsh" || stem == "powershell" {
+        vec!["-NoLogo"]
+    } else {
+        Vec::new()
     }
 }
 
@@ -73,6 +111,9 @@ impl TerminalService {
             .map_err(|error| AppError::Service(error.to_string()))?;
 
         let mut command = CommandBuilder::new(&info.shell);
+        for arg in shell_launch_args(&info.shell) {
+            command.arg(arg);
+        }
         command.cwd(launch_cwd(&info.cwd));
 
         let child = pair
@@ -193,14 +234,41 @@ fn launch_cwd(cwd: &std::path::Path) -> PathBuf {
 
 fn read_pty_loop(session_id: Uuid, reader: &mut dyn Read, handler: &TerminalOutputHandler) {
     let mut buffer = [0_u8; 8192];
+    // Bytes left over from a UTF-8 sequence that was split across a read boundary.
+    // Decoding each 8 KiB chunk in isolation with `from_utf8_lossy` would corrupt any
+    // multibyte character (box-drawing glyphs, non-ASCII output, emoji) that straddles
+    // two reads, turning it into replacement characters. Carry the incomplete tail
+    // forward and decode on the combined buffer instead.
+    let mut pending: Vec<u8> = Vec::new();
     loop {
         match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(read) => {
-                let data = String::from_utf8_lossy(&buffer[..read]).to_string();
+                pending.extend_from_slice(&buffer[..read]);
+                let valid_upto = match std::str::from_utf8(&pending) {
+                    Ok(_) => pending.len(),
+                    Err(error) => error.valid_up_to(),
+                };
+                if valid_upto == 0 {
+                    // No complete character yet (rare: a long multibyte split) — keep
+                    // buffering unless the tail is implausibly long, in which case flush
+                    // lossily so output can never stall.
+                    if pending.len() < 8 {
+                        continue;
+                    }
+                    let data = String::from_utf8_lossy(&pending).to_string();
+                    pending.clear();
+                    handler(session_id, data);
+                    continue;
+                }
+                let data = String::from_utf8_lossy(&pending[..valid_upto]).to_string();
+                pending.drain(..valid_upto);
                 handler(session_id, data);
             }
         }
+    }
+    if !pending.is_empty() {
+        handler(session_id, String::from_utf8_lossy(&pending).to_string());
     }
 }
 

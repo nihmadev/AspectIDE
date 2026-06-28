@@ -132,34 +132,39 @@ export function AiComposerAttachments({ attachments, draggingFiles, removeAttach
           {otherAttachments.length > 0 && (
             <div className="ai-attachment-list">
               {otherAttachments.map((attachment) => {
-                const size = formatBytes(attachment.size, t);
+                const size = attachment.size > 0 ? formatBytes(attachment.size, t) : null;
                 const Icon = chipIcon(attachment);
                 const label = attachment.kind === "editor"
                   ? t("aiChat.attachment.editorTab", { name: attachment.name })
                   : attachment.kind === "selection"
                     ? t("aiChat.attachment.selection", { name: attachment.name })
-                    : attachment.kind === "mention"
-                      ? attachment.name
-                      : attachment.name;
+                    : attachment.name;
+                const path = attachment.detail;
                 return (
-                  <span
-                    className="ai-attachment-chip"
+                  <div
+                    className="ai-attachment-card"
                     data-kind={attachment.kind}
                     key={attachment.id}
-                    title={attachment.detail ? `${label} · ${attachment.detail}` : t("aiChat.attachment.tooltip", { name: attachment.name, size })}
+                    title={path ? `${label}\n${path}` : label}
                   >
-                    <Icon size={13} aria-hidden="true" />
-                    <span>{label}</span>
-                    <small>{size}</small>
+                    <span className="ai-attachment-card-icon" aria-hidden="true">
+                      <Icon size={15} />
+                    </span>
+                    <span className="ai-attachment-card-body">
+                      <span className="ai-attachment-card-name">{label}</span>
+                      {path && <span className="ai-attachment-card-path">{path}</span>}
+                    </span>
+                    {size && <small className="ai-attachment-card-size">{size}</small>}
                     <button
                       type="button"
+                      className="ai-attachment-card-remove"
                       aria-label={t("aiChat.attachment.removeAria", { name: attachment.name })}
                       title={t("common.remove")}
                       onClick={() => removeAttachment(attachment.id)}
                     >
-                      <X size={12} />
+                      <X size={13} />
                     </button>
-                  </span>
+                  </div>
                 );
               })}
             </div>

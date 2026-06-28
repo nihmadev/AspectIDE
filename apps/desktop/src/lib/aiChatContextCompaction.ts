@@ -15,8 +15,8 @@ import { isTauriRuntime, luxCommands } from "./tauri";
 
 export const COMPACTION_CHECKPOINT_MARKER = "[Lux · context compacted]";
 export const TOOL_OUTPUT_PRUNE_MARKER = "[Lux · tool output pruned";
-export const PRESERVE_RECENT_MESSAGE_COUNT = 8;
-export const MIN_MESSAGES_FOR_COMPACTION = 8;
+export const PRESERVE_RECENT_MESSAGE_COUNT = 10;
+export const MIN_MESSAGES_FOR_COMPACTION = 10;
 /**
  * Manual ("Compact now" / `/compact`) compaction must work at any moment, even in
  * a short chat that is nowhere near the auto-compact threshold. Forced runs use a
@@ -24,17 +24,31 @@ export const MIN_MESSAGES_FOR_COMPACTION = 8;
  * summarize instead of refusing with "too few messages". Auto-compaction keeps the
  * larger, conservative values above.
  */
-export const FORCED_PRESERVE_RECENT_MESSAGE_COUNT = 3;
-export const FORCED_MIN_MESSAGES_FOR_COMPACTION = 4;
+export const FORCED_PRESERVE_RECENT_MESSAGE_COUNT = 5;
+export const FORCED_MIN_MESSAGES_FOR_COMPACTION = 5;
 /** OpenCode-style prune: keep full tool output only on the latest N assistant turns. */
 export const PRESERVE_FULL_TOOL_OUTPUT_ASSISTANT_TURNS = 3;
 const MIN_TOOL_OUTPUT_CHARS_TO_PRUNE = 320;
 const MIN_TOKEN_REDUCTION_RATIO = 0.08;
 const COMPACTION_COOLDOWN_MS = 12_000;
-const MAX_TRANSCRIPT_CHARS = 48_000;
-const MAX_SUMMARY_CHARS = 12_000;
+const MAX_TRANSCRIPT_CHARS = 84_000;
+const MAX_SUMMARY_CHARS = 18_000;
+const MAX_PREVIOUS_SUMMARY_CHARS = 6_000;
+const MAX_PINNED_GOAL_CHARS = 3_000;
+const MAX_MESSAGE_CONTENT_CHARS = 8_000;
+const MAX_REASONING_CHARS = 1_200;
+const MAX_TOOL_OUTPUT_CHARS = 1_200;
+const MAX_TOOL_INPUT_CHARS = 900;
+const MAX_CRITICAL_ITEMS = 80;
 const COMPACTION_CHECKPOINT_INSTRUCTION =
-  "Continue the same task from this checkpoint. Older turns were compressed; use tools if you need exact file contents or command output.";
+  "Continue the same task from this checkpoint. Older turns were compressed losslessly for intent/state; use tools if exact file contents or full command output are needed.";
+const LATIN_CHARS_PER_TOKEN = 4.0;
+const CYRILLIC_CHARS_PER_TOKEN = 2.7;
+const NUMBER_CHARS_PER_TOKEN = 3.0;
+const SYMBOL_CHARS_PER_TOKEN = 2.0;
+const CJK_CHARS_PER_TOKEN = 1.0;
+const TOKEN_ESTIMATE_SAFETY_MULTIPLIER = 1.08;
+const TOKEN_ESTIMATE_MESSAGE_OVERHEAD = 4;
 
 export type ContextCompactionDroppedItem = {
   kind: "message" | "tool-output" | "reasoning";
@@ -72,21 +86,45 @@ export type CompactChatHistoryResult = {
   reason?: "below-threshold" | "too-few-messages" | "cooldown" | "no-reduction" | "same-fingerprint" | "already-checkpoint-only";
 };
 
+type CompactionMemory = {
+  goal: string;
+  latestUserDirection: string;
+  openTasks: string[];
+  criticalItems: string[];
+  paths: string[];
+  tools: string[];
+  errors: string[];
+  decisions: string[];
+  progress: string[];
+};
+
 export function isCompactionCheckpointMessage(message: AiChatMessage) {
   return message.kind === "compaction-checkpoint" || message.content.trimStart().startsWith(COMPACTION_CHECKPOINT_MARKER);
 }
 
 export function estimateTokens(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed) return 0;
-  return Math.ceil(trimmed.length / 4);
+  const text = value.trim();
+  if (!text) return 0;
+
+  // `chars / 4` was too crude for real IDE context: Cyrillic, JSON/code symbols,
+  // paths and logs have very different token density. This lightweight estimator
+  // mirrors tokenizer behavior better without bundling a model-specific tokenizer.
+  const latin = text.match(/[A-Za-z_]+/g)?.join("").length ?? 0;
+  const cyrillic = text.match(/[\u0400-\u04FF]+/g)?.join("").length ?? 0;
+  const cjk = text.match(/[\u3040-\u30FF\u3400-\u9FFF\uAC00-\uD7AF]/g)?.length ?? 0;
+  const numbers = text.match(/\d+/g)?.join("").length ?? 0;
+  const whitespace = text.match(/\s+/g)?.join("").length ?? 0;
+  const knownChars = latin + cyrillic + cjk + numbers + whitespace;
+  const symbols = Math.max(0, text.length - knownChars);
+  const rawTokens = (latin / LATIN_CHARS_PER_TOKEN)
+    + (cyrillic / CYRILLIC_CHARS_PER_TOKEN)
+    + (cjk / CJK_CHARS_PER_TOKEN)
+    + (numbers / NUMBER_CHARS_PER_TOKEN)
+    + (symbols / SYMBOL_CHARS_PER_TOKEN);
+
+  return Math.max(1, Math.ceil(rawTokens * TOKEN_ESTIMATE_SAFETY_MULTIPLIER));
 }
 
-// Per-message token estimate cache. Messages are immutable (every edit produces a
-// new object via spread), so the object identity is a safe cache key and a WeakMap
-// lets entries GC with the message. compaction/context-usage hot paths call
-// estimateMessageTokens across the whole history many times per keystroke; without
-// this each call re-walks content + reasoning + every tool payload.
 const messageTokenCache = new WeakMap<AiChatMessage, number>();
 
 export function estimateMessageTokens(message: AiChatMessage) {
@@ -98,7 +136,7 @@ export function estimateMessageTokens(message: AiChatMessage) {
     + estimateTokens(call.input ?? "")
     + estimateTokens(call.output ?? "")
     + estimateTokens(call.error ?? ""), 0) ?? 0;
-  const total = estimateTokens(message.content) + estimateTokens(reasoning) + toolTokens;
+  const total = TOKEN_ESTIMATE_MESSAGE_OVERHEAD + estimateTokens(message.content) + estimateTokens(reasoning) + toolTokens;
   messageTokenCache.set(message, total);
   return total;
 }
@@ -117,7 +155,7 @@ export function shouldAutoCompactContext(params: {
   if (!params.autoCompactEnabled) return false;
   const nonCheckpoint = params.messages.filter((message) => !isCompactionCheckpointMessage(message));
   if (nonCheckpoint.length < MIN_MESSAGES_FOR_COMPACTION) return false;
-  const tokens = estimateHistoryTokens(params.messages);
+  const tokens = estimateHistoryTokens(pruneStaleToolOutputs(params.messages));
   const trigger = resolveContextCompactTriggerTokens(params.model, params.threshold);
   return tokens >= trigger;
 }
@@ -133,9 +171,10 @@ function pruneToolCallOutput(call: AiChatToolCall): AiChatToolCall {
     return call;
   }
   const tokens = estimateTokens(output);
+  const head = truncateText(output.trim(), 700);
   return {
     ...call,
-    output: `${TOOL_OUTPUT_PRUNE_MARKER} · ~${tokens} tokens · re-run the tool to reload the full payload]`,
+    output: `${TOOL_OUTPUT_PRUNE_MARKER} · ~${tokens} tokens · preview:\n${head}\n[re-run the tool to reload the full payload]`,
   };
 }
 
@@ -191,9 +230,6 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
   const triggerTokens = resolveContextCompactTriggerTokens(input.model, threshold);
   const tokensBefore = estimateHistoryTokens(prunedMessages);
   const force = input.force === true;
-  // Forced/manual compaction works at any moment: relax the message floor and
-  // preserve fewer recent turns so even a short chat has something older to
-  // summarize. Auto-compaction keeps the conservative defaults.
   const minMessages = force ? FORCED_MIN_MESSAGES_FOR_COMPACTION : MIN_MESSAGES_FOR_COMPACTION;
   const preserveCount = force ? FORCED_PRESERVE_RECENT_MESSAGE_COUNT : PRESERVE_RECENT_MESSAGE_COUNT;
   const eligible = prunedMessages.filter((message) => !isCompactionCheckpointMessage(message));
@@ -270,12 +306,14 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
     ? extractCheckpointSummary(existingCheckpoint.content)
     : "";
 
-  const transcript = buildCompactionTranscript(older);
+  const memory = buildCompactionMemory(older, previousSummary, input.chatSessionId);
+  const transcript = buildCompactionTranscript(older, memory);
   let summary = "";
   try {
     summary = await summarizeCompactionTranscript({
       transcript,
       previousSummary,
+      memory,
       sessionId: input.chatSessionId,
       provider: input.provider,
       model: input.model,
@@ -284,12 +322,10 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
     });
   } catch (err) {
     if (input.abortSignal?.aborted) throw err;
-    summary = buildDeterministicCompactionSummary(older, previousSummary, input.chatSessionId);
+    summary = buildDeterministicCompactionSummary(older, previousSummary, input.chatSessionId, memory);
   }
 
-  if (!summary.trim()) {
-    summary = buildDeterministicCompactionSummary(older, previousSummary, input.chatSessionId);
-  }
+  summary = mergeSummaryWithDeterministicSafetyNet(summary, older, previousSummary, input.chatSessionId, memory);
 
   const checkpoint: AiChatMessage = {
     id: crypto.randomUUID(),
@@ -304,10 +340,6 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
 
   if (!force && tokensBefore > 0 && tokensAfter >= tokensBefore * (1 - MIN_TOKEN_REDUCTION_RATIO)) {
     const onlyPruned = prunedMessages !== input.messages;
-    // Summarization ran but didn't beat the reduction ratio. Record a cooldown so the
-    // expensive summarizeCompactionTranscript call isn't re-run on every subsequent
-    // over-threshold send (critical when input.compactionState is null, where the
-    // fingerprint/cooldown guards above are skipped entirely).
     const throttledState: ContextCompactionState = input.compactionState
       ? { ...input.compactionState, fingerprint, lastCompactedAt: now, tokensBefore, tokensAfter }
       : { generation: 0, fingerprint, lastCompactedAt: now, tokensBefore, tokensAfter };
@@ -356,91 +388,219 @@ function estimateCheckpointCoveredCount(content: string) {
   return match ? Number(match[1]) : 0;
 }
 
-function buildCompactionTranscript(messages: AiChatMessage[]) {
-  // Fill the char budget from the tail so the most-recent pre-checkpoint turns
-  // (the context most needed to continue) survive and the oldest are truncated.
+function buildCompactionTranscript(messages: AiChatMessage[], memory: CompactionMemory) {
+  const header = [
+    "# Durable compaction source",
+    "The summary must preserve all actionable state below. Prefer exact bullets over vague prose.",
+    "",
+    "## Extracted critical state",
+    formatMemory(memory),
+    "",
+    "## Chronological transcript tail",
+  ].join("\n");
   const parts: string[] = [];
-  let used = 0;
+  let used = header.length;
   for (const message of [...messages].reverse()) {
     const block = formatTranscriptMessage(message);
     if (used + block.length > MAX_TRANSCRIPT_CHARS) {
-      parts.unshift("[... earlier turns truncated for summarization ...]");
+      parts.unshift("[... older low-signal turns omitted; critical state above was extracted before omission ...]");
       break;
     }
     parts.unshift(block);
     used += block.length;
   }
-  return parts.join("\n\n");
+  return [header, parts.join("\n\n")].filter(Boolean).join("\n\n");
 }
 
 function formatTranscriptMessage(message: AiChatMessage) {
   const role = message.role === "user" ? "User" : "Assistant";
   const reasoning = normalizeVisibleReasoning(message.reasoning);
-  const chunks = [`### ${role}`];
-  if (message.content.trim()) chunks.push(truncateText(message.content, 4_000));
-  if (reasoning) chunks.push(`[reasoning]\n${truncateText(reasoning, 800)}`);
-  const tools = message.toolCalls?.filter((call) => call.output || call.error).slice(-6) ?? [];
+  const chunks = [`### ${role} · ${message.id}`];
+  if (message.content.trim()) chunks.push(truncateText(message.content, MAX_MESSAGE_CONTENT_CHARS));
+  if (reasoning) chunks.push(`[visible reasoning]\n${truncateText(reasoning, MAX_REASONING_CHARS)}`);
+  const tools = message.toolCalls?.filter((call) => call.output || call.error || call.input).slice(-10) ?? [];
   if (tools.length > 0) {
-    chunks.push(tools.map((call) => {
-      const detail = call.error ? `error: ${truncateText(call.error, 400)}` : truncateText(call.output ?? "", 600);
-      return `- ${call.tool} (${call.status}): ${detail}`;
+    chunks.push("[tools]\n" + tools.map((call) => {
+      const input = call.input ? ` input=${truncateText(call.input, MAX_TOOL_INPUT_CHARS)}` : "";
+      const detail = call.error
+        ? `error=${truncateText(call.error, MAX_TOOL_OUTPUT_CHARS)}`
+        : `output=${truncateText(call.output ?? "", MAX_TOOL_OUTPUT_CHARS)}`;
+      return `- ${call.tool} (${call.status})${input}: ${detail}`;
     }).join("\n"));
   }
   return chunks.join("\n");
 }
 
-function buildDeterministicCompactionSummary(messages: AiChatMessage[], previousSummary: string, sessionId?: string) {
+function buildCompactionMemory(messages: AiChatMessage[], previousSummary: string, sessionId?: string): CompactionMemory {
   const userMessages = messages.filter((message) => message.role === "user" && message.content.trim() && !isCompactionCheckpointMessage(message));
   const pinnedGoal = sessionId ? getAiSessionGoal(sessionId) : "";
-  const taskGoal = pinnedGoal || (userMessages[0]?.content.trim() ?? "");
-  const latestUser = userMessages[userMessages.length - 1]?.content.trim() ?? "";
-  const tools = new Set<string>();
+  const openTasks = sessionId ? listAiSessionTodos(sessionId).map((todo) => `[${todo.status}] ${todo.content}`) : [];
+  const criticalItems = new Set<string>();
   const paths = new Set<string>();
+  const tools = new Set<string>();
+  const errors = new Set<string>();
+  const decisions = new Set<string>();
+  const progress = new Set<string>();
+
+  if (previousSummary.trim()) criticalItems.add(`Previous checkpoint: ${truncateText(previousSummary.trim(), MAX_PREVIOUS_SUMMARY_CHARS)}`);
+  if (pinnedGoal.trim()) criticalItems.add(`Pinned goal: ${truncateText(pinnedGoal.trim(), MAX_PINNED_GOAL_CHARS)}`);
+
   for (const message of messages) {
+    const content = message.content.trim();
+    extractPathsFromText(content).forEach((path) => paths.add(path));
+    extractImportantLines(content).forEach((line) => {
+      criticalItems.add(line);
+      if (looksLikeDecision(line)) decisions.add(line);
+      if (looksLikeError(line)) errors.add(line);
+      if (looksLikeProgress(line)) progress.add(line);
+    });
     for (const call of message.toolCalls ?? []) {
-      tools.add(call.tool);
-      extractPathsFromText(call.output ?? call.input ?? "").forEach((path) => paths.add(path));
+      tools.add(`${call.tool} (${call.status})`);
+      extractPathsFromText(call.input ?? "").forEach((path) => paths.add(path));
+      extractPathsFromText(call.output ?? "").forEach((path) => paths.add(path));
+      if (call.error?.trim()) errors.add(`${call.tool}: ${truncateText(call.error.trim(), 700)}`);
+      if (call.output?.trim()) {
+        extractImportantLines(call.output).forEach((line) => {
+          criticalItems.add(line);
+          if (looksLikeError(line)) errors.add(line);
+        });
+      }
     }
-    extractPathsFromText(message.content).forEach((path) => paths.add(path));
   }
+
+  return {
+    goal: pinnedGoal || userMessages[0]?.content.trim() || "",
+    latestUserDirection: userMessages[userMessages.length - 1]?.content.trim() || "",
+    openTasks,
+    criticalItems: [...criticalItems].slice(0, MAX_CRITICAL_ITEMS),
+    paths: [...paths].slice(0, 80),
+    tools: [...tools].slice(0, 60),
+    errors: [...errors].slice(0, 40),
+    decisions: [...decisions].slice(0, 40),
+    progress: [...progress].slice(0, 40),
+  };
+}
+
+function formatMemory(memory: CompactionMemory) {
+  return [
+    "### Goal",
+    memory.goal || "(not recorded)",
+    "### Latest user direction",
+    memory.latestUserDirection || "(not recorded)",
+    "### Open tasks",
+    memory.openTasks.length ? memory.openTasks.map((item) => `- ${item}`).join("\n") : "(none recorded)",
+    "### Decisions",
+    formatBulletList(memory.decisions),
+    "### Progress / completed facts",
+    formatBulletList(memory.progress),
+    "### Errors / blockers",
+    formatBulletList(memory.errors),
+    "### Files / paths",
+    formatBulletList(memory.paths),
+    "### Tools",
+    formatBulletList(memory.tools),
+    "### Other critical lines",
+    formatBulletList(memory.criticalItems),
+  ].join("\n");
+}
+
+function formatBulletList(items: string[]) {
+  return items.length ? items.map((item) => `- ${truncateText(item, 1_200)}`).join("\n") : "(none recorded)";
+}
+
+function buildDeterministicCompactionSummary(messages: AiChatMessage[], previousSummary: string, sessionId?: string, memory = buildCompactionMemory(messages, previousSummary, sessionId)) {
   const assistantNotes = messages
     .filter((message) => message.role === "assistant" && message.content.trim())
-    .slice(-3)
-    .map((message) => truncateText(message.content, 500));
+    .slice(-6)
+    .map((message) => truncateText(message.content, 900));
 
   return [
-    previousSummary ? `## Prior checkpoint\n${truncateText(previousSummary, 2_000)}` : "",
     "## Task goal",
-    truncateText(taskGoal, 1_200),
-    latestUser && latestUser !== taskGoal ? `## Latest user direction\n${truncateText(latestUser, 1_000)}` : "",
-    "## Progress (recent assistant)",
-    assistantNotes.length > 0 ? assistantNotes.join("\n---\n") : "(see preserved recent turns)",
-    "## Tools used",
-    [...tools].slice(0, 24).join(", ") || "(none recorded)",
-    "## Paths touched",
-    [...paths].slice(0, 32).join("\n") || "(none extracted)",
-    sessionId && listAiSessionTodos(sessionId).length > 0
-      ? `## Open tasks\n${listAiSessionTodos(sessionId).map((todo) => `- [${todo.status}] ${todo.content}`).join("\n")}`
-      : "",
-    "## Next step",
-    "Resume from the preserved recent messages and complete the original task without re-discovering from scratch.",
+    truncateText(memory.goal || "Continue the active user task.", 1_800),
+    memory.latestUserDirection && memory.latestUserDirection !== memory.goal ? `## Latest user direction\n${truncateText(memory.latestUserDirection, 1_500)}` : "",
+    previousSummary ? `## Prior checkpoint merged\n${truncateText(previousSummary, MAX_PREVIOUS_SUMMARY_CHARS)}` : "",
+    "## Open tasks",
+    memory.openTasks.length > 0 ? memory.openTasks.map((item) => `- ${item}`).join("\n") : "- Continue from preserved recent turns; no explicit task list was stored.",
+    "## Progress",
+    [formatBulletList(memory.progress), assistantNotes.length > 0 ? assistantNotes.map((note) => `- ${note}`).join("\n") : ""].filter(Boolean).join("\n"),
+    "## Key decisions / constraints",
+    formatBulletList(memory.decisions),
+    "## Files and tools",
+    [`Files:\n${formatBulletList(memory.paths)}`, `Tools:\n${formatBulletList(memory.tools)}`].join("\n\n"),
+    "## Errors / blockers",
+    formatBulletList(memory.errors),
+    "## Critical preserved facts",
+    formatBulletList(memory.criticalItems),
+    "## Open items / next step",
+    "Resume from the preserved recent messages, trust this checkpoint for older state, and use read/search tools for exact file contents before editing.",
   ].filter(Boolean).join("\n\n");
 }
 
-const pathPattern = /(?:^|[\s"'`(])([\w./\\-]+\.(?:ts|tsx|js|jsx|rs|py|go|java|css|html|md|json|yaml|yml|toml|sql|cs|cpp|h|vue|svelte))(?:$|[\s"'`,.)])/gi;
+function mergeSummaryWithDeterministicSafetyNet(
+  summary: string,
+  messages: AiChatMessage[],
+  previousSummary: string,
+  sessionId: string | undefined,
+  memory: CompactionMemory,
+) {
+  const trimmed = summary.trim();
+  const fallback = buildDeterministicCompactionSummary(messages, previousSummary, sessionId, memory);
+  if (!trimmed) return truncateText(fallback, MAX_SUMMARY_CHARS);
+
+  const requiredHeadings = ["## Task goal", "## Open tasks", "## Progress", "## Files and tools", "## Errors / blockers", "## Critical preserved facts", "## Open items / next step"];
+  const missing = requiredHeadings.filter((heading) => !trimmed.includes(heading));
+  const hasTasks = memory.openTasks.length === 0 || memory.openTasks.some((task) => trimmed.includes(task.slice(0, 80)));
+  const hasLatestDirection = !memory.latestUserDirection || trimmed.includes(memory.latestUserDirection.slice(0, 80));
+  if (missing.length === 0 && hasTasks && hasLatestDirection) return truncateText(trimmed, MAX_SUMMARY_CHARS);
+
+  return truncateText([
+    trimmed,
+    "",
+    "## Deterministic safety net",
+    "The model summary above missed required durable state; preserve the following exact extracted state too.",
+    fallback,
+  ].join("\n"), MAX_SUMMARY_CHARS);
+}
+
+const pathPattern = /(?:^|[\s"'`(])([\w./\\! -]+\.(?:ts|tsx|js|jsx|rs|py|go|java|css|html|md|json|yaml|yml|toml|sql|cs|cpp|h|vue|svelte))(?:$|[\s"'`,.)])/gi;
+const importantLinePattern = /(todo|task|goal|fix|bug|error|fail|failed|exception|panic|blocked|must|нужно|надо|почини|ошибка|баг|сделай|готово|исправ|решен|completed|pending|in_progress|decision|decided|changed|updated|wrote|created|verified|провер)/i;
+const decisionPattern = /(decided|decision|выбрал|решил|теперь|должен|must|нельзя|запрещ|только|only|avoid|preserve|keep)/i;
+const errorPattern = /(error|failed|failure|exception|panic|timeout|unavailable|dropped|interrupted|ошибка|упал|слом|не работает|баг)/i;
+const progressPattern = /(completed|done|fixed|implemented|created|updated|verified|готово|сделал|исправил|добавил|обновил|проверил|записан|создан)/i;
 
 function extractPathsFromText(text: string) {
   const paths = new Set<string>();
   for (const match of text.matchAll(pathPattern)) {
-    const path = match[1]?.replace(/\\/g, "/");
-    if (path && path.length <= 180) paths.add(path);
+    const path = match[1]?.replace(/\\/g, "/").trim();
+    if (path && path.length <= 220) paths.add(path);
   }
   return paths;
+}
+
+function extractImportantLines(text: string) {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim().replace(/^[-*]\s+/, ""))
+    .filter((line) => line.length >= 12 && line.length <= 1_500 && importantLinePattern.test(line))
+    .slice(0, 40);
+}
+
+function looksLikeDecision(line: string) {
+  return decisionPattern.test(line);
+}
+
+function looksLikeError(line: string) {
+  return errorPattern.test(line);
+}
+
+function looksLikeProgress(line: string) {
+  return progressPattern.test(line);
 }
 
 async function summarizeCompactionTranscript(input: {
   transcript: string;
   previousSummary: string;
+  memory: CompactionMemory;
   sessionId?: string;
   provider: AiProviderConfig;
   model: AiModelConfig;
@@ -448,17 +608,18 @@ async function summarizeCompactionTranscript(input: {
   abortSignal?: AbortSignal;
 }) {
   const system = [
-    "You compress IDE pair-programming chat history into a durable checkpoint.",
-    "Preserve: task goal, constraints, decisions, files/paths, tool outcomes, errors, and the exact next step.",
-    "Do not invent facts. Do not add filler. Use markdown headings.",
-    "Required sections: ## Task goal, ## Progress, ## Key decisions, ## Files and tools, ## Open items / next step",
-    `Stay under ${Math.floor(MAX_SUMMARY_CHARS / 4)} tokens.`,
+    "You compress IDE pair-programming chat history into a durable checkpoint for a coding agent.",
+    "This is not a casual summary. It is the only memory the agent will have for older turns.",
+    "Preserve exact task goal, latest user direction, active tasks with status, constraints, decisions, files/paths, tool outcomes, errors/blockers, verification results, and the next step.",
+    "Never replace concrete facts with vague prose. Do not invent facts. Do not omit unresolved bugs/tasks. Do not say 'see above'.",
+    "If there is conflict between transcript and extracted critical state, include both and mark the conflict.",
+    "Required markdown sections exactly: ## Task goal, ## Latest user direction, ## Open tasks, ## Progress, ## Key decisions / constraints, ## Files and tools, ## Errors / blockers, ## Critical preserved facts, ## Open items / next step.",
+    `Stay under ${Math.floor(MAX_SUMMARY_CHARS / 4)} tokens, but prefer preserving facts over being short.`,
   ].join("\n");
 
   const pinnedGoal = input.sessionId ? getAiSessionGoal(input.sessionId) : "";
   const openTasks = input.sessionId ? listAiSessionTodos(input.sessionId) : [];
 
-  // Native Rust path: summarization runs through the Rust transport.
   if (isTauriRuntime()) {
     const summary = await luxCommands.aiCompactionSummary({
       transcript: input.transcript,
@@ -475,9 +636,10 @@ async function summarizeCompactionTranscript(input: {
   }
 
   const userParts = [
-    pinnedGoal ? `Pinned session goal:\n${truncateText(pinnedGoal, 2_000)}` : "",
+    pinnedGoal ? `Pinned session goal:\n${truncateText(pinnedGoal, MAX_PINNED_GOAL_CHARS)}` : "",
     openTasks.length > 0 ? `Open tasks:\n${openTasks.map((todo) => `- [${todo.status}] ${todo.content}`).join("\n")}` : "",
-    input.previousSummary ? `Previous checkpoint to merge:\n${truncateText(input.previousSummary, 4_000)}` : "",
+    `Extracted critical state:\n${formatMemory(input.memory)}`,
+    input.previousSummary ? `Previous checkpoint to merge:\n${truncateText(input.previousSummary, MAX_PREVIOUS_SUMMARY_CHARS)}` : "",
     `Transcript (${input.transcript.length} chars):\n${truncateText(input.transcript, MAX_TRANSCRIPT_CHARS)}`,
   ].filter(Boolean);
 

@@ -7,14 +7,23 @@ on:
 
 jobs:
   rust:
-    name: Rust
-    runs-on: ubuntu-latest
+    name: Rust (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux
+            os: ubuntu-latest
+          - label: macOS
+            os: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf wget
@@ -26,10 +35,13 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Cargo test
         run: cargo test --workspace
+      # Performance thresholds are calibrated for the Linux runner; macOS runner
+      # hardware varies too much for a stable --assert, so the benchmark stays Linux-only.
       - name: Core performance benchmark
+        if: runner.os == 'Linux'
         run: cargo run -p lux-bench -- --assert --output target/lux-bench-report.json
       - name: Upload performance benchmark report
-        if: always()
+        if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
           name: lux-core-performance-report

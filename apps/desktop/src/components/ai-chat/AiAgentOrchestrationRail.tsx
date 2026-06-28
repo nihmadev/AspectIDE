@@ -185,6 +185,19 @@ function AiAgentOrchestrationRailBody({
                 <span>{formatGoalRunDuration(formatGoalRunElapsedMs(goalRun))}</span>
                 <span>{formatCompactTokens(formatGoalRunTokenTotal(goalRun))}</span>
               </div>
+              {goalRun.limits.maxTokens > 0 && (() => {
+                const spent = formatGoalRunTokenTotal(goalRun);
+                const pct = Math.min(100, Math.round((spent / goalRun.limits.maxTokens) * 100));
+                const tone = pct >= 90 ? "high" : pct >= 70 ? "medium" : "low";
+                return (
+                  <div className="ai-agent-goal-budget" data-tone={tone} title={t("aiChat.orchestration.budgetTitle", { spent: formatCompactTokens(spent), total: formatCompactTokens(goalRun.limits.maxTokens) })}>
+                    <div className="ai-agent-goal-budget-track" aria-hidden="true">
+                      <div className="ai-agent-goal-budget-fill" style={{ width: `${Math.max(2, pct)}%` }} />
+                    </div>
+                    <span className="ai-agent-goal-budget-label">{t("aiChat.orchestration.budgetLabel", { pct })}</span>
+                  </div>
+                );
+              })()}
               {goalRun.lastCheckpoint && (
                 <p className="ai-agent-goal-checkpoint" title={goalRun.lastCheckpoint.summary}>
                   {t("aiChat.orchestration.goalCheckpoint", { summary: goalRun.lastCheckpoint.summary })}

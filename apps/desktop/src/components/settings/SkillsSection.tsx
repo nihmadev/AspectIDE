@@ -68,7 +68,6 @@ export function SkillsSection({ workspace, t }: { workspace: WorkspaceInfo | nul
   if (editing === "import") {
     return (
       <SkillImporter
-        canUseProject={Boolean(workspace)}
         t={t}
         onClose={() => { setEditing(null); void refresh(); }}
       />
@@ -108,6 +107,10 @@ export function SkillsSection({ workspace, t }: { workspace: WorkspaceInfo | nul
 
       {error && <p className="lux-skill-error" role="alert">{error}</p>}
       {loading && <p className="lux-skill-loading"><Loader2 size={14} className="lux-spin" /> {t("settings.skills.loading")}</p>}
+
+      {!loading && visible.length === 0 && (
+        <p className="lux-skill-empty">{t("settings.skills.none")}</p>
+      )}
 
       <ul className="lux-skill-list">
         {visible.map((skill) => (
@@ -269,22 +272,23 @@ function splitCsv(value: string): string[] {
     .filter((item) => item.length > 0);
 }
 
-/** Import skills from other agents (Claude/Codex, auto-discovered) or by pasting
- *  a raw SKILL.md. The chosen scope applies to every import. */
+/** Import skills auto-discovered in other agents' folders (Claude, Codex,
+ *  OpenClaw, Hermes) — one at a time or all at once — or by pasting a raw
+ *  SKILL.md. Every import lands in the global library (skills are not scoped to
+ *  a single project). */
 function SkillImporter({
-  canUseProject,
   t,
   onClose,
 }: {
-  canUseProject: boolean;
   t: TranslateFn;
   onClose: () => void;
 }) {
   const [candidates, setCandidates] = useState<ImportableSkill[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [scope, setScope] = useState<SkillScope>(canUseProject ? "project" : "global");
   const [busy, setBusy] = useState<string | null>(null);
+  const [importingAll, setImportingAll] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const [imported, setImported] = useState<Set<string>>(new Set());
   const [manualName, setManualName] = useState("");
   const [manualContent, setManualContent] = useState("");
@@ -299,21 +303,50 @@ function SkillImporter({
     return () => { active = false; };
   }, []);
 
-  const targetScope = (): SkillScope => (scope === "project" && !canUseProject ? "global" : scope);
+  // Skills are global-only here: a single library shared across every project.
+  const TARGET_SCOPE: SkillScope = "global";
 
   const doImport = useCallback(async (key: string, slug: string, content: string) => {
     setBusy(key);
     setError(null);
     try {
-      await luxCommands.skillsImport(targetScope(), slug, content);
+      await luxCommands.skillsImport(TARGET_SCOPE, slug, content);
       setImported((prev) => new Set(prev).add(key));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setBusy(null);
     }
+  }, []);
+
+  const candidateKey = (candidate: ImportableSkill) => `${candidate.source}:${candidate.slug}`;
+  const pending = candidates.filter((candidate) => !imported.has(candidateKey(candidate)));
+
+  // Import every not-yet-imported discovered skill in one click. Sequential so a
+  // single failure surfaces without aborting the rest; each success ticks the row
+  // over to "Imported" live so progress is visible.
+  const doImportAll = useCallback(async () => {
+    setImportingAll(true);
+    setError(null);
+    setNotice(null);
+    let imports = 0;
+    let failures = 0;
+    for (const candidate of candidates) {
+      const key = candidateKey(candidate);
+      if (imported.has(key)) continue;
+      try {
+        await luxCommands.skillsImport(TARGET_SCOPE, candidate.slug, candidate.content);
+        setImported((prev) => new Set(prev).add(key));
+        imports += 1;
+      } catch (cause) {
+        failures += 1;
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    }
+    setImportingAll(false);
+    if (failures === 0 && imports > 0) setNotice(t("settings.skills.importAllDone", { count: imports }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scope, canUseProject]);
+  }, [candidates, imported, t]);
 
   const manualSlug = slugify(manualName);
   const canImportManual = Boolean(manualSlug && manualContent.trim());
@@ -325,22 +358,31 @@ function SkillImporter({
         <button type="button" className="lux-skill-editor-back" onClick={onClose}>{t("settings.skills.done")}</button>
       </div>
 
-      <label className="lux-skill-field">
-        <span>{t("settings.skills.importScope")}</span>
-        <select value={scope} onChange={(event) => setScope(event.target.value as SkillScope)}>
-          <option value="global">{t("settings.skills.scope.global")}</option>
-          <option value="project" disabled={!canUseProject}>{t("settings.skills.scope.project")}</option>
-        </select>
-      </label>
+      <p className="lux-skill-import-note">{t("settings.skills.importGlobalOnly")}</p>
 
       {error && <p className="lux-skill-error" role="alert">{error}</p>}
+      {notice && <p className="lux-skill-import-success" role="status">{notice}</p>}
 
-      <h4 className="lux-skill-import-h">{t("settings.skills.importDiscovered")}</h4>
+      <div className="lux-skill-import-head">
+        <h4 className="lux-skill-import-h">{t("settings.skills.importDiscovered")}</h4>
+        {pending.length > 0 && (
+          <button
+            type="button"
+            className="lux-skill-import-all"
+            disabled={importingAll || busy !== null}
+            onClick={() => void doImportAll()}
+          >
+            {importingAll
+              ? <><Loader2 size={13} className="lux-spin" /> {t("settings.skills.importingAll")}</>
+              : <><DownloadCloud size={13} /> {t("settings.skills.importAllCount", { count: pending.length })}</>}
+          </button>
+        )}
+      </div>
       {loading && <p className="lux-skill-loading"><Loader2 size={14} className="lux-spin" /> {t("settings.skills.importScanning")}</p>}
       {!loading && candidates.length === 0 && <p className="lux-skill-none">{t("settings.skills.importNone")}</p>}
       <ul className="lux-skill-import-list">
         {candidates.map((candidate) => {
-          const key = `${candidate.source}:${candidate.slug}`;
+          const key = candidateKey(candidate);
           const done = imported.has(key);
           return (
             <li key={key} className="lux-skill-import-row">
@@ -355,11 +397,11 @@ function SkillImporter({
               <button
                 type="button"
                 className="lux-skill-import-btn"
-                disabled={done || busy === key}
+                disabled={done || busy === key || importingAll}
                 onClick={() => void doImport(key, candidate.slug, candidate.content)}
               >
                 {done ? <><Check size={13} /> {t("settings.skills.imported")}</>
-                  : busy === key ? <Loader2 size={13} className="lux-spin" />
+                  : busy === key || importingAll ? <Loader2 size={13} className="lux-spin" />
                   : t("settings.skills.importAction")}
               </button>
             </li>

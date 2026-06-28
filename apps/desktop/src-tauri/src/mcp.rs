@@ -136,6 +136,12 @@ pub async fn connect_server(config: McpServerConfig) -> Result<McpServerStatus, 
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
+    // Windows: launch the stdio MCP server with no console window. Without this an
+    // MCP server whose command is a console app (node, python, a .cmd shim) flashes
+    // a cmd window every time it starts — every other child-spawn site in Lux already
+    // sets this flag; MCP was the one that missed it.
+    #[cfg(windows)]
+    command.creation_flags(crate::ai_tools::CREATE_NO_WINDOW);
     for (key, value) in &config.env {
         command.env(key, value);
     }
