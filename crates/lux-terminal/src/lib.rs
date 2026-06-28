@@ -44,7 +44,7 @@ fn find_on_path(exe: &str) -> Option<PathBuf> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn find_on_path(_exe: &str) -> Option<PathBuf> {
+const fn find_on_path(_exe: &str) -> Option<PathBuf> {
     None
 }
 
