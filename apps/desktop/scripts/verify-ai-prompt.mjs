@@ -139,14 +139,15 @@ if (!webPrompt.includes("Runtime tools are not attached")) {
   throw new Error("AI system prompt must clearly explain web/dev chat requests without runtime tools.");
 }
 
-// Upper bounds carry headroom for the progress-narration guidance and the
-// CodeGraph tool-map line (deliberate features); the floor still guards against
-// an accidentally gutted prompt.
-if (prompt.length < 6_000 || prompt.length > 16_600) {
-  throw new Error(`AI system prompt length ${prompt.length} is outside the expected 6000-16600 character range.`);
+// Upper bounds carry headroom for the progress-narration guidance, the CodeGraph
+// tool-map line, the numbered Precedence block, and the completion self-check
+// (deliberate features); the floor still guards against an accidentally gutted
+// prompt. Kept in lockstep with the Rust ceilings in ai_prompt.rs tests.
+if (prompt.length < 6_000 || prompt.length > 17_700) {
+  throw new Error(`AI system prompt length ${prompt.length} is outside the expected 6000-17700 character range.`);
 }
-if (automaticPrompt.length > 18_100) {
-  throw new Error(`Automatic mode prompt length ${automaticPrompt.length} exceeds 18100 characters.`);
+if (automaticPrompt.length > 19_200) {
+  throw new Error(`Automatic mode prompt length ${automaticPrompt.length} exceeds 19200 characters.`);
 }
 
 console.log(`AI prompt verification passed (${prompt.length} chars).`);

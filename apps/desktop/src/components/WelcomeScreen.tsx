@@ -30,77 +30,75 @@ export function WelcomeScreen({ loading = false, onForgetRecentWorkspace, onOpen
   return (
     <main className="welcome-screen">
       <section className="welcome-content" aria-label={t("welcome.aria")}>
-        <div className="welcome-primary">
-          <div className="welcome-brand">
-            <span className="welcome-logo" aria-hidden="true">L</span>
-            <div>
-              <h1>{t("welcome.title")}</h1>
-              <p>{t("welcome.subtitle")}</p>
-            </div>
-          </div>
+        <header className="welcome-hero">
+          <span className="welcome-logo" aria-hidden="true">L</span>
+          <h1>{t("welcome.title")}</h1>
+          <p>{t("welcome.subtitle")}</p>
+        </header>
 
-          {showTelegramBanner && (
-            <div className="welcome-telegram-banner">
-              <MessageCircle size={18} strokeWidth={1.8} />
-              <div className="welcome-telegram-text">
-                <span>{t("welcome.telegramBanner.text")}</span>
-                <a
-                  href="https://t.me/lux_ide"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="welcome-telegram-link"
-                >
-                  {t("welcome.telegramBanner.link")}
-                </a>
-              </div>
-              <button
-                type="button"
-                className="welcome-telegram-dismiss"
-                onClick={dismissTelegramBanner}
-                aria-label={t("welcome.telegramBanner.dismiss")}
+        {showTelegramBanner && (
+          <div className="welcome-telegram-banner">
+            <MessageCircle size={18} strokeWidth={1.8} />
+            <div className="welcome-telegram-text">
+              <span>{t("welcome.telegramBanner.text")}</span>
+              <a
+                href="https://t.me/lux_ide"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="welcome-telegram-link"
               >
-                <X size={14} />
-              </button>
+                {t("welcome.telegramBanner.link")}
+              </a>
             </div>
-          )}
-
-          <div className="welcome-actions" aria-label={t("welcome.projectActions")}>
-            <button className="welcome-action-card" type="button" disabled={loading} onClick={onOpenProject}>
-              <FolderOpen size={17} strokeWidth={1.8} />
-              <span>{t("welcome.openProject")}</span>
-              <small>{t("welcome.openProjectHint")}</small>
+            <button
+              type="button"
+              className="welcome-telegram-dismiss"
+              onClick={dismissTelegramBanner}
+              aria-label={t("welcome.telegramBanner.dismiss")}
+            >
+              <X size={14} />
             </button>
           </div>
+        )}
+
+        <div className="welcome-actions" aria-label={t("welcome.projectActions")}>
+          <button className="welcome-action-card" type="button" disabled={loading} onClick={onOpenProject}>
+            <span className="welcome-action-icon" aria-hidden="true">
+              <FolderOpen size={18} strokeWidth={1.8} />
+            </span>
+            <span className="welcome-action-text">
+              <span>{t("welcome.openProject")}</span>
+              <small>{t("welcome.openProjectHint")}</small>
+            </span>
+          </button>
         </div>
 
-        <div className="welcome-secondary">
-          <div className="recent-projects" aria-label={t("welcome.recentProjects")}>
-            <div className="recent-header">
-              <span>{t("welcome.recentProjects")}</span>
-              {recentWorkspaces.length > 0 && <small>{recentWorkspaces.length}</small>}
-            </div>
-            {recentWorkspaces.length > 0 ? (
-              <div className="recent-list">
-                {recentWorkspaces.map((workspace) => (
-                  <RecentWorkspaceRow
-                    key={workspace.root}
-                    workspace={workspace}
-                    loading={loading}
-                    onForgetRecentWorkspace={onForgetRecentWorkspace}
-                    onOpenRecentWorkspace={onOpenRecentWorkspace}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="recent-empty">
-                <Clock3 size={15} strokeWidth={1.8} />
-                <div>
-                  <span>{t("welcome.noRecentProjects")}</span>
-                  <small>{t("welcome.noRecentProjectsDetail")}</small>
-                </div>
-              </div>
-            )}
+        <div className="recent-projects" aria-label={t("welcome.recentProjects")}>
+          <div className="recent-header">
+            <span>{t("welcome.recentProjects")}</span>
+            {recentWorkspaces.length > 0 && <small>{recentWorkspaces.length}</small>}
           </div>
+          {recentWorkspaces.length > 0 ? (
+            <div className="recent-list">
+              {recentWorkspaces.map((workspace) => (
+                <RecentWorkspaceRow
+                  key={workspace.root}
+                  workspace={workspace}
+                  loading={loading}
+                  onForgetRecentWorkspace={onForgetRecentWorkspace}
+                  onOpenRecentWorkspace={onOpenRecentWorkspace}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="recent-empty">
+              <Clock3 size={15} strokeWidth={1.8} />
+              <div>
+                <span>{t("welcome.noRecentProjects")}</span>
+                <small>{t("welcome.noRecentProjectsDetail")}</small>
+              </div>
+            </div>
+          )}
         </div>
       </section>
     </main>

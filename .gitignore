@@ -64,3 +64,4 @@ skills-lock.json
 # Updater signing key — NEVER commit
 lux-updater.key
 lux-updater.key.pub
+.lux-review/

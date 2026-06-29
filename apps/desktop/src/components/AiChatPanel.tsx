@@ -96,7 +96,7 @@ import { applyMentionSelection, mentionMenuVisible, parseMentionQuery, searchMen
 import { buildPlanHandoffUserMessage, extractPlanHandoffPayload } from "../lib/aiChatPlanHandoff";
 import { clearPendingPlan, getPendingPlanForSession, getPendingPlansSnapshot, subscribePendingPlans } from "../lib/aiPendingPlan";
 import { getPendingQuestionForSession, getPendingQuestionsSnapshot, settlePendingQuestion, subscribePendingQuestions } from "../lib/aiPendingQuestion";
-import { buildQueuedMessagePayload, dequeueFirstForSession, enqueueChatMessage, removeQueuedMessage, updateQueuedMessage, useAllQueuedMessages, type QueuedMessage } from "../lib/aiChatQueue";
+import { buildQueuedMessagePayload, dequeueFirstForSession, enqueueChatMessage, getQueuedMessagesForSession, removeQueuedMessage, updateQueuedMessage, useAllQueuedMessages, type QueuedMessage } from "../lib/aiChatQueue";
 import { AiChatQueuedMessages } from "./ai-chat/AiChatQueuedMessages";
 import { readEditorDocumentAttachment, readSelectionAttachment } from "../lib/aiChatDocumentAttachment";
 import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
@@ -1149,6 +1149,20 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
             content: text,
             timestamp: Date.now(),
           });
+          // Now that Rust confirmed the fold-in, retire the matching staged chip and
+          // clear its in-flight tracking (the recommendation has landed in-thread).
+          const pending = injectedTextBySessionRef.current.get(sessionId);
+          if (pending) {
+            const at = pending.indexOf(text);
+            if (at >= 0) pending.splice(at, 1);
+          }
+          const match = getQueuedMessagesForSession(sessionId).find(
+            (entry) => entry.mode === "recommendation" && entry.text === text,
+          );
+          if (match) {
+            removeQueuedMessage(match.id);
+            injectingRef.current.delete(match.id);
+          }
         },
         onRetryNotice: (notice) => {
           if (!isActiveTurn()) return;
@@ -1626,6 +1640,15 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     void handleSend();
   }, [activeSessionBusy, activeAiChatSessionId, message, updateMessage, handleMentionSelect, handleSend, handleSlashSelect, mentionActiveIndex, mentionCandidates, mentionMenuOpen, mentionNavigated, slashActiveIndex, slashCommands, slashMenuOpen]);
 
+  // Mid-work injection bookkeeping (shared by the drain effect below and the inject
+  // effect further down). `injectingRef` = recommendation ids handed to the Rust turn
+  // loop but not yet confirmed back via the userMessageInjected event; the chip stays
+  // visible until confirmation, so a recommendation can never vanish on an optimistic
+  // delete nor be double-delivered by the end-of-turn drain. `injectedTextBySessionRef`
+  // tracks the in-flight texts per session for matching the confirmation event.
+  const injectingRef = useRef<Set<string>>(new Set());
+  const injectedTextBySessionRef = useRef<Map<string, string[]>>(new Map());
+
   // Drain each session's queue when THAT session's turn finishes — tracked per
   // session id, not just the active one, so a queued message never strands when the
   // user switches away from a busy chat (and switching tabs never falsely drains).
@@ -1640,6 +1663,15 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       const busy = sendingSessionId === session.id || isAiChatSessionBusyStatus(session.status);
       next[session.id] = busy;
       if (prev[session.id] && !busy && !session.closedAt) {
+        // The turn ended: any recommendation still marked in-flight never got
+        // confirmed (its inject raced the turn close), so release it back to a plain
+        // queued follow-up instead of losing it — then drain one entry as the next turn.
+        injectedTextBySessionRef.current.delete(session.id);
+        for (const entry of getQueuedMessagesForSession(session.id)) {
+          if (entry.mode === "recommendation" && injectingRef.current.has(entry.id)) {
+            injectingRef.current.delete(entry.id);
+          }
+        }
         const queued = dequeueFirstForSession(session.id);
         if (queued) {
           void handleSend(queued.text, undefined, {
@@ -1660,7 +1692,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   // gap between the agent's requests, not after the whole turn ends. "Queued" entries
   // are left for the end-of-turn drain (they run verbatim as their own next turn).
   const allQueuedMessages = useAllQueuedMessages();
-  const injectingRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     if (!isTauriRuntime()) return;
     for (const entry of allQueuedMessages) {
@@ -1670,19 +1701,24 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       if (!session || session.closedAt) continue;
       const running = sendingSessionId === entry.sessionId || isAiChatSessionBusyStatus(session.status);
       if (!running) continue;
-      // Guard against double-inject across re-renders; remove from the queue only
-      // AFTER the inject is accepted so a failed call re-stages instead of vanishing.
+      // Mark in-flight BEFORE the await so a re-render can't double-inject. The chip
+      // is NOT removed here — it is removed only when Rust confirms the fold-in
+      // (onUserMessageInjected), so a turn that ends before the drain never loses it.
       injectingRef.current.add(entry.id);
+      const pending = injectedTextBySessionRef.current.get(entry.sessionId) ?? [];
+      pending.push(entry.text);
+      injectedTextBySessionRef.current.set(entry.sessionId, pending);
       void luxCommands.aiInjectMessage(entry.sessionId, entry.text)
-        .then(() => {
-          removeQueuedMessage(entry.id);
-          injectingRef.current.delete(entry.id);
-        })
         .catch(() => {
-          // Inject failed — leave it queued (its mode flips to "queued" so the
-          // end-of-turn drain sends it as a follow-up turn instead of losing it).
-          updateQueuedMessage(entry.id, { mode: "queued" });
+          // Inject call itself failed — un-track so the end-of-turn drain re-sends it
+          // as a follow-up turn (flip to "queued") instead of stranding it.
           injectingRef.current.delete(entry.id);
+          const list = injectedTextBySessionRef.current.get(entry.sessionId);
+          if (list) {
+            const at = list.indexOf(entry.text);
+            if (at >= 0) list.splice(at, 1);
+          }
+          updateQueuedMessage(entry.id, { mode: "queued" });
         });
     }
   }, [allQueuedMessages, aiChatSessions, sendingSessionId]);
