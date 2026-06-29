@@ -36,11 +36,6 @@ const TCP_CONNECT_DELAY: Duration = Duration::from_millis(50);
 const DISCONNECT_GRACE_TIMEOUT: Duration = Duration::from_secs(2);
 const DISCONNECT_POLL_DELAY: Duration = Duration::from_millis(25);
 const MAX_DAP_CONTENT_LENGTH: usize = 64 * 1024 * 1024;
-/// Upper bound on bytes we will buffer while still searching for the
-/// `\r\n\r\n` header terminator. A well-behaved adapter sends only a handful of
-/// short header lines, so any peer that streams more than this without ever
-/// terminating the header is treated as a protocol violation rather than being
-/// allowed to grow the read buffer without limit (a memory-exhaustion attack).
 const MAX_DAP_HEADER_LENGTH: usize = 16 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,12 +58,54 @@ pub struct DapEvent {
     pub body: Option<Value>,
 }
 
+/// A reverse request from the adapter (type: "request"). Tracks
+/// the `seq` the adapter expects in the response, plus the command
+/// and optional arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DapRequest {
+    pub seq: u64,
+    pub command: String,
+    pub arguments: Option<Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DapMessage {
     Response(DapResponse),
     Event(DapEvent),
-    Request { command: String },
+    Request(DapRequest),
 }
+
+/// Summarises the `initialize` response capabilities that control
+/// IDE-side behaviour during the handshake and session lifetime.
+#[derive(Debug, Clone, Default)]
+struct Capabilities {
+    supports_configuration_done_request: bool,
+}
+
+/// Per-thread running/stopped state used for fine-grained
+/// `continued` event handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadState {
+    Running,
+    Paused,
+}
+
+// ── Request-class timeout durations ──────────────────────────────────────
+const TIMEOUT_METADATA: Duration = Duration::from_secs(8);
+const TIMEOUT_LAUNCH: Duration = Duration::from_secs(60);
+const TIMEOUT_BREAKPOINTS: Duration = Duration::from_secs(8);
+const TIMEOUT_EXECUTION: Duration = Duration::from_secs(15);
+
+// ── Bounded walk limits ──────────────────────────────────────────────────
+const WALK_MAX_DEPTH: usize = 12;
+const WALK_MAX_FILES: usize = 500_000;
+
+// ── Ignored directory names for extension detection ──────────────────────
+const IGNORE_DIRS: &[&str] = &[
+    "node_modules", "target", ".git", ".venv", "venv", "dist", "build",
+    "vendor", "__pycache__", ".next", ".nuxt", "out", ".cache",
+    ".bundle", "coverage", ".terraform", ".serverless",
+];
 
 #[derive(Debug, Clone)]
 pub enum DebugSessionUpdate {
@@ -97,11 +134,20 @@ struct DebugSession {
     next_seq: u64,
     disconnect_sent: bool,
     configuration_done_sent: bool,
+    /// Stored capabilities from the `initialize` response.
+    capabilities: Capabilities,
+    /// Sequence number of the outgoing `configurationDone` request (if sent).
+    configuration_done_seq: Option<u64>,
     breakpoints_by_path: BTreeMap<PathBuf, Vec<DebugSourceBreakpoint>>,
     resolved_breakpoints_by_path: BTreeMap<PathBuf, Vec<DebugResolvedBreakpoint>>,
     pending_breakpoint_requests: BTreeMap<u64, PathBuf>,
     pending_responses: BTreeMap<u64, DapResponse>,
     threads: BTreeMap<u64, DebugThreadInfo>,
+    /// Per-thread running/paused state for fine-grained continued events.
+    thread_states: BTreeMap<u64, ThreadState>,
+    /// Whether the session was running before the last execute command.
+    /// Used for guarded state transitions in `execute`.
+    _pre_exec_was_paused: bool,
 }
 
 impl Drop for DebugSession {
@@ -186,7 +232,7 @@ impl DebugSessionManager {
         self.emit_session(session_id)?;
 
         if let Err(error) = self
-            .start_handshake(session_id, &adapter.id, &configuration)
+            .start_handshake(session_id, &adapter.id, &configuration, &workspace_root)
             .await
         {
             return Err(self.fail_start(session_id, error).await);
@@ -359,11 +405,15 @@ impl DebugSessionManager {
                 next_seq: 1,
                 disconnect_sent: false,
                 configuration_done_sent: false,
+                capabilities: Capabilities::default(),
+                configuration_done_seq: None,
                 breakpoints_by_path,
                 resolved_breakpoints_by_path: BTreeMap::new(),
                 pending_breakpoint_requests: BTreeMap::new(),
                 pending_responses: BTreeMap::new(),
                 threads: BTreeMap::new(),
+                thread_states: BTreeMap::new(),
+                _pre_exec_was_paused: false,
             },
         );
     }
@@ -373,21 +423,35 @@ impl DebugSessionManager {
         session_id: Uuid,
         adapter_id: &str,
         configuration: &DebugConfiguration,
+        workspace_root: &Path,
     ) -> AppResult<()> {
         let initialize_seq = self.next_request_seq(session_id)?;
         self.send_request(session_id, initialize_request(initialize_seq, adapter_id))
             .await?;
-        self.wait_for_response(session_id, initialize_seq, "initialize")
+        let resp = self
+            .wait_for_response_body(session_id, initialize_seq, "initialize")
             .await?;
+        // Store capabilities from the initialize response.
+        {
+            let caps = resp.as_ref();
+            self.with_session_mut(session_id, |session| {
+                session.capabilities = Capabilities {
+                    supports_configuration_done_request: caps
+                        .and_then(|v| v.get("supportsConfigurationDoneRequest"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                };
+            })?;
+        }
         let configuration_seq = self.next_request_seq(session_id)?;
         self.send_request(
             session_id,
             match configuration.request {
                 DebugConfigurationRequest::Launch => {
-                    launch_request(configuration_seq, configuration)
+                    launch_request(configuration_seq, configuration, workspace_root)
                 }
                 DebugConfigurationRequest::Attach => {
-                    attach_request(configuration_seq, configuration)
+                    attach_request(configuration_seq, configuration, workspace_root)
                 }
             },
         )
@@ -515,12 +579,11 @@ impl DebugSessionManager {
             execution_request(execute_seq, action, thread.id),
         )
         .await?;
-        self.wait_for_response(session_id, execute_seq, command)
+        // Guarded state transition: only set Running if the session is still
+        // in the expected pre-execution (Paused) state and no paused/terminal
+        // event was observed during the wait.
+        self.wait_for_response_guarded(session_id, execute_seq, command)
             .await?;
-        self.with_session_mut(session_id, |session| {
-            session.info.status = DebugSessionStatus::Running;
-            session.info.last_event = Some(format!("{command} requested"));
-        })?;
         let info = self.session_info(session_id)?;
         self.emit_session(session_id)?;
         Ok(info)
@@ -721,8 +784,24 @@ impl DebugSessionManager {
         request_seq: u64,
         command: &str,
     ) -> AppResult<Option<Value>> {
-        tokio::time::timeout(Duration::from_secs(8), async {
+        let timeout = match command {
+            "launch" | "attach" => TIMEOUT_LAUNCH,
+            "initialize" => TIMEOUT_METADATA,
+            "continue" | "next" | "stepIn" | "stepOut" => TIMEOUT_EXECUTION,
+            _ => TIMEOUT_METADATA,
+        };
+        tokio::time::timeout(timeout, async {
             loop {
+                // Check for adapter exit before blocking on recv.
+                {
+                    if let Some(session) = self.sessions.get_mut(&session_id) {
+                        if let Ok(Some(_)) = session.child.try_wait() {
+                            return Err(AppError::Service(format!(
+                                "debug adapter exited before responding to {command}"
+                            )));
+                        }
+                    }
+                }
                 if let Some(response) = self.take_pending_response(session_id, request_seq)? {
                     return self.apply_expected_response(session_id, response, command);
                 }
@@ -745,9 +824,29 @@ impl DebugSessionManager {
         .await
         .map_err(|_| {
             AppError::Service(format!(
-                "debug adapter did not respond to {command} within 8 seconds"
+                "debug adapter did not respond to {command} within {timeout:?}"
             ))
         })?
+    }
+
+    /// Like wait_for_response, but only transitions to Running if the session
+    /// is still Paused after the response. Preserves Paused/Stopped/Error.
+    async fn wait_for_response_guarded(
+        &mut self,
+        session_id: Uuid,
+        request_seq: u64,
+        command: &str,
+    ) -> AppResult<()> {
+        let _body = self
+            .wait_for_response_body(session_id, request_seq, command)
+            .await?;
+        self.with_session_mut(session_id, |session| {
+            if session.info.status == DebugSessionStatus::Paused {
+                session.info.status = DebugSessionStatus::Running;
+                session.info.last_event = Some(format!("{command} requested"));
+            }
+        })?;
+        Ok(())
     }
 
     fn apply_expected_response(
@@ -784,16 +883,79 @@ impl DebugSessionManager {
         match message {
             DapMessage::Event(event) => self.apply_event(session_id, event).await?,
             DapMessage::Response(response) => self.apply_response(session_id, response)?,
-            DapMessage::Request { command } => {
-                self.with_session_mut(session_id, |session| {
-                    session.info.last_event = Some(format!("adapter request: {command}"));
-                })?;
-            }
+            DapMessage::Request(request) => self.apply_reverse_request(session_id, request).await?,
         }
         self.emit_session(session_id)
     }
 
+    /// Handle a reverse request from the adapter (type: "request").
+    /// We must respond with a response message keyed by the request `seq`,
+    /// otherwise the adapter may hang waiting for a reply.
+    async fn apply_reverse_request(
+        &mut self,
+        session_id: Uuid,
+        request: DapRequest,
+    ) -> AppResult<()> {
+        self.with_session_mut(session_id, |session| {
+            session.info.last_event = Some(format!("adapter request: {}", request.command));
+        })?;
+        match request.command.as_str() {
+            "runInTerminal" => {
+                // Best-effort: acknowledge with success:true so the adapter
+                // does not hang. A real terminal integration is deferred.
+                let response = json!({
+                    "type": "response",
+                    "request_seq": request.seq,
+                    "success": true,
+                    "command": "runInTerminal",
+                    "body": {}
+                });
+                let encoded = encode_dap_message(&response)?;
+                self.send_raw(session_id, &encoded).await
+            }
+            _ => {
+                // Send success:false so the adapter does not hang on
+                // unsupported reverse requests.
+                let response = json!({
+                    "type": "response",
+                    "request_seq": request.seq,
+                    "success": false,
+                    "command": request.command,
+                    "message": "unsupported reverse request"
+                });
+                let encoded = encode_dap_message(&response)?;
+                self.send_raw(session_id, &encoded).await
+            }
+        }
+    }
+
+    async fn send_raw(&mut self, session_id: Uuid, encoded: &[u8]) -> AppResult<()> {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err(AppError::NotFound(format!("debug session {session_id}")));
+        };
+        session.writer.write_all(encoded).await
+    }
+
     async fn apply_event(&mut self, session_id: Uuid, event: DapEvent) -> AppResult<()> {
+        // Handle output events first — they should not overwrite lifecycle state.
+        if event.event.as_str() == "output" {
+            let text = event
+                .body
+                .as_ref()
+                .and_then(|b| b.get("output"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if !text.is_empty() {
+                self.update_tx
+                    .send(DebugSessionUpdate::Output {
+                        session_id,
+                        text: text.to_string(),
+                    })
+                    .ok();
+            }
+            return Ok(());
+        }
+
         let request = self.with_session_mut(session_id, |session| {
             session.info.last_event = Some(event.event.clone());
             match event.event.as_str() {
@@ -809,11 +971,65 @@ impl DebugSessionManager {
                     session.info.status = DebugSessionStatus::Paused;
                     if let Some(thread_id) = stopped_event_thread_id(event.body.as_ref()) {
                         session.info.active_thread_id = Some(thread_id);
+                        session.thread_states.insert(thread_id, ThreadState::Paused);
                     }
                     None
                 }
                 "continued" => {
-                    session.info.status = DebugSessionStatus::Running;
+                    // Fine-grained thread state: honor body.threadId and
+                    // body.allThreadsContinued.
+                    let thread_id = stopped_event_thread_id(event.body.as_ref());
+                    let all_continued = event
+                        .body
+                        .as_ref()
+                        .and_then(|b| b.get("allThreadsContinued"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if all_continued || thread_id.is_none() {
+                        session.thread_states.clear();
+                        session.info.status = DebugSessionStatus::Running;
+                    } else if let Some(tid) = thread_id {
+                        session.thread_states.insert(tid, ThreadState::Running);
+                        // Keep session Paused if any thread remains stopped.
+                        if session
+                            .thread_states
+                            .values()
+                            .any(|s| *s == ThreadState::Paused)
+                        {
+                            // Stay paused.
+                        } else {
+                            session.info.status = DebugSessionStatus::Running;
+                        }
+                    }
+                    None
+                }
+                "thread" => {
+                    // Handle thread events to update/remove cached threads.
+                    if let Some(body) = event.body.as_ref() {
+                        if let Some(reason) = body.get("reason").and_then(Value::as_str) {
+                            match reason {
+                                "started" => {
+                                    if let Some(thread) = parse_thread_info(body) {
+                                        session.threads.insert(thread.id, thread);
+                                    }
+                                }
+                                "exited" => {
+                                    if let Some(thread_id) =
+                                        body.get("threadId").and_then(Value::as_u64)
+                                    {
+                                        session.threads.remove(&thread_id);
+                                        session.thread_states.remove(&thread_id);
+                                        // Invalidate active_thread_id if the
+                                        // active thread exited.
+                                        if session.info.active_thread_id == Some(thread_id) {
+                                            session.info.active_thread_id = None;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     None
                 }
                 "terminated" | "exited" => {
@@ -843,7 +1059,7 @@ impl DebugSessionManager {
             return Ok(());
         }
 
-        tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::time::timeout(TIMEOUT_METADATA, async {
             loop {
                 let message = self.recv_message(session_id).await?;
                 self.apply_message(session_id, message).await?;
@@ -942,7 +1158,7 @@ impl DebugSessionManager {
         session_id: Uuid,
         request_seq: u64,
     ) -> AppResult<()> {
-        tokio::time::timeout(Duration::from_secs(8), async {
+        tokio::time::timeout(TIMEOUT_BREAKPOINTS, async {
             loop {
                 if let Some(response) = self.take_pending_response(session_id, request_seq)? {
                     self.apply_response(session_id, response)?;
@@ -962,9 +1178,9 @@ impl DebugSessionManager {
                     DapMessage::Event(event) => {
                         self.apply_non_initialized_event(session_id, &event)?;
                     }
-                    DapMessage::Request { command } => {
+                    DapMessage::Request(request) => {
                         self.with_session_mut(session_id, |session| {
-                            session.info.last_event = Some(format!("adapter request: {command}"));
+                            session.info.last_event = Some(format!("adapter request: {}", request.command));
                         })?;
                     }
                 }
@@ -986,10 +1202,51 @@ impl DebugSessionManager {
                     session.info.status = DebugSessionStatus::Paused;
                     if let Some(thread_id) = stopped_event_thread_id(event.body.as_ref()) {
                         session.info.active_thread_id = Some(thread_id);
+                        session.thread_states.insert(thread_id, ThreadState::Paused);
                     }
                 }
                 "continued" => {
-                    session.info.status = DebugSessionStatus::Running;
+                    let thread_id = stopped_event_thread_id(event.body.as_ref());
+                    let all_continued = event
+                        .body
+                        .as_ref()
+                        .and_then(|b| b.get("allThreadsContinued"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(true);
+                    if all_continued || thread_id.is_none() {
+                        session.thread_states.clear();
+                        session.info.status = DebugSessionStatus::Running;
+                    } else if let Some(tid) = thread_id {
+                        session.thread_states.insert(tid, ThreadState::Running);
+                        if !session.thread_states.values().any(|s| *s == ThreadState::Paused) {
+                            session.info.status = DebugSessionStatus::Running;
+                        }
+                    }
+                }
+                "thread" => {
+                    if let Some(body) = event.body.as_ref() {
+                        if let Some(reason) = body.get("reason").and_then(Value::as_str) {
+                            match reason {
+                                "started" => {
+                                    if let Some(thread) = parse_thread_info(body) {
+                                        session.threads.insert(thread.id, thread);
+                                    }
+                                }
+                                "exited" => {
+                                    if let Some(thread_id) =
+                                        body.get("threadId").and_then(Value::as_u64)
+                                    {
+                                        session.threads.remove(&thread_id);
+                                        session.thread_states.remove(&thread_id);
+                                        if session.info.active_thread_id == Some(thread_id) {
+                                            session.info.active_thread_id = None;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 }
                 "terminated" | "exited" => {
                     session.info.status = DebugSessionStatus::Stopped;
@@ -1001,18 +1258,24 @@ impl DebugSessionManager {
     }
 
     async fn send_configuration_done(&mut self, session_id: Uuid) -> AppResult<()> {
-        let request = self.with_session_mut(session_id, |session| {
+        let (seq, should_send) = self.with_session_mut(session_id, |session| {
             if session.configuration_done_sent {
-                None
-            } else {
+                (0, false)
+            } else if !session.capabilities.supports_configuration_done_request {
+                // Adapter does not support it — mark as done and skip.
                 session.configuration_done_sent = true;
+                (0, false)
+            } else {
                 let seq = session.next_seq;
                 session.next_seq += 1;
-                Some(configuration_done_request(seq))
+                session.configuration_done_sent = true;
+                session.configuration_done_seq = Some(seq);
+                (seq, true)
             }
         })?;
-        if let Some(request) = request {
-            self.send_request(session_id, request).await?;
+        if should_send {
+            self.send_request(session_id, configuration_done_request(seq))
+                .await?;
         }
         Ok(())
     }
@@ -1666,13 +1929,13 @@ pub fn initialize_request(seq: u64, adapter_id: &str) -> Value {
 }
 
 #[must_use]
-pub fn launch_request(seq: u64, configuration: &DebugConfiguration) -> Value {
-    debug_configuration_request(seq, "launch", configuration)
+pub fn launch_request(seq: u64, configuration: &DebugConfiguration, workspace_root: &Path) -> Value {
+    debug_configuration_request(seq, "launch", configuration, workspace_root)
 }
 
 #[must_use]
-pub fn attach_request(seq: u64, configuration: &DebugConfiguration) -> Value {
-    debug_configuration_request(seq, "attach", configuration)
+pub fn attach_request(seq: u64, configuration: &DebugConfiguration, workspace_root: &Path) -> Value {
+    debug_configuration_request(seq, "attach", configuration, workspace_root)
 }
 
 #[must_use]
@@ -2098,10 +2361,15 @@ fn debug_configuration_request(
     seq: u64,
     command: &str,
     configuration: &DebugConfiguration,
+    workspace_root: &Path,
 ) -> Value {
     let mut arguments = serde_json::Map::new();
+    let workspace_folder = workspace_root.to_string_lossy();
     for (key, value) in &configuration.raw {
-        arguments.insert(key.clone(), value.clone());
+        arguments.insert(
+            key.clone(),
+            resolve_launch_variables_value(value, &workspace_folder),
+        );
     }
     arguments.insert(
         "name".to_string(),
@@ -2119,6 +2387,74 @@ fn debug_configuration_request(
         "command": command,
         "arguments": arguments,
     })
+}
+
+/// Recursively resolve VS Code-style launch variables in a JSON value.
+fn resolve_launch_variables_value(value: &Value, workspace_folder: &str) -> Value {
+    match value {
+        Value::String(s) => {
+            Value::String(resolve_launch_variables(s, workspace_folder))
+        }
+        Value::Array(arr) => {
+            Value::Array(
+                arr.iter()
+                    .map(|v| resolve_launch_variables_value(v, workspace_folder))
+                    .collect(),
+            )
+        }
+        Value::Object(obj) => {
+            Value::Object(
+                obj.iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            resolve_launch_variables_value(v, workspace_folder),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        other => other.clone(),
+    }
+}
+
+/// Expand `${workspaceFolder}`, `${env:VAR}`, and `${file}` variables
+/// in a string. Rejects unresolved required variables clearly.
+fn resolve_launch_variables(value: &str, workspace_folder: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        result.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let Some(end) = after.find('}') else {
+            // No closing brace — leave as literal.
+            result.push_str("${");
+            rest = after;
+            continue;
+        };
+        let var_name = &after[..end];
+        match var_name {
+            "workspaceFolder" => result.push_str(workspace_folder),
+            "file" => result.push_str(workspace_folder), // Fallback to workspace_folder.
+            v if v.starts_with("env:") => {
+                let env_var = &v[4..];
+                match env::var(env_var) {
+                    Ok(val) => result.push_str(&val),
+                    Err(_) => {
+                        // Leave unresolved env var as-is to avoid silent failure.
+                        result.push_str(&format!("${{{v}}}"));
+                    }
+                }
+            }
+            _ => {
+                // Unknown variable — leave as literal.
+                result.push_str(&format!("${{{var_name}}}"));
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    result.push_str(rest);
+    result
 }
 
 fn read_launch_configurations(
@@ -2295,9 +2631,11 @@ fn parse_dap_message_value(value: &Value) -> Option<DapMessage> {
             event: value.get("event")?.as_str()?.to_string(),
             body: value.get("body").cloned(),
         })),
-        "request" => Some(DapMessage::Request {
+        "request" => Some(DapMessage::Request(DapRequest {
+            seq: value.get("seq")?.as_u64()?,
             command: value.get("command")?.as_str()?.to_string(),
-        }),
+            arguments: value.get("arguments").cloned(),
+        })),
         _ => None,
     }
 }
@@ -2394,25 +2732,45 @@ fn detect_files(root: &Path) -> AppResult<BTreeSet<String>> {
 
 fn detect_extensions(root: &Path) -> AppResult<BTreeSet<String>> {
     let mut extensions = BTreeSet::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![(root.to_path_buf(), 0_usize)];
+    let mut visited = BTreeSet::new();
+    let mut total_files = 0_usize;
 
-    while let Some(path) = stack.pop() {
+    while let Some((path, depth)) = stack.pop() {
+        if depth >= WALK_MAX_DEPTH || total_files >= WALK_MAX_FILES {
+            continue;
+        }
+        // Symlink protection: canonicalize and deduplicate.
+        let canonical = path.canonicalize().unwrap_or(path.clone());
+        if !visited.insert(canonical) {
+            continue;
+        }
+
         let Ok(children) = std::fs::read_dir(&path) else {
             continue;
         };
 
         for child in children {
+            if total_files >= WALK_MAX_FILES {
+                break;
+            }
             let child = child?;
             let file_name = child.file_name();
             let file_name = file_name.to_string_lossy();
-            if file_name == "node_modules" || file_name == "target" || file_name == ".git" {
+            // Skip ignored directories.
+            if IGNORE_DIRS.contains(&file_name.as_ref()) {
                 continue;
             }
 
             let file_type = child.file_type()?;
+            if file_type.is_symlink() {
+                // Skip symlinks to avoid cycles.
+                continue;
+            }
             if file_type.is_dir() {
-                stack.push(child.path());
+                stack.push((child.path(), depth + 1));
             } else if file_type.is_file() {
+                total_files += 1;
                 if let Some(extension) = child.path().extension().and_then(|value| value.to_str()) {
                     extensions.insert(extension.to_ascii_lowercase());
                 }
@@ -2595,7 +2953,7 @@ mod tests {
         };
 
         let initialize = initialize_request(1, "codelldb");
-        let launch = launch_request(2, &configuration);
+        let launch = launch_request(2, &configuration, Path::new("."));
         let disconnect = disconnect_request(3, true);
         let threads = threads_request(4);
         let stack_trace = stack_trace_request(5, 42, 0, 64);
@@ -3039,11 +3397,15 @@ mod tests {
             next_seq: 1,
             disconnect_sent: false,
             configuration_done_sent: true,
+            capabilities: Capabilities::default(),
+            configuration_done_seq: None,
             breakpoints_by_path: BTreeMap::new(),
             resolved_breakpoints_by_path: BTreeMap::new(),
             pending_breakpoint_requests: BTreeMap::new(),
             pending_responses: BTreeMap::new(),
             threads: BTreeMap::new(),
+            thread_states: BTreeMap::new(),
+            _pre_exec_was_paused: false,
         };
 
         let mut changed = mark_session_if_adapter_exited(&mut session);
@@ -3092,11 +3454,15 @@ mod tests {
                 next_seq: 1,
                 disconnect_sent: false,
                 configuration_done_sent: true,
+                capabilities: Capabilities::default(),
+                configuration_done_seq: None,
                 breakpoints_by_path: BTreeMap::new(),
                 resolved_breakpoints_by_path: BTreeMap::new(),
                 pending_breakpoint_requests: BTreeMap::new(),
                 pending_responses: BTreeMap::new(),
                 threads: BTreeMap::new(),
+                thread_states: BTreeMap::new(),
+                _pre_exec_was_paused: false,
             },
         );
 

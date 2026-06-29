@@ -7,6 +7,110 @@
 
 use serde_json::json;
 
+/// Max result bounds reused across many tools.
+const MAX_RESULTS_DEFAULT: i64 = 500;
+const MAX_RESULTS_SYMBOL: i64 = 300;
+const MAX_RESULTS_SOURCES: i64 = 8;
+const MAX_RESULTS_FINDINGS: i64 = 500;
+/// Max byte limits for reading content.
+const MAX_BYTES_DEFAULT: i64 = 10_485_760;
+const MAX_BYTES_SMALL: i64 = 120_000;
+/// Timeout bound (1..600 seconds).
+const TIMEOUT_MIN: i64 = 1;
+const TIMEOUT_MAX: i64 = 600;
+/// Port range.
+const PORT_MIN: i64 = 1;
+const PORT_MAX: i64 = 65535;
+/// Line/column bounds.
+const LINE_MAX: i64 = 2_000_000;
+const COLUMN_MAX: i64 = 10_000;
+/// Progress bounds.
+const PROGRESS_MIN: i64 = 0;
+const PROGRESS_MAX: i64 = 100;
+/// Expected replacement count.
+const REPLACEMENT_MIN: i64 = 1;
+const REPLACEMENT_MAX: i64 = 1000;
+
+/// Returns a JSON Schema `anyOf` for PresentPlan.steps: a string or object.
+fn steps_item_schema() -> serde_json::Value {
+    json!({
+        "anyOf": [
+            { "type": "string" },
+            {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string" },
+                    "detail": { "type": "string" },
+                    "file": { "type": "string" }
+                },
+                "required": ["title"]
+            }
+        ]
+    })
+}
+
+/// Returns a JSON Schema `anyOf` for PresentPlan.alternatives: a string or decision object.
+fn alternatives_item_schema() -> serde_json::Value {
+    json!({
+        "anyOf": [
+            { "type": "string" },
+            {
+                "type": "object",
+                "properties": {
+                    "option": { "type": "string" },
+                    "tradeoff": { "type": "string" }
+                },
+                "required": ["option", "tradeoff"]
+            }
+        ]
+    })
+}
+
+/// Returns a JSON Schema `anyOf` for AskUser.options: a string or label+description object.
+fn ask_user_options_item_schema() -> serde_json::Value {
+    json!({
+        "anyOf": [
+            { "type": "string" },
+            {
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string" },
+                    "description": { "type": "string" }
+                },
+                "required": ["label"]
+            }
+        ]
+    })
+}
+
+/// Returns a full nested JSON Schema for PatchEngine.operations array items.
+fn patch_operation_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "description": "Operation kind",
+                "enum": [
+                    "create", "write", "rewrite", "replacefile", "replace_file",
+                    "strreplace", "str_replace", "replace", "delete", "remove"
+                ]
+            },
+            "path": { "type": "string", "description": "Target file path" },
+            "text": { "type": "string", "description": "New content (create/rewrite)" },
+            "oldText": { "type": "string", "description": "Text to replace" },
+            "newText": { "type": "string", "description": "Replacement text" },
+            "expectedReplacements": {
+                "type": "integer", "description": "Expected occurrence count",
+                "minimum": REPLACEMENT_MIN, "maximum": REPLACEMENT_MAX
+            },
+            "overwrite": { "type": "boolean", "description": "Allow overwrite existing" }
+        },
+        "required": ["action", "path"],
+        "additionalProperties": false
+    })
+}
+
 /// Produce the full tool-definitions array filtered by mode and settings.
 pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<serde_json::Value> {
     let full_exec = matches!(agent_mode, "agent" | "automatic");
@@ -24,14 +128,14 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     tools.push(tool(
         "RepoMap",
         "Summarize workspace structure.",
-        &[opt("maxFiles", "number", "Max files, default 80.")],
+        &[opt_int("maxFiles", "Max files, default 80.", 1, MAX_RESULTS_DEFAULT)],
     ));
     tools.push(tool(
         "WorkspaceIndex",
         "Indexed snapshot of the workspace.",
         &[
-            opt("maxFiles", "number", "Max per section, default 60."),
-            opt("maxScan", "number", "Max scan."),
+            opt_int("maxFiles", "Max per section, default 60.", 1, MAX_RESULTS_DEFAULT),
+            opt_int("maxScan", "Max scan.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -43,7 +147,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 "boolean",
                 "Include active document text.",
             ),
-            opt("maxOpenDocuments", "number", "Max docs."),
+            opt_int("maxOpenDocuments", "Max docs.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -51,7 +155,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Read project guidance files.",
         &[
             opt("query", "string", "Topic."),
-            opt("maxFiles", "number", "Max files."),
+            opt_int("maxFiles", "Max files.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -59,7 +163,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Local documentation and deps.",
         &[
             opt("query", "string", "Topic."),
-            opt("maxFiles", "number", "Max files."),
+            opt_int("maxFiles", "Max files.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -67,8 +171,8 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Durable project memory.",
         &[
             opt("query", "string", "Topic."),
-            opt("maxFiles", "number", "Max."),
-            opt("maxSignals", "number", "Max."),
+            opt_int("maxFiles", "Max.", 1, MAX_RESULTS_DEFAULT),
+            opt_int("maxSignals", "Max.", 1, MAX_RESULTS_DEFAULT),
             opt("includeRecentChat", "boolean", "Include chat."),
         ],
     ));
@@ -78,7 +182,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             req("query", "string", "What to recall."),
             opt("category", "string", "Restrict to a category (core, episodic, semantic, procedural, or custom)."),
-            opt("limit", "number", "Max results, default 8."),
+            opt_int("limit", "Max results, default 8.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -96,7 +200,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "List available skills — reusable, vetted instruction modules for recurring tasks. Check here before improvising a procedure; an existing skill is more reliable.",
         &[
             opt("query", "string", "Rank skills by relevance to this topic; omit to list all."),
-            opt("limit", "number", "Max skills, default 20."),
+            opt_int("limit", "Max skills, default 20.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -109,11 +213,11 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Ranked context under a char budget.",
         &[
             req("query", "string", "Task."),
-            opt("targetChars", "number", "Budget."),
+            opt_int("targetChars", "Budget.", 1, 1_000_000),
             opt("includeActiveText", "boolean", ""),
             opt("includeOpenDocuments", "boolean", ""),
             opt("includeToolContext", "boolean", ""),
-            opt("maxItems", "number", ""),
+            opt_int("maxItems", "", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -122,7 +226,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             req("query", "string", "Topic."),
             opt("path", "string", "Path filter."),
-            opt("maxResults", "number", "Max."),
+            opt_int("maxResults", "Max.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -155,7 +259,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "List files matching a pattern.",
         &[
             req("pattern", "string", "Pattern."),
-            opt("maxResults", "number", "Max."),
+            opt_int("maxResults", "Max.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -163,7 +267,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Read a text file.",
         &[
             req("path", "string", "File path."),
-            opt("maxBytes", "number", "Max bytes."),
+            opt_int("maxBytes", "Max bytes.", 1, MAX_BYTES_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -171,9 +275,9 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Structured preview of any file type.",
         &[
             req("path", "string", "File path."),
-            opt("maxRows", "number", ""),
-            opt("maxColumns", "number", ""),
-            opt("maxBytes", "number", ""),
+            opt_int("maxRows", "", 1, 100_000),
+            opt_int("maxColumns", "", 1, 1_000),
+            opt_int("maxBytes", "", 1, MAX_BYTES_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -183,7 +287,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             req("query", "string", "Search text."),
             opt("useRegex", "boolean", ""),
             opt("caseSensitive", "boolean", ""),
-            opt("maxResults", "number", ""),
+            opt_int("maxResults", "", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -192,9 +296,9 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             opt("query", "string", "Symbol."),
             opt("path", "string", "File."),
-            opt("line", "number", ""),
-            opt("column", "number", ""),
-            opt("maxResults", "number", ""),
+            opt_int("line", "", 0, LINE_MAX),
+            opt_int("column", "", 0, COLUMN_MAX),
+            opt_int("maxResults", "", 1, MAX_RESULTS_SYMBOL),
         ],
     ));
     tools.push(tool(
@@ -203,13 +307,13 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             opt("path", "string", "Target."),
             opt("query", "string", "Topic."),
-            opt("maxResults", "number", ""),
+            opt_int("maxResults", "", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
         "DiagnosticsContext",
         "IDE diagnostics.",
-        &[opt("maxResults", "number", "")],
+        &[opt_int("maxResults", "", 1, MAX_RESULTS_DEFAULT)],
     ));
     tools.push(tool(
         "ReadLints",
@@ -218,7 +322,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             opt("path", "string", ""),
             opt("severity", "string", ""),
             opt("source", "string", ""),
-            opt("maxResults", "number", ""),
+            opt_int("maxResults", "", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool("GitContext", "Git branch and changed files.", &[]));
@@ -228,7 +332,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             opt("path", "string", "Target."),
             opt("query", "string", "Change."),
-            opt("maxResults", "number", ""),
+            opt_int("maxResults", "", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -236,7 +340,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Quality gate on current diff.",
         &[
             opt("includePatch", "boolean", ""),
-            opt("maxFindings", "number", ""),
+            opt_int("maxFindings", "", 1, MAX_RESULTS_FINDINGS),
         ],
     ));
     tools.push(tool(
@@ -247,7 +351,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             opt("path", "string", ""),
             opt("includeDiff", "boolean", ""),
             opt("returnRedactedText", "boolean", ""),
-            opt("maxFindings", "number", ""),
+            opt_int("maxFindings", "", 1, MAX_RESULTS_FINDINGS),
         ],
     ));
     tools.push(tool(
@@ -255,8 +359,8 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Fetch ONE known URL's content. For an open-ended question across the web, use WebResearch instead.",
         &[
             req("url", "string", "URL."),
-            opt("maxBytes", "number", ""),
-            opt("timeoutSecs", "number", ""),
+            opt_int("maxBytes", "", 1, MAX_BYTES_DEFAULT),
+            opt_int("timeoutSecs", "", TIMEOUT_MIN, TIMEOUT_MAX),
         ],
     ));
     tools.push(tool(
@@ -265,7 +369,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             req("query", "string", "The research question or topic."),
             opt("focus", "string", "web | academic | news | social | video | code (default web)."),
-            opt("maxSources", "number", "How many ranked sources to return, default 6 (max 8)."),
+            opt_int("maxSources", "How many ranked sources to return, default 6 (max 8).", 1, MAX_RESULTS_SOURCES),
         ],
     ));
     tools.push(tool(
@@ -281,7 +385,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             opt("log", "string", "Raw output."),
             opt("includeTestHealth", "boolean", ""),
             opt("includeDiagnostics", "boolean", ""),
-            opt("maxFindings", "number", ""),
+            opt_int("maxFindings", "", 1, MAX_RESULTS_FINDINGS),
         ],
     ));
     tools.push(tool(
@@ -291,7 +395,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             opt("action", "string", "post or read."),
             opt("topic", "string", "Channel."),
             opt("content", "string", "Message."),
-            opt("limit", "number", "Max read."),
+            opt_int("limit", "Max read.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -300,7 +404,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             req("question", "string", "The question to ask."),
             opt("detail", "string", "Optional clarifying context shown under the question."),
-            opt_arr("options", "0–10 suggested answers: strings or { label, description } objects."),
+            opt_arr_items("options", "0–10 suggested answers: strings or { label, description } objects.", ask_user_options_item_schema()),
             opt("multiSelect", "boolean", "Allow selecting more than one option."),
             opt("allowCustom", "boolean", "Offer a free-form answer field (default true)."),
             opt("htmlPreview", "string", "Optional self-contained HTML5 document rendered in a sandboxed preview pane."),
@@ -313,12 +417,12 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             "PresentPlan",
             "Present a structured, reviewable execution plan to the user. Renders an expandable plan card and pins the plan as the session goal + task list. In Plan/Agent mode the user presses Start to hand it to Agent execution (do not edit before that). In Automatic mode execution auto-starts. Scale the plan to the task's complexity and risk — it is NOT a flat list of phases. A strong plan covers five reasoning phases (a deterministic quality gate scores them and coaches whatever is missing): (1) DECOMPOSE into concrete file-level `steps` (each = a specific action on a named file/module with its acceptance check, never vague labels like 'implement business logic'); (2) ALTERNATIVES — in `alternatives`, name the key decision(s): the approach you chose and why it wins over the option you rejected (the tradeoff); (3) CRITIQUE — in `risks`, the failure modes and hidden assumptions of the riskiest step (what breaks, under what input/timing); (4) SYNTHESIS — the chosen path's rationale in `summary`; (5) VERIFY — in `verification`, the tests/build/checks that prove it works, plus a rollback/recovery trigger for risky changes. Riskier work (auth, payments, migrations, concurrency, data-loss, public APIs) earns more steps, an explicit decision, named risks, and verification; trivial work stays terse (steps alone are fine). Prefer this over a plain prose checklist for multi-step work.",
             &[
-                req_arr("steps", "Ordered steps: strings or { title, detail, file } objects."),
+                req_arr_items("steps", "Ordered steps: strings or { title, detail, file } objects.", steps_item_schema()),
                 opt("title", "string", "Short plan title."),
                 opt("summary", "string", "One-paragraph summary of the goal/approach + why this path (synthesis)."),
-                opt_arr("alternatives", "Key decisions: strings or { option, tradeoff } objects — the approach chosen and why it beats the rejected one."),
-                opt_arr("risks", "Failure modes / hidden assumptions of the riskiest steps (strings)."),
-                opt_arr("verification", "Checks that prove it works + rollback trigger (strings)."),
+                opt_arr_items("alternatives", "Key decisions: strings or { option, tradeoff } objects — the approach chosen and why it beats the rejected one.", alternatives_item_schema()),
+                opt_str_arr("risks", "Failure modes / hidden assumptions of the riskiest steps (strings)."),
+                opt_str_arr("verification", "Checks that prove it works + rollback trigger (strings)."),
             ],
         ));
     }
@@ -342,7 +446,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 req("path", "string", ""),
                 req("oldText", "string", ""),
                 req("newText", "string", ""),
-                opt("expectedReplacements", "number", ""),
+                opt_int("expectedReplacements", "", REPLACEMENT_MIN, REPLACEMENT_MAX),
                 opt("saveToDisk", "boolean", ""),
             ],
         ));
@@ -350,7 +454,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             "PatchEngine",
             "Multi-file patch.",
             &[
-                req_arr("operations", "Patch ops."),
+                req_arr_items("operations", "Patch ops.", patch_operation_schema()),
                 opt("saveToDisk", "boolean", ""),
                 opt("dryRun", "boolean", ""),
             ],
@@ -367,7 +471,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 req("action", "string", "create/list/diff/delete/restore."),
                 opt("id", "string", "Checkpoint id (for diff/delete/restore)."),
                 opt("label", "string", "Human label for a created checkpoint."),
-                opt_arr("paths", "Array of workspace file paths to snapshot on create. Omit to snapshot all open editor files."),
+                opt_str_arr("paths", "Array of workspace file paths to snapshot on create. Omit to snapshot all open editor files."),
                 opt("saveToDisk", "boolean", ""),
                 opt("dryRun", "boolean", ""),
             ],
@@ -378,7 +482,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             &[
                 req("command", "string", "Command."),
                 opt("cwd", "string", ""),
-                opt("timeoutSecs", "number", ""),
+                opt_int("timeoutSecs", "", TIMEOUT_MIN, TIMEOUT_MAX),
             ],
         ));
         tools.push(tool(
@@ -386,7 +490,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             "Terminal sessions and output.",
             &[
                 opt("sessionId", "string", ""),
-                opt("maxChars", "number", ""),
+                opt_int("maxChars", "", 1, 100_000),
             ],
         ));
         tools.push(tool(
@@ -403,7 +507,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             &[
                 req("host", "string", "ssh_config alias, hostname/IP, or user@host."),
                 opt("user", "string", "Login user (overrides host/config)."),
-                opt("port", "number", "Port (default 22 or per ssh_config)."),
+                opt_int("port", "Port (default 22 or per ssh_config).", PORT_MIN, PORT_MAX),
                 opt("identityFile", "string", "Path to a private key to use exclusively."),
                 opt("label", "string", "Friendly label for the session."),
             ],
@@ -415,7 +519,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 req("session", "string", "sessionId from SshConnect."),
                 req("command", "string", "Remote command to run."),
                 opt("cwd", "string", "Remote working directory (sticky for the session)."),
-                opt("timeoutSecs", "number", "Timeout in seconds, default 120, max 600."),
+                opt_int("timeoutSecs", "Timeout in seconds, default 120, max 600.", TIMEOUT_MIN, TIMEOUT_MAX),
             ],
         ));
         tools.push(tool(
@@ -442,7 +546,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             "Pin session goal and progress.",
             &[
                 opt("goal", "string", ""),
-                opt("progress", "number", ""),
+                opt_int("progress", "", PROGRESS_MIN, PROGRESS_MAX),
                 opt("status", "string", ""),
                 opt("summary", "string", ""),
             ],
@@ -450,7 +554,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         tools.push(tool(
             "TodoWrite",
             "Replace session task list.",
-            &[req_arr("todos", "Task list.")],
+            &[req_str_arr("todos", "Task list.")],
         ));
         tools.push(tool(
             "Task",
@@ -473,7 +577,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 opt("id", "string", "Server id (lowercase letters/digits/-/_, no '__'). Required for all actions except 'list'."),
                 opt("name", "string", "Human-readable name (add)."),
                 opt("command", "string", "Executable to spawn for the stdio transport, e.g. 'npx' (add)."),
-                opt_arr("args", "Command arguments, e.g. ['-y','@modelcontextprotocol/server-filesystem','.'] (add)."),
+                opt_str_arr("args", "Command arguments, e.g. ['-y','@modelcontextprotocol/server-filesystem','.'] (add)."),
                 opt("env", "object", "Environment variables for the server process as a JSON object (add)."),
                 opt("enabled", "boolean", "Enable flag for enable/disable, or initial state for add (default true)."),
             ],
@@ -492,7 +596,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 &[
                     opt("interactive", "boolean", ""),
                     opt("compact", "boolean", ""),
-                    opt("depth", "number", ""),
+                    opt_int("depth", "", 1, 100),
                     opt("selector", "string", ""),
                     opt("includeUrls", "boolean", ""),
                 ],
@@ -554,7 +658,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 "Dashboard.",
                 &[
                     opt("action", "string", ""),
-                    opt("port", "number", ""),
+                    opt_int("port", "", PORT_MIN, PORT_MAX),
                     opt("openInBrowser", "boolean", ""),
                 ],
             ));
@@ -566,7 +670,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             tools.push(tool(
                 "BrowserInvoke",
                 "Raw CLI.",
-                &[req_arr("args", "CLI args.")],
+                &[req_str_arr("args", "CLI args.")],
             ));
         }
     }
@@ -581,7 +685,12 @@ struct Param {
     kind: &'static str,
     desc: &'static str,
     required: bool,
-    is_array: bool,
+    /// Item schema for array parameters (replaces the old boolean `is_array`).
+    items: Option<serde_json::Value>,
+    /// Minimum value constraint for integer parameters.
+    min_val: Option<i64>,
+    /// Maximum value constraint for integer parameters.
+    max_val: Option<i64>,
 }
 
 const fn req(name: &'static str, kind: &'static str, desc: &'static str) -> Param {
@@ -590,7 +699,9 @@ const fn req(name: &'static str, kind: &'static str, desc: &'static str) -> Para
         kind,
         desc,
         required: true,
-        is_array: false,
+        items: None,
+        min_val: None,
+        max_val: None,
     }
 }
 const fn opt(name: &'static str, kind: &'static str, desc: &'static str) -> Param {
@@ -599,25 +710,77 @@ const fn opt(name: &'static str, kind: &'static str, desc: &'static str) -> Para
         kind,
         desc,
         required: false,
-        is_array: false,
+        items: None,
+        min_val: None,
+        max_val: None,
     }
 }
-const fn req_arr(name: &'static str, desc: &'static str) -> Param {
+
+fn req_int(name: &'static str, desc: &'static str, min: i64, max: i64) -> Param {
+    Param {
+        name,
+        kind: "integer",
+        desc,
+        required: true,
+        items: None,
+        min_val: Some(min),
+        max_val: Some(max),
+    }
+}
+fn opt_int(name: &'static str, desc: &'static str, min: i64, max: i64) -> Param {
+    Param {
+        name,
+        kind: "integer",
+        desc,
+        required: false,
+        items: None,
+        min_val: Some(min),
+        max_val: Some(max),
+    }
+}
+
+fn req_str_arr(name: &'static str, desc: &'static str) -> Param {
     Param {
         name,
         kind: "array",
         desc,
         required: true,
-        is_array: true,
+        items: Some(json!({ "type": "string" })),
+        min_val: None,
+        max_val: None,
     }
 }
-const fn opt_arr(name: &'static str, desc: &'static str) -> Param {
+fn opt_str_arr(name: &'static str, desc: &'static str) -> Param {
     Param {
         name,
         kind: "array",
         desc,
         required: false,
-        is_array: true,
+        items: Some(json!({ "type": "string" })),
+        min_val: None,
+        max_val: None,
+    }
+}
+fn req_arr_items(name: &'static str, desc: &'static str, items: serde_json::Value) -> Param {
+    Param {
+        name,
+        kind: "array",
+        desc,
+        required: true,
+        items: Some(items),
+        min_val: None,
+        max_val: None,
+    }
+}
+fn opt_arr_items(name: &'static str, desc: &'static str, items: serde_json::Value) -> Param {
+    Param {
+        name,
+        kind: "array",
+        desc,
+        required: false,
+        items: Some(items),
+        min_val: None,
+        max_val: None,
     }
 }
 
@@ -625,11 +788,17 @@ fn tool(name: &str, description: &str, params: &[Param]) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
     for p in params {
-        let schema = if p.is_array {
-            json!({ "type": "array", "description": p.desc, "items": { "type": "object" } })
+        let mut schema = if let Some(ref items) = p.items {
+            json!({ "type": "array", "description": p.desc, "items": items })
         } else {
             json!({ "type": p.kind, "description": p.desc })
         };
+        if let (Some(min), Some(max)) = (p.min_val, p.max_val) {
+            if let Some(obj) = schema.as_object_mut() {
+                obj.insert("minimum".to_string(), json!(min));
+                obj.insert("maximum".to_string(), json!(max));
+            }
+        }
         properties.insert(p.name.to_string(), schema);
         if p.required {
             required.push(json!(p.name));
@@ -697,5 +866,58 @@ mod tests {
             .collect();
         assert!(names.contains(&"BrowserOpen".to_string()));
         assert!(names.contains(&"BrowserSnapshot".to_string()));
+    }
+
+    #[test]
+    fn integer_params_have_bounds() {
+        let defs = runtime_tool_definitions("agent", true);
+        for tool_val in &defs {
+            let Some(func) = tool_val.get("function") else { continue };
+            let Some(name) = func.get("name").and_then(|v| v.as_str()) else { continue };
+            let Some(params) = func.pointer("/parameters/properties") else { continue };
+            let Some(obj) = params.as_object() else { continue };
+            for (prop_name, schema) in obj {
+                let Some(ty) = schema.get("type").and_then(|v| v.as_str()) else { continue };
+                if ty == "integer" {
+                    let has_min = schema.get("minimum").is_some();
+                    let has_max = schema.get("maximum").is_some();
+                    assert!(
+                        has_min && has_max,
+                        "integer param {name}/{prop_name} missing minimum/maximum"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn string_arrays_have_string_items() {
+        let defs = runtime_tool_definitions("agent", true);
+        for tool_val in &defs {
+            let Some(func) = tool_val.get("function") else { continue };
+            let Some(params) = func.pointer("/parameters/properties") else { continue };
+            let Some(obj) = params.as_object() else { continue };
+            for (prop_name, schema) in obj {
+                let Some(ty) = schema.get("type").and_then(|v| v.as_str()) else { continue };
+                if ty != "array" { continue; }
+                let Some(items) = schema.get("items") else {
+                    panic!("array param without items: {prop_name}");
+                };
+                let items_obj = items.as_object().unwrap_or_else(||
+                    panic!("array param {prop_name} has non-object items"));
+                // If it's an anyOf, that's a union item schema – skip items.type check.
+                if items_obj.contains_key("anyOf") { continue; }
+                let item_type = items.get("type").and_then(|v| v.as_str())
+                    .unwrap_or("<missing>");
+                let item_type_msg = format!("{prop_name} items.type = {item_type:?}");
+                // Properties-only arrays (like PatchEngine.operations) have object items.
+                // String-only arrays have string items.
+                // Both are valid — just assert there's something reasonable.
+                assert!(
+                    item_type == "string" || item_type == "object",
+                    "array param {prop_name} has unexpected items.type: {item_type}"
+                );
+            }
+        }
     }
 }

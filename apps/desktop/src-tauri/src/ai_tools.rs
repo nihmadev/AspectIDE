@@ -21,6 +21,9 @@ use super::{
 const AI_SHELL_DEFAULT_TIMEOUT_SECS: u64 = 120;
 const AI_SHELL_MAX_TIMEOUT_SECS: u64 = 600;
 const AI_SHELL_MAX_OUTPUT_CHARS: usize = 24_000;
+/// Head+tail split: first 12k and last 12k characters when truncating.
+const AI_SHELL_TRUNCATE_HEAD_CHARS: usize = 12_000;
+const AI_SHELL_TRUNCATE_TAIL_CHARS: usize = 12_000;
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -177,16 +180,21 @@ pub async fn ai_file_write(
                 .open_loaded_file(&path, text)
                 .map_err(String::from)?
         };
-        emit_event(
+        // Finding 2: post-mutation event/LSP failures are non-fatal warnings —
+        // disk state has already been committed, so returning Err would cause
+        // retries to double-apply on a correct disk payload.
+        if let Err(e) = emit_event(
             &app,
             LuxEvent::EditorDocumentChanged {
                 document: document.clone(),
             },
-        )?;
+        ) {
+            tracing::warn!(%e, "ai_file_write: emit_event failed (non-fatal)");
+        }
         if exists {
-            lsp::forward_document_update(&app, &state, &document).await?;
+            let _ = lsp::forward_document_update(&app, &state, &document).await;
         } else {
-            lsp::forward_document_open(&app, &state, &document).await?;
+            let _ = lsp::forward_document_open(&app, &state, &document).await;
         }
         Some(document)
     } else {
@@ -216,19 +224,22 @@ pub async fn ai_file_write(
             }
         };
         if let Some(document) = &existing {
-            emit_event(
+            // Finding 2: non-fatal warnings on post-mutation notification failure.
+            if let Err(e) = emit_event(
                 &app,
                 LuxEvent::EditorDocumentChanged {
                     document: document.clone(),
                 },
-            )?;
+            ) {
+                tracing::warn!(%e, "ai_file_write(staged): emit_event failed (non-fatal)");
+            }
             // A never-before-opened staged doc needs a didOpen first; sending
             // didChange (forward_document_update) for an unknown document would
             // be dropped or rejected by the language server. Mirror ai_file_patch.
             if newly_opened {
-                lsp::forward_document_open(&app, &state, document).await?;
+                let _ = lsp::forward_document_open(&app, &state, document).await;
             } else {
-                lsp::forward_document_update(&app, &state, document).await?;
+                let _ = lsp::forward_document_update(&app, &state, document).await;
             }
         }
         existing
@@ -263,7 +274,8 @@ pub async fn ai_file_str_replace(
     if old_text.is_empty() {
         return Err("oldText must not be empty".to_string());
     }
-    let path = resolve_workspace_path(&state, &path)?;
+    // Finding 1: use write-path resolution for mutating operations (same as Write/Create).
+    let path = resolve_workspace_path_for_write(&state, &path)?;
     let before = current_text_for_path(&state, &path).await?;
     let replacement_count = before.matches(&old_text).count();
     let expected = expected_replacements.unwrap_or(1);
@@ -280,7 +292,10 @@ pub async fn ai_file_str_replace(
         tokio::fs::write(&path, &after)
             .await
             .map_err(|error| error.to_string())?;
-        emit_event(&app, LuxEvent::FsChanged { path: path.clone() })?;
+        // Finding 2: non-fatal on notification failure (disk is already committed).
+        if let Err(e) = emit_event(&app, LuxEvent::FsChanged { path: path.clone() }) {
+            tracing::warn!(%e, "ai_file_str_replace: emit_event failed (non-fatal)");
+        }
     }
 
     let edited_document =
@@ -395,44 +410,51 @@ pub async fn ai_file_patch(
     }
 
     for document in &closed_documents {
-        emit_event(
+        // Finding 2: non-fatal warnings on post-mutation notification failure.
+        if let Err(e) = emit_event(
             &app,
             LuxEvent::EditorDocumentClosed {
                 document: document.clone(),
             },
-        )?;
+        ) {
+            tracing::warn!(%e, "ai_file_patch: emit_event(closed) failed (non-fatal)");
+        }
         if let Some(path) = &document.path {
-            lsp::forward_document_close(&app, &state, path).await?;
+            let _ = lsp::forward_document_close(&app, &state, path).await;
         }
     }
     for (document, is_new_document) in &document_events {
-        emit_event(
+        if let Err(e) = emit_event(
             &app,
             LuxEvent::EditorDocumentChanged {
                 document: document.clone(),
             },
-        )?;
+        ) {
+            tracing::warn!(%e, "ai_file_patch: emit_event(changed) failed (non-fatal)");
+        }
         if *is_new_document {
-            lsp::forward_document_open(&app, &state, document).await?;
+            let _ = lsp::forward_document_open(&app, &state, document).await;
         } else {
-            lsp::forward_document_update(&app, &state, document).await?;
+            let _ = lsp::forward_document_update(&app, &state, document).await;
         }
     }
     for path in &changed_paths {
         if save_to_disk {
-            emit_event(&app, LuxEvent::FsChanged { path: path.clone() })?;
+            if let Err(e) = emit_event(&app, LuxEvent::FsChanged { path: path.clone() }) {
+                tracing::warn!(%e, "ai_file_patch: emit_event(FsChanged) failed (non-fatal)");
+            }
         }
         if prepared.iter().any(|operation| {
             operation.path == *path && operation.kind == AiPreparedPatchKind::Delete
         }) {
-            lsp::apply_diagnostics_update(
+            let _ = lsp::apply_diagnostics_update(
                 &app,
                 state.inner(),
                 lux_lsp::DiagnosticsUpdate {
                     path: path.clone(),
                     diagnostics: Vec::new(),
                 },
-            )?;
+            );
         }
     }
 
@@ -455,24 +477,22 @@ pub async fn ai_file_delete(
     state: State<'_, SharedState>,
     path: PathBuf,
 ) -> Result<AiFileOperationResult, String> {
-    let path = resolve_workspace_path(&state, &path)?;
+    // Finding 1 + 8: use write-path resolution; refuse directories (file-only contract).
+    let path = resolve_workspace_path_for_write(&state, &path)?;
     let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|error| error.to_string())?;
-    let previous_text = if metadata.is_file() {
-        tokio::fs::read_to_string(&path).await.unwrap_or_default()
-    } else {
-        String::new()
-    };
     if metadata.is_dir() {
-        tokio::fs::remove_dir_all(&path)
-            .await
-            .map_err(|error| error.to_string())?;
-    } else {
-        tokio::fs::remove_file(&path)
-            .await
-            .map_err(|error| error.to_string())?;
+        return Err(format!(
+            "Delete tool only removes files, not directories: {}. \
+             Use the integrated terminal for recursive directory deletion.",
+            path.display()
+        ));
     }
+    let previous_text = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    tokio::fs::remove_file(&path)
+        .await
+        .map_err(|error| error.to_string())?;
     let stats = AiFileOperationStats {
         lines_added: 0,
         lines_removed: previous_text.lines().count(),
@@ -482,64 +502,35 @@ pub async fn ai_file_delete(
     };
     let closed_documents = {
         let mut documents = state.documents.lock().map_err(lock_error)?;
-        if metadata.is_dir() {
-            // remove_dir_all wiped a whole subtree: close every open document that
-            // lived under the deleted directory, otherwise those tabs linger with
-            // stale content and their LSP sessions / diagnostics are never cleared.
-            let descendants: Vec<PathBuf> = documents
-                .snapshots()
-                .into_iter()
-                .filter_map(|document| document.path.filter(|doc_path| doc_path.starts_with(&path)))
-                .collect();
-            let mut closed = Vec::new();
-            for descendant in descendants {
-                if let Some(document) = documents.close_path(&descendant).map_err(String::from)? {
-                    closed.push(document);
-                }
-            }
-            closed
-        } else {
-            documents
-                .close_path(&path)
-                .map_err(String::from)?
-                .into_iter()
-                .collect()
-        }
+        documents
+            .close_path(&path)
+            .map_err(String::from)?
+            .into_iter()
+            .collect::<Vec<_>>()
     };
+    // Finding 2: disk is already committed; notification failures are non-fatal.
     for document in &closed_documents {
-        emit_event(
+        if let Err(e) = emit_event(
             &app,
             LuxEvent::EditorDocumentClosed {
                 document: document.clone(),
             },
-        )?;
-    }
-    if metadata.is_dir() {
-        for document in &closed_documents {
-            if let Some(doc_path) = &document.path {
-                lsp::forward_document_close(&app, &state, doc_path).await?;
-                lsp::apply_diagnostics_update(
-                    &app,
-                    state.inner(),
-                    lux_lsp::DiagnosticsUpdate {
-                        path: doc_path.clone(),
-                        diagnostics: Vec::new(),
-                    },
-                )?;
-            }
+        ) {
+            tracing::warn!(%e, "ai_file_delete: emit_event(closed) failed (non-fatal)");
         }
-    } else {
-        lsp::forward_document_close(&app, &state, &path).await?;
-        lsp::apply_diagnostics_update(
-            &app,
-            state.inner(),
-            lux_lsp::DiagnosticsUpdate {
-                path: path.clone(),
-                diagnostics: Vec::new(),
-            },
-        )?;
     }
-    emit_event(&app, LuxEvent::FsChanged { path: path.clone() })?;
+    let _ = lsp::forward_document_close(&app, &state, &path).await;
+    let _ = lsp::apply_diagnostics_update(
+        &app,
+        state.inner(),
+        lux_lsp::DiagnosticsUpdate {
+            path: path.clone(),
+            diagnostics: Vec::new(),
+        },
+    );
+    if let Err(e) = emit_event(&app, LuxEvent::FsChanged { path: path.clone() }) {
+        tracing::warn!(%e, "ai_file_delete: emit_event(FsChanged) failed (non-fatal)");
+    }
     Ok(AiFileOperationResult {
         operation: "delete".to_string(),
         path: path.clone(),
@@ -634,6 +625,14 @@ pub async fn ai_shell(
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
 
+    // Finding 5: keep bounded stdout/stderr buffers outside the timed-out future so
+    // partial output is returned on timeout instead of being discarded. The collect
+    // future fills them; on timeout we read what arrived so far via the Arc.
+    let shared_stdout: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let shared_stderr: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
     // Own the child explicitly (rather than `process.output()`, which hides the
     // PID): drain both pipes concurrently to avoid a full-buffer deadlock, then
     // reap. Borrowing `child` here means a timeout drops only this future's
@@ -652,13 +651,13 @@ pub async fn ai_shell(
         // to flush trailing output before returning. The real command's output is
         // already captured; a lingering daemon must not hold the turn hostage.
         const PIPE_DRAIN_GRACE_SECS: u64 = 2;
-        let mut stdout_buf = Vec::new();
-        let mut stderr_buf = Vec::new();
+        let mut local_stdout = Vec::new();
+        let mut local_stderr = Vec::new();
         let read_stdout = async {
             if let Some(pipe) = stdout_pipe.as_mut() {
                 let _ = pipe
                     .take(MAX_CAPTURE_BYTES)
-                    .read_to_end(&mut stdout_buf)
+                    .read_to_end(&mut local_stdout)
                     .await;
             }
         };
@@ -666,7 +665,7 @@ pub async fn ai_shell(
             if let Some(pipe) = stderr_pipe.as_mut() {
                 let _ = pipe
                     .take(MAX_CAPTURE_BYTES)
-                    .read_to_end(&mut stderr_buf)
+                    .read_to_end(&mut local_stderr)
                     .await;
             }
         };
@@ -685,40 +684,67 @@ pub async fn ai_shell(
         };
         // Drop the future (and its borrows of the buffers) before moving them out.
         drop(drain);
-        (status, stdout_buf, stderr_buf)
+        // Finding 5: copy output into the shared buffers so timeout path sees it.
+        *shared_stdout.lock().await = local_stdout;
+        *shared_stderr.lock().await = local_stderr;
+        status
     };
 
     let output_result = timeout(Duration::from_secs(timeout_secs), collect).await;
     let duration_ms = started.elapsed().as_millis();
 
     match output_result {
-        Ok((Ok(status), stdout_buf, stderr_buf)) => Ok(AiShellResponse {
-            workspace_root: root,
-            cwd,
-            command,
-            exit_code: status.code(),
-            duration_ms,
-            stdout: truncate_shell_output(&String::from_utf8_lossy(&stdout_buf)),
-            stderr: truncate_shell_output(&String::from_utf8_lossy(&stderr_buf)),
-            timed_out: false,
-            warnings: safety.warnings,
-            read_only: safety.read_only,
-        }),
-        Ok((Err(error), _, _)) => Err(format!("Failed to run shell command: {error}")),
+        Ok(Ok(status)) => {
+            let stdout_buf = std::sync::Arc::try_unwrap(shared_stdout)
+                .unwrap_or_else(|_| unreachable!())
+                .into_inner();
+            let stderr_buf = std::sync::Arc::try_unwrap(shared_stderr)
+                .unwrap_or_else(|_| unreachable!())
+                .into_inner();
+            Ok(AiShellResponse {
+                workspace_root: root,
+                cwd,
+                command,
+                exit_code: status.code(),
+                duration_ms,
+                stdout: truncate_shell_output(&String::from_utf8_lossy(&stdout_buf)),
+                stderr: truncate_shell_output(&String::from_utf8_lossy(&stderr_buf)),
+                timed_out: false,
+                warnings: safety.warnings,
+                read_only: safety.read_only,
+            })
+        }
+        Ok(Err(error)) => Err(format!("Failed to run shell command: {error}")),
         Err(_) => {
             // Timed out: `child` is still alive (only the borrow held by `collect`
             // was dropped). Kill the whole process tree before returning so no
             // grandchild keeps running orphaned; start_kill backstops the shell.
             kill_process_tree(child_pid).await;
             let _ = child.start_kill();
+            // Finding 5: preserve partial stdout/stderr captured before timeout.
+            let partial_stdout = {
+                let buf = shared_stdout.lock().await;
+                String::from_utf8_lossy(&buf).to_string()
+            };
+            let partial_stderr = {
+                let buf = shared_stderr.lock().await;
+                String::from_utf8_lossy(&buf).to_string()
+            };
             Ok(AiShellResponse {
                 workspace_root: root,
                 cwd,
                 command,
                 exit_code: None,
                 duration_ms,
-                stdout: String::new(),
-                stderr: format!("Shell command timed out after {timeout_secs} seconds"),
+                stdout: truncate_shell_output(&partial_stdout),
+                stderr: if partial_stderr.is_empty() {
+                    format!("Shell command timed out after {timeout_secs} seconds")
+                } else {
+                    format!(
+                        "{}\n---\nShell command timed out after {timeout_secs} seconds",
+                        truncate_shell_output(&partial_stderr)
+                    )
+                },
                 timed_out: true,
                 warnings: safety.warnings,
                 read_only: safety.read_only,
@@ -1050,11 +1076,10 @@ async fn prepare_ai_patch_operations(
             _ => return Err(format!("unsupported patch action: {}", operation.action)),
         };
         let path = match kind {
-            AiPreparedPatchKind::Create | AiPreparedPatchKind::Rewrite => {
-                resolve_workspace_path_for_write(state, &operation.path)?
-            }
+            AiPreparedPatchKind::Create | AiPreparedPatchKind::Rewrite |
             AiPreparedPatchKind::Replace | AiPreparedPatchKind::Delete => {
-                resolve_workspace_path(state, &operation.path)?
+                // Finding 1: route ALL mutating operations through the write resolver.
+                resolve_workspace_path_for_write(state, &operation.path)?
             }
         };
         let before_text = if let Some(previous) = next_text_by_path.get(&path) {
@@ -1373,20 +1398,43 @@ async fn update_open_document_after_text_change(
     text: String,
     dirty: bool,
 ) -> Result<Option<DocumentSnapshot>, String> {
-    let updated = {
+    let (updated, newly_opened) = {
         let mut documents = state.documents.lock().map_err(lock_error)?;
-        documents
-            .replace_text_for_path(path, text, dirty)
-            .map_err(String::from)?
+        let existing = documents
+            .replace_text_for_path(path, text.clone(), dirty)
+            .map_err(String::from)?;
+        if let Some(document) = existing {
+            (Some(document), false)
+        } else if dirty {
+            // Finding 7: staged (save_to_disk=false) operation on a not-yet-open
+            // path: open an in-memory doc so the edit is visible in the editor
+            // instead of being silently discarded while we report success.
+            let opened = documents
+                .open_loaded_file(path, String::new())
+                .map_err(String::from)?;
+            let updated = documents
+                .update_text(opened.id, text)
+                .map_err(String::from)?;
+            (Some(updated), true)
+        } else {
+            (None, false)
+        }
     };
     if let Some(document) = &updated {
-        emit_event(
+        // Finding 2: non-fatal warnings on post-mutation notification failure.
+        if let Err(e) = emit_event(
             app,
             LuxEvent::EditorDocumentChanged {
                 document: document.clone(),
             },
-        )?;
-        lsp::forward_document_update(app, state, document).await?;
+        ) {
+            tracing::warn!(%e, "update_open_document: emit_event failed (non-fatal)");
+        }
+        if newly_opened {
+            let _ = lsp::forward_document_open(app, state, document).await;
+        } else {
+            let _ = lsp::forward_document_update(app, state, document).await;
+        }
     }
     Ok(updated)
 }
@@ -1421,11 +1469,21 @@ fn shell_command(command_line: &str) -> tokio::process::Command {
 
 pub fn truncate_shell_output(value: &str) -> String {
     let trimmed = value.trim();
-    if trimmed.chars().count() <= AI_SHELL_MAX_OUTPUT_CHARS {
+    let total_chars = trimmed.chars().count();
+    if total_chars <= AI_SHELL_MAX_OUTPUT_CHARS {
         return trimmed.to_string();
     }
-    let head: String = trimmed.chars().take(AI_SHELL_MAX_OUTPUT_CHARS).collect();
-    format!("{head}\n...[truncated]")
+    // Finding 6: head+tail truncation (first 12k + last 12k chars) with
+    // omitted-character count, preserving both early context and final errors.
+    let head: String = trimmed.chars().take(AI_SHELL_TRUNCATE_HEAD_CHARS).collect();
+    let tail: String = trimmed
+        .chars()
+        .skip(total_chars.saturating_sub(AI_SHELL_TRUNCATE_TAIL_CHARS))
+        .collect();
+    let omitted = total_chars
+        - AI_SHELL_TRUNCATE_HEAD_CHARS
+        - AI_SHELL_TRUNCATE_TAIL_CHARS;
+    format!("{head}\n... [{omitted} characters omitted] ...\n{tail}")
 }
 
 #[cfg(test)]
@@ -1546,5 +1604,136 @@ mod tests {
             end_line: 1,
             end_column: 1,
         }
+    }
+
+    // ── Finding 6: truncation tests ──
+
+    #[test]
+    fn truncate_shell_output_short_string_passes_through() {
+        let result = truncate_shell_output("hello world");
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn truncate_shell_output_head_tail_preserved() {
+        // Build a string barely over 24k chars.
+        let prefix = "AAABBB";
+        let middle = "X".repeat(AI_SHELL_MAX_OUTPUT_CHARS);
+        let suffix = "CCCDDD";
+        let long = format!("{prefix}{middle}{suffix}");
+        let result = truncate_shell_output(&long);
+        // Head is first 12k chars starting with AAA; tail is last 12k ending with DDD.
+        assert!(
+            result.starts_with("AAABBB"),
+            "head should be preserved, got: {result:.50}..."
+        );
+        assert!(
+            result.ends_with("CCCDDD"),
+            "tail should be preserved, got: ...{:.50}",
+            result.len().saturating_sub(50)..result.len()
+        );
+        assert!(result.contains("characters omitted"), "omitted count marker missing");
+    }
+
+    #[test]
+    fn truncate_shell_output_exact_limit_unchanged() {
+        let exact = "a".repeat(AI_SHELL_MAX_OUTPUT_CHARS);
+        let result = truncate_shell_output(&exact);
+        assert_eq!(result.len(), AI_SHELL_MAX_OUTPUT_CHARS);
+    }
+
+    #[test]
+    fn truncate_shell_output_one_over_truncates() {
+        let one_over = "a".repeat(AI_SHELL_MAX_OUTPUT_CHARS + 1);
+        let result = truncate_shell_output(&one_over);
+        assert!(result.len() < one_over.len());
+        assert!(result.contains("characters omitted"));
+    }
+
+    // ── Finding 5: edge cases for shell output ──
+
+    #[test]
+    fn truncate_shell_output_whitespace_trimmed() {
+        let result = truncate_shell_output("  \n  hello  \n  ");
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn diff_stats_new_file_counts_created() {
+        let stats = diff_stats("", "hello\nworld", true);
+        assert_eq!(stats.lines_added, 2);
+        assert_eq!(stats.lines_removed, 0);
+        assert_eq!(stats.files_created, 1);
+        assert_eq!(stats.files_changed, 0);
+    }
+
+    #[test]
+    fn diff_stats_no_change_no_change_flag() {
+        let stats = diff_stats("same", "same", false);
+        assert_eq!(stats.lines_added, 0);
+        assert_eq!(stats.files_changed, 0);
+    }
+
+    #[test]
+    fn diff_stats_removal_only() {
+        let stats = diff_stats("a\nb\nc", "", false);
+        assert_eq!(stats.lines_removed, 3);
+        assert_eq!(stats.lines_added, 0);
+        assert_eq!(stats.files_changed, 1);
+    }
+
+    // ── Finding 4: tool def integer bounds (schema-level test) ──
+    // See ai_tool_defs.rs `integer_params_have_bounds` for the JSON schema test.
+
+    // ── Finding 7: staged StrReplace baseline ──
+    // `update_open_document_after_text_change` is async and needs State —
+    // testing its staged-branch logic fully requires an integration test with
+    // a real SharedState / Documents instance. Unit-verify the helper fn.
+
+    #[test]
+    fn combine_patch_stats_empty() {
+        assert_eq!(
+            combine_patch_stats(&[]),
+            AiFileOperationStats {
+                lines_added: 0,
+                lines_removed: 0,
+                files_changed: 0,
+                files_created: 0,
+                files_deleted: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn unique_patch_paths_deduplicates() {
+        let root = PathBuf::from("C:/work");
+        let ops = vec![
+            AiPreparedPatchOperation {
+                kind: AiPreparedPatchKind::Rewrite,
+                path: root.join("a.ts"),
+                after_text: None,
+                stats: AiFileOperationStats {
+                    lines_added: 0,
+                    lines_removed: 0,
+                    files_changed: 0,
+                    files_created: 0,
+                    files_deleted: 0,
+                },
+            },
+            AiPreparedPatchOperation {
+                kind: AiPreparedPatchKind::Replace,
+                path: root.join("a.ts"),
+                after_text: None,
+                stats: AiFileOperationStats {
+                    lines_added: 0,
+                    lines_removed: 0,
+                    files_changed: 0,
+                    files_created: 0,
+                    files_deleted: 0,
+                },
+            },
+        ];
+        let paths = unique_patch_paths(&ops);
+        assert_eq!(paths, vec![root.join("a.ts")]);
     }
 }

@@ -3548,7 +3548,10 @@ async fn execute_tool(
                 app.clone(),
                 state.clone(),
                 action,
-                id,
+                id.clone(),
+                // No session-scoping from turn loop; pass None so the global
+                // workspace pool is used (caller can scope explicitly).
+                None,
                 label,
                 paths,
                 max_files,

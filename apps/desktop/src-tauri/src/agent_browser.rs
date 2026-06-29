@@ -3,28 +3,49 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::{
+    net::IpAddr,
     path::{Path, PathBuf},
     process::Stdio,
-    sync::Mutex,
     time::{Duration, Instant},
 };
 
-static NPM_LATEST_CACHE: Mutex<Option<(String, Instant)>> = Mutex::new(None);
-static LAST_AUTO_UPGRADE: Mutex<Option<Instant>> = Mutex::new(None);
-static STATUS_PROBE_IN_FLIGHT: Mutex<bool> = Mutex::new(false);
-
-const NPM_CACHE_TTL: Duration = Duration::from_hours(1);
-const AUTO_UPGRADE_COOLDOWN: Duration = Duration::from_mins(30);
-const NPM_LATEST_URL: &str = "https://registry.npmjs.org/agent-browser/latest";
-
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 /// Windows `CREATE_NO_WINDOW` — prevents a console window from flashing when the
-/// agent-browser CLI (and its npm/install steps) are spawned from the GUI app.
+/// agent-browser CLI is spawned from the GUI app.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Check if IP is loopback, private, or unspecified (stable equivalent of
+/// the nightly-only `IpAddr::is_private()` / `is_unspecified()`).
+fn is_private_or_loopback_ip(ip: &IpAddr) -> bool {
+    if ip.is_loopback() {
+        return true;
+    }
+    if ip.is_unspecified() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            // RFC 1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+            // Carrier-grade NAT: 100.64.0.0/10
+            // Link-local: 169.254.0.0/16
+            let octets = v4.octets();
+            octets[0] == 10
+                || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+                || (octets[0] == 192 && octets[1] == 168)
+                || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+                || (octets[0] == 169 && octets[1] == 254)
+        }
+        IpAddr::V6(v6) => {
+            // Unique local: fc00::/7
+            v6.octets()[0] & 0xfe == 0xfc
+        }
+    }
+}
 
 /// Spawns the agent-browser CLI without a visible console window on Windows.
 /// Centralizes the `creation_flags` call so no spawn site can forget it.
@@ -43,14 +64,29 @@ const DEFAULT_MAX_OUTPUT: usize = 50_000;
 const MAX_OUTPUT_CAP: usize = 120_000;
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const INSTALL_TIMEOUT_SECS: u64 = 600;
+const READ_VERSION_TIMEOUT_SECS: u64 = 15;
+
+// ── Binary source provenance ──
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BinarySource {
+    Bundled,
+    EnvVar,
+    Path,
+}
+
+// ── Request/Response DTOs ──
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBrowserStatusRequest {
+    /// Per-request command_path override. IGNORED by the Rust side -- binary
+    /// resolution uses trusted sources only (bundled > env var > PATH).
+    /// Kept for backward compat; frontend should remove from status requests.
     pub command_path: Option<String>,
-    /// When true, skip npm latest check and auto-upgrade (faster status-only probe).
+    /// Deprecated -- no longer used. Status is always read-only.
     pub skip_auto_update: Option<bool>,
-    /// When true, only resolve CLI + version. Skips doctor and session listing (no Chromium).
+    /// When true, only resolve CLI + version. Skips doctor, session listing,
+    /// and npm-latest check (no network, no Chromium).
     pub lightweight: Option<bool>,
 }
 
@@ -66,6 +102,7 @@ pub struct AgentBrowserStatusResponse {
     pub detail: String,
     pub sessions: Vec<String>,
     pub doctor: Option<serde_json::Value>,
+    pub binary_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,6 +114,9 @@ pub struct AgentBrowserInvokeRequest {
     pub allowed_domains: Option<String>,
     pub max_output: Option<usize>,
     pub timeout_secs: Option<u64>,
+    /// Per-request command_path override. IGNORED by the Rust side -- binary
+    /// resolution uses trusted sources only (bundled > env var > PATH).
+    /// Kept for backward compat; frontend should remove from invoke requests.
     pub command_path: Option<String>,
     pub session_name: Option<String>,
     pub profile: Option<String>,
@@ -104,6 +144,7 @@ pub struct AgentBrowserInvokeResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentBrowserInstallRequest {
+    /// Per-request command_path override. IGNORED by the Rust side.
     pub command_path: Option<String>,
     pub with_deps: Option<bool>,
 }
@@ -145,6 +186,7 @@ pub struct AgentBrowserReadImageResponse {
 #[serde(rename_all = "camelCase")]
 pub struct AgentBrowserStreamStatusRequest {
     pub session: String,
+    /// Per-request command_path override. IGNORED by the Rust side.
     pub command_path: Option<String>,
     pub enable: Option<bool>,
     pub port: Option<u16>,
@@ -165,6 +207,7 @@ pub struct AgentBrowserStreamStatusResponse {
 pub struct AgentBrowserDashboardRequest {
     pub action: String,
     pub port: Option<u16>,
+    /// Per-request command_path override. IGNORED by the Rust side.
     pub command_path: Option<String>,
 }
 
@@ -184,6 +227,7 @@ pub struct AgentBrowserDashboardResponse {
 pub struct AgentBrowserSkillsRequest {
     pub name: Option<String>,
     pub all: Option<bool>,
+    /// Per-request command_path override. IGNORED by the Rust side.
     pub command_path: Option<String>,
 }
 
@@ -195,127 +239,125 @@ pub struct AgentBrowserSkillsResponse {
     pub data: serde_json::Value,
 }
 
-/// RAII guard that clears `STATUS_PROBE_IN_FLIGHT` on drop, so the in-flight flag is
-/// released even if `status_inner` panics or its future is cancelled before returning.
-/// A manual reset would be skipped on those paths, wedging every future probe.
-struct StatusProbeGuard;
+// ── Default implementations for request types ──
 
-impl Drop for StatusProbeGuard {
-    fn drop(&mut self) {
-        if let Ok(mut in_flight) = STATUS_PROBE_IN_FLIGHT.lock() {
-            *in_flight = false;
-        }
+impl Default for AgentBrowserStatusRequest {
+    fn default() -> Self {
+        Self { command_path: None, skip_auto_update: None, lightweight: None }
     }
 }
+
+impl Default for AgentBrowserInstallRequest {
+    fn default() -> Self {
+        Self { command_path: None, with_deps: None }
+    }
+}
+
+impl Default for AgentBrowserSkillsRequest {
+    fn default() -> Self {
+        Self { name: None, all: None, command_path: None }
+    }
+}
+
+// ── Binary Resolution ──
+
+/// Resolve the agent-browser binary path from trusted sources only.
+/// Order: bundled > env var > PATH. Rejects per-request overrides.
+fn resolve_binary() -> Result<PathBuf, String> {
+    resolve_binary_with_source().map(|(path, _)| path)
+}
+
+fn resolve_binary_with_source() -> Result<(PathBuf, BinarySource), String> {
+    // 1. Bundled binary (node_modules/.bin/agent-browser) — highest precedence.
+    if let Some(path) = bundled_binary() {
+        return Ok((path, BinarySource::Bundled));
+    }
+
+    // 2. Environment variables — user-configured at the OS/process level.
+    if let Ok(path) =
+        std::env::var("AGENT_BROWSER_PATH").or_else(|_| std::env::var("LUX_AGENT_BROWSER_COMMAND"))
+    {
+        let candidate = PathBuf::from(path.trim());
+        if candidate.exists() {
+            return Ok((candidate, BinarySource::EnvVar));
+        }
+    }
+
+    // 3. PATH resolution.
+    if let Ok(path) = which::which("agent-browser") {
+        return Ok((path, BinarySource::Path));
+    }
+
+    Err(
+        "agent-browser CLI is not installed. Use Settings -> Browser automation -> Install now, \
+         or run `pnpm add agent-browser` in apps/desktop."
+            .to_string(),
+    )
+}
+
+fn bundled_binary() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let desktop_dir = manifest_dir.parent()?;
+    let bin_name = if cfg!(windows) {
+        "agent-browser.cmd"
+    } else {
+        "agent-browser"
+    };
+    let candidate = desktop_dir.join("node_modules").join(".bin").join(bin_name);
+    candidate.exists().then_some(candidate)
+}
+
+fn binary_source_label(source: BinarySource) -> &'static str {
+    match source {
+        BinarySource::Bundled => "bundled",
+        BinarySource::EnvVar => "env",
+        BinarySource::Path => "path",
+    }
+}
+
+// ── Status (read-only) ──
 
 pub async fn status(
     request: AgentBrowserStatusRequest,
 ) -> Result<AgentBrowserStatusResponse, String> {
     let lightweight = request.lightweight == Some(true);
-    let _probe_guard = if lightweight {
-        let Ok(mut in_flight) = STATUS_PROBE_IN_FLIGHT.lock() else {
-            return Err("agent-browser status probe lock poisoned".to_string());
-        };
-        if *in_flight {
-            return Ok(AgentBrowserStatusResponse {
-                available: false,
-                command_path: None,
-                version: None,
-                latest_version: None,
-                update_performed: false,
-                update_detail: Some("Status probe already running.".to_string()),
-                detail: "agent-browser status probe already running".to_string(),
-                sessions: Vec::new(),
-                doctor: None,
-            });
-        }
-        *in_flight = true;
-        drop(in_flight);
-        Some(StatusProbeGuard)
-    } else {
-        None
-    };
-
-    status_inner(request, lightweight).await
+    status_inner(lightweight).await
 }
 
-// Linear status-resolution flow (fetch latest, auto-upgrade, doctor, detail string); splitting it
-// would scatter shared local state across helpers without reducing real complexity.
 #[allow(clippy::too_many_lines)]
 async fn status_inner(
-    request: AgentBrowserStatusRequest,
     lightweight: bool,
 ) -> Result<AgentBrowserStatusResponse, String> {
-    let use_bundled = request
-        .command_path
-        .as_ref()
-        .is_none_or(|value| value.trim().is_empty());
-    let mut update_performed = false;
-    let mut update_detail: Option<String> = None;
-    let mut latest_version: Option<String> = None;
-
-    if use_bundled && request.skip_auto_update != Some(true) {
-        latest_version = fetch_npm_latest_version_cached().await.ok();
-        if let Some(latest) = latest_version.as_ref() {
-            if let Ok(path) = resolve_binary(None) {
-                if let Ok(current_raw) = read_version(&path).await {
-                    let current = normalize_agent_browser_version(&current_raw);
-                    if version_is_older(&current, latest) && try_begin_auto_upgrade() {
-                        match upgrade_bundled_agent_browser().await {
-                            Ok(detail) => {
-                                update_performed = true;
-                                update_detail = Some(detail);
-                            }
-                            Err(error) => {
-                                update_detail = Some(format!("Auto-update failed: {error}"));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    let binary = match resolve_binary(request.command_path.as_deref()) {
-        Ok(path) => path,
-        Err(error) => {
-            return Ok(AgentBrowserStatusResponse {
-                available: false,
-                command_path: None,
-                version: None,
-                latest_version,
-                update_performed,
-                update_detail,
-                detail: error,
-                sessions: Vec::new(),
-                doctor: None,
-            });
-        }
-    };
+    let (binary, source) = resolve_binary_with_source()?;
 
     let version = read_version(&binary)
         .await
         .ok()
         .map(|text| normalize_agent_browser_version(&text));
+
+    // Non-lightweight status is read-only: no npm latest check, no network I/O.
+    // latest_version is always None in read-only mode. A separate background
+    // updater can populate it in future work.
+    let latest_version: Option<String> = None;
+
     let sessions = if lightweight {
         Vec::new()
     } else {
         list_sessions(&binary).await.unwrap_or_default()
     };
-    let doctor = if lightweight {
+
+    // Doctor: in non-lightweight mode, only the doctor data value is carried
+    // into the response (available computed from its success field below).
+    let doctor: Option<serde_json::Value> = if lightweight {
         None
     } else {
-        run_json(
-            &binary,
-            None,
-            &["doctor", "--json", "--offline", "--quick"],
-            45,
-        )
-        .await
-        .ok()
-        .map(|response| response.data)
+        run_json(&binary, None, &["doctor", "--json", "--offline", "--quick"], 45)
+            .await
+            .map(|resp| resp.data)
+            .ok()
     };
 
+    // Fail-closed: non-lightweight requires explicit doctor success for available=true.
     let available = if lightweight {
         version.is_some()
     } else {
@@ -323,36 +365,42 @@ async fn status_inner(
             .as_ref()
             .and_then(|value| value.get("success"))
             .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true)
+            .unwrap_or(false)
     };
 
-    let base_detail = if available {
+    let detail = if available {
         format!(
             "agent-browser is available ({})",
             version
                 .clone()
                 .unwrap_or_else(|| "version unknown".to_string())
         )
-    } else {
-        "agent-browser responded, but doctor reported issues. Run `agent-browser doctor --fix` in a terminal.".to_string()
-    };
-
-    let detail = if update_performed {
-        format!(
-            "agent-browser updated to {} ({})",
-            version.clone().unwrap_or_else(|| "unknown".to_string()),
-            update_detail.clone().unwrap_or_default()
-        )
-    } else if let (Some(current), Some(latest)) = (version.as_ref(), latest_version.as_ref()) {
-        if version_is_older(current, latest) {
-            format!("agent-browser {current} (npm latest {latest}; update pending or failed)")
-        } else if available {
-            format!("agent-browser is up to date ({current})")
+    } else if lightweight {
+        if version.is_some() {
+            format!(
+                "agent-browser {} (lightweight check)",
+                version.as_deref().unwrap_or("version unknown")
+            )
         } else {
-            base_detail
+            "agent-browser resolved but version unknown".to_string()
         }
     } else {
-        base_detail
+        "agent-browser responded, but doctor reported issues. Run `agent-browser doctor --fix` \
+         in a terminal."
+            .to_string()
+    };
+
+    // Determine if an update is available (cached vs installed).
+    let (update_performed, update_detail) = if let (Some(current), Some(latest)) =
+        (version.as_ref(), latest_version.as_ref())
+    {
+        if version_is_older(current, latest) {
+            (false, Some(format!("Update available: {latest} (installed: {current})")))
+        } else {
+            (false, None)
+        }
+    } else {
+        (false, None)
     };
 
     Ok(AgentBrowserStatusResponse {
@@ -365,16 +413,51 @@ async fn status_inner(
         detail,
         sessions,
         doctor,
+        binary_source: Some(binary_source_label(source).to_string()),
     })
 }
+
+// ── Invoke (validated) ──
 
 pub async fn invoke(
     request: AgentBrowserInvokeRequest,
 ) -> Result<AgentBrowserInvokeResponse, String> {
-    let binary = resolve_binary(request.command_path.as_deref())?;
+    let binary = resolve_binary()?;
     let session = sanitize_session(&request.session);
     if request.args.is_empty() {
         return Err("Browser invoke requires at least one command argument.".to_string());
+    }
+
+    // ── Security validations ──
+    // Deny file access and TLS bypass by default.
+    if request.allow_file_access == Some(true) {
+        return Err(
+            "agent-browser --allow-file-access is denied by default for security. \
+             Enable it in your AI preferences if you trust the session domain."
+                .to_string(),
+        );
+    }
+    if request.ignore_https_errors == Some(true) {
+        return Err(
+            "agent-browser --ignore-https-errors is denied by default for security. \
+             Enable it in your AI preferences if you trust the session domain."
+                .to_string(),
+        );
+    }
+
+    // Validate allowed_domains if set.
+    if let Some(ref domains) = request.allowed_domains {
+        validate_domain_list(domains)?;
+    }
+
+    // Validate proxy URL if set.
+    if let Some(ref proxy) = request.proxy {
+        validate_proxy_url(proxy)?;
+    }
+
+    // Validate provider if set (allowlist of known safe providers).
+    if let Some(ref provider) = request.provider {
+        validate_provider(provider)?;
     }
 
     let timeout_secs = request
@@ -398,8 +481,10 @@ pub async fn invoke(
             profile: request.profile.clone(),
             state_path: request.state_path.clone(),
             content_boundaries: request.content_boundaries,
-            ignore_https_errors: request.ignore_https_errors,
-            allow_file_access: request.allow_file_access,
+            // Always deny these — the validate check above already rejected
+            // the request if they were requested. Set to false/Never.
+            ignore_https_errors: None,
+            allow_file_access: None,
             provider: request.provider.clone(),
             proxy: request.proxy.clone(),
         }),
@@ -419,6 +504,135 @@ pub async fn invoke(
         exit_code: response.exit_code,
     })
 }
+
+// ── Domain/Proxy/Provider Validation ──
+
+/// Validate a comma-separated list of domains. Rejects private/loopback IPs
+/// and internal-only hostnames.
+fn validate_domain_list(domains: &str) -> Result<(), String> {
+    for domain in domains.split(',') {
+        let domain = domain.trim();
+        if domain.is_empty() {
+            continue;
+        }
+        // Reject raw IPs in private ranges.
+        if let Ok(ip) = domain.parse::<IpAddr>() {
+            if is_private_or_loopback_ip(&ip) {
+                return Err(format!(
+                    "Domain '{}' is a private/local IP address and is not allowed. \
+                     Use a public domain or approve it in AI preferences.",
+                    domain
+                ));
+            }
+            continue;
+        }
+        // Reject internal-only TLDs.
+        let lower = domain.to_ascii_lowercase();
+        for bad_tld in &[
+            ".local",
+            ".internal",
+            ".localhost",
+            ".localdomain",
+            ".lan",
+            ".intranet",
+        ] {
+            if lower == *bad_tld || lower.ends_with(bad_tld) {
+                return Err(format!(
+                    "Domain '{}' uses an internal-only TLD '{}' and is not allowed. \
+                     Use a public domain.",
+                    domain, bad_tld
+                ));
+            }
+        }
+        // Reject hostnames that are just "localhost" or "local".
+        if lower == "localhost" || lower == "local" || lower.starts_with("localhost.") {
+            return Err(format!(
+                "Domain '{}' resolves to localhost and is not allowed. Use a public domain.",
+                domain
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate a proxy URL (http/https scheme, public hosts only, no private IPs).
+/// Uses basic string parsing to avoid pulling in the `url` crate.
+fn validate_proxy_url(proxy: &str) -> Result<(), String> {
+    let trimmed = proxy.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    // Require http:// or https:// prefix.
+    let lower = trimmed.to_ascii_lowercase();
+    let rest = if let Some(rest) = lower.strip_prefix("https://") {
+        rest
+    } else if let Some(rest) = lower.strip_prefix("http://") {
+        rest
+    } else {
+        return Err(format!(
+            "Invalid proxy URL '{}': scheme must be http or https.",
+            trimmed
+        ));
+    };
+    // Split host:port from the rest.
+    let host_part = rest.split('/').next().unwrap_or(rest);
+    let host = if let Some(idx) = host_part.rfind(':') {
+        // Could be port, or IPv6 address with brackets.
+        let candidate = &host_part[..idx];
+        if candidate.is_empty() {
+            // IPv6 like [::1]:8080 — take the bracketed part.
+            let ipv6_end = host_part.rfind(']');
+            ipv6_end.map(|end| &host_part[1..end]).unwrap_or(host_part)
+        } else {
+            candidate
+        }
+    } else {
+        host_part
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.is_empty() {
+        return Err("Invalid proxy URL: empty host.".to_string());
+    }
+    // Reject private IP hosts.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_private_or_loopback_ip(&ip) {
+            return Err(format!(
+                "Proxy URL host '{host}' is a private/local address and is not allowed."
+            ));
+        }
+    } else {
+        let host_lower = host.to_ascii_lowercase();
+        if host_lower == "localhost" || host_lower.ends_with(".local") || host_lower.ends_with(".internal") {
+            return Err(format!(
+                "Proxy URL host '{host}' is an internal hostname and is not allowed."
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the provider identifier against an allowlist of known safe providers.
+fn validate_provider(provider: &str) -> Result<(), String> {
+    let trimmed = provider.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    // Allowlisted known-safe providers. Unknown providers are rejected.
+    let allowed = [
+        "chrome", "browserless", "browserbase", "kernel", "agentcore", "ios",
+    ];
+    if allowed.contains(&trimmed.as_str()) {
+        return Ok(());
+    }
+    Err(format!(
+        "Provider '{}' is not in the allowlist of known providers. \
+         Allowed: {}",
+        provider,
+        allowed.join(", ")
+    ))
+}
+
+// ── Invoke Options ──
 
 #[derive(Clone)]
 struct InvokeOptions {
@@ -453,6 +667,8 @@ const fn session_invoke_options(session: String, max_output: usize) -> InvokeOpt
     }
 }
 
+// ── CLI Response Parsing ──
+
 struct ParsedCliResponse {
     success: bool,
     data: serde_json::Value,
@@ -467,7 +683,7 @@ struct ParsedCliResponse {
     reason = "cohesive subprocess JSON invocation; splitting would scatter shared state"
 )]
 async fn run_json(
-    binary: &PathBuf,
+    binary: &Path,
     options: Option<InvokeOptions>,
     args: &[&str],
     timeout_secs: u64,
@@ -544,23 +760,42 @@ async fn run_json(
 
     command.args(args);
 
-    let child = command
+    let mut child = command
         .spawn()
         .map_err(|error| format!("Failed to start agent-browser: {error}"))?;
 
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs.saturating_add(5)),
-        child.wait_with_output(),
+    // ── Incremental stdout/stderr reading with parent-side byte cap ──
+    // Read incrementally instead of wait_with_output to bound memory use
+    // from noisy actions before the child finishes.
+    let stdout_pipe = child.stdout.take().ok_or_else(|| "no stdout pipe".to_string())?;
+    let stderr_pipe = child.stderr.take().ok_or_else(|| "no stderr pipe".to_string())?;
+
+    // Allocate a generous but bounded buffer for stdout (max_output + JSON margin).
+    let stdout_budget = max_output.saturating_add(4096);
+    // Stderr is error info — 32 KiB is generous.
+    let stderr_budget: usize = 32_768;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(timeout_secs.saturating_add(5)),
+        async {
+            let stdout_buf = read_pipe_bounded(stdout_pipe, stdout_budget).await;
+            let stderr_buf = read_pipe_bounded(stderr_pipe, stderr_budget).await;
+            let status = child.wait().await;
+            (stdout_buf, stderr_buf, status)
+        },
     )
     .await
-    .map_err(|_| format!("agent-browser timed out after {timeout_secs}s"))?
-    .map_err(|error| format!("agent-browser process failed: {error}"))?;
+    .map_err(|_| format!("agent-browser timed out after {timeout_secs}s"))?;
 
-    let exit_code = output.status.code();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let (stdout_bytes, stderr_bytes, status_result) = result;
+    let exit_code = status_result
+        .map(|status| status.code())
+        .unwrap_or(None);
 
-    if stdout.is_empty() && !stderr.is_empty() && !output.status.success() {
+    let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
+    let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
+
+    if stdout.is_empty() && !stderr.is_empty() && exit_code != Some(0) {
         return Err(stderr);
     }
 
@@ -573,10 +808,10 @@ async fn run_json(
         .as_ref()
         .and_then(|value| value.get("success"))
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or_else(|| output.status.success());
+        .unwrap_or_else(|| exit_code == Some(0));
     let parsed = parsed_json.unwrap_or_else(|| {
         serde_json::json!({
-            "success": output.status.success(),
+            "success": exit_code == Some(0),
             "data": { "stdout": stdout.as_str(), "stderr": stderr.as_str() },
         })
     });
@@ -595,6 +830,32 @@ async fn run_json(
         truncated,
         exit_code,
     })
+}
+
+/// Read a pipe into a Vec<u8>, stopping after `max_bytes` have been collected.
+async fn read_pipe_bounded<R: AsyncReadExt + Unpin>(
+    mut reader: R,
+    max_bytes: usize,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(max_bytes.min(4096));
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = match reader.read(&mut tmp).await {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(_) => break,
+        };
+        let remaining = max_bytes.saturating_sub(buf.len());
+        if remaining == 0 {
+            break;
+        }
+        let to_take = n.min(remaining);
+        buf.extend_from_slice(&tmp[..to_take]);
+        if to_take < n {
+            break; // truncated at cap
+        }
+    }
+    buf
 }
 
 fn extract_text(data: &serde_json::Value, root: &serde_json::Value, stderr: &str) -> String {
@@ -658,12 +919,14 @@ fn truncate_text(text: String, max_chars: usize) -> (String, bool) {
     )
 }
 
-async fn read_version(binary: &PathBuf) -> Result<String, String> {
+// ── Version Helpers ──
+
+async fn read_version(binary: &Path) -> Result<String, String> {
     let mut command = agent_browser_command(binary);
     command.arg("--version");
     command.stdin(Stdio::null());
     command.kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(15), command.output())
+    let output = tokio::time::timeout(Duration::from_secs(READ_VERSION_TIMEOUT_SECS), command.output())
         .await
         .map_err(|_| "agent-browser --version timed out".to_string())?
         .map_err(|error| error.to_string())?;
@@ -675,7 +938,7 @@ async fn read_version(binary: &PathBuf) -> Result<String, String> {
     }
 }
 
-async fn list_sessions(binary: &PathBuf) -> Result<Vec<String>, String> {
+async fn list_sessions(binary: &Path) -> Result<Vec<String>, String> {
     let response = run_json(binary, None, &["session", "list", "--json"], 20).await?;
     let sessions = response
         .data
@@ -699,52 +962,31 @@ async fn list_sessions(binary: &PathBuf) -> Result<Vec<String>, String> {
     Ok(sessions)
 }
 
-fn resolve_binary(override_path: Option<&str>) -> Result<PathBuf, String> {
-    if let Some(path) = override_path.filter(|value| !value.trim().is_empty()) {
-        let candidate = PathBuf::from(path.trim());
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        return Err(format!(
-            "agent-browser not found at configured path: {}",
-            candidate.display()
-        ));
-    }
-
-    if let Ok(path) =
-        std::env::var("AGENT_BROWSER_PATH").or_else(|_| std::env::var("LUX_AGENT_BROWSER_COMMAND"))
-    {
-        let candidate = PathBuf::from(path.trim());
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    if let Ok(path) = which::which("agent-browser") {
-        return Ok(path);
-    }
-
-    if let Some(path) = bundled_binary() {
-        return Ok(path);
-    }
-
-    Err(
-        "agent-browser CLI is not installed. Use Settings → Browser automation → Install now, or run `pnpm add agent-browser` in apps/desktop."
-            .to_string(),
-    )
+fn normalize_agent_browser_version(raw: &str) -> String {
+    raw.trim()
+        .strip_prefix("agent-browser")
+        .unwrap_or(raw)
+        .trim()
+        .to_string()
 }
 
-fn bundled_binary() -> Option<PathBuf> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let desktop_dir = manifest_dir.parent()?;
-    let bin_name = if cfg!(windows) {
-        "agent-browser.cmd"
-    } else {
-        "agent-browser"
-    };
-    let candidate = desktop_dir.join("node_modules").join(".bin").join(bin_name);
-    candidate.exists().then_some(candidate)
+fn parse_version_parts(version: &str) -> Option<(u32, u32, u32)> {
+    let core = version.split('+').next()?.split('-').next()?.trim();
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next().unwrap_or("0").parse().ok()?;
+    let patch = parts.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
 }
+
+fn version_is_older(current: &str, latest: &str) -> bool {
+    match (parse_version_parts(current), parse_version_parts(latest)) {
+        (Some(current_parts), Some(latest_parts)) => current_parts < latest_parts,
+        _ => current != latest,
+    }
+}
+
+// ── Session Sanitization ──
 
 #[must_use]
 pub fn sanitize_session(value: &str) -> String {
@@ -766,118 +1008,46 @@ pub fn sanitize_session(value: &str) -> String {
     }
 }
 
-#[tauri::command]
-pub async fn agent_browser_status(
-    request: Option<AgentBrowserStatusRequest>,
-) -> Result<AgentBrowserStatusResponse, String> {
-    status(request.unwrap_or(AgentBrowserStatusRequest {
-        command_path: None,
-        skip_auto_update: None,
-        lightweight: None,
-    }))
-    .await
-}
-
-#[tauri::command]
-pub async fn agent_browser_invoke(
-    request: AgentBrowserInvokeRequest,
-) -> Result<AgentBrowserInvokeResponse, String> {
-    invoke(request).await
-}
-
-pub async fn install(
-    request: AgentBrowserInstallRequest,
-) -> Result<AgentBrowserInstallResponse, String> {
-    let mut steps = Vec::new();
-    let desktop_dir = desktop_package_dir();
-    let (package_manager, install_args) = resolve_package_manager_latest()?;
-    let local_install = run_install_step_in_dir(
-        "package-install-latest",
-        package_manager.clone(),
-        install_args,
-        desktop_dir.as_deref(),
-        INSTALL_TIMEOUT_SECS,
-    )
-    .await;
-    steps.push(local_install.clone());
-
-    if !local_install.success {
-        let npm = resolve_npm()?;
-        let npm_install = run_install_step(
-            "npm-install-global-latest",
-            npm,
-            vec![
-                "install".to_string(),
-                "-g".to_string(),
-                "agent-browser@latest".to_string(),
-            ],
-            INSTALL_TIMEOUT_SECS,
-        )
-        .await;
-        steps.push(npm_install);
-    }
-
-    if let Ok(binary) = resolve_binary(request.command_path.as_deref()) {
-        let upgrade_step = run_install_step(
-            "agent-browser-cli-upgrade",
-            binary,
-            vec!["upgrade".to_string()],
-            INSTALL_TIMEOUT_SECS,
-        )
-        .await;
-        steps.push(upgrade_step);
-    }
-
-    let binary = resolve_binary(request.command_path.as_deref()).ok();
-    let chrome_args = if request.with_deps == Some(true) {
-        vec!["install".to_string(), "--with-deps".to_string()]
-    } else {
-        vec!["install".to_string()]
-    };
-
-    let chrome_step = if let Some(binary) = binary {
-        run_install_step(
-            "agent-browser-install-chrome",
-            binary,
-            chrome_args.clone(),
-            INSTALL_TIMEOUT_SECS,
-        )
-        .await
-    } else {
-        let fallback = resolve_binary_after_install()?;
-        run_install_step(
-            "agent-browser-install-chrome",
-            fallback,
-            chrome_args,
-            INSTALL_TIMEOUT_SECS,
-        )
-        .await
-    };
-    steps.push(chrome_step);
-
-    let command_path = resolve_binary(request.command_path.as_deref()).ok();
-    let success = steps.iter().all(|step| step.success);
-    let detail = if success {
-        "agent-browser installed successfully.".to_string()
-    } else {
-        "agent-browser installation finished with errors. Review step output.".to_string()
-    };
-
-    Ok(AgentBrowserInstallResponse {
-        success,
-        command_path: command_path.map(|path| path.display().to_string()),
-        steps,
-        detail,
-    })
-}
+// ── Read Image (restricted) ──
 
 pub async fn read_image(
     request: AgentBrowserReadImageRequest,
 ) -> Result<AgentBrowserReadImageResponse, String> {
-    let path = PathBuf::from(request.path.trim());
-    if request.path.trim().is_empty() {
+    let raw_path = request.path.trim();
+    if raw_path.is_empty() {
         return Err("Image path is required.".to_string());
     }
+
+    // Canonicalize the requested path to resolve symlinks and normalize.
+    let path = tokio::fs::canonicalize(raw_path)
+        .await
+        .map_err(|error| format!("Invalid image path: {error}"))?;
+
+    // Verify the canonical path is within an approved root directory.
+    let approved_roots = {
+        let mut roots: Vec<PathBuf> = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(real) = std::fs::canonicalize(&cwd) {
+                roots.push(real);
+            } else {
+                roots.push(cwd);
+            }
+        }
+        roots.push(std::env::temp_dir());
+        roots
+    };
+
+    let in_allowed_root = approved_roots
+        .iter()
+        .any(|root| path.starts_with(root));
+
+    if !in_allowed_root {
+        return Err(format!(
+            "Access denied: path '{}' is outside approved directories.",
+            path.display()
+        ));
+    }
+
     if !path.exists() {
         return Err(format!("Screenshot file not found: {}", path.display()));
     }
@@ -916,17 +1086,28 @@ pub async fn read_image(
     })
 }
 
+fn mime_type_for_path(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg" | "jpe") => "image/jpeg".to_string(),
+        Some("webp") => "image/webp".to_string(),
+        Some("gif") => "image/gif".to_string(),
+        _ => "image/png".to_string(),
+    }
+}
+
+// ── Stream Status ──
+
 pub async fn stream_status(
     request: AgentBrowserStreamStatusRequest,
 ) -> Result<AgentBrowserStreamStatusResponse, String> {
-    let binary = resolve_binary(request.command_path.as_deref())?;
+    let binary = resolve_binary()?;
     let session = sanitize_session(&request.session);
     let enable_stream = request.enable == Some(true);
-    // Stream state is session-scoped: BOTH `stream enable` and `stream status` must
-    // target the chat's daemon via `--session`. Previously the status-only query passed
-    // no session, so it probed the default daemon (a different/absent session) and the
-    // live preview never found its WebSocket port — it sat in "waiting"/"disconnected"
-    // until a manual refresh (the only path that enabled, and thus scoped, the stream).
     let invoke_options = session_invoke_options(session.clone(), DEFAULT_MAX_OUTPUT);
     if enable_stream {
         let mut enable_args = vec!["stream".to_string(), "enable".to_string()];
@@ -950,10 +1131,38 @@ pub async fn stream_status(
     })
 }
 
+fn stream_port_from_data(data: &serde_json::Value) -> Option<u16> {
+    for key in ["port", "streamPort", "stream_port"] {
+        if let Some(value) = data.get(key).and_then(parse_port_value) {
+            return Some(value);
+        }
+    }
+    if let Some(nested) = data.get("stream").and_then(serde_json::Value::as_object) {
+        for key in ["port", "streamPort"] {
+            if let Some(value) = nested.get(key).and_then(parse_port_value) {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
+
+fn parse_port_value(value: &serde_json::Value) -> Option<u16> {
+    match value {
+        serde_json::Value::Number(number) => {
+            number.as_u64().and_then(|port| u16::try_from(port).ok())
+        }
+        serde_json::Value::String(text) => text.trim().parse::<u16>().ok(),
+        _ => None,
+    }
+}
+
+// ── Dashboard ──
+
 pub async fn dashboard(
     request: AgentBrowserDashboardRequest,
 ) -> Result<AgentBrowserDashboardResponse, String> {
-    let binary = resolve_binary(request.command_path.as_deref())?;
+    let binary = resolve_binary()?;
     let action = request.action.trim().to_ascii_lowercase();
     let port = request.port.unwrap_or(4848);
     let (args, url): (Vec<String>, Option<String>) = match action.as_str() {
@@ -991,10 +1200,12 @@ pub async fn dashboard(
     })
 }
 
+// ── Skills ──
+
 pub async fn skills(
     request: AgentBrowserSkillsRequest,
 ) -> Result<AgentBrowserSkillsResponse, String> {
-    let binary = resolve_binary(request.command_path.as_deref())?;
+    let binary = resolve_binary()?;
     let args: Vec<String> = if request.all == Some(true) {
         vec!["skills".to_string(), "get".to_string(), "--all".to_string()]
     } else if let Some(name) = request
@@ -1020,12 +1231,14 @@ pub async fn skills(
     })
 }
 
+// ── Install (local-only) ──
+
 fn desktop_package_dir() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir.parent().map(std::path::Path::to_path_buf)
 }
 
-fn resolve_package_manager_latest() -> Result<(PathBuf, Vec<String>), String> {
+fn resolve_package_manager() -> Result<(PathBuf, Vec<String>), String> {
     if let Ok(path) = which::which("pnpm") {
         return Ok((
             path,
@@ -1039,113 +1252,75 @@ fn resolve_package_manager_latest() -> Result<(PathBuf, Vec<String>), String> {
     ))
 }
 
-async fn fetch_npm_latest_version_cached() -> Result<String, String> {
-    if let Ok(cache) = NPM_LATEST_CACHE.lock() {
-        if let Some((version, fetched_at)) = cache.as_ref() {
-            if fetched_at.elapsed() < NPM_CACHE_TTL {
-                return Ok(version.clone());
-            }
+fn resolve_npm() -> Result<PathBuf, String> {
+    if cfg!(windows) {
+        if let Ok(path) = which::which("npm.cmd") {
+            return Ok(path);
         }
     }
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|error| error.to_string())?;
-    let response = client
-        .get(NPM_LATEST_URL)
-        .send()
-        .await
-        .map_err(|error| format!("Failed to reach npm registry: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!("npm registry returned HTTP {}", response.status()));
-    }
-    let payload: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|error| format!("Invalid npm registry response: {error}"))?;
-    let version = payload
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "npm registry response missing version field".to_string())?
-        .to_string();
-    if let Ok(mut cache) = NPM_LATEST_CACHE.lock() {
-        *cache = Some((version.clone(), Instant::now()));
-    }
-    Ok(version)
+    which::which("npm").map_err(|_| {
+        "npm was not found on PATH. Install Node.js 24+ before installing agent-browser."
+            .to_string()
+    })
 }
 
-fn normalize_agent_browser_version(raw: &str) -> String {
-    raw.trim()
-        .strip_prefix("agent-browser")
-        .unwrap_or(raw)
-        .trim()
-        .to_string()
-}
-
-fn parse_version_parts(version: &str) -> Option<(u32, u32, u32)> {
-    let core = version.split('+').next()?.split('-').next()?.trim();
-    let mut parts = core.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next().unwrap_or("0").parse().ok()?;
-    let patch = parts.next().unwrap_or("0").parse().ok()?;
-    Some((major, minor, patch))
-}
-
-fn version_is_older(current: &str, latest: &str) -> bool {
-    match (parse_version_parts(current), parse_version_parts(latest)) {
-        (Some(current_parts), Some(latest_parts)) => current_parts < latest_parts,
-        _ => current != latest,
-    }
-}
-
-/// Atomically claims the auto-upgrade cooldown slot: under a single lock, checks
-/// whether the cooldown has elapsed and, if so, stamps `Instant::now()` and returns
-/// `true`. This makes the check-then-act a single critical section so two concurrent
-/// `status()` calls cannot both pass the gate and launch simultaneous installs.
-fn try_begin_auto_upgrade() -> bool {
-    let Ok(mut guard) = LAST_AUTO_UPGRADE.lock() else {
-        return true;
-    };
-    let allowed = guard
-        .as_ref()
-        .is_none_or(|instant| instant.elapsed() >= AUTO_UPGRADE_COOLDOWN);
-    if allowed {
-        *guard = Some(Instant::now());
-    }
-    allowed
-}
-
-async fn upgrade_bundled_agent_browser() -> Result<String, String> {
+pub async fn install(
+    request: AgentBrowserInstallRequest,
+) -> Result<AgentBrowserInstallResponse, String> {
+    let mut steps = Vec::new();
     let desktop_dir = desktop_package_dir();
-    let (package_manager, install_args) = resolve_package_manager_latest()?;
-    let package_step = run_install_step_in_dir(
-        "auto-update-package",
+    let (package_manager, install_args) = resolve_package_manager()?;
+    let local_install = run_install_step_in_dir(
+        "package-install-latest",
         package_manager,
         install_args,
         desktop_dir.as_deref(),
         INSTALL_TIMEOUT_SECS,
     )
     .await;
-    if !package_step.success {
-        return Err(package_step.output);
-    }
-    let binary = resolve_binary(None)?;
-    let cli_upgrade = run_install_step(
-        "auto-update-cli",
-        binary.clone(),
-        vec!["upgrade".to_string()],
-        INSTALL_TIMEOUT_SECS,
-    )
-    .await;
-    let version = read_version(&binary).await.unwrap_or_default();
-    if cli_upgrade.success {
-        Ok(format!(
-            "Updated via npm/pnpm and agent-browser upgrade ({version})"
-        ))
+    steps.push(local_install);
+
+    // NOTE: Global npm install removed. All installs go through the local
+    // package manager (pnpm/npm in apps/desktop). If the local install fails,
+    // surface the error so the user can fix the project's dependency state.
+
+    // After package install, try to find the CLI and run upgrade/Chrome install.
+    let binary = resolve_binary().ok();
+
+    let chrome_args = if request.with_deps == Some(true) {
+        vec!["install".to_string(), "--with-deps".to_string()]
     } else {
-        Ok(format!("Updated package to latest ({version})"))
+        vec!["install".to_string()]
+    };
+
+    if let Some(ref binary) = binary {
+        let chrome_step = run_install_step(
+            "agent-browser-install-chrome",
+            binary.clone(),
+            chrome_args,
+            INSTALL_TIMEOUT_SECS,
+        )
+        .await;
+        steps.push(chrome_step);
     }
+
+    let command_path = resolve_binary().ok();
+    let success = steps.iter().all(|step| step.success);
+    let detail = if success {
+        "agent-browser installed successfully.".to_string()
+    } else {
+        "agent-browser installation finished with errors. Review step output.".to_string()
+    };
+
+    Ok(AgentBrowserInstallResponse {
+        success,
+        command_path: command_path.map(|path| path.display().to_string()),
+        steps,
+        detail,
+    })
 }
+
+// ── Install Step Runner ──
 
 async fn run_install_step_in_dir(
     name: &str,
@@ -1205,71 +1380,27 @@ async fn run_install_step(
     run_install_step_in_dir(name, program, args, None, timeout_secs).await
 }
 
-fn resolve_npm() -> Result<PathBuf, String> {
-    if cfg!(windows) {
-        if let Ok(path) = which::which("npm.cmd") {
-            return Ok(path);
-        }
-    }
-    which::which("npm").map_err(|_| {
-        "npm was not found on PATH. Install Node.js 24+ before installing agent-browser."
-            .to_string()
-    })
+// ── Tauri Commands ──
+
+#[tauri::command]
+pub async fn agent_browser_status(
+    request: Option<AgentBrowserStatusRequest>,
+) -> Result<AgentBrowserStatusResponse, String> {
+    status(request.unwrap_or_default()).await
 }
 
-fn resolve_binary_after_install() -> Result<PathBuf, String> {
-    resolve_binary(None)
-}
-
-fn stream_port_from_data(data: &serde_json::Value) -> Option<u16> {
-    for key in ["port", "streamPort", "stream_port"] {
-        if let Some(value) = data.get(key).and_then(parse_port_value) {
-            return Some(value);
-        }
-    }
-    if let Some(nested) = data.get("stream").and_then(serde_json::Value::as_object) {
-        for key in ["port", "streamPort"] {
-            if let Some(value) = nested.get(key).and_then(parse_port_value) {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
-
-fn parse_port_value(value: &serde_json::Value) -> Option<u16> {
-    match value {
-        serde_json::Value::Number(number) => {
-            number.as_u64().and_then(|port| u16::try_from(port).ok())
-        }
-        serde_json::Value::String(text) => text.trim().parse::<u16>().ok(),
-        _ => None,
-    }
-}
-
-fn mime_type_for_path(path: &Path) -> String {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("jpg" | "jpeg" | "jpe") => "image/jpeg".to_string(),
-        Some("webp") => "image/webp".to_string(),
-        Some("gif") => "image/gif".to_string(),
-        _ => "image/png".to_string(),
-    }
+#[tauri::command]
+pub async fn agent_browser_invoke(
+    request: AgentBrowserInvokeRequest,
+) -> Result<AgentBrowserInvokeResponse, String> {
+    invoke(request).await
 }
 
 #[tauri::command]
 pub async fn agent_browser_install(
     request: Option<AgentBrowserInstallRequest>,
 ) -> Result<AgentBrowserInstallResponse, String> {
-    install(request.unwrap_or(AgentBrowserInstallRequest {
-        command_path: None,
-        with_deps: None,
-    }))
-    .await
+    install(request.unwrap_or_default()).await
 }
 
 #[tauri::command]
@@ -1297,13 +1428,10 @@ pub async fn agent_browser_dashboard(
 pub async fn agent_browser_skills(
     request: Option<AgentBrowserSkillsRequest>,
 ) -> Result<AgentBrowserSkillsResponse, String> {
-    skills(request.unwrap_or(AgentBrowserSkillsRequest {
-        name: None,
-        all: None,
-        command_path: None,
-    }))
-    .await
+    skills(request.unwrap_or_default()).await
 }
+
+// ── Tests ──
 
 #[cfg(test)]
 mod tests {
@@ -1313,5 +1441,52 @@ mod tests {
     fn sanitize_session_prefixes_and_filters() {
         assert_eq!(sanitize_session("chat-123"), "lux-chat-123");
         assert_eq!(sanitize_session(""), "lux-default");
+    }
+
+    #[test]
+    fn version_parsing_orders_correctly() {
+        use super::{parse_version_parts, version_is_older};
+        assert_eq!(parse_version_parts("1.2.3"), Some((1, 2, 3)));
+        assert_eq!(parse_version_parts("1.2"), Some((1, 2, 0)));
+        assert_eq!(parse_version_parts("1"), Some((1, 0, 0)));
+        assert!(parse_version_parts("").is_none());
+        assert!(version_is_older("1.0.0", "1.0.1"));
+        assert!(version_is_older("1.0.0", "2.0.0"));
+        assert!(!version_is_older("1.0.1", "1.0.0"));
+        assert!(!version_is_older("1.0.0", "1.0.0"));
+    }
+
+    #[test]
+    fn domain_validation_rejects_private_ip() {
+        use super::validate_domain_list;
+        assert!(validate_domain_list("example.com").is_ok());
+        assert!(validate_domain_list("example.com,test.org").is_ok());
+        assert!(validate_domain_list("127.0.0.1").is_err());
+        assert!(validate_domain_list("192.168.1.1").is_err());
+        assert!(validate_domain_list("10.0.0.5").is_err());
+        assert!(validate_domain_list("172.16.0.1").is_err());
+        assert!(validate_domain_list("localhost").is_err());
+        assert!(validate_domain_list("internal.local").is_err());
+    }
+
+    #[test]
+    fn proxy_validation_rejects_internal() {
+        use super::validate_proxy_url;
+        assert!(validate_proxy_url("http://proxy.example.com:8080").is_ok());
+        assert!(validate_proxy_url("https://proxy.example.com").is_ok());
+        assert!(validate_proxy_url("http://127.0.0.1:8080").is_err());
+        assert!(validate_proxy_url("file:///tmp/proxy").is_err());
+        assert!(validate_proxy_url("").is_ok());
+    }
+
+    #[test]
+    fn provider_validation_allowlists_known() {
+        use super::validate_provider;
+        assert!(validate_provider("chrome").is_ok());
+        assert!(validate_provider("browserless").is_ok());
+        assert!(validate_provider("browserbase").is_ok());
+        assert!(validate_provider("").is_ok());
+        assert!(validate_provider("evil-provider").is_err());
+        assert!(validate_provider("CHROME").is_ok());
     }
 }

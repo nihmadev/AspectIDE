@@ -9,6 +9,21 @@ use serde::Deserialize;
 const MAX_SUMMARY_CHARS: usize = 18_000;
 const MAX_TRANSCRIPT_CHARS: usize = 84_000;
 
+/// Required markdown headings in the order the prompt emits them. Used to
+/// validate that a model-generated summary covers all critical sections before
+/// storage.
+const REQUIRED_SECTIONS: &[&str] = &[
+    "## Task goal",
+    "## Latest user direction",
+    "## Open tasks",
+    "## Progress",
+    "## Key decisions / constraints",
+    "## Files and tools",
+    "## Errors / blockers",
+    "## Critical preserved facts",
+    "## Open items / next step",
+];
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactionSummaryInput {
@@ -34,7 +49,8 @@ pub struct CompactionSummaryInput {
 }
 
 /// Summarize a transcript into a checkpoint. Errors if the model returns nothing
-/// (caller falls back to a deterministic TS summary).
+/// (caller falls back to a deterministic TS summary) or if the output truncation
+/// would drop critical required sections.
 #[tauri::command]
 pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<String, String> {
     let max_tokens = MAX_SUMMARY_CHARS / 4;
@@ -70,10 +86,13 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
             truncate(&input.previous_summary, 4_000)
         ));
     }
+    // Use tail-preserving compaction for the ordered transcript so the latest
+    // user direction, tool output, and errors are always visible to the summary
+    // model instead of only the oldest prefix.
     user_parts.push(format!(
         "Transcript ({} chars):\n{}",
         input.transcript.len(),
-        truncate(&input.transcript, MAX_TRANSCRIPT_CHARS),
+        transcript_tail(&input.transcript, MAX_TRANSCRIPT_CHARS),
     ));
 
     let mut payload = serde_json::json!({
@@ -118,7 +137,60 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
     if content.is_empty() {
         return Err("Compaction summary was empty.".to_string());
     }
-    Ok(truncate(&content, MAX_SUMMARY_CHARS))
+
+    // Validate: if the model output needs truncation, verify the truncated
+    // version still has all required sections non-empty. A blind clip can
+    // silently drop "Errors / blockers", "Critical preserved facts", or
+    // "Open items / next step" — exactly the sections compaction exists to
+    // preserve. If any are missing after truncation, reject so the caller
+    // retries with a more concise generation request.
+    let result = truncate(&content, MAX_SUMMARY_CHARS);
+    if result != content {
+        if let Err(missing) = validate_summary_sections(&result) {
+            return Err(format!(
+                "Compaction summary exceeds {} chars and {missing}. Regenerate with more concise output.",
+                MAX_SUMMARY_CHARS
+            ));
+        }
+    }
+
+    Ok(result)
+}
+
+/// Validate that all required markdown sections are present and non-empty.
+///
+/// For each heading in `REQUIRED_SECTIONS`, locates its position, determines the
+/// body boundary by searching for the next required heading that follows it, then
+/// checks the body contains non-whitespace content.
+fn validate_summary_sections(content: &str) -> Result<(), String> {
+    for (i, &heading) in REQUIRED_SECTIONS.iter().enumerate() {
+        let pos = content
+            .find(heading)
+            .ok_or_else(|| format!("required section '{heading}' is missing"))?;
+        let start = pos + heading.len();
+        let end = REQUIRED_SECTIONS[i + 1..]
+            .iter()
+            .filter_map(|&next| content[start..].find(next))
+            .min()
+            .map(|offset| start + offset)
+            .unwrap_or(content.len());
+        let body = content[start..end].trim();
+        if body.is_empty() {
+            return Err(format!("required section '{heading}' is empty"));
+        }
+    }
+    Ok(())
+}
+
+/// Keep the last `max` characters of `value`, preserving the message order that
+/// matters most for continuity (tool output, errors, latest user direction).
+fn transcript_tail(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let tail_start = value.len() - value.chars().rev().take(max).map(|c| c.len_utf8()).sum::<usize>();
+    let tail: String = value[tail_start..].chars().collect();
+    format!("…{tail}")
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -141,5 +213,79 @@ mod tests {
         let result = truncate(&long, 50);
         assert_eq!(result.chars().count(), 51); // 50 + ellipsis
         assert!(result.ends_with('…'));
+    }
+
+    #[test]
+    fn transcript_tail_keeps_suffix() {
+        assert_eq!(transcript_tail("short", 100), "short");
+        let long = "abcdefghij";
+        let result = transcript_tail(long, 4);
+        assert!(result.starts_with('…'));
+        assert!(result.contains("ghij"));
+        assert_eq!(result.chars().count(), 5); // 4 + ellipsis
+    }
+
+    #[test]
+    fn validate_sections_passes_complete_summary() {
+        let content = "\
+## Task goal
+Fix the login flow.
+
+## Latest user direction
+Add two-factor auth.
+
+## Open tasks
+- Implement TOTP
+- Add backup codes
+
+## Progress
+50% complete
+
+## Key decisions / constraints
+Use time-based OTP
+
+## Files and tools
+login.rs, auth.rs
+
+## Errors / blockers
+None so far
+
+## Critical preserved facts
+User wants TOTP
+
+## Open items / next step
+PR review
+";
+        assert!(validate_summary_sections(content).is_ok());
+    }
+
+    #[test]
+    fn validate_sections_rejects_missing_heading() {
+        let content = "\
+## Task goal
+Fix the login flow.
+## Latest user direction
+Add two-factor auth.
+";
+        assert!(validate_summary_sections(content).is_err());
+    }
+
+    #[test]
+    fn validate_sections_rejects_empty_section() {
+        let content = "\
+## Task goal
+Fix the login flow.
+
+## Latest user direction
+
+## Open tasks
+- Implement TOTP
+".to_string();
+        // Need all sections present; for brevity just check the empty section is caught.
+        let mut full = content;
+        for rest in &REQUIRED_SECTIONS[3..] {
+            full.push_str(&format!("\n{rest}\ncontent\n"));
+        }
+        assert!(validate_summary_sections(&full).is_err());
     }
 }
