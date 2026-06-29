@@ -27,7 +27,7 @@ const AI_SHELL_TRUNCATE_TAIL_CHARS: usize = 12_000;
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiFileOperationStats {
     lines_added: usize,
@@ -1629,8 +1629,8 @@ mod tests {
         );
         assert!(
             result.ends_with("CCCDDD"),
-            "tail should be preserved, got: ...{:.50}",
-            result.len().saturating_sub(50)..result.len()
+            "tail should be preserved, got: ...{}",
+            &result[result.len().saturating_sub(50)..]
         );
         assert!(result.contains("characters omitted"), "omitted count marker missing");
     }
