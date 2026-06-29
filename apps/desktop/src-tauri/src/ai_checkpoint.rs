@@ -59,7 +59,7 @@ fn ws_key(root: &str) -> String {
     ai_semantic::normalize_slashes_pub(root.trim_end_matches('/')).to_lowercase()
 }
 
-/// Derive the in-memory store key. When a session_id is provided the key is
+/// Derive the in-memory store key. When a `session_id` is provided the key is
 /// workspace + session so concurrent agents/chats get isolated checkpoint stores.
 /// Without it the key is workspace-only (legacy behavior).
 fn store_key(root: &str, session_id: Option<&str>) -> String {
@@ -191,7 +191,9 @@ pub async fn ai_checkpoint(
                 .or_default();
             list.insert(0, cp);
             list.truncate(MAX_CHECKPOINTS);
-            Ok(serde_json::json!({ "status": "created", "checkpoint": summary, "files": file_views }))
+            Ok(
+                serde_json::json!({ "status": "created", "checkpoint": summary, "files": file_views }),
+            )
         }
         "list" => {
             let guard = store().lock().map_err(lock_error)?;
@@ -200,7 +202,9 @@ pub async fn ai_checkpoint(
                 .cloned()
                 .unwrap_or_default();
             let summaries: Vec<CheckpointSummary> = list.iter().map(summarize).collect();
-            Ok(serde_json::json!({ "workspaceRoot": root_str, "count": summaries.len(), "checkpoints": summaries }))
+            Ok(
+                serde_json::json!({ "workspaceRoot": root_str, "count": summaries.len(), "checkpoints": summaries }),
+            )
         }
         "diff" => {
             let cp = select_checkpoint(&root_str, session_id.as_deref(), id.as_ref())?;
@@ -209,7 +213,9 @@ pub async fn ai_checkpoint(
                 diffs.push(diff_file(&state, &root_str, file, cp.max_bytes_per_file).await);
             }
             let summary = diff_summary(&diffs);
-            Ok(serde_json::json!({ "status": "diffed", "checkpoint": summarize(&cp), "summary": summary, "files": diffs }))
+            Ok(
+                serde_json::json!({ "status": "diffed", "checkpoint": summarize(&cp), "summary": summary, "files": diffs }),
+            )
         }
         "delete" => {
             let cp = select_checkpoint(&root_str, session_id.as_deref(), id.as_ref())?;
@@ -275,7 +281,9 @@ pub async fn ai_checkpoint(
                 }));
             }
             if operations.is_empty() {
-                return Ok(serde_json::json!({ "status": "unchanged", "checkpoint": summarize(&cp) }));
+                return Ok(
+                    serde_json::json!({ "status": "unchanged", "checkpoint": summarize(&cp) }),
+                );
             }
             let op_count = operations.len();
             let result = crate::ai_tools::ai_file_patch(
@@ -286,7 +294,9 @@ pub async fn ai_checkpoint(
                 Some(dry),
             )
             .await?;
-            Ok(serde_json::json!({ "status": if dry { "preview" } else { "restored" }, "operations": op_count, "result": result }))
+            Ok(
+                serde_json::json!({ "status": if dry { "preview" } else { "restored" }, "operations": op_count, "result": result }),
+            )
         }
         "augment" => {
             // Capture pre-edit snapshots for files the model is about to create/edit that were not
@@ -311,7 +321,12 @@ pub async fn ai_checkpoint(
                     .iter()
                     .map(|f| ai_semantic::normalize_slashes_pub(&f.path).to_lowercase())
                     .collect();
-                (cp.max_bytes_per_file, cp.max_files, existing, cp.files.len())
+                (
+                    cp.max_bytes_per_file,
+                    cp.max_files,
+                    existing,
+                    cp.files.len(),
+                )
             };
             let mut missing: Vec<String> = Vec::new();
             for raw in &requested {
@@ -482,9 +497,7 @@ fn resolve_in_workspace(path: &str, root: &str) -> Option<String> {
                 Path::new(&root_normalized).canonicalize(),
             ) {
                 if canon.starts_with(&root_canon) {
-                    return canon
-                        .to_str()
-                        .map(|s| ai_semantic::normalize_slashes_pub(s));
+                    return canon.to_str().map(ai_semantic::normalize_slashes_pub);
                 }
                 return None;
             }
@@ -537,7 +550,7 @@ fn relative_to(path: &str, root: &str) -> String {
 }
 
 /// Read up to `max_bytes` bytes from a file, respecting UTF-8 character boundaries.
-/// Returns (text_content, was_truncated, file_size_bytes).
+/// Returns (`text_content`, `was_truncated`, `file_size_bytes`).
 async fn bounded_read_text(path: &str, max_bytes: u64) -> std::io::Result<(String, bool, u64)> {
     use tokio::io::AsyncReadExt;
 
@@ -554,13 +567,13 @@ async fn bounded_read_text(path: &str, max_bytes: u64) -> std::io::Result<(Strin
     }
 
     // Bounded read: grab max_bytes + 4 bytes so we can find a clean UTF-8 boundary.
-    let read_n = (max_bytes.saturating_add(4)).min(file_size) as usize;
+    let read_n = usize::try_from(max_bytes.saturating_add(4).min(file_size)).unwrap_or(usize::MAX);
     let mut file = tokio::fs::File::open(path).await?;
     let mut buf = vec![0u8; read_n];
     let n = file.read(&mut buf).await?;
     buf.truncate(n);
 
-    let text = decode_utf8_bounded(&buf, max_bytes as usize);
+    let text = decode_utf8_bounded(&buf, usize::try_from(max_bytes).unwrap_or(usize::MAX));
     Ok((text, true, file_size))
 }
 
@@ -573,8 +586,7 @@ fn decode_utf8_bounded(buf: &[u8], max_bytes: usize) -> String {
         .char_indices()
         .take_while(|(i, _)| *i < max_bytes)
         .last()
-        .map(|(i, c)| i + c.len_utf8())
-        .unwrap_or(0);
+        .map_or(0, |(i, c)| i + c.len_utf8());
     s[..bound].to_string()
 }
 
@@ -592,10 +604,9 @@ async fn snapshot_file(
             let bound = snap
                 .text
                 .char_indices()
-                .take_while(|(i, _)| *i < max_bytes as usize)
+                .take_while(|(i, _)| (*i as u64) < max_bytes)
                 .last()
-                .map(|(i, c)| i + c.len_utf8())
-                .unwrap_or(0);
+                .map_or(0, |(i, c)| i + c.len_utf8());
             snap.text[..bound].to_string()
         } else {
             snap.text.clone()
@@ -615,7 +626,7 @@ async fn snapshot_file(
     snapshot_file_disk(path, relative_path, max_bytes).await
 }
 
-/// Disk-only path of snapshot_file, factored for testability without Tauri State.
+/// Disk-only path of `snapshot_file`, factored for testability without Tauri State.
 async fn snapshot_file_disk(
     path: &str,
     relative_path: String,
@@ -646,7 +657,11 @@ async fn snapshot_file_disk(
                 } else {
                     "error".into()
                 },
-                error: if not_found { None } else { Some(err.to_string()) },
+                error: if not_found {
+                    None
+                } else {
+                    Some(err.to_string())
+                },
             }
         }
     }
@@ -675,10 +690,9 @@ async fn read_current(
             let bound = snap
                 .text
                 .char_indices()
-                .take_while(|(i, _)| *i < max_bytes as usize)
+                .take_while(|(i, _)| (*i as u64) < max_bytes)
                 .last()
-                .map(|(i, c)| i + c.len_utf8())
-                .unwrap_or(0);
+                .map_or(0, |(i, c)| i + c.len_utf8());
             snap.text[..bound].to_string()
         } else {
             snap.text.clone()
@@ -721,7 +735,11 @@ async fn read_current(
                 } else {
                     "error".into()
                 },
-                error: if not_found { None } else { Some(err.to_string()) },
+                error: if not_found {
+                    None
+                } else {
+                    Some(err.to_string())
+                },
             }
         }
     }
@@ -845,14 +863,8 @@ mod tests {
     #[test]
     fn resolve_workspace_rejects_parent_escape() {
         assert_eq!(resolve_in_workspace("../other.txt", "/root"), None);
-        assert_eq!(
-            resolve_in_workspace("a/../../other.txt", "/root"),
-            None
-        );
-        assert_eq!(
-            resolve_in_workspace("/root/../other.txt", "/root"),
-            None
-        );
+        assert_eq!(resolve_in_workspace("a/../../other.txt", "/root"), None);
+        assert_eq!(resolve_in_workspace("/root/../other.txt", "/root"), None);
     }
 
     #[test]
@@ -901,10 +913,8 @@ mod tests {
 
     #[tokio::test]
     async fn missing_file_snapshot_disk_no_error() {
-        let dir = std::env::temp_dir().join(format!(
-            "lux-ckpt-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lux-ckpt-test-{}", uuid::Uuid::new_v4().simple()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let missing_path = dir.join("not-here.txt");
@@ -923,6 +933,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // guard is explicitly dropped before any await
     async fn missing_snapshot_restore_deletes_file() {
         // Regression test for finding 1: a missing-file baseline (snapshot taken
         // before the AI creates a file) must have error=None, so that restore can
@@ -966,7 +977,10 @@ mod tests {
         tokio::fs::write(&file_str, "AI generated content")
             .await
             .unwrap();
-        assert!(file_path.exists(), "file should exist after simulated AI edit");
+        assert!(
+            file_path.exists(),
+            "file should exist after simulated AI edit"
+        );
 
         // Step 4: select the checkpoint (as the restore command would).
         let restored_cp = select_checkpoint(&root, None, None).unwrap();
@@ -976,7 +990,10 @@ mod tests {
             .files
             .iter()
             .any(|f| f.truncated || f.error.is_some());
-        assert!(!blocked, "restore must not be blocked by truncated/error files");
+        assert!(
+            !blocked,
+            "restore must not be blocked by truncated/error files"
+        );
 
         // The snapshot correctly recorded existed=false.
         let file_snap = &restored_cp.files[0];

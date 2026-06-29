@@ -501,9 +501,7 @@ impl MemoryStore {
         }
         let present: HashSet<String> = candidates.iter().map(|c| c.memory.id.clone()).collect();
 
-        let mut sql = format!(
-            "SELECT {COLS}, embedding FROM memories WHERE embedding IS NOT NULL"
-        );
+        let mut sql = format!("SELECT {COLS}, embedding FROM memories WHERE embedding IS NOT NULL");
         let mut values: Vec<SqlValue> = Vec::new();
         if let Some(category) = &opts.category {
             sql.push_str(" AND category = ?");

@@ -62,13 +62,15 @@ const MIN_MAX_DIMENSION: u32 = 256;
 /// 4096 covers all current provider limits; larger values must be allowlisted.
 const MAX_MAX_DIMENSION: u32 = 4096;
 /// Pixel-bomb guard: reject decoded images whose total pixel count exceeds this
-/// limit even if their compressed byte size passed MAX_SOURCE_BYTES. A hostile
+/// limit even if their compressed byte size passed `MAX_SOURCE_BYTES`. A hostile
 /// compressed PNG (e.g. 16k×16k solid colour) can decode to hundreds of MiB
 /// while easily fitting in a 16 MiB compressed file.
 const MAX_DECODED_PIXELS: u64 = 4096 * 4096; // ≈ 67 MP, well above any model vision cap
 /// Encoded base64 payload length limit applied *before* decoding a data URL
-/// (base64 expands ~33 %, so this matches MAX_SOURCE_BYTES after decode).
-/// Using ceiling division: ceil(MAX_SOURCE_BYTES * 4 / 3).
+/// (base64 expands ~33 %, so this matches `MAX_SOURCE_BYTES` after decode).
+/// Using ceiling division: `ceil(MAX_SOURCE_BYTES` * 4 / 3).
+// ~22 MB literal — fits `usize` on every supported (32/64-bit) target.
+#[allow(clippy::cast_possible_truncation)]
 const MAX_DATA_URL_BASE64_LEN: usize = ((MAX_SOURCE_BYTES * 4).div_ceil(3)) as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -303,7 +305,7 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
 /// Borrows `bytes` so the caller retains ownership for the passthrough path.
 ///
 /// Pixel-bomb guard: rejects images whose decoded pixel count exceeds
-/// MAX_DECODED_PIXELS even when their compressed size is within MAX_SOURCE_BYTES,
+/// `MAX_DECODED_PIXELS` even when their compressed size is within `MAX_SOURCE_BYTES`,
 /// preventing hostile compressed inputs (e.g. 16 k×16 k solid-colour PNG) from
 /// exhausting memory.
 fn decode_source(bytes: &[u8], hint_mime: Option<String>) -> Option<DecodedSource> {
@@ -312,9 +314,7 @@ fn decode_source(bytes: &[u8], hint_mime: Option<String>) -> Option<DecodedSourc
     // Read just the image header to get dimensions before full decode.
     // `ImageReader::into_dimensions` avoids allocating the full pixel buffer,
     // so a 16 k×16 k PNG that sneaks under MAX_SOURCE_BYTES never expands.
-    if let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-    {
+    if let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format() {
         if let Ok((w, h)) = reader.into_dimensions() {
             if u64::from(w) * u64::from(h) > MAX_DECODED_PIXELS {
                 // Treat as undecodable: forward bytes untouched; this mirrors

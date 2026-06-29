@@ -38,9 +38,7 @@ pub async fn status(
 }
 
 #[allow(clippy::too_many_lines)]
-async fn status_inner(
-    lightweight: bool,
-) -> Result<AgentBrowserStatusResponse, String> {
+async fn status_inner(lightweight: bool) -> Result<AgentBrowserStatusResponse, String> {
     let (binary, source) = resolve_binary_with_source()?;
 
     let version = read_version(&binary)
@@ -64,10 +62,15 @@ async fn status_inner(
     let doctor: Option<serde_json::Value> = if lightweight {
         None
     } else {
-        run_json(&binary, None, &["doctor", "--json", "--offline", "--quick"], 45)
-            .await
-            .map(|resp| resp.data)
-            .ok()
+        run_json(
+            &binary,
+            None,
+            &["doctor", "--json", "--offline", "--quick"],
+            45,
+        )
+        .await
+        .map(|resp| resp.data)
+        .ok()
     };
 
     // Fail-closed: non-lightweight requires explicit doctor success for available=true.
@@ -104,17 +107,19 @@ async fn status_inner(
     };
 
     // Determine if an update is available (cached vs installed).
-    let (update_performed, update_detail) = if let (Some(current), Some(latest)) =
-        (version.as_ref(), latest_version.as_ref())
-    {
-        if version_is_older(current, latest) {
-            (false, Some(format!("Update available: {latest} (installed: {current})")))
+    let (update_performed, update_detail) =
+        if let (Some(current), Some(latest)) = (version.as_ref(), latest_version.as_ref()) {
+            if version_is_older(current, latest) {
+                (
+                    false,
+                    Some(format!("Update available: {latest} (installed: {current})")),
+                )
+            } else {
+                (false, None)
+            }
         } else {
             (false, None)
-        }
-    } else {
-        (false, None)
-    };
+        };
 
     Ok(AgentBrowserStatusResponse {
         available,
@@ -247,9 +252,7 @@ pub async fn read_image(
         roots
     };
 
-    let in_allowed_root = approved_roots
-        .iter()
-        .any(|root| path.starts_with(root));
+    let in_allowed_root = approved_roots.iter().any(|root| path.starts_with(root));
 
     if !in_allowed_root {
         return Err(format!(
@@ -502,11 +505,7 @@ async fn run_install_step_in_dir(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
     command.kill_on_drop(true);
-    let output = tokio::time::timeout(
-        Duration::from_secs(timeout_secs),
-        command.output(),
-    )
-    .await;
+    let output = tokio::time::timeout(Duration::from_secs(timeout_secs), command.output()).await;
     match output {
         Ok(Ok(output)) => {
             let stdout = String::from_utf8_lossy(&output.stdout);

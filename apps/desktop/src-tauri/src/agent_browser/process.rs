@@ -117,30 +117,31 @@ pub async fn run_json(
     // ── Incremental stdout/stderr reading with parent-side byte cap ──
     // Read incrementally instead of wait_with_output to bound memory use
     // from noisy actions before the child finishes.
-    let stdout_pipe = child.stdout.take().ok_or_else(|| "no stdout pipe".to_string())?;
-    let stderr_pipe = child.stderr.take().ok_or_else(|| "no stderr pipe".to_string())?;
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "no stdout pipe".to_string())?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "no stderr pipe".to_string())?;
 
     // Allocate a generous but bounded buffer for stdout (max_output + JSON margin).
     let stdout_budget = max_output.saturating_add(4096);
     // Stderr is error info — 32 KiB is generous.
     let stderr_budget: usize = 32_768;
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(timeout_secs.saturating_add(5)),
-        async {
-            let stdout_buf = read_pipe_bounded(stdout_pipe, stdout_budget).await;
-            let stderr_buf = read_pipe_bounded(stderr_pipe, stderr_budget).await;
-            let status = child.wait().await;
-            (stdout_buf, stderr_buf, status)
-        },
-    )
+    let result = tokio::time::timeout(Duration::from_secs(timeout_secs.saturating_add(5)), async {
+        let stdout_buf = read_pipe_bounded(stdout_pipe, stdout_budget).await;
+        let stderr_buf = read_pipe_bounded(stderr_pipe, stderr_budget).await;
+        let status = child.wait().await;
+        (stdout_buf, stderr_buf, status)
+    })
     .await
     .map_err(|_| format!("agent-browser timed out after {timeout_secs}s"))?;
 
     let (stdout_bytes, stderr_bytes, status_result) = result;
-    let exit_code = status_result
-        .map(|status| status.code())
-        .unwrap_or(None);
+    let exit_code = status_result.map_or(None, |status| status.code());
 
     let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
     let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
@@ -183,17 +184,13 @@ pub async fn run_json(
 }
 
 /// Read a pipe into a `Vec<u8>`, stopping after `max_bytes` have been collected.
-async fn read_pipe_bounded<R: AsyncReadExt + Unpin>(
-    mut reader: R,
-    max_bytes: usize,
-) -> Vec<u8> {
+async fn read_pipe_bounded<R: AsyncReadExt + Unpin>(mut reader: R, max_bytes: usize) -> Vec<u8> {
     let mut buf = Vec::with_capacity(max_bytes.min(4096));
     let mut tmp = [0u8; 8192];
     loop {
         let n = match reader.read(&mut tmp).await {
-            Ok(0) => break,
+            Ok(0) | Err(_) => break,
             Ok(n) => n,
-            Err(_) => break,
         };
         let remaining = max_bytes.saturating_sub(buf.len());
         if remaining == 0 {
@@ -274,10 +271,13 @@ pub async fn read_version(binary: &Path) -> Result<String, String> {
     command.arg("--version");
     command.stdin(Stdio::null());
     command.kill_on_drop(true);
-    let output = tokio::time::timeout(Duration::from_secs(READ_VERSION_TIMEOUT_SECS), command.output())
-        .await
-        .map_err(|_| "agent-browser --version timed out".to_string())?
-        .map_err(|error| error.to_string())?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(READ_VERSION_TIMEOUT_SECS),
+        command.output(),
+    )
+    .await
+    .map_err(|_| "agent-browser --version timed out".to_string())?
+    .map_err(|error| error.to_string())?;
     let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if text.is_empty() {
         Err("agent-browser --version returned empty output".to_string())

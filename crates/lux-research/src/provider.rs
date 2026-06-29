@@ -214,9 +214,7 @@ pub fn validate_source_url(url: &str) -> Option<String> {
     let url = url.trim();
     let rest = strip_http_scheme(url)?;
     // Authority ends at the first '/', '?' or '#'.
-    let authority_end = rest
-        .find(['/', '?', '#'])
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     if authority.is_empty() {
         return None;
@@ -511,7 +509,10 @@ mod tests {
         assert_eq!(validate_source_url("http://localhost:8080/admin"), None);
         assert_eq!(validate_source_url("http://[::1]/"), None);
         // Cloud metadata + link-local.
-        assert_eq!(validate_source_url("http://169.254.169.254/latest/meta-data"), None);
+        assert_eq!(
+            validate_source_url("http://169.254.169.254/latest/meta-data"),
+            None
+        );
         // RFC1918 / private + ULA.
         assert_eq!(validate_source_url("http://10.0.0.5/"), None);
         assert_eq!(validate_source_url("http://192.168.1.1/"), None);

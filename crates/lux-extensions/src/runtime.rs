@@ -1,12 +1,10 @@
 // Wasmtime runtime: instantiation with fuel + table limits, wall-clock timeout
 // enforcement, host import linking, and per-phase fuel budgets.
-use std::{
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
+use std::{sync::mpsc, thread, time::Duration};
 
-use lux_core::{AppError, AppResult, ExtensionActivationCandidate, ExtensionHostActivationContract};
+use lux_core::{
+    AppError, AppResult, ExtensionActivationCandidate, ExtensionHostActivationContract,
+};
 use wasmtime::{
     Config, Engine, Instance, Linker, Module, Store, StoreLimits, StoreLimitsBuilder, Trap,
 };
@@ -35,11 +33,17 @@ pub struct ExtensionExportFailure {
 
 impl ExtensionExportFailure {
     pub const fn without_execution(error: AppError) -> Self {
-        Self { error, execution: None }
+        Self {
+            error,
+            execution: None,
+        }
     }
 
     pub const fn with_execution(error: AppError, execution: ExtensionExportExecution) -> Self {
-        Self { error, execution: Some(execution) }
+        Self {
+            error,
+            execution: Some(execution),
+        }
     }
 }
 
@@ -69,9 +73,8 @@ impl ExtensionRuntime {
             .map_err(AppError::from)
             .map_err(ExtensionExportFailure::without_execution)?;
 
-        let memory_limit =
-            memory_limit_bytes(candidate.host_contract.limits.max_memory_pages)
-                .map_err(ExtensionExportFailure::without_execution)?;
+        let memory_limit = memory_limit_bytes(candidate.host_contract.limits.max_memory_pages)
+            .map_err(ExtensionExportFailure::without_execution)?;
 
         let contract = candidate.host_contract.clone();
         let timeout = Duration::from_millis(EXTENSION_HOST_ACTIVATION_TIMEOUT_MS);
@@ -92,11 +95,11 @@ impl ExtensionRuntime {
                     "extension activation timed out after {EXTENSION_HOST_ACTIVATION_TIMEOUT_MS}ms"
                 )),
             )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(ExtensionExportFailure::without_execution(AppError::Service(
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(
+                ExtensionExportFailure::without_execution(AppError::Service(
                     "extension activation worker disconnected unexpectedly".into(),
-                )))
-            }
+                )),
+            ),
         }
     }
 
@@ -188,7 +191,8 @@ fn instantiate_on_thread(
     let module = Module::new(&engine, bytes)
         .map_err(|e| ExtensionExportFailure::without_execution(wasmtime_error(&e)))?;
     let mut linker = Linker::new(&engine);
-    define_host_imports(&mut linker, contract).map_err(ExtensionExportFailure::without_execution)?;
+    define_host_imports(&mut linker, contract)
+        .map_err(ExtensionExportFailure::without_execution)?;
 
     let instance = linker
         .instantiate(&mut store, &module)
@@ -224,26 +228,20 @@ fn define_host_imports(
         // any extension that uses them before we ever get here.
         match import.name.as_str() {
             "log" => linker.func_wrap(LUX_HOST_IMPORT_MODULE, "log", || ()),
-            "workspace_read" => linker.func_wrap(
-                LUX_HOST_IMPORT_MODULE,
-                "workspace_read",
-                || Err::<(), _>(wasmtime::format_err!("workspace_read is not implemented")),
-            ),
-            "workspace_write" => linker.func_wrap(
-                LUX_HOST_IMPORT_MODULE,
-                "workspace_write",
-                || Err::<(), _>(wasmtime::format_err!("workspace_write is not implemented")),
-            ),
-            "network_fetch" => linker.func_wrap(
-                LUX_HOST_IMPORT_MODULE,
-                "network_fetch",
-                || Err::<(), _>(wasmtime::format_err!("network_fetch is not implemented")),
-            ),
-            "process_spawn" => linker.func_wrap(
-                LUX_HOST_IMPORT_MODULE,
-                "process_spawn",
-                || Err::<(), _>(wasmtime::format_err!("process_spawn is not implemented")),
-            ),
+            "workspace_read" => linker.func_wrap(LUX_HOST_IMPORT_MODULE, "workspace_read", || {
+                Err::<(), _>(wasmtime::format_err!("workspace_read is not implemented"))
+            }),
+            "workspace_write" => {
+                linker.func_wrap(LUX_HOST_IMPORT_MODULE, "workspace_write", || {
+                    Err::<(), _>(wasmtime::format_err!("workspace_write is not implemented"))
+                })
+            }
+            "network_fetch" => linker.func_wrap(LUX_HOST_IMPORT_MODULE, "network_fetch", || {
+                Err::<(), _>(wasmtime::format_err!("network_fetch is not implemented"))
+            }),
+            "process_spawn" => linker.func_wrap(LUX_HOST_IMPORT_MODULE, "process_spawn", || {
+                Err::<(), _>(wasmtime::format_err!("process_spawn is not implemented"))
+            }),
             name => {
                 return Err(AppError::Service(format!(
                     "runtime refused unknown Lux host import: {name}"
@@ -276,10 +274,13 @@ pub fn export_execution_since(
     store: &Store<StoreLimits>,
     fuel_before: u64,
 ) -> Option<ExtensionExportExecution> {
-    store.get_fuel().ok().map(|fuel_remaining| ExtensionExportExecution {
-        fuel_consumed: fuel_before.saturating_sub(fuel_remaining),
-        fuel_remaining,
-    })
+    store
+        .get_fuel()
+        .ok()
+        .map(|fuel_remaining| ExtensionExportExecution {
+            fuel_consumed: fuel_before.saturating_sub(fuel_remaining),
+            fuel_remaining,
+        })
 }
 
 pub fn export_failure_from_initial_fuel(

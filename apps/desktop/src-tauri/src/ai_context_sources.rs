@@ -148,8 +148,8 @@ async fn context_source_tool(
             // Multiple hits in the same file are collapsed to a capped bonus.
             let mut bonus_map: HashMap<String, i64> = HashMap::new();
             for hit in &response.hits {
-                let p = ai_semantic::normalize_slashes_pub(&hit.path.to_string_lossy())
-                    .to_lowercase();
+                let p =
+                    ai_semantic::normalize_slashes_pub(&hit.path.to_string_lossy()).to_lowercase();
                 let entry = bonus_map.entry(p).or_insert(0);
                 *entry = (*entry + CONTENT_TOKEN_BONUS).min(CONTENT_BONUS_CAP);
             }

@@ -57,7 +57,7 @@ const MAX_TRANSCRIPT_BYTES: usize = 64 * 1024; // 64 KiB
 ///   1. HTTPS scheme only — no `http://`, `file://`, or custom schemes.
 ///   2. No private/loopback/link-local hosts — same guard as `web_fetch`.
 ///
-/// Legitimate AI providers (OpenAI, Anthropic, Azure, Bedrock, etc.) are all
+/// Legitimate AI providers (`OpenAI`, Anthropic, Azure, Bedrock, etc.) are all
 /// reachable over HTTPS from a public address. A self-hosted provider on
 /// localhost that a user explicitly configured for goal-eval is an edge case;
 /// if needed the restriction can be relaxed by a dedicated settings flag, but
@@ -92,9 +92,7 @@ fn validate_goal_eval_url(base_url: &str) -> Result<(), String> {
                 ));
             }
             std::net::IpAddr::V6(v6) if v6.is_loopback() => {
-                return Err(format!(
-                    "goal eval: base_url IP {ip} is a loopback address"
-                ));
+                return Err(format!("goal eval: base_url IP {ip} is a loopback address"));
             }
             _ => {}
         }

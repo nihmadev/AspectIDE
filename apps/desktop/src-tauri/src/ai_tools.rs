@@ -1112,8 +1112,10 @@ async fn prepare_ai_patch_operations(
             _ => return Err(format!("unsupported patch action: {}", operation.action)),
         };
         let path = match kind {
-            AiPreparedPatchKind::Create | AiPreparedPatchKind::Rewrite |
-            AiPreparedPatchKind::Replace | AiPreparedPatchKind::Delete => {
+            AiPreparedPatchKind::Create
+            | AiPreparedPatchKind::Rewrite
+            | AiPreparedPatchKind::Replace
+            | AiPreparedPatchKind::Delete => {
                 // Finding 1: route ALL mutating operations through the write resolver.
                 resolve_workspace_path_for_write(state, &operation.path)?
             }
@@ -1519,8 +1521,7 @@ pub fn truncate_shell_output(value: &str) -> String {
     // reserved space is never smaller than the actual marker, guaranteeing
     // head + tail + marker <= AI_SHELL_MAX_OUTPUT_CHARS < total_chars.
     let widest_marker = format!("\n... [{total_chars} characters omitted] ...\n");
-    let content_budget =
-        AI_SHELL_MAX_OUTPUT_CHARS.saturating_sub(widest_marker.chars().count());
+    let content_budget = AI_SHELL_MAX_OUTPUT_CHARS.saturating_sub(widest_marker.chars().count());
     let head_chars = AI_SHELL_TRUNCATE_HEAD_CHARS.min(content_budget);
     let tail_chars = AI_SHELL_TRUNCATE_TAIL_CHARS.min(content_budget - head_chars);
     let omitted = total_chars - head_chars - tail_chars;
@@ -1675,7 +1676,10 @@ mod tests {
             "tail should be preserved, got: ...{}",
             &result[result.len().saturating_sub(50)..]
         );
-        assert!(result.contains("characters omitted"), "omitted count marker missing");
+        assert!(
+            result.contains("characters omitted"),
+            "omitted count marker missing"
+        );
     }
 
     #[test]

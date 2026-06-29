@@ -390,7 +390,12 @@ pub async fn code_graph_export_html(state: State<'_, SharedState>) -> Result<Str
     let html = with_index(&state, |index| {
         let graph = index.graph();
         let communities = lux_codegraph::detect_communities(graph);
-        Ok(lux_codegraph::to_graph_html(graph, &communities, &root, &title))
+        Ok(lux_codegraph::to_graph_html(
+            graph,
+            &communities,
+            &root,
+            &title,
+        ))
     })
     .await?;
 
@@ -400,8 +405,7 @@ pub async fn code_graph_export_html(state: State<'_, SharedState>) -> Result<Str
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Could not create .lux directory: {e}"))?;
-        std::fs::write(&write_path, html)
-            .map_err(|e| format!("Could not write visualization: {e}"))
+        std::fs::write(&write_path, html).map_err(|e| format!("Could not write visualization: {e}"))
     })
     .await
     .map_err(|e| e.to_string())??;

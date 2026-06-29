@@ -2,7 +2,9 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 const transportPath = resolve("src/lib/aiChatTransport.ts");
-const tauriRuntimePath = resolve("src/lib/tauri.ts");
+// The `isBrowserPreviewRuntime` gate lives in the dedicated tauriRuntime module
+// after the tauri.ts decomposition (tauri.ts re-exports it for consumers).
+const tauriRuntimePath = resolve("src/lib/tauriRuntime.ts");
 const browserPreviewScriptPath = resolve("scripts/start-browser-preview.mjs");
 const packagePath = resolve("package.json");
 const [source, tauriRuntimeSource, browserPreviewScriptSource, packageSource] = await Promise.all([

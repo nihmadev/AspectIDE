@@ -32,7 +32,8 @@ pub async fn extensions_activation_plan(
     tokio::task::spawn_blocking(move || {
         // `build_activation_plan` is infallible (returns the plan directly); only
         // discovery can fail, so surface that error and wrap the plan in `Ok`.
-        let extensions = lux_extensions::discover_extensions_in_roots(roots).map_err(String::from)?;
+        let extensions =
+            lux_extensions::discover_extensions_in_roots(roots).map_err(String::from)?;
         Ok::<ExtensionActivationPlan, String>(lux_extensions::build_activation_plan(extensions))
     })
     .await

@@ -204,7 +204,11 @@ impl IgnorePolicy {
             return true;
         }
         // Global gitignore first (cheap, already compiled).
-        if self.global.matched_path_or_any_parents(path, false).is_ignore() {
+        if self
+            .global
+            .matched_path_or_any_parents(path, false)
+            .is_ignore()
+        {
             return true;
         }
         // Walk root → … → parent(path), letting a deeper `.gitignore` override a
@@ -451,9 +455,15 @@ impl Index {
                     // Still in flux — skip; watcher will fire again.
                     return None;
                 }
-                return Some(FileEntry { meta: meta2, parsed: parsed2 });
+                return Some(FileEntry {
+                    meta: meta2,
+                    parsed: parsed2,
+                });
             }
-            Some(FileEntry { meta: post_meta, parsed })
+            Some(FileEntry {
+                meta: post_meta,
+                parsed,
+            })
         });
         match entry {
             Some(entry) => {
@@ -732,8 +742,8 @@ fn add_reference_edges(
         // definition whose extent contains it. A file-scope reference (imports,
         // top-level uses, etc.) has no encloser, so it attaches to the synthetic
         // module node instead of being silently discarded.
-        let source = enclosing_def(placed, reference.span, None)
-            .unwrap_or_else(|| get_file_module(graph));
+        let source =
+            enclosing_def(placed, reference.span, None).unwrap_or_else(|| get_file_module(graph));
 
         let global = graph.nodes_by_name(&reference.name);
         if global.is_empty() {
@@ -992,10 +1002,7 @@ mod tests {
         // A `.gitignore` in a *subdirectory* (not the root) excludes `build/`. A
         // fresh build's WalkBuilder honors it, so the incremental path must too —
         // otherwise saving a generated file would diverge the graph from a rebuild.
-        let root = workspace(&[
-            ("src/.gitignore", "build/\n"),
-            ("src/a.rs", "fn a() {}\n"),
-        ]);
+        let root = workspace(&[("src/.gitignore", "build/\n"), ("src/a.rs", "fn a() {}\n")]);
         let mut index = Index::build(&root).expect("build");
 
         let nested_ignored = root.join("src/build/gen.rs");

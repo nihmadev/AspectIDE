@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct AgentBrowserStatusRequest {
-    /// Per-request command_path override. IGNORED by the Rust side -- binary
+    /// Per-request `command_path` override. IGNORED by the Rust side -- binary
     /// resolution uses trusted sources only (bundled > env var > PATH).
     /// Kept for backward compat; frontend should remove from status requests.
     pub command_path: Option<String>,
@@ -43,7 +44,7 @@ pub struct AgentBrowserInvokeRequest {
     pub allowed_domains: Option<String>,
     pub max_output: Option<usize>,
     pub timeout_secs: Option<u64>,
-    /// Per-request command_path override. IGNORED by the Rust side -- binary
+    /// Per-request `command_path` override. IGNORED by the Rust side -- binary
     /// resolution uses trusted sources only (bundled > env var > PATH).
     /// Kept for backward compat; frontend should remove from invoke requests.
     pub command_path: Option<String>,
@@ -72,8 +73,9 @@ pub struct AgentBrowserInvokeResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct AgentBrowserInstallRequest {
-    /// Per-request command_path override. IGNORED by the Rust side.
+    /// Per-request `command_path` override. IGNORED by the Rust side.
     pub command_path: Option<String>,
     pub with_deps: Option<bool>,
 }
@@ -115,7 +117,7 @@ pub struct AgentBrowserReadImageResponse {
 #[serde(rename_all = "camelCase")]
 pub struct AgentBrowserStreamStatusRequest {
     pub session: String,
-    /// Per-request command_path override. IGNORED by the Rust side.
+    /// Per-request `command_path` override. IGNORED by the Rust side.
     pub command_path: Option<String>,
     pub enable: Option<bool>,
     pub port: Option<u16>,
@@ -136,7 +138,7 @@ pub struct AgentBrowserStreamStatusResponse {
 pub struct AgentBrowserDashboardRequest {
     pub action: String,
     pub port: Option<u16>,
-    /// Per-request command_path override. IGNORED by the Rust side.
+    /// Per-request `command_path` override. IGNORED by the Rust side.
     pub command_path: Option<String>,
 }
 
@@ -153,10 +155,11 @@ pub struct AgentBrowserDashboardResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub struct AgentBrowserSkillsRequest {
     pub name: Option<String>,
     pub all: Option<bool>,
-    /// Per-request command_path override. IGNORED by the Rust side.
+    /// Per-request `command_path` override. IGNORED by the Rust side.
     pub command_path: Option<String>,
 }
 
@@ -169,24 +172,6 @@ pub struct AgentBrowserSkillsResponse {
 }
 
 // ── Default implementations for request types ──
-
-impl Default for AgentBrowserStatusRequest {
-    fn default() -> Self {
-        Self { command_path: None, skip_auto_update: None, lightweight: None }
-    }
-}
-
-impl Default for AgentBrowserInstallRequest {
-    fn default() -> Self {
-        Self { command_path: None, with_deps: None }
-    }
-}
-
-impl Default for AgentBrowserSkillsRequest {
-    fn default() -> Self {
-        Self { name: None, all: None, command_path: None }
-    }
-}
 
 // ── Internal carriers shared across submodules ──
 

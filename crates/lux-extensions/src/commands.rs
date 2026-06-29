@@ -6,7 +6,7 @@ use lux_core::{
     ExtensionCommandExecutionPhase, ExtensionCommandExecutionStatus, ExtensionCommandRoute,
 };
 
-use crate::runtime::{ExtensionExportExecution, ExtensionRuntime, execution_failure_reason};
+use crate::runtime::{execution_failure_reason, ExtensionExportExecution, ExtensionRuntime};
 
 // ---------------------------------------------------------------------------
 // Route building
@@ -122,11 +122,7 @@ pub fn execute_extension_command_from_plan(
     }
 
     let route = matching_routes.into_iter().next().expect("checked above");
-    let Some(candidate) = plan
-        .candidates
-        .iter()
-        .find(|c| c.id == route.extension_id)
-    else {
+    let Some(candidate) = plan.candidates.iter().find(|c| c.id == route.extension_id) else {
         return failed_command_execution(
             command_id,
             Some(route),

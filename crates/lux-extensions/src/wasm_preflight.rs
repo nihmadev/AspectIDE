@@ -6,15 +6,13 @@ use lux_core::{
     AppError, AppResult, ExtensionHostActivationContract, ExtensionHostLimits, ExtensionInfo,
     ExtensionWasmAbi, ExtensionWasmImport, ExtensionWasmImportKind, ExtensionWasmPreflight,
 };
-use wasmparser::{
-    CompositeInnerType, Encoding, ExternalKind, Parser, Payload, TypeRef, Validator,
-};
+use wasmparser::{CompositeInnerType, Encoding, ExternalKind, Parser, Payload, TypeRef, Validator};
 
 use crate::{
     ALLOWED_HOST_IMPORTS, EXTENSION_HOST_ACTIVATION_TIMEOUT_MS, EXTENSION_HOST_MAX_MEMORY_PAGES,
-    EXTENSION_HOST_MAX_OUTPUT_BYTES, EXTENSION_HOST_MAX_TABLE_ELEMENTS,
-    LUX_EXTENSION_ABI_VERSION, LUX_EXTENSION_ENTRYPOINT, LUX_EXTENSION_OPTIONAL_EXPORTS,
-    LUX_HOST_IMPORT_MODULE, MAX_WASM_MODULE_BYTES, WASM_MAGIC_AND_VERSION,
+    EXTENSION_HOST_MAX_OUTPUT_BYTES, EXTENSION_HOST_MAX_TABLE_ELEMENTS, LUX_EXTENSION_ABI_VERSION,
+    LUX_EXTENSION_ENTRYPOINT, LUX_EXTENSION_OPTIONAL_EXPORTS, LUX_HOST_IMPORT_MODULE,
+    MAX_WASM_MODULE_BYTES, WASM_MAGIC_AND_VERSION,
 };
 
 /// Parameter / result counts of a defined WASM function type, used by the F3

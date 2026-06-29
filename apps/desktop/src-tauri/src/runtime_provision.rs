@@ -1163,9 +1163,10 @@ fn tombstone_path(dest: &Path) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    let name = dest
-        .file_name()
-        .map_or_else(|| "runtime".to_string(), |n| n.to_string_lossy().to_string());
+    let name = dest.file_name().map_or_else(
+        || "runtime".to_string(),
+        |n| n.to_string_lossy().to_string(),
+    );
     dest.with_file_name(format!(".{name}.tombstone-{nanos}"))
 }
 

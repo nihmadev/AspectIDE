@@ -93,7 +93,7 @@ fn clear_turn_cancelled(turn_id: &str) {
 }
 
 /// Messages the UI staged WHILE a turn was running, keyed by `session_id:turn_id`.
-/// Keying by turn_id prevents a restarted or concurrent turn draining messages
+/// Keying by `turn_id` prevents a restarted or concurrent turn draining messages
 /// that were staged for a different (earlier) turn (F5 — misrouting live input).
 fn pending_injections() -> &'static Mutex<HashMap<String, VecDeque<String>>> {
     static PENDING: OnceLock<Mutex<HashMap<String, VecDeque<String>>>> = OnceLock::new();
@@ -1150,12 +1150,12 @@ pub async fn ai_run_turn(
                 if matches!(tc.name.as_str(), "Read" | "InspectFile") {
                     if let Some(raw) = tc_args.get("path").and_then(|v| v.as_str()) {
                         // Only a first-time read (file not yet in session) creates the risk.
-                        if let Ok(resolved) = crate::resolve_workspace_path(
-                            &state,
-                            std::path::Path::new(raw),
-                        ) {
+                        if let Ok(resolved) =
+                            crate::resolve_workspace_path(&state, std::path::Path::new(raw))
+                        {
                             if !crate::ai_session::was_file_read(&input.session_id, &resolved) {
-                                reads_in_batch.insert(resolved.to_string_lossy().replace('\\', "/"));
+                                reads_in_batch
+                                    .insert(resolved.to_string_lossy().replace('\\', "/"));
                             }
                         }
                     }
@@ -1200,12 +1200,9 @@ pub async fn ai_run_turn(
                             .get("path")
                             .and_then(|v| v.as_str())
                             .and_then(|raw| {
-                                crate::resolve_workspace_path(
-                                    &state,
-                                    std::path::Path::new(raw),
-                                )
-                                .ok()
-                                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                                crate::resolve_workspace_path(&state, std::path::Path::new(raw))
+                                    .ok()
+                                    .map(|p| p.to_string_lossy().replace('\\', "/"))
                             })
                     } else {
                         None
@@ -1614,7 +1611,7 @@ fn parse_tool_call(value: &serde_json::Value) -> Option<ParsedToolCall> {
 /// `execute_tool` rejects any call whose name is not in this set, so mode
 /// restrictions are enforced at the Rust boundary — a forged `Write`/`Shell` call
 /// in a read-only mode (whose definitions never included those tools) is blocked
-/// regardless of approval settings. Handles both the OpenAI `{function:{name}}`
+/// regardless of approval settings. Handles both the `OpenAI` `{function:{name}}`
 /// shape and a bare `{name}` shape.
 fn tool_names_from_defs(tools: &[serde_json::Value]) -> std::collections::HashSet<String> {
     tools
@@ -1963,8 +1960,7 @@ async fn execute_tool(
             // in deny/ask/allow rules match the canonical workspace-relative form, not
             // whatever spelling the model used (./x, mixed separators, etc.).
             let resolved_path = crate::resolve_workspace_path(state, std::path::Path::new(&path))
-                .map(|p| p.to_string_lossy().replace('\\', "/"))
-                .unwrap_or_else(|_| path.clone());
+                .map_or_else(|_| path.clone(), |p| p.to_string_lossy().replace('\\', "/"));
             require_tool_approval(
                 app,
                 turn_id,
@@ -2007,8 +2003,7 @@ async fn execute_tool(
             // F9: resolve path for permission evaluation.
             let resolved_str_path =
                 crate::resolve_workspace_path(state, std::path::Path::new(&path))
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|_| path.clone());
+                    .map_or_else(|_| path.clone(), |p| p.to_string_lossy().replace('\\', "/"));
             let old_text = json_str(&args, "oldText");
             let new_text = json_str(&args, "newText");
             let expected = args
@@ -2063,8 +2058,7 @@ async fn execute_tool(
             // F9: resolve path for permission evaluation.
             let resolved_delete_path =
                 crate::resolve_workspace_path(state, std::path::Path::new(&path))
-                    .map(|p| p.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_else(|_| path.clone());
+                    .map_or_else(|_| path.clone(), |p| p.to_string_lossy().replace('\\', "/"));
             require_tool_approval(
                 app,
                 turn_id,
@@ -2189,9 +2183,8 @@ async fn execute_tool(
                             | "str_replace"
                             | "replace"
                             | "delete"
-                            | "remove"
-                    // F8: treat create+overwrite on an existing file as an existing-file
-                    // mutation — require a prior eligible read rather than bypassing the guard.
+                            | "remove" // F8: treat create+overwrite on an existing file as an existing-file
+                                       // mutation — require a prior eligible read rather than bypassing the guard.
                     ) || (is_create && overwrite_flag);
                     if !mutates_existing {
                         continue;
@@ -2225,8 +2218,7 @@ async fn execute_tool(
                     .iter()
                     .map(|p| {
                         crate::resolve_workspace_path(state, std::path::Path::new(p))
-                            .map(|r| r.to_string_lossy().replace('\\', "/"))
-                            .unwrap_or_else(|_| p.clone())
+                            .map_or_else(|_| p.clone(), |r| r.to_string_lossy().replace('\\', "/"))
                     })
                     .collect();
                 // Evaluate each target independently so a deny on any one blocks all.
@@ -2525,10 +2517,9 @@ async fn execute_tool(
             // with --fix, and BrowserScreenshot with a write path were ungated.
             let browser_is_side_effecting = match tc.name.as_str() {
                 // Always side-effecting: opens connections, mutates pages, installs.
+                // BrowserInvoke is a raw CLI escape hatch — also always side-effecting.
                 "BrowserOpen" | "BrowserAct" | "BrowserClose" | "BrowserChat"
-                | "BrowserInstall" => true,
-                // BrowserInvoke is a raw CLI escape hatch — always side-effecting.
-                "BrowserInvoke" => true,
+                | "BrowserInstall" | "BrowserInvoke" => true,
                 // BrowserDoctor with --fix runs repair commands; read-only without it.
                 "BrowserDoctor" => args
                     .get("fix")
@@ -2762,7 +2753,7 @@ async fn execute_tool(
                 ));
             }
             // Timeout prevents deadlock when the card is destroyed mid-turn (F2).
-            const QUESTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+            const QUESTION_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
             match tokio::time::timeout(QUESTION_TIMEOUT, rx).await {
                 Ok(Ok(answer)) if !answer.cancelled && !answer.answer.trim().is_empty() => {
                     Ok(serde_json::json!({ "answer": answer.answer }).to_string())
@@ -3765,9 +3756,12 @@ async fn run_subagent(
     // its mode either (a read_only subagent must not execute Write/Shell/etc.).
     let subagent_allowed: std::collections::HashSet<String> = tools
         .iter()
-        .filter_map(|t| t.get("function").and_then(|f| f.get("name"))
-            .or_else(|| t.get("name"))
-            .and_then(|n| n.as_str()))
+        .filter_map(|t| {
+            t.get("function")
+                .and_then(|f| f.get("name"))
+                .or_else(|| t.get("name"))
+                .and_then(|n| n.as_str())
+        })
         .map(str::to_string)
         .collect();
 
@@ -3840,7 +3834,16 @@ async fn run_subagent(
                 Err("Nested subagents are not allowed (depth limit).".to_string())
             } else {
                 // Subagent tool calls don't emit UI events (isolated context).
-                Box::pin(execute_tool(app, state, parent, agent_id, false, child, &subagent_allowed)).await
+                Box::pin(execute_tool(
+                    app,
+                    state,
+                    parent,
+                    agent_id,
+                    false,
+                    child,
+                    &subagent_allowed,
+                ))
+                .await
             };
             let content = match result {
                 Ok(output) => output,
@@ -3948,7 +3951,7 @@ async fn require_tool_approval(
     }
     // Timeout prevents the turn from hanging forever when the frontend card is
     // missing or the window is closed mid-turn (F2 — deadlock guard).
-    const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(5);
     match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
         Ok(Ok(ApprovalDecision::Approved)) => Ok(()),
         Ok(_) => Err(format!("{tool} was rejected by the user.")),
@@ -4404,14 +4407,24 @@ mod tests {
         for mode in ["plan", "ask"] {
             let defs = crate::ai_tool_defs::runtime_tool_definitions(mode, false);
             let allowed = tool_names_from_defs(&defs);
-            for forged in ["Write", "StrReplace", "Delete", "PatchEngine", "Shell", "McpManage"] {
+            for forged in [
+                "Write",
+                "StrReplace",
+                "Delete",
+                "PatchEngine",
+                "Shell",
+                "McpManage",
+            ] {
                 assert!(
                     !allowed.contains(forged),
                     "{forged} must NOT be in the {mode}-mode allowlist (forge guard)"
                 );
             }
             // Read-only tools the mode does advertise stay allowed.
-            assert!(allowed.contains("Read"), "Read must remain available in {mode}");
+            assert!(
+                allowed.contains("Read"),
+                "Read must remain available in {mode}"
+            );
         }
     }
 
@@ -4422,8 +4435,14 @@ mod tests {
         for mode in ["agent", "automatic"] {
             let defs = crate::ai_tool_defs::runtime_tool_definitions(mode, false);
             let allowed = tool_names_from_defs(&defs);
-            assert!(allowed.contains("Write"), "Write expected in {mode} allowlist");
-            assert!(allowed.contains("StrReplace"), "StrReplace expected in {mode} allowlist");
+            assert!(
+                allowed.contains("Write"),
+                "Write expected in {mode} allowlist"
+            );
+            assert!(
+                allowed.contains("StrReplace"),
+                "StrReplace expected in {mode} allowlist"
+            );
         }
     }
 }

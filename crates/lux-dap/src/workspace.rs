@@ -19,9 +19,23 @@ const WALK_MAX_FILES: usize = 500_000;
 
 // ── Ignored directory names for extension detection ──────────────────────
 const IGNORE_DIRS: &[&str] = &[
-    "node_modules", "target", ".git", ".venv", "venv", "dist", "build",
-    "vendor", "__pycache__", ".next", ".nuxt", "out", ".cache",
-    ".bundle", "coverage", ".terraform", ".serverless",
+    "node_modules",
+    "target",
+    ".git",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    "vendor",
+    "__pycache__",
+    ".next",
+    ".nuxt",
+    "out",
+    ".cache",
+    ".bundle",
+    "coverage",
+    ".terraform",
+    ".serverless",
 ];
 
 struct BuiltinDebugAdapter {

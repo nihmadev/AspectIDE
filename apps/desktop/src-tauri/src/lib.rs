@@ -2,9 +2,11 @@
 #![deny(clippy::nursery)]
 #![allow(clippy::missing_errors_doc)]
 #![allow(
+    clippy::items_after_statements,
     clippy::large_stack_frames,
     clippy::missing_panics_doc,
     clippy::needless_pass_by_value,
+    clippy::option_if_let_else,
     clippy::significant_drop_tightening,
     clippy::similar_names,
     clippy::struct_excessive_bools,
@@ -343,7 +345,11 @@ async fn fs_list_files(
 // renderer/extension/AI surface to the open workspace and rejects absolute or
 // `..`-escaping targets, instead of forwarding raw `PathBuf`s straight to `lux_fs`.
 #[tauri::command]
-fn fs_create_file(app: AppHandle, state: State<'_, SharedState>, path: PathBuf) -> Result<(), String> {
+fn fs_create_file(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    path: PathBuf,
+) -> Result<(), String> {
     let path = resolve_workspace_path_for_write(&state, &path)?;
     lux_fs::create_file(&path).map_err(String::from)?;
     emit_event(&app, LuxEvent::FsChanged { path })?;
@@ -351,7 +357,11 @@ fn fs_create_file(app: AppHandle, state: State<'_, SharedState>, path: PathBuf) 
 }
 
 #[tauri::command]
-fn fs_create_dir(app: AppHandle, state: State<'_, SharedState>, path: PathBuf) -> Result<(), String> {
+fn fs_create_dir(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    path: PathBuf,
+) -> Result<(), String> {
     let path = resolve_workspace_path_for_write(&state, &path)?;
     lux_fs::create_dir(&path).map_err(String::from)?;
     emit_event(&app, LuxEvent::FsChanged { path })?;
@@ -397,10 +407,7 @@ fn fs_delete(app: AppHandle, state: State<'_, SharedState>, path: PathBuf) -> Re
 }
 
 #[tauri::command]
-fn fs_reveal_in_file_explorer(
-    state: State<'_, SharedState>,
-    path: PathBuf,
-) -> Result<(), String> {
+fn fs_reveal_in_file_explorer(state: State<'_, SharedState>, path: PathBuf) -> Result<(), String> {
     let path = resolve_workspace_path(&state, &path)?;
     lux_fs::reveal_in_file_explorer(path).map_err(String::from)
 }

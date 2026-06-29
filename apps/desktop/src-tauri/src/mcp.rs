@@ -270,7 +270,8 @@ pub async fn connect_server(config: McpServerConfig) -> Result<McpServerStatus, 
         Ok::<Vec<McpToolInfo>, String>(parse_tools(&tools_result))
     };
 
-    let handshake_error = match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), handshake).await {
+    let handshake_error = match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), handshake).await
+    {
         Ok(Ok(tools)) => {
             connection.tools = tools;
             connection.state = "connected".to_string();
@@ -776,7 +777,10 @@ mod tests {
         assert!(!is_provider_safe_tool_name("mcp__ctx7__has space"));
         assert!(!is_provider_safe_tool_name("mcp__ctx7__dot.name"));
         assert!(!is_provider_safe_tool_name("mcp__ctx7__naïve")); // non-ASCII
-        assert!(!is_provider_safe_tool_name(&format!("mcp__ctx7__{}", "x".repeat(64))));
+        assert!(!is_provider_safe_tool_name(&format!(
+            "mcp__ctx7__{}",
+            "x".repeat(64)
+        )));
         assert!(!is_provider_safe_tool_name(""));
     }
 

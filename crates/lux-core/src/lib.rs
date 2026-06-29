@@ -4,8 +4,8 @@
 
 mod concurrency;
 pub use concurrency::{
-    acquire_scan_workers, resolve_scan_threads, scan_threads, set_scan_concurrency, ScanConcurrency,
-    ScanWorkers,
+    acquire_scan_workers, resolve_scan_threads, scan_threads, set_scan_concurrency,
+    ScanConcurrency, ScanWorkers,
 };
 
 // File-format catalog + view/preview descriptors. Extracted from this schema root

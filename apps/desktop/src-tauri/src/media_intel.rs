@@ -123,25 +123,23 @@ fn transcribe_media_file(request: &FileMediaAiContextRequest) -> Result<String, 
 /// Run a subprocess with a wall-clock timeout. Spawns the child, then polls
 /// every 100 ms until the deadline. On expiry the child is killed and an error
 /// is returned so the caller can surface a bounded note rather than hanging.
-fn run_with_timeout(mut command: Command, timeout: Duration) -> Result<std::process::ExitStatus, String> {
+fn run_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+) -> Result<std::process::ExitStatus, String> {
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to spawn process: {e}"))?;
     let deadline = Instant::now() + timeout;
     loop {
-        match child.try_wait().map_err(|e| e.to_string())? {
-            Some(status) => return Ok(status),
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    return Err(format!(
-                        "process timed out after {}s",
-                        timeout.as_secs()
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return Ok(status);
         }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            return Err(format!("process timed out after {}s", timeout.as_secs()));
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -156,7 +154,9 @@ fn probe_duration_secs(path: &Path, ffmpeg: &str) -> Option<f64> {
             p.parent()
                 .and_then(|parent| {
                     let sibling = parent.join("ffprobe");
-                    sibling.is_file().then(|| sibling.to_string_lossy().into_owned())
+                    sibling
+                        .is_file()
+                        .then(|| sibling.to_string_lossy().into_owned())
                 })
                 .unwrap_or_else(|| "ffprobe".to_string())
         } else {
@@ -167,9 +167,12 @@ fn probe_duration_secs(path: &Path, ffmpeg: &str) -> Option<f64> {
     // Spawn with stdout piped; enforce timeout via polling.
     let mut child = ffmpeg_command(&ffprobe)
         .args([
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             "-nostdin",
         ])
         .arg(path)
@@ -180,26 +183,25 @@ fn probe_duration_secs(path: &Path, ffmpeg: &str) -> Option<f64> {
 
     let deadline = Instant::now() + FFMPEG_TIMEOUT;
     loop {
-        match child.try_wait().ok()? {
-            Some(status) => {
-                if !status.success() {
-                    return None;
-                }
-                break;
+        if let Some(status) = child.try_wait().ok()? {
+            if !status.success() {
+                return None;
             }
-            None => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(100));
-            }
+            break;
         }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 
     let output = child.wait_with_output().ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
-    text.trim().parse::<f64>().ok().filter(|d| d.is_finite() && *d > 0.0)
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|d| d.is_finite() && *d > 0.0)
 }
 
 fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<String>, String> {
@@ -227,7 +229,12 @@ fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<Stri
             Some(duration) => {
                 // Sample at evenly-spaced positions across [0, duration).
                 (0..usize::from(max_frames))
-                    .map(|i| duration * (i as f64) / (f64::from(max_frames) - 1.0).max(1.0))
+                    .map(|i| {
+                        // Frame index is always tiny (< max_frames); widening to
+                        // f64 via u32 is lossless and avoids a precision-loss cast.
+                        let i = f64::from(u32::try_from(i).unwrap_or(u32::MAX));
+                        duration * i / (f64::from(max_frames) - 1.0).max(1.0)
+                    })
                     .map(|t| t.min(duration * 0.99)) // stay within the file
                     .collect()
             }
@@ -246,48 +253,30 @@ fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<Stri
     // aspect ratio. "scale='min(W,1280):min(H,1280):force_original_aspect_ratio=decrease'"
     // is the canonical ffmpeg approach. We also add a JPEG quality argument.
     let scale_filter = format!(
-        "scale='if(gt(iw,ih),min(iw,{max_dim}),-2):if(gt(iw,ih),-2,min(ih,{max_dim})),\
-         scale=trunc(iw/2)*2:trunc(ih/2)*2'",
-        max_dim = FRAME_MAX_DIMENSION
+        "scale='if(gt(iw,ih),min(iw,{FRAME_MAX_DIMENSION}),-2):if(gt(iw,ih),-2,min(ih,{FRAME_MAX_DIMENSION})),\
+         scale=trunc(iw/2)*2:trunc(ih/2)*2'"
     );
 
     let mut all_frames: Vec<PathBuf> = Vec::new();
 
-    if !seek_times.is_empty() {
-        // Evenly-spaced mode: one ffmpeg invocation per timestamp with -ss seek.
-        for (index, &seek) in seek_times.iter().enumerate() {
-            let output_path = output_dir.join(format!("frame-{:02}.jpg", index + 1));
-            let mut cmd = ffmpeg_command(&ffmpeg);
-            cmd.arg("-nostdin")
-                .arg("-hide_banner")
-                .arg("-loglevel").arg("error")
-                .arg("-y")
-                .arg("-ss").arg(format!("{seek:.3}"))
-                .arg("-i").arg(path)
-                .arg("-vf").arg(&scale_filter)
-                .arg("-frames:v").arg("1")
-                .arg("-q:v").arg("3") // JPEG quality 2–5 is good; 3 balances size/quality
-                .arg(&output_path);
-            // Ignore per-frame errors; collect whatever succeeds.
-            if run_with_timeout(cmd, FFMPEG_TIMEOUT).map_or(false, |s| s.success()) {
-                if output_path.exists() {
-                    all_frames.push(output_path);
-                }
-            }
-        }
-    } else {
+    if seek_times.is_empty() {
         // Fallback: sequential fps-based extraction (no duration available).
         let output_pattern = output_dir.join("frame-%02d.jpg");
         let combined_filter = format!("fps=1/{},{}", u32::from(max_frames).max(1), scale_filter);
         let mut cmd = ffmpeg_command(&ffmpeg);
         cmd.arg("-nostdin")
             .arg("-hide_banner")
-            .arg("-loglevel").arg("error")
+            .arg("-loglevel")
+            .arg("error")
             .arg("-y")
-            .arg("-i").arg(path)
-            .arg("-vf").arg(&combined_filter)
-            .arg("-frames:v").arg(max_frames.to_string())
-            .arg("-q:v").arg("3")
+            .arg("-i")
+            .arg(path)
+            .arg("-vf")
+            .arg(&combined_filter)
+            .arg("-frames:v")
+            .arg(max_frames.to_string())
+            .arg("-q:v")
+            .arg("3")
             .arg(&output_pattern);
         let status = run_with_timeout(cmd, FFMPEG_TIMEOUT)
             .map_err(|error| format!("ffmpeg timed out or failed: {error}"))?;
@@ -303,6 +292,34 @@ fn extract_video_frame_data_urls(path: &Path, max_frames: u8) -> Result<Vec<Stri
             all_frames.extend(entries.into_iter().take(usize::from(max_frames)));
         } else if all_frames.is_empty() {
             return Err(format!("ffmpeg exited with {status}"));
+        }
+    } else {
+        // Evenly-spaced mode: one ffmpeg invocation per timestamp with -ss seek.
+        for (index, &seek) in seek_times.iter().enumerate() {
+            let output_path = output_dir.join(format!("frame-{:02}.jpg", index + 1));
+            let mut cmd = ffmpeg_command(&ffmpeg);
+            cmd.arg("-nostdin")
+                .arg("-hide_banner")
+                .arg("-loglevel")
+                .arg("error")
+                .arg("-y")
+                .arg("-ss")
+                .arg(format!("{seek:.3}"))
+                .arg("-i")
+                .arg(path)
+                .arg("-vf")
+                .arg(&scale_filter)
+                .arg("-frames:v")
+                .arg("1")
+                .arg("-q:v")
+                .arg("3") // JPEG quality 2–5 is good; 3 balances size/quality
+                .arg(&output_path);
+            // Ignore per-frame errors; collect whatever succeeds.
+            if run_with_timeout(cmd, FFMPEG_TIMEOUT).is_ok_and(|s| s.success())
+                && output_path.exists()
+            {
+                all_frames.push(output_path);
+            }
         }
     }
 

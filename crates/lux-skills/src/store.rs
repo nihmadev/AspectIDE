@@ -68,8 +68,7 @@ pub fn write_skill(root: &Path, slug: &str, content: &str) -> AppResult<PathBuf>
     // Use `resolve_skill_path` so the write always targets the same file that
     // `read_skill` / `set_skill_enabled` would open. Fall back to the directory
     // form (preferred canonical) when no file exists yet.
-    let target = resolve_skill_path(root, slug)
-        .unwrap_or_else(|| root.join(slug).join(SKILL_FILE));
+    let target = resolve_skill_path(root, slug).unwrap_or_else(|| root.join(slug).join(SKILL_FILE));
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -423,9 +422,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let root = dir.path();
         // Create directory form first (canonical).
-        write(&root.join("dual/SKILL.md"), "---\nname: original\ndescription: dir\n---\nbody");
+        write(
+            &root.join("dual/SKILL.md"),
+            "---\nname: original\ndescription: dir\n---\nbody",
+        );
         // Also plant a single-file copy (stale shadow).
-        write(&root.join("dual.md"), "---\nname: stale\ndescription: single\n---\nbody");
+        write(
+            &root.join("dual.md"),
+            "---\nname: stale\ndescription: single\n---\nbody",
+        );
 
         let new_content = "---\nname: updated\ndescription: updated desc\n---\nnew body";
         let written_path = write_skill(root, "dual", new_content).unwrap();
@@ -438,10 +443,16 @@ mod tests {
         // Reading back through the canonical resolver must see the updated content.
         let roots = [(SkillScope::Global, root.to_path_buf())];
         let skill = read_skill(&roots, "dual").unwrap().unwrap();
-        assert_eq!(skill.name, "updated", "read_skill must see the updated content");
+        assert_eq!(
+            skill.name, "updated",
+            "read_skill must see the updated content"
+        );
         // The single-file shadow must remain unmodified.
         let shadow = fs::read_to_string(root.join("dual.md")).unwrap();
-        assert!(shadow.contains("stale"), "single-file shadow must not be overwritten");
+        assert!(
+            shadow.contains("stale"),
+            "single-file shadow must not be overwritten"
+        );
     }
 
     #[test]

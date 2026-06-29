@@ -75,5 +75,8 @@ pub fn build_activation_plan(extensions: Vec<ExtensionInfo>) -> ExtensionActivat
 
     candidates.sort_by(|l, r| l.id.cmp(&r.id));
     blocked.sort_by(|l, r| l.id.cmp(&r.id));
-    ExtensionActivationPlan { candidates, blocked }
+    ExtensionActivationPlan {
+        candidates,
+        blocked,
+    }
 }

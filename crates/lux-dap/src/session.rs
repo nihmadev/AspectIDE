@@ -14,9 +14,9 @@ use chrono::Utc;
 use lux_core::{
     AppError, AppResult, DebugAdapterInfo, DebugAdapterStatus, DebugAdapterTransport,
     DebugBreakpointsUpdate, DebugConfiguration, DebugConfigurationRequest, DebugEvaluateContext,
-    DebugEvaluateResult, DebugFrameScopes, DebugResolvedBreakpoint, DebugSessionInfo,
-    DebugSessionStatus, DebugSourceBreakpoint, DebugStackTrace, DebugThreadInfo, DebugVariables,
-    DebugExecutionAction,
+    DebugEvaluateResult, DebugExecutionAction, DebugFrameScopes, DebugResolvedBreakpoint,
+    DebugSessionInfo, DebugSessionStatus, DebugSourceBreakpoint, DebugStackTrace, DebugThreadInfo,
+    DebugVariables,
 };
 use serde_json::{json, Value};
 use tokio::{
@@ -1157,7 +1157,8 @@ impl DebugSessionManager {
                     }
                     DapMessage::Request(request) => {
                         self.with_session_mut(session_id, |session| {
-                            session.info.last_event = Some(format!("adapter request: {}", request.command));
+                            session.info.last_event =
+                                Some(format!("adapter request: {}", request.command));
                         })?;
                     }
                 }
@@ -1195,7 +1196,11 @@ impl DebugSessionManager {
                         session.info.status = DebugSessionStatus::Running;
                     } else if let Some(tid) = thread_id {
                         session.thread_states.insert(tid, ThreadState::Running);
-                        if !session.thread_states.values().any(|s| *s == ThreadState::Paused) {
+                        if !session
+                            .thread_states
+                            .values()
+                            .any(|s| *s == ThreadState::Paused)
+                        {
                             session.info.status = DebugSessionStatus::Running;
                         }
                     }

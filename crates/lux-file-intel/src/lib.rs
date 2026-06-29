@@ -554,7 +554,8 @@ fn notebook_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<F
         .take(options.max_rows)
         .enumerate()
         .map(|(index, cell)| {
-            let source = truncate_chars(&json_text_array(cell.get("source")), NOTEBOOK_CELL_CHAR_CAP);
+            let source =
+                truncate_chars(&json_text_array(cell.get("source")), NOTEBOOK_CELL_CHAR_CAP);
             let output_text = truncate_chars(
                 &cell
                     .get("outputs")

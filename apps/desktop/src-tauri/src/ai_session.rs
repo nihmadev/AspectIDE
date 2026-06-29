@@ -308,10 +308,8 @@ mod tests {
     /// Create a uniquely-named temp directory for a read-tracking test and return
     /// it so the caller can drop a real file into it (the guard now stats files).
     fn temp_dir() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "lux-read-test-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("lux-read-test-{}", uuid::Uuid::new_v4().simple()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

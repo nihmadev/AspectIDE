@@ -1,16 +1,15 @@
-#![deny(clippy::pedantic)]
-#![deny(clippy::nursery)]
-#![allow(clippy::missing_errors_doc)]
+// pedantic/nursery denies + the project's noise-lint allow list are inherited
+// from the crate root (lib.rs); only the module-specific allow is set here.
 #![allow(clippy::module_name_repetitions)]
 
 //! agent-browser bridge: drives the `agent-browser` CLI for AI browser
 //! automation. Split into focused submodules:
-//! - [`types`]: request/response DTOs and internal carriers
-//! - [`resolver`]: trusted binary resolution + tuning constants
-//! - [`validate`]: domain/proxy/provider validation + sanitisation
-//! - [`version`]: version string parsing/comparison
-//! - [`process`]: subprocess execution + bounded output parsing
-//! - [`operations`]: status/invoke/stream/dashboard/skills/install/read-image
+//! - `types` — request/response DTOs and internal carriers
+//! - `resolver` — trusted binary resolution + tuning constants
+//! - `validate` — domain/proxy/provider validation + sanitisation
+//! - `version` — version string parsing/comparison
+//! - `process` — subprocess execution + bounded output parsing
+//! - `operations` — status/invoke/stream/dashboard/skills/install/read-image
 //!
 //! The Tauri command wrappers stay here so their `crate::agent_browser::*`
 //! paths and the public API are unchanged.

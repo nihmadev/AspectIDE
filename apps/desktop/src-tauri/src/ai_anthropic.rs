@@ -580,10 +580,12 @@ mod tests {
         assert_eq!(out["tool_choice"]["disable_parallel_tool_use"], json!(true));
 
         // parallel_tool_calls: true (or absent) leaves the flag off.
-        let mut parallel = base.clone();
+        let mut parallel = base;
         parallel["parallel_tool_calls"] = json!(true);
         let out = to_anthropic_request(&parallel);
-        assert!(out["tool_choice"].get("disable_parallel_tool_use").is_none());
+        assert!(out["tool_choice"]
+            .get("disable_parallel_tool_use")
+            .is_none());
     }
 
     #[test]

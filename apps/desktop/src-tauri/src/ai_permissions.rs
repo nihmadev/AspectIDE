@@ -197,33 +197,29 @@ const AI_PREFERENCES_SETTINGS_KEY: &str = "ai.preferences";
 fn load_permission_rules_from_settings(
     state: &tauri::State<'_, crate::SharedState>,
 ) -> Vec<String> {
-    let settings = match state.settings.lock() {
-        Ok(guard) => guard,
-        Err(_) => return Vec::new(),
+    let Ok(settings) = state.settings.lock() else {
+        return Vec::new();
     };
-    let store = match settings.as_ref() {
-        Some(s) => s,
-        None => return Vec::new(),
+    let Some(store) = settings.as_ref() else {
+        return Vec::new();
     };
-    let setting = match store.get(lux_core::SettingsScope::User, AI_PREFERENCES_SETTINGS_KEY) {
-        Some(s) => s,
-        None => return Vec::new(),
+    let Some(setting) = store.get(lux_core::SettingsScope::User, AI_PREFERENCES_SETTINGS_KEY)
+    else {
+        return Vec::new();
     };
     // The value is the full `AiPreferences` JSON object; we only need the rules array.
-    let rules = setting
+    setting
         .value
         .get("toolPermissionRules")
-        .and_then(|v| v.as_array());
-    match rules {
-        Some(arr) => arr
-            .iter()
-            .filter_map(|v| v.as_str())
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| s.trim().to_string())
-            .take(100) // match the TS-side limit
-            .collect(),
-        None => Vec::new(),
-    }
+        .and_then(|v| v.as_array())
+        .map_or_else(Vec::new, |arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .take(100) // match the TS-side limit
+                .collect()
+        })
 }
 
 /// Tauri command: decide a tool call against the configured permission rules.

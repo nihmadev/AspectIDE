@@ -149,7 +149,10 @@ fn runtime_section(input: &SystemPromptInput, agent_name: &str) -> String {
     let workspace_line = if input.workspace_root.trim().is_empty() {
         "Workspace root: none open".to_string()
     } else {
-        format!("Workspace root: {}", redact_workspace_root(&input.workspace_root))
+        format!(
+            "Workspace root: {}",
+            redact_workspace_root(&input.workspace_root)
+        )
     };
     let tool_round_limit = input
         .tool_round_limit
@@ -343,7 +346,10 @@ fn budget_text(text: &str, max_bytes: usize) -> String {
         cut -= 1;
     }
     let omitted = text.len() - cut;
-    format!("{}\n[… truncated {omitted} bytes to respect prompt budget …]", &text[..cut])
+    format!(
+        "{}\n[… truncated {omitted} bytes to respect prompt budget …]",
+        &text[..cut]
+    )
 }
 
 #[cfg(test)]
@@ -484,9 +490,18 @@ mod tests {
 
     #[test]
     fn redact_workspace_root_edge_cases() {
-        assert_eq!(redact_workspace_root("/home/alice/proj"), "<workspace>/proj");
-        assert_eq!(redact_workspace_root("/home/alice/proj/"), "<workspace>/proj");
-        assert_eq!(redact_workspace_root(r"C:\Users\bob\app"), "<workspace>/app");
+        assert_eq!(
+            redact_workspace_root("/home/alice/proj"),
+            "<workspace>/proj"
+        );
+        assert_eq!(
+            redact_workspace_root("/home/alice/proj/"),
+            "<workspace>/proj"
+        );
+        assert_eq!(
+            redact_workspace_root(r"C:\Users\bob\app"),
+            "<workspace>/app"
+        );
         assert_eq!(redact_workspace_root(r"D:\app\"), "<workspace>/app");
         // Bare roots have no meaningful folder name → placeholder only.
         assert_eq!(redact_workspace_root("/"), "<workspace>");

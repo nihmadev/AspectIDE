@@ -160,7 +160,9 @@ pub fn parse_text_document_sync_kind(value: &Value) -> TextDocumentSyncKind {
         .and_then(|caps| caps.get("textDocumentSync"));
     let change = match sync {
         Some(Value::Number(number)) => number.as_i64(),
-        Some(Value::Object(_)) => sync.and_then(|sync| sync.get("change")).and_then(Value::as_i64),
+        Some(Value::Object(_)) => sync
+            .and_then(|sync| sync.get("change"))
+            .and_then(Value::as_i64),
         _ => None,
     };
     match change {

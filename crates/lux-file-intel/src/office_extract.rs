@@ -92,10 +92,7 @@ fn rtf_office_preview(path: &Path) -> FilePreview {
         .ok()
         .map(|f| {
             let mut buf = Vec::new();
-            BufReader::new(f)
-                .take(read_cap)
-                .read_to_end(&mut buf)
-                .ok();
+            BufReader::new(f).take(read_cap).read_to_end(&mut buf).ok();
             // Try UTF-8 first; fall back to lossy decode for legacy encodings.
             match String::from_utf8(buf) {
                 Ok(s) => s,

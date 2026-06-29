@@ -478,7 +478,11 @@ impl WorkspaceFs {
     }
 
     /// Rename/move within the workspace; both endpoints are confined.
-    pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> AppResult<(PathBuf, PathBuf)> {
+    pub fn rename(
+        &self,
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+    ) -> AppResult<(PathBuf, PathBuf)> {
         let from = self.confine(from.as_ref())?;
         let to = self.confine(to.as_ref())?;
         rename(&from, &to)?;
@@ -486,7 +490,11 @@ impl WorkspaceFs {
     }
 
     /// Copy within the workspace; both endpoints are confined.
-    pub fn copy_path(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> AppResult<(PathBuf, PathBuf)> {
+    pub fn copy_path(
+        &self,
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+    ) -> AppResult<(PathBuf, PathBuf)> {
         let from = self.confine(from.as_ref())?;
         let to = self.confine(to.as_ref())?;
         copy_path(&from, &to)?;
@@ -520,9 +528,7 @@ fn confine_to_root(root: &Path, candidate: &Path) -> AppResult<PathBuf> {
         )));
     }
 
-    let base = root
-        .canonicalize()
-        .unwrap_or_else(|_| root.to_path_buf());
+    let base = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let mut resolved = base.clone();
     for component in candidate.components() {
         match component {
@@ -730,9 +736,7 @@ mod tests {
 
     use lux_core::FsEntryKind;
 
-    use super::{
-        list_files, read_tree, read_tree_bounded, WorkspaceFs,
-    };
+    use super::{list_files, read_tree, read_tree_bounded, WorkspaceFs};
 
     fn test_root(tag: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -932,7 +936,7 @@ mod tests {
         let created = workspace
             .create_file("notes/today.md")
             .expect("relative create should succeed");
-        assert!(created.starts_with(root.canonicalize().unwrap_or(root.clone())));
+        assert!(created.starts_with(root.canonicalize().unwrap_or_else(|_| root.clone())));
         assert!(created.exists());
 
         // `..` traversal that escapes the workspace is rejected before touching disk.

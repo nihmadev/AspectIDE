@@ -75,7 +75,10 @@ struct HostImportSpec {
 /// further rejects I/O imports (those with `permission.is_some()`) at
 /// preflight time until real host-side implementations are provided.
 const ALLOWED_HOST_IMPORTS: &[HostImportSpec] = &[
-    HostImportSpec { name: "log", permission: None },
+    HostImportSpec {
+        name: "log",
+        permission: None,
+    },
     HostImportSpec {
         name: "workspace_read",
         permission: Some(lux_core::ExtensionHostPermission::WorkspaceRead),
@@ -149,13 +152,17 @@ pub fn extension_activation_plan_in_roots(
 pub fn activate_extensions_in_roots(
     roots: impl IntoIterator<Item = impl AsRef<Path>>,
 ) -> AppResult<ExtensionActivationReport> {
-    Ok(activate_extension_plan(extension_activation_plan_in_roots(roots)?))
+    Ok(activate_extension_plan(extension_activation_plan_in_roots(
+        roots,
+    )?))
 }
 
 pub fn extension_contribution_registry_in_roots(
     roots: impl IntoIterator<Item = impl AsRef<Path>>,
 ) -> AppResult<ExtensionContributionRegistry> {
-    Ok(build_contribution_registry(activate_extensions_in_roots(roots)?))
+    Ok(build_contribution_registry(activate_extensions_in_roots(
+        roots,
+    )?))
 }
 
 pub fn extension_command_routes_in_roots(
@@ -172,7 +179,9 @@ pub fn execute_extension_command_in_roots(
     command_id: &str,
 ) -> AppResult<ExtensionCommandExecution> {
     let plan = extension_activation_plan_in_roots(roots)?;
-    Ok(commands::execute_extension_command_from_plan(&plan, command_id))
+    Ok(commands::execute_extension_command_from_plan(
+        &plan, command_id,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -221,13 +230,15 @@ pub fn contribution_points_for_manifest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, time::{SystemTime, UNIX_EPOCH}};
     use lux_core::{
-        ExtensionCommandExecutionPhase, ExtensionCommandExecutionStatus,
-        ExtensionContributionKind, ExtensionManifest,
-        ExtensionStatus,
+        ExtensionCommandExecutionPhase, ExtensionCommandExecutionStatus, ExtensionContributionKind,
+        ExtensionManifest, ExtensionStatus,
     };
     use std::path::PathBuf;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     // -----------------------------------------------------------------------
     // Manifest unit tests
@@ -392,13 +403,14 @@ mod tests {
             true,
         );
 
-        let extensions =
-            discover_extensions_in_roots([root_a.as_path(), root_b.as_path()])
-                .expect("discovery should not fail");
+        let extensions = discover_extensions_in_roots([root_a.as_path(), root_b.as_path()])
+            .expect("discovery should not fail");
 
         // One winner + one conflict.
         assert_eq!(extensions.len(), 2, "both entries should appear");
-        let conflict = extensions.iter().find(|e| e.status == ExtensionStatus::Invalid);
+        let conflict = extensions
+            .iter()
+            .find(|e| e.status == ExtensionStatus::Invalid);
         assert!(conflict.is_some(), "duplicate should be marked Invalid");
         assert!(
             conflict
@@ -1255,7 +1267,9 @@ mod tests {
             &mut wasm,
             &[
                 &[0x41, 0x01, 0x24, 0x00, 0x0b],
-                &[0x23, 0x00, 0x41, 0x01, 0x46, 0x04, 0x40, 0x0f, 0x0b, 0x00, 0x0b],
+                &[
+                    0x23, 0x00, 0x41, 0x01, 0x46, 0x04, 0x40, 0x0f, 0x0b, 0x00, 0x0b,
+                ],
             ],
         );
         wasm

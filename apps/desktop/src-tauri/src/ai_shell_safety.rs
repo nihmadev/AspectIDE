@@ -302,7 +302,10 @@ fn first_token(normalized: &str) -> &str {
     // Up to 4 wrapper layers (e.g. `sudo env command rm …`).
     for _ in 0..4 {
         let mut tokens = rest.splitn(2, ' ');
-        let head = tokens.next().unwrap_or("").trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+        let head = tokens
+            .next()
+            .unwrap_or("")
+            .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
         let tail = tokens.next().unwrap_or("").trim_start();
 
         match head {
@@ -403,7 +406,10 @@ fn catastrophic_reason(normalized: &str) -> Option<String> {
     // are plain string arguments, not substitutions, so we handle them here.
     // We match normalized (lowercased, whitespace-collapsed) to keep it tight.
     let ft = first_token(normalized);
-    if matches!(ft, "bash" | "sh" | "zsh" | "fish" | "dash" | "ksh" | "csh" | "tcsh") {
+    if matches!(
+        ft,
+        "bash" | "sh" | "zsh" | "fish" | "dash" | "ksh" | "csh" | "tcsh"
+    ) {
         if let Some(inner) = extract_interpreter_payload(normalized) {
             let inner_norm = normalize(&inner);
             if let Some(reason) = catastrophic_reason(&inner_norm) {
@@ -411,8 +417,7 @@ fn catastrophic_reason(normalized: &str) -> Option<String> {
             }
         }
     }
-    if matches!(ft, "python" | "python3" | "ruby" | "perl" | "node")
-        && normalized.contains(" -c ")
+    if matches!(ft, "python" | "python3" | "ruby" | "perl" | "node") && normalized.contains(" -c ")
     {
         if let Some(inner) = extract_interpreter_payload(normalized) {
             let inner_norm = normalize(&inner);
@@ -804,16 +809,15 @@ fn risky_warnings(normalized: &str) -> Vec<String> {
 /// `fd` is similarly excluded because it supports `--exec`. Both are handled by
 /// the `find`/`fd` branch in `is_read_only_segment` instead.
 const READ_ONLY_COMMANDS: &[&str] = &[
-    "ls", "dir", "pwd", "cat", "type", "echo", "printenv", "whoami", "hostname", "id",
-    "date", "uname", "which", "where", "head", "tail", "wc", "grep", "rg", "tree",
-    "stat", "file", "du", "df", "ps", "less", "more", "sort", "uniq", "cut", "jq", "yq", "diff",
-    "basename", "dirname", "realpath", "readlink", "sleep", "true", "test",
+    "ls", "dir", "pwd", "cat", "type", "echo", "printenv", "whoami", "hostname", "id", "date",
+    "uname", "which", "where", "head", "tail", "wc", "grep", "rg", "tree", "stat", "file", "du",
+    "df", "ps", "less", "more", "sort", "uniq", "cut", "jq", "yq", "diff", "basename", "dirname",
+    "realpath", "readlink", "sleep", "true", "test",
 ];
 
 /// Flags in `find` that make it destructive or capable of arbitrary execution.
 const FIND_DANGEROUS_FLAGS: &[&str] = &[
-    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0",
-    "-fprintf", "-ls",
+    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-ls",
 ];
 
 /// True when the segment cannot write or mutate state.
@@ -832,11 +836,9 @@ fn is_read_only_segment(normalized: &str) -> bool {
 
         // SECURITY (finding #5): `find` is only read-only when it uses no
         // destructive or execution predicates. Fail closed: unknown = not read-only.
-        "find" => {
-            !FIND_DANGEROUS_FLAGS
-                .iter()
-                .any(|flag| normalized.contains(flag))
-        }
+        "find" => !FIND_DANGEROUS_FLAGS
+            .iter()
+            .any(|flag| normalized.contains(flag)),
 
         // `fd` with `--exec` / `--exec-batch` executes commands — not read-only.
         "fd" => {
@@ -878,9 +880,9 @@ fn is_git_read_only(normalized: &str) -> bool {
     let sub = rest.split(' ').find(|t| !t.starts_with('-')).unwrap_or("");
     match sub {
         // Unconditionally read-only subcommands.
-        "status" | "log" | "diff" | "show" | "describe" | "rev-parse" | "blame"
-        | "ls-files" | "shortlog" | "cat-file" | "ls-tree" | "for-each-ref"
-        | "count-objects" | "fsck" | "verify-pack" | "stash" => {
+        "status" | "log" | "diff" | "show" | "describe" | "rev-parse" | "blame" | "ls-files"
+        | "shortlog" | "cat-file" | "ls-tree" | "for-each-ref" | "count-objects" | "fsck"
+        | "verify-pack" | "stash" => {
             // `git stash list/show` are reads; `git stash apply/pop/drop` are writes.
             if sub == "stash" {
                 rest.contains("list") || rest.contains("show")

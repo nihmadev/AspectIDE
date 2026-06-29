@@ -175,8 +175,7 @@ fn validate_summary_sections(content: &str) -> Result<(), String> {
             .iter()
             .filter_map(|&next| content[start..].find(next))
             .min()
-            .map(|offset| start + offset)
-            .unwrap_or(content.len());
+            .map_or(content.len(), |offset| start + offset);
         let body = content[start..end].trim();
         if body.is_empty() {
             return Err(format!("required section '{heading}' is empty"));
@@ -191,7 +190,13 @@ fn transcript_tail(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_string();
     }
-    let tail_start = value.len() - value.chars().rev().take(max).map(|c| c.len_utf8()).sum::<usize>();
+    let tail_start = value.len()
+        - value
+            .chars()
+            .rev()
+            .take(max)
+            .map(char::len_utf8)
+            .sum::<usize>();
     let tail: String = value[tail_start..].chars().collect();
     format!("…{tail}")
 }
@@ -283,11 +288,14 @@ Fix the login flow.
 
 ## Open tasks
 - Implement TOTP
-".to_string();
+"
+        .to_string();
         // Need all sections present; for brevity just check the empty section is caught.
         let mut full = content;
         for rest in &REQUIRED_SECTIONS[3..] {
-            full.push_str(&format!("\n{rest}\ncontent\n"));
+            full.push('\n');
+            full.push_str(rest);
+            full.push_str("\ncontent\n");
         }
         assert!(validate_summary_sections(&full).is_err());
     }

@@ -1379,7 +1379,12 @@ async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
         });
         if pending.is_empty() {
             // Every slot is now `Some`; unwrap is total here.
-            Poll::Ready(outputs.iter_mut().map(|slot| slot.take().unwrap()).collect())
+            Poll::Ready(
+                outputs
+                    .iter_mut()
+                    .map(|slot| slot.take().unwrap())
+                    .collect(),
+            )
         } else {
             Poll::Pending
         }
@@ -1429,7 +1434,11 @@ mod tests {
 
         let outputs = join_all(futures).await;
 
-        assert_eq!(outputs, vec![0, 1, 2, 3, 4], "outputs must keep input order");
+        assert_eq!(
+            outputs,
+            vec![0, 1, 2, 3, 4],
+            "outputs must keep input order"
+        );
         assert!(
             max_live.load(Ordering::SeqCst) > 1,
             "futures must have been in flight concurrently, not one-at-a-time"

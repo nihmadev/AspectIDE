@@ -34,9 +34,12 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub fn status(root: impl AsRef<Path>) -> AppResult<GitStatus> {
     // `-z` makes status NUL-delimit records and emit verbatim (unquoted) paths, so
     // filenames containing spaces, quotes, or newlines parse unambiguously.
-    let output = run_git_capture(
-        git_command(root.as_ref()).args(["status", "--porcelain=v1", "-z", "--branch"]),
-    )?;
+    let output = run_git_capture(git_command(root.as_ref()).args([
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--branch",
+    ]))?;
     Ok(parse_status(&String::from_utf8_lossy(&output)))
 }
 
@@ -49,12 +52,22 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
 
     // `-z` NUL-delimits records and disables path quoting, making rename/odd-name
     // parsing robust (see `parse_diff_files`).
-    let stat_output = run_git_capture(
-        git_command(root).args(["diff", "--numstat", "-z", "--find-renames", &base, "--"]),
-    )?;
-    let name_status_output = run_git_capture(
-        git_command(root).args(["diff", "--name-status", "-z", "--find-renames", &base, "--"]),
-    )?;
+    let stat_output = run_git_capture(git_command(root).args([
+        "diff",
+        "--numstat",
+        "-z",
+        "--find-renames",
+        &base,
+        "--",
+    ]))?;
+    let name_status_output = run_git_capture(git_command(root).args([
+        "diff",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        &base,
+        "--",
+    ]))?;
 
     let mut files = parse_diff_files(
         &String::from_utf8_lossy(&stat_output),
@@ -63,16 +76,14 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
 
     // Stream the patch and stop at the byte budget so an enormous diff is never
     // fully materialized just to truncate it afterwards.
-    let (raw_patch, patch_capped) = run_git_patch_streamed(
-        git_command(root).args([
-            "diff",
-            "--find-renames",
-            "--patch",
-            "--unified=3",
-            &base,
-            "--",
-        ]),
-    )?;
+    let (raw_patch, patch_capped) = run_git_patch_streamed(git_command(root).args([
+        "diff",
+        "--find-renames",
+        "--patch",
+        "--unified=3",
+        &base,
+        "--",
+    ]))?;
 
     // Untracked files are invisible to `git diff`; merge them in as additions so AI
     // review and working-tree context see newly created source files.
@@ -83,9 +94,14 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     let patch = if raw_patch_chars > MAX_DIFF_PATCH_CHARS {
         let kept: String = raw_patch.chars().take(MAX_DIFF_PATCH_CHARS).collect();
         let suffix = if patch_capped {
-            format!("\n...[truncated at {MAX_DIFF_PATCH_CHARS} chars; diff exceeds the streamed limit]")
+            format!(
+                "\n...[truncated at {MAX_DIFF_PATCH_CHARS} chars; diff exceeds the streamed limit]"
+            )
         } else {
-            format!("\n...[truncated {} chars]", raw_patch_chars - MAX_DIFF_PATCH_CHARS)
+            format!(
+                "\n...[truncated {} chars]",
+                raw_patch_chars - MAX_DIFF_PATCH_CHARS
+            )
         };
         format!("{kept}{suffix}")
     } else if patch_capped {
@@ -121,9 +137,12 @@ fn diff_base(root: &Path) -> String {
 /// already present. Their line counts come from a follow-up numstat against the
 /// empty blob; unreadable/binary files are marked accordingly.
 fn merge_untracked_files(root: &Path, files: &mut Vec<GitDiffFile>) {
-    let Ok(output) = run_git_capture(
-        git_command(root).args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-    ) else {
+    let Ok(output) = run_git_capture(git_command(root).args([
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ])) else {
         return;
     };
     let text = String::from_utf8_lossy(&output);
@@ -183,7 +202,8 @@ fn untracked_line_stats(root: &Path, path: &str) -> (u32, bool) {
     )]
     let newlines = bytes.iter().filter(|&&byte| byte == b'\n').count();
     let has_unterminated_tail = bytes.last().is_some_and(|&byte| byte != b'\n');
-    let additions = u32::try_from(newlines + usize::from(has_unterminated_tail)).unwrap_or(u32::MAX);
+    let additions =
+        u32::try_from(newlines + usize::from(has_unterminated_tail)).unwrap_or(u32::MAX);
     (additions, false)
 }
 
@@ -738,9 +758,8 @@ mod tests {
     fn parses_status_rename_and_paths_with_spaces() {
         // A rename is `XY <new>` followed by a bare `<old>` record that must be
         // consumed, and `-z` keeps spaced names intact as a single record.
-        let status = parse_status(
-            "## master\0R  renamed.txt\0a.txt\0M  weird name.txt\0?? b.txt\0",
-        );
+        let status =
+            parse_status("## master\0R  renamed.txt\0a.txt\0M  weird name.txt\0?? b.txt\0");
         assert_eq!(status.branch.as_deref(), Some("master"));
         assert_eq!(status.ahead, 0);
         assert_eq!(status.behind, 0);
@@ -757,7 +776,7 @@ mod tests {
         // `-z`: numstat records are NUL-delimited, name-status splits status and path
         // into separate NUL records.
         let files = parse_diff_files(
-            "4\t2\tsrc/main.rs\0-\t-\tassets/logo.png\01\t0\tnew.rs\0",
+            "4\t2\tsrc/main.rs\0-\t-\tassets/logo.png\x001\t0\tnew.rs\0",
             "M\0src/main.rs\0D\0assets/logo.png\0A\0new.rs\0",
         );
 

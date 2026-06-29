@@ -7,9 +7,7 @@ use lux_core::{
 
 use crate::runtime::{activation_failure_reason, ExtensionRuntime};
 
-pub fn activate_extension_plan(
-    plan: ExtensionActivationPlan,
-) -> ExtensionActivationReport {
+pub fn activate_extension_plan(plan: ExtensionActivationPlan) -> ExtensionActivationReport {
     let mut activated = Vec::new();
     let mut failed = Vec::new();
 
@@ -39,8 +37,7 @@ pub fn activate_extension_plan(
 fn activate_extension_candidate(
     candidate: &lux_core::ExtensionActivationCandidate,
 ) -> Result<ExtensionActivated, lux_core::AppError> {
-    let mut runtime = ExtensionRuntime::instantiate(candidate)
-        .map_err(|failure| failure.error)?;
+    let mut runtime = ExtensionRuntime::instantiate(candidate).map_err(|failure| failure.error)?;
     let execution = runtime
         .call_activation(&candidate.host_contract.abi.entrypoint)
         .map_err(|failure| failure.error)?;

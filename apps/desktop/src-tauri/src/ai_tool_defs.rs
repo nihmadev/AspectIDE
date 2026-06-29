@@ -14,7 +14,6 @@ const MAX_RESULTS_SOURCES: i64 = 8;
 const MAX_RESULTS_FINDINGS: i64 = 500;
 /// Max byte limits for reading content.
 const MAX_BYTES_DEFAULT: i64 = 10_485_760;
-const MAX_BYTES_SMALL: i64 = 120_000;
 /// Timeout bound (1..600 seconds).
 const TIMEOUT_MIN: i64 = 1;
 const TIMEOUT_MAX: i64 = 600;
@@ -128,13 +127,23 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     tools.push(tool(
         "RepoMap",
         "Summarize workspace structure.",
-        &[opt_int("maxFiles", "Max files, default 80.", 1, MAX_RESULTS_DEFAULT)],
+        &[opt_int(
+            "maxFiles",
+            "Max files, default 80.",
+            1,
+            MAX_RESULTS_DEFAULT,
+        )],
     ));
     tools.push(tool(
         "WorkspaceIndex",
         "Indexed snapshot of the workspace.",
         &[
-            opt_int("maxFiles", "Max per section, default 60.", 1, MAX_RESULTS_DEFAULT),
+            opt_int(
+                "maxFiles",
+                "Max per section, default 60.",
+                1,
+                MAX_RESULTS_DEFAULT,
+            ),
             opt_int("maxScan", "Max scan.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
@@ -716,18 +725,7 @@ const fn opt(name: &'static str, kind: &'static str, desc: &'static str) -> Para
     }
 }
 
-fn req_int(name: &'static str, desc: &'static str, min: i64, max: i64) -> Param {
-    Param {
-        name,
-        kind: "integer",
-        desc,
-        required: true,
-        items: None,
-        min_val: Some(min),
-        max_val: Some(max),
-    }
-}
-fn opt_int(name: &'static str, desc: &'static str, min: i64, max: i64) -> Param {
+const fn opt_int(name: &'static str, desc: &'static str, min: i64, max: i64) -> Param {
     Param {
         name,
         kind: "integer",
@@ -761,7 +759,7 @@ fn opt_str_arr(name: &'static str, desc: &'static str) -> Param {
         max_val: None,
     }
 }
-fn req_arr_items(name: &'static str, desc: &'static str, items: serde_json::Value) -> Param {
+const fn req_arr_items(name: &'static str, desc: &'static str, items: serde_json::Value) -> Param {
     Param {
         name,
         kind: "array",
@@ -772,7 +770,7 @@ fn req_arr_items(name: &'static str, desc: &'static str, items: serde_json::Valu
         max_val: None,
     }
 }
-fn opt_arr_items(name: &'static str, desc: &'static str, items: serde_json::Value) -> Param {
+const fn opt_arr_items(name: &'static str, desc: &'static str, items: serde_json::Value) -> Param {
     Param {
         name,
         kind: "array",
@@ -872,12 +870,22 @@ mod tests {
     fn integer_params_have_bounds() {
         let defs = runtime_tool_definitions("agent", true);
         for tool_val in &defs {
-            let Some(func) = tool_val.get("function") else { continue };
-            let Some(name) = func.get("name").and_then(|v| v.as_str()) else { continue };
-            let Some(params) = func.pointer("/parameters/properties") else { continue };
-            let Some(obj) = params.as_object() else { continue };
+            let Some(func) = tool_val.get("function") else {
+                continue;
+            };
+            let Some(name) = func.get("name").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(params) = func.pointer("/parameters/properties") else {
+                continue;
+            };
+            let Some(obj) = params.as_object() else {
+                continue;
+            };
             for (prop_name, schema) in obj {
-                let Some(ty) = schema.get("type").and_then(|v| v.as_str()) else { continue };
+                let Some(ty) = schema.get("type").and_then(|v| v.as_str()) else {
+                    continue;
+                };
                 if ty == "integer" {
                     let has_min = schema.get("minimum").is_some();
                     let has_max = schema.get("maximum").is_some();
@@ -894,22 +902,36 @@ mod tests {
     fn string_arrays_have_string_items() {
         let defs = runtime_tool_definitions("agent", true);
         for tool_val in &defs {
-            let Some(func) = tool_val.get("function") else { continue };
-            let Some(params) = func.pointer("/parameters/properties") else { continue };
-            let Some(obj) = params.as_object() else { continue };
+            let Some(func) = tool_val.get("function") else {
+                continue;
+            };
+            let Some(params) = func.pointer("/parameters/properties") else {
+                continue;
+            };
+            let Some(obj) = params.as_object() else {
+                continue;
+            };
             for (prop_name, schema) in obj {
-                let Some(ty) = schema.get("type").and_then(|v| v.as_str()) else { continue };
-                if ty != "array" { continue; }
+                let Some(ty) = schema.get("type").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                if ty != "array" {
+                    continue;
+                }
                 let Some(items) = schema.get("items") else {
                     panic!("array param without items: {prop_name}");
                 };
-                let items_obj = items.as_object().unwrap_or_else(||
-                    panic!("array param {prop_name} has non-object items"));
+                let items_obj = items
+                    .as_object()
+                    .unwrap_or_else(|| panic!("array param {prop_name} has non-object items"));
                 // If it's an anyOf, that's a union item schema – skip items.type check.
-                if items_obj.contains_key("anyOf") { continue; }
-                let item_type = items.get("type").and_then(|v| v.as_str())
+                if items_obj.contains_key("anyOf") {
+                    continue;
+                }
+                let item_type = items
+                    .get("type")
+                    .and_then(|v| v.as_str())
                     .unwrap_or("<missing>");
-                let item_type_msg = format!("{prop_name} items.type = {item_type:?}");
                 // Properties-only arrays (like PatchEngine.operations) have object items.
                 // String-only arrays have string items.
                 // Both are valid — just assert there's something reasonable.

@@ -396,7 +396,7 @@ const fn embedded_ipv4(segments: [u16; 8]) -> Option<Ipv4Addr> {
         (low_octets & 0xff) as u8,
     );
     let is_mapped = marker == 0xffff; // ::ffff:a.b.c.d
-    // ::a.b.c.d — exclude the `::`/`::1` specials (not real embedded IPv4).
+                                      // ::a.b.c.d — exclude the `::`/`::1` specials (not real embedded IPv4).
     let is_compatible = marker == 0 && (high_octets != 0 || low_octets > 1);
     if high_zero && (is_mapped || is_compatible) {
         Some(v4)

@@ -10,9 +10,7 @@ use lux_core::{
     ExtensionContributionPoint, ExtensionInfo, ExtensionManifest, ExtensionStatus,
 };
 
-use crate::{
-    LUX_EXTENSION_ENTRYPOINT, LUX_EXTENSION_OPTIONAL_EXPORTS, MAX_CONTRIBUTION_POINTS,
-};
+use crate::{LUX_EXTENSION_ENTRYPOINT, LUX_EXTENSION_OPTIONAL_EXPORTS, MAX_CONTRIBUTION_POINTS};
 
 // ---------------------------------------------------------------------------
 // Info construction
@@ -311,11 +309,7 @@ pub fn validate_command_id(extension_id: &str, command_id: &str) -> AppResult<()
         )));
     }
     if !trimmed.bytes().all(|b| {
-        b.is_ascii_lowercase()
-            || b.is_ascii_digit()
-            || b == b'.'
-            || b == b'-'
-            || b == b'_'
+        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'.' || b == b'-' || b == b'_'
     }) {
         return Err(AppError::Service(
             "extension command id may only contain lowercase ASCII letters, digits, '.', '-' and '_'"

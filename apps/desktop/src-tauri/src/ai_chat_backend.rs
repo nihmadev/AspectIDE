@@ -417,6 +417,9 @@ where
 /// a Stop pressed mid-stream truly aborts the in-flight request instead of draining
 /// the model's full generation. The partial body is returned so the caller's own
 /// post-stream cancellation check can finalize the turn as cancelled.
+// The future is awaited inline by the native turn loop (never `tokio::spawn`ed),
+// so the non-Send `should_cancel: Fn` closure it holds across awaits is fine.
+#[allow(clippy::future_not_send)]
 pub async fn completion_streaming<F, C, R>(
     request: AiChatCompletionRequest,
     mut on_delta: F,
@@ -1338,8 +1341,7 @@ pub fn history_save(
         sessions: request.sessions,
         updated_at: Utc::now(),
     };
-    let serialized =
-        serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?;
+    let serialized = serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?;
 
     // Serialize all writes through a process-level mutex. A unique temp-file id
     // per write (defense in depth) ensures two callers that somehow both acquire
@@ -1502,6 +1504,9 @@ fn history_temp_path(path: &Path, id: &str) -> PathBuf {
     path.with_extension(format!("{id}.tmp"))
 }
 
+// Returns `Result` for call-site symmetry with the rest of the history I/O path,
+// even though recovery is best-effort and never surfaces an error.
+#[allow(clippy::unnecessary_wraps)]
 fn recover_history_temp_file(path: &Path) -> Result<(), String> {
     // Main file is intact — nothing to recover.
     if path.exists() {
@@ -1516,20 +1521,18 @@ fn recover_history_temp_file(path: &Path) -> Result<(), String> {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("ai-chat-history");
-    let candidate = std::fs::read_dir(dir)
-        .ok()
-        .and_then(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| {
-                    let name = e.file_name();
-                    let s = name.to_string_lossy();
-                    // Match both the legacy single-path `ai-chat-history.json.tmp`
-                    // and the new per-write `ai-chat-history.<uuid>.tmp` names.
-                    s.starts_with(stem) && s.ends_with(".tmp")
-                })
-                .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
-        });
+    let candidate = std::fs::read_dir(dir).ok().and_then(|entries| {
+        entries
+            .filter_map(std::result::Result::ok)
+            .filter(|e| {
+                let name = e.file_name();
+                let s = name.to_string_lossy();
+                // Match both the legacy single-path `ai-chat-history.json.tmp`
+                // and the new per-write `ai-chat-history.<uuid>.tmp` names.
+                s.starts_with(stem) && s.ends_with(".tmp")
+            })
+            .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
+    });
     if let Some(entry) = candidate {
         let _ = std::fs::rename(entry.path(), path);
     }
@@ -1614,10 +1617,11 @@ async fn sleep_backoff(attempt: u32) {
 /// after each tick. Returns `true` if the sleep was interrupted by cancellation.
 /// This lets `completion_streaming` honour a Stop during connection-phase retries
 /// without requiring a full `CancellationToken` plumbing through every call site.
+#[allow(clippy::future_not_send)] // awaited inline; `should_cancel` need not be Send.
 async fn sleep_backoff_cancelable<C: Fn() -> bool>(attempt: u32, should_cancel: &C) -> bool {
     const TICK_MS: u64 = 250;
     let total = backoff_delay(attempt);
-    let ticks = (total.as_millis() / u128::from(TICK_MS)).max(1) as u32;
+    let ticks = u32::try_from((total.as_millis() / u128::from(TICK_MS)).max(1)).unwrap_or(u32::MAX);
     for _ in 0..ticks {
         if should_cancel() {
             return true;
@@ -1644,6 +1648,7 @@ enum CancelRace<T> {
 /// Without this, the per-chunk `tokio::select!` only checked cancellation *after* a
 /// chunk arrived — a provider that stops sending bytes would ignore Stop for up to
 /// `CHAT_TIMEOUT_SECS`.
+#[allow(clippy::future_not_send)] // awaited inline; `should_cancel` need not be Send.
 async fn race_cancel<T, Fut, C>(fut: Fut, deadline: Duration, should_cancel: &C) -> CancelRace<T>
 where
     Fut: std::future::Future<Output = T>,
@@ -1973,11 +1978,11 @@ async fn stream_completion(
             let has_content = normalized
                 .pointer("/choices/0/message/content")
                 .and_then(Value::as_str)
-                .map_or(false, |s| !s.is_empty());
+                .is_some_and(|s| !s.is_empty());
             let has_tools = normalized
                 .pointer("/choices/0/message/tool_calls")
                 .and_then(Value::as_array)
-                .map_or(false, |a| !a.is_empty());
+                .is_some_and(|a| !a.is_empty());
             if has_content || has_tools {
                 emit_stream_event(
                     app,
@@ -2572,8 +2577,14 @@ mod tests {
 
         let mode = StreamMode::OpenAi(acc);
         let err = mode.stream_error().expect("error must be captured");
-        assert!(err.contains("rate_limit_exceeded"), "error should include code");
-        assert!(err.contains("Rate limit hit"), "error should include message");
+        assert!(
+            err.contains("rate_limit_exceeded"),
+            "error should include code"
+        );
+        assert!(
+            err.contains("Rate limit hit"),
+            "error should include message"
+        );
     }
 
     #[test]

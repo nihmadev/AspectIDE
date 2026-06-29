@@ -35,7 +35,7 @@ const MIN_SESSION_ID_BYTES: usize = 16;
 /// Per-session resident byte budget (approximate, based on content + topic +
 /// author UTF-8 byte lengths). Prevents runaway agent loops from consuming
 /// hundreds of MiB with 8 k-char entries × 500 entries × many sessions.
-/// At MAX_CONTENT_CHARS=8000 + overhead ≈ 8400 bytes/entry × 500 = ~4 MiB/session.
+/// At `MAX_CONTENT_CHARS=8000` + overhead ≈ 8400 bytes/entry × 500 = ~4 MiB/session.
 const MAX_SESSION_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
 /// Global byte budget across all sessions. Evict by LRU when exceeded.
 const MAX_GLOBAL_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
@@ -68,7 +68,7 @@ fn clamp_chars(value: &str, max: usize) -> String {
 
 /// Approximate resident byte weight for a single entry (author + topic + content
 /// UTF-8 byte lengths plus a fixed per-entry struct overhead).
-fn entry_bytes(entry: &BlackboardEntry) -> usize {
+const fn entry_bytes(entry: &BlackboardEntry) -> usize {
     const STRUCT_OVERHEAD: usize = 64; // id (uuid str) + timestamp i64 + misc
     entry.author.len() + entry.topic.len() + entry.content.len() + STRUCT_OVERHEAD
 }
@@ -117,7 +117,7 @@ fn sanitize_session_id(session_id: &str) -> String {
 /// boundary, so this rejects short/enumerable namespaces that a hostile or buggy
 /// caller could squat to read or clear another session's agent findings.
 /// `sanitized` must already have passed through [`sanitize_session_id`].
-fn is_authorized_session_id(sanitized: &str) -> bool {
+const fn is_authorized_session_id(sanitized: &str) -> bool {
     sanitized.len() >= MIN_SESSION_ID_BYTES
 }
 

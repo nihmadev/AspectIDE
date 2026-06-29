@@ -61,7 +61,11 @@ impl SettingsStore {
             (BTreeMap::new(), false)
         };
 
-        Ok(Self { path, values, read_only_corrupt })
+        Ok(Self {
+            path,
+            values,
+            read_only_corrupt,
+        })
     }
 
     #[must_use]
@@ -232,7 +236,8 @@ impl SettingsStore {
 
 /// Returns the path for workspace-scoped settings: `<root>/.lux/settings.json`.
 fn workspace_settings_path(root: &Path) -> PathBuf {
-    root.join(WORKSPACE_SETTINGS_DIR).join(WORKSPACE_SETTINGS_FILE)
+    root.join(WORKSPACE_SETTINGS_DIR)
+        .join(WORKSPACE_SETTINGS_FILE)
 }
 
 /// Per-process sequence making each temporary file name unique (see [`write_atomic`]).

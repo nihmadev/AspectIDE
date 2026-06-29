@@ -1,7 +1,7 @@
 // Contribution registry: maps activated extensions to their contribution
 // points, and collects unavailable contributions from failed/blocked ones.
 use lux_core::{
-    ExtensionActivationReport, ExtensionContributionRegistry, ExtensionContributionRegistration,
+    ExtensionActivationReport, ExtensionContributionRegistration, ExtensionContributionRegistry,
     ExtensionContributionUnavailable,
 };
 

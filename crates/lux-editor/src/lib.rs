@@ -658,9 +658,7 @@ mod tests {
                 .map_or(0, |elapsed| elapsed.as_nanos())
         ));
         std::fs::write(&path, "original").expect("seed file");
-        let document = store
-            .open_file(&path)
-            .expect("open should succeed");
+        let document = store.open_file(&path).expect("open should succeed");
         store
             .update_text(document.id, "updated contents".to_string())
             .expect("update should succeed");
@@ -674,10 +672,7 @@ mod tests {
         // The staging sibling for *this* file must be gone after a successful
         // rename (scope the check to our own file name to stay robust under the
         // parallel test runner).
-        let our_temp_marker = format!(
-            ".{}.lux-tmp-",
-            path.file_name().unwrap().to_string_lossy()
-        );
+        let our_temp_marker = format!(".{}.lux-tmp-", path.file_name().unwrap().to_string_lossy());
         let leftover = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .filter_map(Result::ok)

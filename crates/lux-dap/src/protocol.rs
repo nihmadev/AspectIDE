@@ -132,12 +132,20 @@ pub fn initialize_request(seq: u64, adapter_id: &str) -> Value {
 }
 
 #[must_use]
-pub fn launch_request(seq: u64, configuration: &DebugConfiguration, workspace_root: &Path) -> Value {
+pub fn launch_request(
+    seq: u64,
+    configuration: &DebugConfiguration,
+    workspace_root: &Path,
+) -> Value {
     debug_configuration_request(seq, "launch", configuration, workspace_root)
 }
 
 #[must_use]
-pub fn attach_request(seq: u64, configuration: &DebugConfiguration, workspace_root: &Path) -> Value {
+pub fn attach_request(
+    seq: u64,
+    configuration: &DebugConfiguration,
+    workspace_root: &Path,
+) -> Value {
     debug_configuration_request(seq, "attach", configuration, workspace_root)
 }
 
@@ -592,28 +600,22 @@ fn debug_configuration_request(
 /// Recursively resolve VS Code-style launch variables in a JSON value.
 fn resolve_launch_variables_value(value: &Value, workspace_folder: &str) -> Value {
     match value {
-        Value::String(s) => {
-            Value::String(resolve_launch_variables(s, workspace_folder))
-        }
-        Value::Array(arr) => {
-            Value::Array(
-                arr.iter()
-                    .map(|v| resolve_launch_variables_value(v, workspace_folder))
-                    .collect(),
-            )
-        }
-        Value::Object(obj) => {
-            Value::Object(
-                obj.iter()
-                    .map(|(k, v)| {
-                        (
-                            k.clone(),
-                            resolve_launch_variables_value(v, workspace_folder),
-                        )
-                    })
-                    .collect(),
-            )
-        }
+        Value::String(s) => Value::String(resolve_launch_variables(s, workspace_folder)),
+        Value::Array(arr) => Value::Array(
+            arr.iter()
+                .map(|v| resolve_launch_variables_value(v, workspace_folder))
+                .collect(),
+        ),
+        Value::Object(obj) => Value::Object(
+            obj.iter()
+                .map(|(k, v)| {
+                    (
+                        k.clone(),
+                        resolve_launch_variables_value(v, workspace_folder),
+                    )
+                })
+                .collect(),
+        ),
         other => other.clone(),
     }
 }

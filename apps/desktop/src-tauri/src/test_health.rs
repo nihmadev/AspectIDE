@@ -960,7 +960,8 @@ async fn run_test_health_plans(
 
     let started = std::time::Instant::now();
     let over_cap = plans.len().saturating_sub(AI_TEST_HEALTH_MAX_RUNNERS);
-    let selected: Vec<TestHealthPlan> = plans.into_iter().take(AI_TEST_HEALTH_MAX_RUNNERS).collect();
+    let selected: Vec<TestHealthPlan> =
+        plans.into_iter().take(AI_TEST_HEALTH_MAX_RUNNERS).collect();
     let selected_count = selected.len();
 
     // Run plans with bounded concurrency under a single global budget. When the budget

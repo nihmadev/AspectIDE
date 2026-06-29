@@ -84,7 +84,7 @@ fn bundled_binary() -> Option<PathBuf> {
     candidate.exists().then_some(candidate)
 }
 
-pub fn binary_source_label(source: BinarySource) -> &'static str {
+pub const fn binary_source_label(source: BinarySource) -> &'static str {
     match source {
         BinarySource::Bundled => "bundled",
         BinarySource::EnvVar => "env",

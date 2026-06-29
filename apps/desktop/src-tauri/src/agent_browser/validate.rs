@@ -45,9 +45,8 @@ pub fn validate_domain_list(domains: &str) -> Result<(), String> {
         if let Ok(ip) = domain.parse::<IpAddr>() {
             if is_private_or_loopback_ip(&ip) {
                 return Err(format!(
-                    "Domain '{}' is a private/local IP address and is not allowed. \
-                     Use a public domain or approve it in AI preferences.",
-                    domain
+                    "Domain '{domain}' is a private/local IP address and is not allowed. \
+                     Use a public domain or approve it in AI preferences."
                 ));
             }
             continue;
@@ -64,17 +63,15 @@ pub fn validate_domain_list(domains: &str) -> Result<(), String> {
         ] {
             if lower == *bad_tld || lower.ends_with(bad_tld) {
                 return Err(format!(
-                    "Domain '{}' uses an internal-only TLD '{}' and is not allowed. \
-                     Use a public domain.",
-                    domain, bad_tld
+                    "Domain '{domain}' uses an internal-only TLD '{bad_tld}' and is not allowed. \
+                     Use a public domain."
                 ));
             }
         }
         // Reject hostnames that are just "localhost" or "local".
         if lower == "localhost" || lower == "local" || lower.starts_with("localhost.") {
             return Err(format!(
-                "Domain '{}' resolves to localhost and is not allowed. Use a public domain.",
-                domain
+                "Domain '{domain}' resolves to localhost and is not allowed. Use a public domain."
             ));
         }
     }
@@ -83,6 +80,9 @@ pub fn validate_domain_list(domains: &str) -> Result<(), String> {
 
 /// Validate a proxy URL (http/https scheme, public hosts only, no private IPs).
 /// Uses basic string parsing to avoid pulling in the `url` crate.
+// `.ends_with(".local")` checks a hostname suffix (already lowercased), not a
+// file extension — the lint's case-insensitive suggestion does not apply.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 pub fn validate_proxy_url(proxy: &str) -> Result<(), String> {
     let trimmed = proxy.trim();
     if trimmed.is_empty() {
@@ -96,25 +96,23 @@ pub fn validate_proxy_url(proxy: &str) -> Result<(), String> {
         rest
     } else {
         return Err(format!(
-            "Invalid proxy URL '{}': scheme must be http or https.",
-            trimmed
+            "Invalid proxy URL '{trimmed}': scheme must be http or https."
         ));
     };
     // Split host:port from the rest.
     let host_part = rest.split('/').next().unwrap_or(rest);
-    let host = if let Some(idx) = host_part.rfind(':') {
+    let host = host_part.rfind(':').map_or(host_part, |idx| {
         // Could be port, or IPv6 address with brackets.
         let candidate = &host_part[..idx];
         if candidate.is_empty() {
             // IPv6 like [::1]:8080 — take the bracketed part.
-            let ipv6_end = host_part.rfind(']');
-            ipv6_end.map(|end| &host_part[1..end]).unwrap_or(host_part)
+            host_part
+                .rfind(']')
+                .map_or(host_part, |end| &host_part[1..end])
         } else {
             candidate
         }
-    } else {
-        host_part
-    };
+    });
     let host = host.trim_start_matches('[').trim_end_matches(']');
     if host.is_empty() {
         return Err("Invalid proxy URL: empty host.".to_string());
@@ -128,7 +126,10 @@ pub fn validate_proxy_url(proxy: &str) -> Result<(), String> {
         }
     } else {
         let host_lower = host.to_ascii_lowercase();
-        if host_lower == "localhost" || host_lower.ends_with(".local") || host_lower.ends_with(".internal") {
+        if host_lower == "localhost"
+            || host_lower.ends_with(".local")
+            || host_lower.ends_with(".internal")
+        {
             return Err(format!(
                 "Proxy URL host '{host}' is an internal hostname and is not allowed."
             ));
@@ -145,7 +146,12 @@ pub fn validate_provider(provider: &str) -> Result<(), String> {
     }
     // Allowlisted known-safe providers. Unknown providers are rejected.
     let allowed = [
-        "chrome", "browserless", "browserbase", "kernel", "agentcore", "ios",
+        "chrome",
+        "browserless",
+        "browserbase",
+        "kernel",
+        "agentcore",
+        "ios",
     ];
     if allowed.contains(&trimmed.as_str()) {
         return Ok(());
