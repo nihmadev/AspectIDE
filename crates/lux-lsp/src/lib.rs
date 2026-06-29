@@ -4,8 +4,11 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
+    task::{Context, Poll},
 };
 
 mod discovery;
@@ -59,6 +62,11 @@ use tokio::{
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Upper bound on the merged `workspace/symbol` result set returned to the IDE.
+/// Keeps a polyglot fan-out from flooding the picker while leaving plenty of
+/// headroom for relevance.
+const MAX_WORKSPACE_SYMBOLS: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageServerDefinition {
@@ -431,18 +439,35 @@ impl LspManager {
             return Ok(Vec::new());
         }
 
+        // Fan out the per-server `workspace/symbol` requests CONCURRENTLY rather than
+        // awaiting each server's (up to 8s) response before querying the next. In a
+        // polyglot workspace the serial version made total latency the SUM of slow
+        // servers — directly hurting AI navigation/tool calls. Each session is
+        // borrowed independently via `iter_mut`, so the requests interleave on one
+        // task with each server keeping its own per-request timeout; partial results
+        // from the servers that did answer are still returned.
+        let query = query.as_str();
+        let futures = self
+            .sessions
+            .iter_mut()
+            .map(|(language_id, session)| async move {
+                (language_id.clone(), session.workspace_symbols(query).await)
+            })
+            .collect::<Vec<_>>();
+        let results = join_all(futures).await;
+
         let mut symbols = Vec::new();
-        let languages = self.sessions.keys().cloned().collect::<Vec<_>>();
-        for language_id in languages {
-            let Some(session) = self.sessions.get_mut(&language_id) else {
-                continue;
-            };
-            let result = session.workspace_symbols(&query).await;
-            if result.is_err() {
-                self.teardown_if_dead(&language_id).await;
-                continue;
+        let mut dead_languages = Vec::new();
+        for (language_id, result) in results {
+            match result {
+                Ok(found) => symbols.extend(found),
+                // Defer teardown until the concurrent borrows above are released, so
+                // a single unresponsive server doesn't drop the others' results.
+                Err(_) => dead_languages.push(language_id),
             }
-            symbols.extend(result?);
+        }
+        for language_id in dead_languages {
+            self.teardown_if_dead(&language_id).await;
         }
 
         symbols.sort_by(|left, right| {
@@ -450,7 +475,7 @@ impl LspManager {
                 .cmp(&right.name)
                 .then_with(|| left.location.path.cmp(&right.location.path))
         });
-        symbols.truncate(200);
+        symbols.truncate(MAX_WORKSPACE_SYMBOLS);
         Ok(symbols)
     }
 
@@ -1330,6 +1355,38 @@ fn session_language_id(language_id: &str) -> &str {
     }
 }
 
+/// Drive every future in `futures` to completion CONCURRENTLY on the current task,
+/// returning their outputs in input order. A dependency-free stand-in for
+/// `futures::future::join_all`: each poll sweeps the not-yet-ready futures, so all
+/// their await points (the per-server LSP round-trips) interleave instead of
+/// running one-at-a-time. Used by `workspace_symbols` to fan out per-server
+/// requests; the wakers chain through so a single combined poll wakes on any
+/// child's readiness.
+async fn join_all<F: Future>(futures: Vec<F>) -> Vec<F::Output> {
+    // Pin each future in place; `slots` tracks the still-pending ones by index so a
+    // completed future is never polled again (which would be a contract violation).
+    let mut pinned: Vec<Pin<Box<F>>> = futures.into_iter().map(Box::pin).collect();
+    let mut outputs: Vec<Option<F::Output>> = (0..pinned.len()).map(|_| None).collect();
+    let mut pending: Vec<usize> = (0..pinned.len()).collect();
+
+    std::future::poll_fn(move |cx: &mut Context<'_>| {
+        pending.retain(|&index| match pinned[index].as_mut().poll(cx) {
+            Poll::Ready(value) => {
+                outputs[index] = Some(value);
+                false
+            }
+            Poll::Pending => true,
+        });
+        if pending.is_empty() {
+            // Every slot is now `Some`; unwrap is total here.
+            Poll::Ready(outputs.iter_mut().map(|slot| slot.take().unwrap()).collect())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1339,6 +1396,51 @@ mod tests {
         LspSymbolKind,
     };
     use serde_json::json;
+
+    #[tokio::test]
+    async fn join_all_preserves_input_order_and_runs_concurrently() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        // Each future yields back to the runtime before returning its index, so a
+        // serial driver would force strictly increasing completion. The shared
+        // counter records completion order; with real concurrency the longest-delay
+        // future need not finish last, but `join_all`'s OUTPUT must stay input-order.
+        let live = Arc::new(AtomicUsize::new(0));
+        let max_live = Arc::new(AtomicUsize::new(0));
+        let futures = (0..5_usize)
+            .map(|index| {
+                let live = Arc::clone(&live);
+                let max_live = Arc::clone(&max_live);
+                async move {
+                    let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_live.fetch_max(now, Ordering::SeqCst);
+                    // Yield a few times so all futures are in-flight simultaneously.
+                    for _ in 0..3 {
+                        tokio::task::yield_now().await;
+                    }
+                    live.fetch_sub(1, Ordering::SeqCst);
+                    index
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let outputs = join_all(futures).await;
+
+        assert_eq!(outputs, vec![0, 1, 2, 3, 4], "outputs must keep input order");
+        assert!(
+            max_live.load(Ordering::SeqCst) > 1,
+            "futures must have been in flight concurrently, not one-at-a-time"
+        );
+    }
+
+    #[tokio::test]
+    async fn join_all_handles_empty_input() {
+        let futures: Vec<std::future::Ready<u8>> = Vec::new();
+        assert!(join_all(futures).await.is_empty());
+    }
 
     #[test]
     fn drain_lsp_frames_extracts_complete_frames_and_keeps_partial_tail() {

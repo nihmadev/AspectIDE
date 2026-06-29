@@ -39,6 +39,17 @@ pub fn classify_shell_command(command: &str) -> ShellSafetyReport {
         return report;
     }
 
+    // SECURITY (finding #2): safety net for quote/escape ambiguity. When the
+    // splitter fails closed (e.g. `echo "foo\" ; rm -rf /` collapses to one
+    // opaque segment whose first token is `echo`), a destructive `rm -rf <root>`
+    // hiding later in the line would never be the first token of any segment and
+    // so escape `catastrophic_reason`. Scan the *whole normalized line* for a
+    // recursive-force rm against a protected target, independent of position.
+    if let Some(reason) = whole_command_catastrophic_rm(&full) {
+        report.blocked = Some(reason);
+        return report;
+    }
+
     let segments = split_segments(command);
     report.read_only = !segments.is_empty();
 
@@ -100,12 +111,23 @@ pub fn classify_shell_command(command: &str) -> ShellSafetyReport {
 
 /// Split a command line into independently-executed segments.
 ///
-/// SECURITY: The splitter tracks escape characters (`\`) inside double-quoted
-/// strings so an escaped quote cannot close the current quote context and
-/// expose a subsequent separator as a boundary. Without this, `"foo\" ; rm -rf /"
-/// would see the `\` "escape" the `"` and then the `;` would split a second
-/// segment containing the destructive command. On escape ambiguity we fail
-/// **closed**: the whole command is returned as a single opaque segment so the
+/// SECURITY: The splitter tracks escape characters (`\`) in both the unquoted
+/// context and inside double-quoted strings so an escaped quote cannot flip the
+/// quote state machine and either hide or expose a separator as a boundary.
+///
+/// Two concrete bypasses this guards against (finding #2):
+///   - `"foo\" ; rm -rf /` — an escaped `"` inside double quotes must NOT close
+///     the quote context (so the `;` stays quoted and no fake segment appears).
+///   - `echo \" ; rm -rf /` — an escaped `"` in the *unquoted* context must NOT
+///     *open* a quote context. Without escape handling here the lone `"` would
+///     flip `in_double` on, swallow the real `;` separator, and the trailing
+///     `rm -rf /` would hide inside a single `echo …` segment whose first token
+///     is `echo`, slipping past the catastrophic-`rm` classifier entirely.
+///
+/// Bash semantics: a backslash escapes the next character in the unquoted and
+/// double-quoted contexts, but is a literal inside single quotes. We mirror that.
+/// On escape ambiguity (unclosed quote or a trailing `\`) we fail **closed**:
+/// the whole command is returned as a single opaque segment so the
 /// catastrophic/risky classifiers still see it (and `read_only` stays false).
 fn split_segments(command: &str) -> Vec<String> {
     let mut segments = Vec::new();
@@ -114,16 +136,17 @@ fn split_segments(command: &str) -> Vec<String> {
     let mut index = 0;
     let mut in_single = false;
     let mut in_double = false;
-    // Track escape state inside double-quoted strings. A backslash inside
-    // double quotes escapes the next character (including `"`), so we must
-    // consume it before toggling the quote flag.
+    // Track escape state in the unquoted and double-quoted contexts. A backslash
+    // escapes the next character (including `"`), so we must consume it before
+    // toggling any quote flag. Inside single quotes a backslash is literal, so
+    // escapes are not tracked there (matches bash).
     let mut escaped = false;
 
     while index < bytes.len() {
         let ch = bytes[index] as char;
 
         if escaped {
-            // The previous character was `\` inside a double-quoted string;
+            // The previous character was a `\` in an escape-honouring context;
             // this byte is consumed literally regardless of what it is.
             escaped = false;
             current.push(ch);
@@ -132,8 +155,9 @@ fn split_segments(command: &str) -> Vec<String> {
         }
 
         match ch {
-            // A backslash inside a double-quoted string escapes the next char.
-            '\\' if in_double => {
+            // A backslash escapes the next char in the unquoted and double-quoted
+            // contexts (but is literal inside single quotes).
+            '\\' if !in_single => {
                 escaped = true;
                 current.push(ch);
             }
@@ -305,27 +329,46 @@ fn first_token(normalized: &str) -> &str {
     rest.split(' ').next().unwrap_or("")
 }
 
-/// Skip leading flag tokens (`-n`, `--flag`, `-u root`) from a command tail,
+/// Short `sudo`/`doas` flags that take a separate value argument (so the token
+/// after them is the flag's value, not the wrapped command). Restricting the
+/// "consume next token" behaviour to this known set is critical: a blanket
+/// "any single-char flag eats the next token" heuristic mis-reads `sudo -n rm`
+/// as `-n` consuming `rm`, hiding the destructive command from classification.
+/// `-n` (non-interactive), `-b`, `-E`, `-H`, `-i`, `-k`, `-K`, `-l`, `-P`, `-S`,
+/// `-s`, `-v` take NO argument and are intentionally absent here.
+const SUDO_VALUE_FLAGS: &[char] = &['u', 'g', 'h', 'p', 'C', 'r', 't', 'U', 'c', 'T', 'R'];
+
+/// Skip leading flag tokens (`-n`, `--flag`, `-u root`) from a launcher tail,
 /// returning the first non-flag token onward. Used to unwrap `sudo -n cmd`.
+///
+/// SECURITY (finding #3): we only treat a flag as consuming the following token
+/// when it is a *known* value-taking `sudo`/`doas` flag (`SUDO_VALUE_FLAGS`).
+/// Any other single-char flag (notably `-n`) takes no argument, so the next
+/// token is the wrapped command and must be preserved. Failing the other way —
+/// greedily eating the next token — let `sudo -n rm -rf /` slip past the
+/// catastrophic-`rm` check because the resolved first token became `-rf`.
 fn skip_flags(s: &str) -> &str {
     let mut rest = s.trim_start();
     while let Some(token_end) = rest.find(' ') {
         let token = &rest[..token_end];
-        if token.starts_with('-') {
-            // A flag may consume the next token as its argument (e.g. `-u root`).
-            // We conservatively skip one extra token for single-char flags with args.
-            rest = rest[token_end + 1..].trim_start();
-            // If this was a value-consuming flag like `-u`, skip one more token.
-            if token.len() == 2 && token.starts_with('-') && token.as_bytes()[1].is_ascii_alphabetic() {
-                if let Some(next_end) = rest.find(' ') {
-                    let next = &rest[..next_end];
-                    if !next.starts_with('-') {
-                        rest = rest[next_end + 1..].trim_start();
-                    }
+        if !token.starts_with('-') {
+            break;
+        }
+        rest = rest[token_end + 1..].trim_start();
+        // Only a known value-taking short flag (`-u root`, `-g grp`, …) consumes
+        // the next token. `--long=value` carries its own value; `--long value`
+        // and unknown short flags are assumed argument-less (safe direction:
+        // keep the command token visible to the classifier).
+        let is_value_flag = token.len() == 2
+            && !token.starts_with("--")
+            && SUDO_VALUE_FLAGS.contains(&(token.as_bytes()[1] as char));
+        if is_value_flag {
+            if let Some(next_end) = rest.find(' ') {
+                let next = &rest[..next_end];
+                if !next.starts_with('-') {
+                    rest = rest[next_end + 1..].trim_start();
                 }
             }
-        } else {
-            break;
         }
     }
     rest
@@ -443,6 +486,12 @@ fn is_rm_recursive_force(normalized: &str) -> bool {
     if first_token(normalized) != "rm" {
         return false;
     }
+    has_recursive_force_flags(normalized)
+}
+
+/// True when the line carries both recursive (`-r`/`-R`/`--recursive`) and force
+/// (`-f`/`--force`) semantics, including clustered short flags (`-rf`/`-fr`).
+fn has_recursive_force_flags(normalized: &str) -> bool {
     let has_recursive = normalized.contains(" -r")
         || normalized.contains(" --recursive")
         || flag_cluster_has(normalized, 'r');
@@ -450,6 +499,45 @@ fn is_rm_recursive_force(normalized: &str) -> bool {
         || normalized.contains(" --force")
         || flag_cluster_has(normalized, 'f');
     has_recursive && has_force
+}
+
+/// Position-independent catastrophic `rm` detector for the whole command line.
+///
+/// SECURITY (finding #2): when quote/escape ambiguity makes the splitter fail
+/// closed to a single opaque segment, a destructive `rm -rf <protected>` later
+/// in the line is never any segment's first token, so first-token-based
+/// classification misses it. This scans for an `rm` token that is followed by a
+/// dangerous root operand somewhere on the line, with recursive+force flags
+/// present anywhere. It is deliberately conservative (a real protected target is
+/// required), so it does not block scoped deletes like `echo hi; rm -rf ./dist`.
+fn whole_command_catastrophic_rm(normalized: &str) -> Option<String> {
+    // The first token is already handled by the per-segment path; only act as a
+    // safety net when `rm` appears but is NOT the leading token (the ambiguous,
+    // hidden-segment case). This avoids double-reporting and keeps scoped
+    // first-token deletes flowing through the precise `rm_targets` logic.
+    let first = normalized.split(' ').next().unwrap_or("");
+    if first == "rm" {
+        return None;
+    }
+    let tokens: Vec<&str> = normalized.split(' ').collect();
+    for (i, &token) in tokens.iter().enumerate() {
+        if token != "rm" {
+            continue;
+        }
+        // Build the slice from this `rm` to the end of the line and reuse the
+        // precise recursive-force + protected-target checks on it.
+        let tail = tokens[i..].join(" ");
+        if has_recursive_force_flags(&tail) {
+            for target in rm_targets(&tail) {
+                if is_dangerous_root_target(&target) {
+                    return Some(format!(
+                        "recursive force delete of a protected path: {target}"
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Detect a clustered short flag like `-rf`/`-fr` containing `needle`.
@@ -572,21 +660,55 @@ fn is_dangerous_root_target(target: &str) -> bool {
 /// Extract the inner shell payload from `-c '…'` or `-Command '…'` style
 /// interpreter invocations. Returns `None` if no recognizable `-c`/`-command`
 /// argument is found. The returned string is unquoted one level.
+///
+/// SECURITY (finding #3): the payload is a *multi-word* quoted string
+/// (`bash -c 'rm -rf /'`). Taking only the first space-delimited token after the
+/// flag yields `'rm` → unquoted `rm`, which is NOT recursive-force and slips past
+/// the catastrophic check. We instead capture the whole argument: from the flag
+/// to the matching closing quote (or end of line when unquoted), so the full
+/// `rm -rf /` reaches `catastrophic_reason`.
 fn extract_interpreter_payload(normalized: &str) -> Option<String> {
-    // Look for `-c` or `-command` flag followed by the payload token.
-    let tokens: Vec<&str> = normalized.split(' ').collect();
-    for (i, &token) in tokens.iter().enumerate() {
+    // Find the `-c` / `-command` flag as a standalone token and the byte offset
+    // where its argument begins.
+    let mut arg_start = None;
+    let mut cursor = 0usize;
+    for token in normalized.split(' ') {
+        let token_end = cursor + token.len();
         if matches!(token, "-c" | "-command" | "/c" | "/command") {
-            if let Some(&payload) = tokens.get(i + 1) {
-                // Strip surrounding quotes from the payload.
-                let unquoted = payload.trim_matches(|c| c == '\'' || c == '"');
-                if !unquoted.is_empty() {
-                    return Some(unquoted.to_string());
-                }
+            // Argument starts at the first non-space byte after this flag token.
+            let mut idx = token_end;
+            let bytes = normalized.as_bytes();
+            while idx < bytes.len() && bytes[idx] == b' ' {
+                idx += 1;
             }
+            arg_start = Some(idx);
+            break;
         }
+        cursor = token_end + 1; // +1 for the single normalized space separator
     }
-    None
+    let start = arg_start?;
+    let rest = normalized.get(start..)?.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+
+    // Quoted payload: capture up to the matching closing quote so the entire
+    // command survives. Unquoted: take the remainder of the line.
+    let first = rest.as_bytes()[0];
+    let payload = if first == b'\'' || first == b'"' {
+        let quote = first as char;
+        // Up to the matching closing quote; on an unterminated quote take
+        // everything after the opener so an unbalanced payload still reaches
+        // classification (fail closed).
+        rest[1..]
+            .find(quote)
+            .map_or(&rest[1..], |close| &rest[1..=close])
+    } else {
+        rest
+    };
+
+    let payload = payload.trim();
+    (!payload.is_empty()).then(|| payload.to_string())
 }
 
 fn writes_to_block_device(normalized: &str) -> bool {
@@ -958,6 +1080,21 @@ mod tests {
     }
 
     #[test]
+    fn escaped_quote_in_unquoted_context_does_not_hide_segment() {
+        // Finding #2 (unquoted escape): `echo \" ; rm -rf /` — the escaped `"`
+        // in the *unquoted* context must NOT open a quote context. Bash runs the
+        // `rm` here (the `\"` is a literal quote argument, the `;` a real
+        // separator), so the splitter must surface `rm -rf /` as its own segment
+        // and the catastrophic blocker must fire. Before the fix the lone `"`
+        // flipped the quote state on, swallowed the `;`, and hid the rm inside an
+        // `echo …` segment whose first token is `echo`.
+        assert!(blocked("echo \\\" ; rm -rf /"));
+        // A literal escaped separator (`\;`) is split conservatively (safe
+        // direction): the rm still surfaces and is blocked.
+        assert!(blocked("rm -rf / \\; echo done"));
+    }
+
+    #[test]
     fn blocks_rm_via_wrapper_launchers() {
         // Finding #3: common launcher wrappers must not bypass first_token.
         assert!(blocked("env rm -rf /"));
@@ -974,8 +1111,36 @@ mod tests {
         assert!(blocked("bash -c 'rm -rf /'"));
         assert!(blocked("sh -c 'rm -rf /'"));
         assert!(blocked("zsh -c 'rm -rf /'"));
+        // Double-quoted multi-word payload must also be captured whole.
+        assert!(blocked("bash -c \"rm -rf /\""));
+        // Inner payload targeting a protected dir, not just root.
+        assert!(blocked("sh -c 'rm -rf /etc'"));
         // Scoped inner payload is still allowed.
         assert!(!blocked("bash -c 'ls -la'"));
+        assert!(!blocked("bash -c 'rm -rf ./dist'"));
+    }
+
+    #[test]
+    fn sudo_noninteractive_flag_does_not_consume_command() {
+        // Finding #3 root cause: `-n` (non-interactive) takes NO argument, so
+        // the wrapped `rm` must remain visible as the resolved first token.
+        // A prior heuristic ate `rm` as `-n`'s value and let this through.
+        assert_eq!(first_token("sudo -n rm -rf /"), "rm");
+        assert_eq!(first_token("doas -n rm -rf /"), "rm");
+        // Value-taking flags (`-u root`) still consume their argument correctly.
+        assert_eq!(first_token("sudo -u root rm -rf /"), "rm");
+        assert!(blocked("sudo -n rm -rf /"));
+    }
+
+    #[test]
+    fn whole_command_safety_net_no_false_positive_on_scoped_rm() {
+        // The position-independent safety net must only fire on protected roots,
+        // not on legitimate scoped deletes that follow another command.
+        assert!(!blocked("npm run clean; rm -rf ./node_modules"));
+        assert!(!blocked("echo hi && rm -rf /tmp/build"));
+        assert!(!blocked("make && rm -rf target/debug"));
+        // But a protected target after a leading command is still caught.
+        assert!(blocked("echo hi && rm -rf /etc"));
     }
 
     #[test]

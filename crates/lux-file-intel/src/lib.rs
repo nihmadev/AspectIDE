@@ -42,7 +42,7 @@ const OFFICE_ENTRY_BYTE_CEILING: u64 = 8 * 1024 * 1024;
 /// Maximum on-disk size of a notebook we will read+JSON-parse for preview.
 const NOTEBOOK_BYTE_CEILING: u64 = 32 * 1024 * 1024;
 
-/// Maximum on-disk size for a PDF we will pass to pdf_extract. The extractor
+/// Maximum on-disk size for a PDF we will pass to `pdf_extract`. The extractor
 /// is synchronous and materialises the full text, so we gate on file size to
 /// avoid stalling the turn loop on huge or adversarial PDFs.
 const PDF_BYTE_CEILING: u64 = 64 * 1024 * 1024;
@@ -355,13 +355,13 @@ fn pdf_preview(path: &Path) -> AppResult<FilePreview> {
     // Reject oversized PDFs before we hand them to pdf-extract, which is
     // synchronous and materialises the full decoded text. A large or adversarial
     // PDF can otherwise stall the turn loop for seconds or exhaust memory.
-    let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let file_size = fs::metadata(path).map_or(0, |m| m.len());
     if file_size > PDF_BYTE_CEILING {
         return Ok(FilePreview::Pdf {
             text: format!(
-                "[PDF too large to preview inline ({:.1} MiB). Open externally or use a \
+                "[PDF too large to preview inline ({}). Open externally or use a \
                  dedicated PDF reader.]",
-                file_size as f64 / (1024.0 * 1024.0)
+                format_mib(file_size)
             ),
             page_count: None,
             truncated: true,
@@ -818,6 +818,18 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         return value.to_string();
     }
     value.chars().take(max_chars).collect::<String>()
+}
+
+/// Format a byte count as a human-readable `X.Y MiB` string using integer math,
+/// avoiding a lossy `u64 as f64` cast (forbidden under `clippy::pedantic`) while
+/// preserving one decimal place for display-only size messages.
+pub(crate) fn format_mib(bytes: u64) -> String {
+    const MIB: u64 = 1024 * 1024;
+    let whole = bytes / MIB;
+    // Tenths of a MiB: scale the remainder by 10 before dividing to keep one
+    // fractional digit without floating point.
+    let tenths = (bytes % MIB * 10) / MIB;
+    format!("{whole}.{tenths} MiB")
 }
 
 mod spreadsheet_edit;

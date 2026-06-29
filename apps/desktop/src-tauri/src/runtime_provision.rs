@@ -513,11 +513,11 @@ async fn provision_node(app: &AppHandle) -> Result<String, String> {
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|e| e.to_string())?;
-    let archive = root.join(format!("node-download.{ext}"));
+    let archive = unique_scratch_path(&root, "node-download", &format!(".{ext}"));
     download_to_file(app, "node", &client, &url, &archive, 8, 68, checksum).await?;
 
     progress(app, "node", 70, "Extracting");
-    let staging = root.join("node-staging");
+    let staging = unique_scratch_path(&root, "node-staging", "");
     let _ = tokio::fs::remove_dir_all(&staging).await;
     extract_archive(&archive, &staging, ext).await?;
     let _ = tokio::fs::remove_file(&archive).await;
@@ -608,11 +608,11 @@ async fn provision_go(app: &AppHandle) -> Result<String, String> {
     tokio::fs::create_dir_all(&root)
         .await
         .map_err(|e| e.to_string())?;
-    let archive = root.join(format!("go-download.{ext}"));
+    let archive = unique_scratch_path(&root, "go-download", &format!(".{ext}"));
     download_to_file(app, "go", &client, &url, &archive, 8, 70, checksum).await?;
 
     progress(app, "go", 72, "Extracting");
-    let staging = root.join("go-staging");
+    let staging = unique_scratch_path(&root, "go-staging", "");
     let _ = tokio::fs::remove_dir_all(&staging).await;
     extract_archive(&archive, &staging, ext).await?;
     let _ = tokio::fs::remove_file(&archive).await;
@@ -731,14 +731,14 @@ async fn provision_python(app: &AppHandle) -> Result<String, String> {
 
     let file = format!("python-{PYTHON_EMBED_VERSION}-embed-{arch}.zip");
     let url = format!("{PYTHON_FTP_BASE}/{PYTHON_EMBED_VERSION}/{file}");
-    let archive = root.join("python-download.zip");
+    let archive = unique_scratch_path(&root, "python-download", ".zip");
     download_to_file(app, "python", &client, &url, &archive, 8, 60, checksum).await?;
 
     progress(app, "python", 64, "Extracting");
     let dest = python_dir(app)?;
     // Extract into a staging dir, then atomically swap it into place — never extract
     // over a half-deleted old tree (the ENOTEMPTY/mixed-version footgun on Windows).
-    let staging = root.join("python-staging");
+    let staging = unique_scratch_path(&root, "python-staging", "");
     let _ = tokio::fs::remove_dir_all(&staging).await;
     extract_archive(&archive, &staging, "zip").await?;
     let _ = tokio::fs::remove_file(&archive).await;
@@ -1167,6 +1167,24 @@ fn tombstone_path(dest: &Path) -> PathBuf {
         .file_name()
         .map_or_else(|| "runtime".to_string(), |n| n.to_string_lossy().to_string());
     dest.with_file_name(format!(".{name}.tombstone-{nanos}"))
+}
+
+/// A per-run-unique scratch name (`<stem>-<pid>-<nanos><suffix>`) for a download or
+/// staging path under the runtime root. The in-memory provision lock serializes runs
+/// *within* this process, but the runtime root lives in shared app data: a second app
+/// instance (or helper) provisioning the same runtime could otherwise collide on the
+/// FIXED `node-staging`/`node-download.zip` names and corrupt each other's scratch
+/// dir/archive mid-extract. Folding the PID + a nanosecond timestamp into the name
+/// keeps cross-process scratch artifacts disjoint; the atomic tombstone swap in
+/// [`replace_runtime_dir`] still guarantees only one fully-staged tree wins the dest.
+/// A full advisory lock file across the whole download→finalize sequence is tracked
+/// as a followup.
+fn unique_scratch_path(root: &Path, stem: &str, suffix: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let pid = std::process::id();
+    root.join(format!("{stem}-{pid}-{nanos}{suffix}"))
 }
 
 /// Rename `from` → `to`, retrying with exponential backoff to ride out transient

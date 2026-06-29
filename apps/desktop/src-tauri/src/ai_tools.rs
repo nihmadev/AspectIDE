@@ -162,7 +162,11 @@ pub async fn ai_file_write(
         tokio::fs::write(&path, &text)
             .await
             .map_err(|error| error.to_string())?;
-        emit_event(&app, LuxEvent::FsChanged { path: path.clone() })?;
+        // Finding 2: disk is already committed, so a notification failure must be a
+        // non-fatal warning — returning Err here would make a retry double-apply.
+        if let Err(e) = emit_event(&app, LuxEvent::FsChanged { path: path.clone() }) {
+            tracing::warn!(%e, "ai_file_write: emit_event(FsChanged) failed (non-fatal)");
+        }
     }
 
     let edited_document = if save_to_disk {
@@ -637,12 +641,14 @@ pub async fn ai_shell(
     // PID): drain both pipes concurrently to avoid a full-buffer deadlock, then
     // reap. Borrowing `child` here means a timeout drops only this future's
     // borrow, leaving the child alive so the tree-kill below can target it.
+    let collect_stdout = std::sync::Arc::clone(&shared_stdout);
+    let collect_stderr = std::sync::Arc::clone(&shared_stderr);
     let collect = async {
         use tokio::io::AsyncReadExt;
         // Cap each pipe so a runaway producer (`yes`, `cat /dev/urandom`) can't
         // balloon memory before the timeout fires — the output is truncated for
         // display anyway. Bounded read here, not "read everything then cap".
-        const MAX_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
+        const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
         // After the command's own process exits, a backgrounded grandchild it
         // spawned (`cmd /C foo &`, `serve &`, a daemon) can keep the stdout/stderr
         // write end open, so `read_to_end` would block on an EOF that never comes —
@@ -651,22 +657,59 @@ pub async fn ai_shell(
         // to flush trailing output before returning. The real command's output is
         // already captured; a lingering daemon must not hold the turn hostage.
         const PIPE_DRAIN_GRACE_SECS: u64 = 2;
-        let mut local_stdout = Vec::new();
-        let mut local_stderr = Vec::new();
-        let read_stdout = async {
-            if let Some(pipe) = stdout_pipe.as_mut() {
-                let _ = pipe
-                    .take(MAX_CAPTURE_BYTES)
-                    .read_to_end(&mut local_stdout)
-                    .await;
+        // Finding 5: read each pipe in chunks and append into the SHARED buffers as
+        // bytes arrive, rather than into a local buffer that is only published after
+        // EOF. A `read_to_end` that publishes on completion loses everything when the
+        // outer timeout fires mid-read, so the timeout branch would still see empty
+        // output. Streaming into the shared (mutex-guarded) buffer means whatever was
+        // captured before the timeout is preserved.
+        async fn stream_into(
+            pipe: Option<&mut tokio::process::ChildStdout>,
+            sink: &std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+            cap: usize,
+        ) {
+            let Some(pipe) = pipe else { return };
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                match pipe.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut buffer = sink.lock().await;
+                        if buffer.len() >= cap {
+                            break;
+                        }
+                        let room = cap - buffer.len();
+                        buffer.extend_from_slice(&chunk[..n.min(room)]);
+                        if buffer.len() >= cap {
+                            break;
+                        }
+                    }
+                }
             }
-        };
+        }
+        // `ChildStdout`/`ChildStderr` are distinct types, so read stderr inline with
+        // the same chunked-append logic instead of reusing the stdout-typed helper.
+        let read_stdout = stream_into(stdout_pipe.as_mut(), &collect_stdout, MAX_CAPTURE_BYTES);
         let read_stderr = async {
-            if let Some(pipe) = stderr_pipe.as_mut() {
-                let _ = pipe
-                    .take(MAX_CAPTURE_BYTES)
-                    .read_to_end(&mut local_stderr)
-                    .await;
+            let Some(pipe) = stderr_pipe.as_mut() else {
+                return;
+            };
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                match pipe.read(&mut chunk).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let mut buffer = collect_stderr.lock().await;
+                        if buffer.len() >= MAX_CAPTURE_BYTES {
+                            break;
+                        }
+                        let room = MAX_CAPTURE_BYTES - buffer.len();
+                        buffer.extend_from_slice(&chunk[..n.min(room)]);
+                        if buffer.len() >= MAX_CAPTURE_BYTES {
+                            break;
+                        }
+                    }
+                }
             }
         };
         let drain = async { tokio::join!(read_stdout, read_stderr) };
@@ -682,11 +725,6 @@ pub async fn ai_shell(
                 status
             }
         };
-        // Drop the future (and its borrows of the buffers) before moving them out.
-        drop(drain);
-        // Finding 5: copy output into the shared buffers so timeout path sees it.
-        *shared_stdout.lock().await = local_stdout;
-        *shared_stderr.lock().await = local_stderr;
         status
     };
 
@@ -695,12 +733,10 @@ pub async fn ai_shell(
 
     match output_result {
         Ok(Ok(status)) => {
-            let stdout_buf = std::sync::Arc::try_unwrap(shared_stdout)
-                .unwrap_or_else(|_| unreachable!())
-                .into_inner();
-            let stderr_buf = std::sync::Arc::try_unwrap(shared_stderr)
-                .unwrap_or_else(|_| unreachable!())
-                .into_inner();
+            // The `collect` future (and its buffer clones) is dropped once `timeout`
+            // resolves, so read the captured bytes back through the shared handles.
+            let stdout_buf = shared_stdout.lock().await.clone();
+            let stderr_buf = shared_stderr.lock().await.clone();
             Ok(AiShellResponse {
                 workspace_root: root,
                 cwd,
@@ -1475,14 +1511,21 @@ pub fn truncate_shell_output(value: &str) -> String {
     }
     // Finding 6: head+tail truncation (first 12k + last 12k chars) with
     // omitted-character count, preserving both early context and final errors.
-    let head: String = trimmed.chars().take(AI_SHELL_TRUNCATE_HEAD_CHARS).collect();
-    let tail: String = trimmed
-        .chars()
-        .skip(total_chars.saturating_sub(AI_SHELL_TRUNCATE_TAIL_CHARS))
-        .collect();
-    let omitted = total_chars
-        - AI_SHELL_TRUNCATE_HEAD_CHARS
-        - AI_SHELL_TRUNCATE_TAIL_CHARS;
+    //
+    // Reserve room for the marker inside the cap so the reconstruction is always
+    // strictly shorter than the input — for inputs only barely over the cap the
+    // marker text would otherwise make the result LONGER than the original.
+    // Reserve using the widest possible marker (omitted == total_chars) so the
+    // reserved space is never smaller than the actual marker, guaranteeing
+    // head + tail + marker <= AI_SHELL_MAX_OUTPUT_CHARS < total_chars.
+    let widest_marker = format!("\n... [{total_chars} characters omitted] ...\n");
+    let content_budget =
+        AI_SHELL_MAX_OUTPUT_CHARS.saturating_sub(widest_marker.chars().count());
+    let head_chars = AI_SHELL_TRUNCATE_HEAD_CHARS.min(content_budget);
+    let tail_chars = AI_SHELL_TRUNCATE_TAIL_CHARS.min(content_budget - head_chars);
+    let omitted = total_chars - head_chars - tail_chars;
+    let head: String = trimmed.chars().take(head_chars).collect();
+    let tail: String = trimmed.chars().skip(total_chars - tail_chars).collect();
     format!("{head}\n... [{omitted} characters omitted] ...\n{tail}")
 }
 

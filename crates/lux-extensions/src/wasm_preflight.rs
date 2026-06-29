@@ -6,7 +6,9 @@ use lux_core::{
     AppError, AppResult, ExtensionHostActivationContract, ExtensionHostLimits, ExtensionInfo,
     ExtensionWasmAbi, ExtensionWasmImport, ExtensionWasmImportKind, ExtensionWasmPreflight,
 };
-use wasmparser::{Encoding, ExternalKind, Parser, Payload, TypeRef, Validator};
+use wasmparser::{
+    CompositeInnerType, Encoding, ExternalKind, Parser, Payload, TypeRef, Validator,
+};
 
 use crate::{
     ALLOWED_HOST_IMPORTS, EXTENSION_HOST_ACTIVATION_TIMEOUT_MS, EXTENSION_HOST_MAX_MEMORY_PAGES,
@@ -14,6 +16,14 @@ use crate::{
     LUX_EXTENSION_ABI_VERSION, LUX_EXTENSION_ENTRYPOINT, LUX_EXTENSION_OPTIONAL_EXPORTS,
     LUX_HOST_IMPORT_MODULE, MAX_WASM_MODULE_BYTES, WASM_MAGIC_AND_VERSION,
 };
+
+/// Parameter / result counts of a defined WASM function type, used by the F3
+/// host-import signature check.
+#[derive(Debug, Clone, Copy)]
+struct FuncArity {
+    params: usize,
+    results: usize,
+}
 
 pub fn validate_wasm_preflight(extension: &ExtensionInfo) -> AppResult<ExtensionWasmPreflight> {
     let root = extension.root.canonicalize()?;
@@ -68,6 +78,13 @@ pub fn validate_wasm_host_contract(
     let mut exports_memory = false;
     let mut imports = Vec::new();
     let mut exported_functions = Vec::new();
+    // F3 fix: collect each defined function type's (param_count, result_count)
+    // in type-index order so we can validate that host function imports match
+    // the exact ABI signature (zero params, zero results) the host links,
+    // moving the failure from activation time to deterministic preflight.
+    // `None` marks a non-function type so indices stay aligned with the WASM
+    // type index space.
+    let mut func_type_arity: Vec<Option<FuncArity>> = Vec::new();
 
     for payload in Parser::new(0).parse_all(&bytes) {
         match payload.map_err(|e| AppError::Service(e.to_string()))? {
@@ -78,10 +95,19 @@ pub fn validate_wasm_host_contract(
                     ));
                 }
             }
+            Payload::TypeSection(reader) => {
+                collect_func_type_arity(reader, &mut func_type_arity)?;
+            }
             Payload::ImportSection(reader) => {
                 for import in reader.into_imports() {
                     let import = import.map_err(|e| AppError::Service(e.to_string()))?;
-                    validate_host_import(extension, import.module, import.name, import.ty)?;
+                    validate_host_import(
+                        extension,
+                        import.module,
+                        import.name,
+                        import.ty,
+                        &func_type_arity,
+                    )?;
                     imports.push(ExtensionWasmImport {
                         module: import.module.to_string(),
                         name: import.name.to_string(),
@@ -104,28 +130,12 @@ pub fn validate_wasm_host_contract(
                 }
             }
             Payload::ExportSection(reader) => {
-                for export in reader {
-                    let export = export.map_err(|e| AppError::Service(e.to_string()))?;
-                    if export.name == LUX_EXTENSION_ENTRYPOINT {
-                        if export.kind != ExternalKind::Func {
-                            return Err(AppError::Service(format!(
-                                "required export {LUX_EXTENSION_ENTRYPOINT} must be a function"
-                            )));
-                        }
-                        exported_entrypoint = true;
-                    }
-                    if export.kind == ExternalKind::Func {
-                        exported_functions.push(export.name.to_string());
-                    }
-                    if export.name == "memory" {
-                        if export.kind != ExternalKind::Memory {
-                            return Err(AppError::Service(
-                                "export named memory must be a WebAssembly memory".into(),
-                            ));
-                        }
-                        exports_memory = true;
-                    }
-                }
+                process_export_section(
+                    reader,
+                    &mut exported_entrypoint,
+                    &mut exports_memory,
+                    &mut exported_functions,
+                )?;
             }
             _ => {}
         }
@@ -161,6 +171,59 @@ pub fn validate_wasm_host_contract(
     })
 }
 
+/// F3 helper: record each defined function type's arity in type-index order.
+/// Non-function types push `None` so indices stay aligned with the WASM type
+/// index space, letting host-import signatures be resolved by index.
+fn collect_func_type_arity(
+    reader: wasmparser::TypeSectionReader,
+    func_type_arity: &mut Vec<Option<FuncArity>>,
+) -> AppResult<()> {
+    for rec_group in reader {
+        let rec_group = rec_group.map_err(|e| AppError::Service(e.to_string()))?;
+        for sub_type in rec_group.types() {
+            func_type_arity.push(match &sub_type.composite_type.inner {
+                CompositeInnerType::Func(func) => Some(FuncArity {
+                    params: func.params().len(),
+                    results: func.results().len(),
+                }),
+                _ => None,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn process_export_section(
+    reader: wasmparser::ExportSectionReader,
+    exported_entrypoint: &mut bool,
+    exports_memory: &mut bool,
+    exported_functions: &mut Vec<String>,
+) -> AppResult<()> {
+    for export in reader {
+        let export = export.map_err(|e| AppError::Service(e.to_string()))?;
+        if export.name == LUX_EXTENSION_ENTRYPOINT {
+            if export.kind != ExternalKind::Func {
+                return Err(AppError::Service(format!(
+                    "required export {LUX_EXTENSION_ENTRYPOINT} must be a function"
+                )));
+            }
+            *exported_entrypoint = true;
+        }
+        if export.kind == ExternalKind::Func {
+            exported_functions.push(export.name.to_string());
+        }
+        if export.name == "memory" {
+            if export.kind != ExternalKind::Memory {
+                return Err(AppError::Service(
+                    "export named memory must be a WebAssembly memory".into(),
+                ));
+            }
+            *exports_memory = true;
+        }
+    }
+    Ok(())
+}
+
 fn validate_command_handler_exports(
     extension: &ExtensionInfo,
     exported_functions: &[String],
@@ -187,15 +250,37 @@ fn validate_host_import(
     module: &str,
     name: &str,
     ty: TypeRef,
+    func_type_arity: &[Option<FuncArity>],
 ) -> AppResult<()> {
     if module != LUX_HOST_IMPORT_MODULE {
         return Err(AppError::Service(format!(
             "unsupported WASM import module: {module}.{name}"
         )));
     }
-    if !matches!(ty, TypeRef::Func(_) | TypeRef::FuncExact(_)) {
+    let (TypeRef::Func(type_index) | TypeRef::FuncExact(type_index)) = ty else {
         return Err(AppError::Service(format!(
             "Lux host import must be a function: {module}.{name}"
+        )));
+    };
+
+    // F3 fix: validate the exact ABI signature.  Every linked Lux host function
+    // is zero-argument / zero-result (`func_wrap(.., || ())`), so an import with
+    // any other signature would only fail at activation.  Reject it here so the
+    // mismatch surfaces as a deterministic preflight error instead.
+    let arity = func_type_arity
+        .get(type_index as usize)
+        .and_then(|slot| slot.as_ref())
+        .ok_or_else(|| {
+            AppError::Service(format!(
+                "Lux host import {module}.{name} references an undefined or non-function type \
+                 (index {type_index})"
+            ))
+        })?;
+    if arity.params != 0 || arity.results != 0 {
+        return Err(AppError::Service(format!(
+            "Lux host import {module}.{name} has unsupported signature \
+             ({} params, {} results); host imports must take no arguments and return nothing",
+            arity.params, arity.results
         )));
     }
 

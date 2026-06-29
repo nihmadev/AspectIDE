@@ -895,13 +895,7 @@ pub async fn ai_run_turn(
     // the request. Any tool call whose name is not in this set is rejected before
     // dispatch — enforcing mode restrictions at the Rust boundary, not only via
     // prompt/tool-definition shaping.
-    let allowed_tool_names: std::collections::HashSet<String> = tools
-        .iter()
-        .filter_map(|t| t.get("function").and_then(|f| f.get("name"))
-            .or_else(|| t.get("name"))
-            .and_then(|n| n.as_str()))
-        .map(str::to_string)
-        .collect();
+    let allowed_tool_names = tool_names_from_defs(&tools);
 
     let mut final_content = String::new();
     let mut usage_prompt: u64 = 0;
@@ -912,6 +906,21 @@ pub async fn ai_run_turn(
     // instead exhausts `max_rounds` mid-work, `final_content` may be stale text from
     // an early round; the recovery turn below then refreshes it (L8).
     let mut completed_naturally = false;
+    // F7: aggregate tool-output budget for the WHOLE turn. The per-tool clamp below
+    // bounds any single result, but a flood of many tools (or many rounds) can still
+    // accumulate unbounded context. Track the post-clamp bytes appended to the
+    // conversation and the total tool calls; once either ceiling is crossed we stop
+    // issuing more tools and fall through to the tool-free recovery synthesis, which
+    // turns the work done so far into a final answer instead of looping forever.
+    let mut turn_output_bytes: usize = 0;
+    let mut turn_tool_calls: usize = 0;
+    let mut tool_budget_exceeded = false;
+    /// Hard ceiling on cumulative tool-output bytes appended across the turn. Far
+    /// above a normal multi-step task; only a tool flood reaches it.
+    const TURN_OUTPUT_BYTE_BUDGET: usize = 600_000;
+    /// Hard ceiling on total tool calls across the turn — a backstop against a model
+    /// that calls tools without converging.
+    const TURN_TOOL_CALL_BUDGET: usize = 200;
 
     // Clear the read-before-edit set at turn start: reads from a previous turn
     // must not authorize edits in the new one (on-disk state may have changed).
@@ -1282,6 +1291,11 @@ pub async fn ai_run_turn(
             } else {
                 output
             };
+            // F7: fold the post-clamp result into the per-turn aggregate budget so a
+            // flood of (individually-bounded) tool outputs still can't grow context
+            // without limit.
+            turn_output_bytes = turn_output_bytes.saturating_add(content_for_messages.len());
+            turn_tool_calls = turn_tool_calls.saturating_add(1);
             // Append tool result to conversation.
             messages.push(serde_json::json!({
                 "role": "tool",
@@ -1303,6 +1317,30 @@ pub async fn ai_run_turn(
                 );
                 return Ok(());
             }
+
+            // F7: aggregate tool-output budget reached — stop running tools for the
+            // rest of this turn. We break out to the tool-free recovery synthesis
+            // (which sees everything done so far) rather than continuing to flood the
+            // context. The model is told its work was capped via the tool result.
+            if turn_output_bytes >= TURN_OUTPUT_BYTE_BUDGET
+                || turn_tool_calls >= TURN_TOOL_CALL_BUDGET
+            {
+                tool_budget_exceeded = true;
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": format!(
+                        "[Tool budget reached for this turn: {turn_tool_calls} tool calls, \
+                         ~{turn_output_bytes} bytes of tool output. No more tools will run this \
+                         turn — synthesize a final answer from the results already gathered.]"
+                    ),
+                }));
+                break;
+            }
+        }
+        // F7: a budget break inside the tool loop ends the whole round loop; the
+        // recovery synthesis below (forced tool_choice "none") produces the answer.
+        if tool_budget_exceeded {
+            break;
         }
 
         // Inter-round injection: fold in any messages the user staged mid-work so a
@@ -1571,6 +1609,25 @@ fn parse_tool_call(value: &serde_json::Value) -> Option<ParsedToolCall> {
 // Dispatches to native Rust implementations for tools that are already ported;
 // remaining tools fall through to a Tauri self-invoke bridge (calls the existing
 // TS tool dispatcher through IPC).
+
+/// F4: collect the set of tool names from the exact definitions sent to the model.
+/// `execute_tool` rejects any call whose name is not in this set, so mode
+/// restrictions are enforced at the Rust boundary — a forged `Write`/`Shell` call
+/// in a read-only mode (whose definitions never included those tools) is blocked
+/// regardless of approval settings. Handles both the OpenAI `{function:{name}}`
+/// shape and a bare `{name}` shape.
+fn tool_names_from_defs(tools: &[serde_json::Value]) -> std::collections::HashSet<String> {
+    tools
+        .iter()
+        .filter_map(|t| {
+            t.get("function")
+                .and_then(|f| f.get("name"))
+                .or_else(|| t.get("name"))
+                .and_then(|n| n.as_str())
+        })
+        .map(str::to_string)
+        .collect()
+}
 
 /// Read-before-edit guard. An edit against an **existing** file must be preceded
 /// by a `Read`/`InspectFile` of that file in the same session, so the model never
@@ -4322,5 +4379,51 @@ mod tests {
             ApprovalDecision::Approved,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn tool_names_from_defs_reads_both_shapes() {
+        let defs = vec![
+            serde_json::json!({ "type": "function", "function": { "name": "Read" } }),
+            serde_json::json!({ "name": "Grep" }),
+            serde_json::json!({ "function": { "description": "no name" } }),
+        ];
+        let names = tool_names_from_defs(&defs);
+        assert!(names.contains("Read"));
+        assert!(names.contains("Grep"));
+        assert_eq!(names.len(), 2, "the nameless entry must be skipped");
+    }
+
+    #[test]
+    fn forged_edit_tool_blocked_in_read_only_modes() {
+        // F4: in plan/ask the runtime tool definitions never include edit/execute
+        // tools, so the allowlist built from them excludes Write/StrReplace/Delete/
+        // PatchEngine/Shell. A model (or compromised proxy) that forges such a call
+        // is rejected before dispatch — mode safety is enforced at the Rust boundary,
+        // not only via prompt/tool-definition shaping.
+        for mode in ["plan", "ask"] {
+            let defs = crate::ai_tool_defs::runtime_tool_definitions(mode, false);
+            let allowed = tool_names_from_defs(&defs);
+            for forged in ["Write", "StrReplace", "Delete", "PatchEngine", "Shell", "McpManage"] {
+                assert!(
+                    !allowed.contains(forged),
+                    "{forged} must NOT be in the {mode}-mode allowlist (forge guard)"
+                );
+            }
+            // Read-only tools the mode does advertise stay allowed.
+            assert!(allowed.contains("Read"), "Read must remain available in {mode}");
+        }
+    }
+
+    #[test]
+    fn full_exec_modes_allow_edit_tools() {
+        // Sanity counterpart: agent/automatic DO advertise the edit/execute tools,
+        // so the allowlist permits them (the guard only blocks tools never sent).
+        for mode in ["agent", "automatic"] {
+            let defs = crate::ai_tool_defs::runtime_tool_definitions(mode, false);
+            let allowed = tool_names_from_defs(&defs);
+            assert!(allowed.contains("Write"), "Write expected in {mode} allowlist");
+            assert!(allowed.contains("StrReplace"), "StrReplace expected in {mode} allowlist");
+        }
     }
 }

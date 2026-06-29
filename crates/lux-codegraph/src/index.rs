@@ -7,10 +7,11 @@
 //! the incremental path the file watcher drives. Rebuild is linear in total
 //! symbols (cheap next to re-parsing), and only the changed file is re-parsed.
 
+use std::cell::RefCell;
 use std::path::{Component, Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use ignore::{WalkBuilder, WalkState};
+use ignore::{Match, WalkBuilder, WalkState};
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
@@ -38,10 +39,10 @@ const SYNTHETIC_SPAN: Span = Span {
 ///   even when the index root was opened as relative).
 /// * `./` prefixes or internal `foo/../bar` components.
 /// * Drive-letter casing differences on Windows (not addressed here — relies on
-///   the OS and the WalkBuilder emitting consistent casing).
+///   the OS and the `WalkBuilder` emitting consistent casing).
 ///
 /// Full `canonicalize` is intentionally *not* used: it resolves symlinks (wrong
-/// — WalkBuilder does NOT follow symlinks, so we must stay consistent) and fails
+/// — `WalkBuilder` does NOT follow symlinks, so we must stay consistent) and fails
 /// for deleted files (wrong — `remove_file` is called *after* deletion).
 fn normalize_path(path: &Path) -> PathBuf {
     // Make absolute relative to the current directory if needed.
@@ -63,7 +64,24 @@ fn normalize_path(path: &Path) -> PathBuf {
             c => cleaned.push(c),
         }
     }
-    cleaned
+    strip_verbatim(&cleaned)
+}
+
+/// Strip a Windows verbatim prefix (`\\?\C:\…` → `C:\…`, `\\?\UNC\srv\sh` →
+/// `\\srv\sh`) so canonicalized roots and lexically-normalized watcher paths share
+/// one key form. `std::fs::canonicalize` returns verbatim paths on Windows while
+/// [`normalize_path`] does not; without this they would never compare equal and a
+/// save/delete after the build would miss its indexed entry. A no-op on non-verbatim
+/// paths and on every non-Windows platform.
+fn strip_verbatim(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    path.to_path_buf()
 }
 
 /// Files larger than this are skipped.
@@ -111,59 +129,114 @@ struct FileEntry {
 /// gitignored or hidden file would otherwise sneak into the graph on save while a
 /// fresh build skipped it — a silent build/incremental divergence.
 ///
-/// Fidelity note: this captures the workspace-root `.gitignore` plus the user's
-/// global gitignore (the dominant cases) and the hidden-entry rule. Nested
-/// `.gitignore` files below the root are not aggregated here; a full rebuild
-/// (workspace open, or a collapsed watch batch) re-applies the complete walk.
+/// Fidelity: this matches `WalkBuilder` semantics by aggregating **every**
+/// `.gitignore` from the workspace root down to the file's parent directory (not
+/// just the root one), the user's global gitignore, and the hidden-entry rule.
+/// Per-directory matchers are parsed lazily and cached, so a watcher firing many
+/// events under the same tree re-reads no `.gitignore`.
 #[derive(Debug)]
 struct IgnorePolicy {
-    root: Gitignore,
     global: Gitignore,
+    /// One compiled matcher per directory that has a `.gitignore`, keyed by the
+    /// directory. `None` means "checked, no usable `.gitignore` there" so a missing
+    /// file is cached as a negative and never re-stat'd. Interior mutability lets
+    /// the otherwise-`&self` [`IgnorePolicy::is_ignored`] populate the cache.
+    dir_matchers: RefCell<FxHashMap<PathBuf, Option<Gitignore>>>,
 }
 
 impl Default for IgnorePolicy {
     fn default() -> Self {
         Self {
-            root: Gitignore::empty(),
             global: Gitignore::empty(),
+            dir_matchers: RefCell::new(FxHashMap::default()),
         }
     }
 }
 
 impl IgnorePolicy {
-    fn build(root: &Path) -> Self {
-        let mut builder = GitignoreBuilder::new(root);
-        // `add` returns `Some(err)` on a malformed/absent file — ignored: a missing
-        // `.gitignore` simply means nothing is ignored at the root level.
-        let _ = builder.add(root.join(".gitignore"));
-        let root_gi = builder.build().unwrap_or_else(|_| Gitignore::empty());
+    fn build() -> Self {
         let (global, _) = Gitignore::global();
         Self {
-            root: root_gi,
             global,
+            dir_matchers: RefCell::new(FxHashMap::default()),
         }
     }
 
+    /// The compiled `.gitignore` matcher for `dir`, if that directory has one.
+    /// Cached (including the negative result) so repeated incremental events under
+    /// the same subtree never re-read a `.gitignore` from disk.
+    fn matcher_for_dir(&self, dir: &Path) -> Option<Gitignore> {
+        if let Some(cached) = self.dir_matchers.borrow().get(dir) {
+            return cached.clone();
+        }
+        let gitignore = dir.join(".gitignore");
+        let compiled = if gitignore.is_file() {
+            let mut builder = GitignoreBuilder::new(dir);
+            // `add` returns `Some(err)` on a malformed/absent file — ignored: a
+            // broken `.gitignore` simply contributes nothing.
+            let _ = builder.add(&gitignore);
+            builder.build().ok()
+        } else {
+            None
+        };
+        self.dir_matchers
+            .borrow_mut()
+            .insert(dir.to_path_buf(), compiled.clone());
+        compiled
+    }
+
     /// True when the build walk would have skipped `path`: a hidden path component
-    /// (`WalkBuilder`'s default `hidden(true)`) or a gitignore match on the path or
-    /// any parent directory.
+    /// (`WalkBuilder`'s default `hidden(true)`), the global gitignore, or any
+    /// `.gitignore` from the root down to the file's parent directory — matching
+    /// `WalkBuilder`'s nested-gitignore semantics so the incremental and build
+    /// paths never diverge.
     fn is_ignored(&self, root: &Path, path: &Path) -> bool {
-        if let Ok(relative) = path.strip_prefix(root) {
-            let hidden = relative.components().any(|component| match component {
-                Component::Normal(name) => name.to_str().is_some_and(|name| name.starts_with('.')),
-                _ => false,
-            });
-            if hidden {
-                return true;
+        let Ok(relative) = path.strip_prefix(root) else {
+            // Outside the root: the build walk never visits it, so treat as ignored.
+            return true;
+        };
+        // Hidden component anywhere in the relative path → skipped by the walk.
+        let hidden = relative.components().any(|component| match component {
+            Component::Normal(name) => name.to_str().is_some_and(|name| name.starts_with('.')),
+            _ => false,
+        });
+        if hidden {
+            return true;
+        }
+        // Global gitignore first (cheap, already compiled).
+        if self.global.matched_path_or_any_parents(path, false).is_ignore() {
+            return true;
+        }
+        // Walk root → … → parent(path), letting a deeper `.gitignore` override a
+        // shallower one (last match wins), exactly as `WalkBuilder` aggregates them.
+        // Each matcher is queried with the path relative to *its own* directory so
+        // anchored patterns (`/build`) resolve against the right base.
+        let mut decided: Option<bool> = None;
+        let mut dir = root.to_path_buf();
+        let mut walk_dirs = vec![dir.clone()];
+        for component in relative.components() {
+            if let Component::Normal(name) = component {
+                dir = dir.join(name);
+                // Only directories carry `.gitignore`; stop before the file itself.
+                if dir == path {
+                    break;
+                }
+                walk_dirs.push(dir.clone());
             }
         }
-        self.root
-            .matched_path_or_any_parents(path, false)
-            .is_ignore()
-            || self
-                .global
-                .matched_path_or_any_parents(path, false)
-                .is_ignore()
+        for matcher_dir in &walk_dirs {
+            let Some(matcher) = self.matcher_for_dir(matcher_dir) else {
+                continue;
+            };
+            // `is_dir = false`: incremental events are always for files (a directory
+            // never enters the graph), and the build walk only admits files.
+            match matcher.matched_path_or_any_parents(path, false) {
+                Match::Ignore(_) => decided = Some(true),
+                Match::Whitelist(_) => decided = Some(false),
+                Match::None => {}
+            }
+        }
+        decided.unwrap_or(false)
     }
 }
 
@@ -218,17 +291,19 @@ impl Index {
             return Err(IndexError::NotADirectory(root.to_path_buf()));
         }
         // Canonicalize the root so the stored key matches whatever the OS
-        // returns from watcher events. Falls back to lexical normalization
-        // (which is still correct for non-symlink paths).
+        // returns from watcher events, then strip any Windows verbatim prefix so
+        // build-walk paths (root-joined) and `normalize_path`'d watcher paths share
+        // one key form. Falls back to lexical normalization (which is still correct
+        // for non-symlink paths and already verbatim-free).
         let root = root
             .canonicalize()
-            .unwrap_or_else(|_| normalize_path(root));
+            .map_or_else(|_| normalize_path(root), |c| strip_verbatim(&c));
         let root = root.as_path();
         let paths = collect_source_files(root);
         let (files, cache_dirty) = assemble_files(&paths, prior)?;
         let graph = build_graph(&files);
         Ok(Self {
-            ignore: IgnorePolicy::build(root),
+            ignore: IgnorePolicy::build(),
             root: root.to_path_buf(),
             files,
             graph,
@@ -654,16 +729,11 @@ fn add_reference_edges(
     let mut edges = Vec::new();
     for reference in &parsed.refs {
         // A reference is not a node, so nothing to exclude — find the tightest
-        // definition whose extent contains it.
-        let source = match enclosing_def(placed, reference.span, None) {
-            Some(s) => s,
-            None => {
-                // File-scope reference (imports, top-level uses, etc.): attach
-                // to the synthetic module node so the edge is preserved in the
-                // graph rather than being silently discarded.
-                get_file_module(graph)
-            }
-        };
+        // definition whose extent contains it. A file-scope reference (imports,
+        // top-level uses, etc.) has no encloser, so it attaches to the synthetic
+        // module node instead of being silently discarded.
+        let source = enclosing_def(placed, reference.span, None)
+            .unwrap_or_else(|| get_file_module(graph));
 
         let global = graph.nodes_by_name(&reference.name);
         if global.is_empty() {
@@ -913,6 +983,51 @@ mod tests {
         std::fs::write(root.join("src/a.rs"), "fn a() { a2(); }\nfn a2() {}\n").unwrap();
         assert!(index.update_file(root.join("src/a.rs")));
         assert_eq!(index.graph().nodes_by_name("a2").len(), 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn incremental_respects_nested_gitignore() {
+        // A `.gitignore` in a *subdirectory* (not the root) excludes `build/`. A
+        // fresh build's WalkBuilder honors it, so the incremental path must too —
+        // otherwise saving a generated file would diverge the graph from a rebuild.
+        let root = workspace(&[
+            ("src/.gitignore", "build/\n"),
+            ("src/a.rs", "fn a() {}\n"),
+        ]);
+        let mut index = Index::build(&root).expect("build");
+
+        let nested_ignored = root.join("src/build/gen.rs");
+        std::fs::create_dir_all(nested_ignored.parent().unwrap()).unwrap();
+        std::fs::write(&nested_ignored, "fn gen() {}\n").unwrap();
+        assert!(
+            !index.update_file(&nested_ignored),
+            "a file ignored by a nested .gitignore must not enter the index incrementally"
+        );
+        assert_eq!(index.graph().nodes_by_name("gen").len(), 0);
+
+        // A sibling file NOT under build/ still updates normally.
+        std::fs::write(root.join("src/a.rs"), "fn a() { a2(); }\nfn a2() {}\n").unwrap();
+        assert!(index.update_file(root.join("src/a.rs")));
+        assert_eq!(index.graph().nodes_by_name("a2").len(), 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn recursive_call_produces_a_self_loop_edge() {
+        // A function that calls itself must produce a Calls self-loop, not be
+        // silently dropped (the recursion-handling fix in resolve_targets).
+        let root = workspace(&[("r.rs", "fn fact(n: u32) -> u32 { fact(n - 1) }\n")]);
+        let index = Index::build(&root).expect("build");
+        let graph = index.graph();
+        let fact = graph.nodes_by_name("fact")[0];
+        let self_call = graph
+            .out_neighbors(fact)
+            .iter()
+            .any(|adj| adj.node == fact && adj.kind == EdgeKind::Calls);
+        assert!(self_call, "recursive call must be a Calls self-loop edge");
 
         std::fs::remove_dir_all(&root).ok();
     }

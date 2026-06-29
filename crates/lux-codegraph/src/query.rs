@@ -48,29 +48,41 @@ impl NodeRef {
 /// Ordered exact → prefix → substring (graphify's `_find_node` bucket order).
 /// Matching is case-insensitive. Within a bucket, results keep node order
 /// (stable). Returns every match so callers can disambiguate; most take the first.
+///
+/// The exact bucket is an O(1) hash lookup ([`CodeGraph::nodes_by_lowercase_name`]);
+/// the prefix/substring buckets scan the per-node lowercase names cached at
+/// [`CodeGraph::finalize`], so no lowercase `String` is allocated per node per
+/// query — the difference that matters when AI tools resolve names repeatedly on
+/// a multi-million-node graph during a turn.
 #[must_use]
 pub fn resolve(graph: &CodeGraph, query: &str) -> Vec<NodeRef> {
     let needle = query.trim().to_ascii_lowercase();
     if needle.is_empty() {
         return Vec::new();
     }
-    let (mut exact, mut prefix, mut substring) = (Vec::new(), Vec::new(), Vec::new());
+    // Exact case-insensitive matches: direct bucket lookup, no scan.
+    let exact = graph.nodes_by_lowercase_name(&needle);
+
+    // Prefix/substring buckets: one pass over cached lowercase names, skipping any
+    // node that already landed in the exact bucket (its lowercase == needle).
+    let (mut prefix, mut substring) = (Vec::new(), Vec::new());
     for i in 0..graph.node_count() {
         let id = NodeId::from_raw(u32::try_from(i).unwrap_or(u32::MAX));
-        let Some(name) = graph.name_of(id) else {
+        let Some(lower) = graph.lowercase_name_of(id) else {
             continue;
         };
-        let lower = name.to_ascii_lowercase();
         if lower == needle {
-            exact.push(id);
-        } else if lower.starts_with(&needle) {
+            continue; // already in the exact bucket
+        }
+        if lower.starts_with(needle.as_str()) {
             prefix.push(id);
-        } else if lower.contains(&needle) {
+        } else if lower.contains(needle.as_str()) {
             substring.push(id);
         }
     }
     exact
-        .into_iter()
+        .iter()
+        .copied()
         .chain(prefix)
         .chain(substring)
         .filter_map(|id| NodeRef::of(graph, id))

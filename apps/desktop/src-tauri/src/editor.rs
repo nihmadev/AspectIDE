@@ -7,7 +7,10 @@ use lux_core::{
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use super::{emit_event, lock_error, lsp, resolve_workspace_path_for_write, SharedState};
+use super::{
+    emit_event, lock_error, lsp, resolve_workspace_path, resolve_workspace_path_for_write,
+    SharedState,
+};
 
 #[tauri::command]
 pub async fn editor_open_file(
@@ -15,10 +18,21 @@ pub async fn editor_open_file(
     state: State<'_, SharedState>,
     path: PathBuf,
 ) -> Result<DocumentSnapshot, String> {
-    let canonical = tokio::task::spawn_blocking(move || dunce::canonicalize(&path))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
+    // Confine opens to the active workspace: route the caller-supplied path through
+    // the workspace guard, which canonicalizes and rejects absolute/`..`-escaping
+    // targets that land outside the project. A renderer/extension/AI path bug (or an
+    // LSP location pointing elsewhere) must not be able to read arbitrary local files.
+    // With no workspace open — a user-only state — fall back to a plain canonicalize
+    // so standalone-file opens still work; that path carries no workspace to escape.
+    let has_workspace = state.workspace.lock().map_err(lock_error)?.is_some();
+    let canonical = if has_workspace {
+        resolve_workspace_path(&state, &path)?
+    } else {
+        tokio::task::spawn_blocking(move || dunce::canonicalize(&path))
+            .await
+            .map_err(|error| error.to_string())?
+            .map_err(|error| error.to_string())?
+    };
 
     let existing = {
         let documents = state.documents.lock().map_err(lock_error)?;

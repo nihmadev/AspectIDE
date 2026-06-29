@@ -97,14 +97,12 @@ fn resolve_spreadsheet_save_path(path: &Path) -> PathBuf {
 pub fn guard_decompression_bomb(path: &Path) -> AppResult<()> {
     if !matches!(extension(path).as_str(), "xlsx" | "xlsm" | "xlsb" | "ods") {
         // Non-zip legacy formats: check flat file size before open_workbook_auto.
-        let size = std::fs::metadata(path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size = std::fs::metadata(path).map_or(0, |m| m.len());
         if size > MAX_LEGACY_SPREADSHEET_BYTES {
             return Err(AppError::Service(format!(
-                "spreadsheet rejected: file size {:.1} MiB exceeds the {} MiB ceiling \
+                "spreadsheet rejected: file size {} exceeds the {} MiB ceiling \
                  for non-zip workbooks — open externally for large legacy files",
-                size as f64 / (1024.0 * 1024.0),
+                crate::format_mib(size),
                 MAX_LEGACY_SPREADSHEET_BYTES / (1024 * 1024)
             )));
         }

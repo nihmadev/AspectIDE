@@ -1595,4 +1595,28 @@ mod tests {
         assert_eq!(response.exit_code, Some(1));
         assert_eq!(response.language, "Mixed");
     }
+
+    /// Regression for the stderr-deadlock false timeout: a stream larger than the
+    /// capture cap must be fully drained (read to EOF) rather than wedging once the
+    /// cap is hit. `run_single_test_health_plan` drains stdout and stderr with the
+    /// same `read_stream_capped` under `tokio::join!`, so proving the reader keeps
+    /// consuming past the cap proves a chatty pipe can't block the child.
+    #[tokio::test]
+    async fn read_stream_capped_drains_past_cap_without_wedging() {
+        // Twice the cap so the reader must consume well beyond what it keeps.
+        let oversized = vec![b'x'; AI_TEST_HEALTH_MAX_CAPTURE_BYTES * 2 + 7];
+        let mut cursor = std::io::Cursor::new(oversized.clone());
+        // Bounded so a hung reader (one that stops at the cap) fails loudly instead
+        // of hanging the suite — exactly the deadlock this guards against.
+        let captured = timeout(
+            Duration::from_secs(5),
+            read_stream_capped(Some(&mut cursor)),
+        )
+        .await
+        .expect("reader must drain the whole stream, not wedge at the cap");
+        // Capture is clamped to the cap, but the entire input was consumed (cursor
+        // advanced to EOF), which is what keeps the child's pipe from filling.
+        assert_eq!(captured.len(), AI_TEST_HEALTH_MAX_CAPTURE_BYTES);
+        assert_eq!(cursor.position(), oversized.len() as u64);
+    }
 }

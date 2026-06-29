@@ -3,6 +3,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, Copy, FilePlus2, Folder, Fold
 import type { CSSProperties, DragEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent } from "react";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEditorCloseGuard } from "../EditorCloseGuard";
 import { fileIconForName } from "../../lib/fileIcons";
 import { displayPath, joinPath, normalizePath, parentPath } from "../../lib/fileTree";
@@ -14,6 +15,7 @@ import {
   buildDirectories,
   buildGitDecorations,
   countDescendants,
+  flattenVisibleRows,
   gitDecoBadge,
   type GitDecoStatus,
   deleteDialogDescription,
@@ -29,6 +31,15 @@ import {
 } from "./ExplorerHelpers";
 import type { ClipboardEntry, ContextMenuState, DraggedEntry, PendingCreate, PendingDelete, PendingRename, TreeAction } from "./ExplorerTypes";
 import { PanelHeader, readErrorMessage, relativePath, TreeMessage } from "./SidebarShared";
+
+// Fixed row height of a tree row (.file-row / header / create / rename), in px.
+// Used as the virtualizer size estimate; `measureElement` corrects any drift.
+const EXPLORER_ROW_HEIGHT = 24;
+// Below this visible-row count the tree renders in normal flow — the virtual
+// layout's absolute positioning and measurement overhead is not worth it.
+const EXPLORER_VIRTUALIZE_THRESHOLD = 80;
+// Extra rows rendered above/below the viewport so fast scrolls stay smooth.
+const EXPLORER_OVERSCAN = 12;
 
 export function ExplorerPanel() {
   const { t } = useTranslation();
@@ -84,7 +95,6 @@ export function ExplorerPanel() {
     ? { name: primaryRoot.name, path: primaryRoot.root, kind: "directory", size: 0, modified_at: null, is_hidden: false }
     : null;
   const rootEntries = fileTreeDirectories[rootKey] ?? fileEntries;
-  const rootPendingCreate = pendingCreate && normalizePath(pendingCreate.parentPath) === rootKey ? pendingCreate : null;
   // Git status → tree decorations (green added, gold modified, red deleted, …),
   // refreshed automatically by the workspace watcher's gitStatusChanged events.
   const gitDecorations = useMemo(
@@ -482,6 +492,98 @@ export function ExplorerPanel() {
     requestDeleteEntry(selectedEntry);
   }, [pendingCreate, pendingDelete, pendingRename, requestDeleteEntry, selectedEntry]);
 
+  // Flatten the expanded tree into a bounded, depth-tagged visible-row array so
+  // large monorepos render through a virtual window instead of mounting every
+  // node. Recomputed only when the loaded directories, expansion set, or the
+  // active create-row parent change — not on selection/drag/git ticks.
+  const pendingCreateParentKey = pendingCreate ? normalizePath(pendingCreate.parentPath) : null;
+  const visibleRows = useMemo(
+    () => flattenVisibleRows(workspaceRoots, fileTreeDirectories, expandedPaths, pendingCreateParentKey, rootEntries, rootPath),
+    [workspaceRoots, fileTreeDirectories, expandedPaths, pendingCreateParentKey, rootEntries, rootPath],
+  );
+
+  const treeScrollRef = useRef<HTMLDivElement | null>(null);
+  const treeVirtualizer = useVirtualizer({
+    count: visibleRows.length,
+    getScrollElement: () => treeScrollRef.current,
+    getItemKey: (index) => {
+      const row = visibleRows[index];
+      if (!row) return index;
+      return row.kind === "entry" ? row.entryKey : row.kind === "folder-header" ? `header:${row.folderKey}` : `create:${row.parentPath}`;
+    },
+    estimateSize: () => EXPLORER_ROW_HEIGHT,
+    overscan: EXPLORER_OVERSCAN,
+  });
+  const useVirtualTree = visibleRows.length >= EXPLORER_VIRTUALIZE_THRESHOLD;
+
+  // Renders one flattened row. Directory children are already laid out as
+  // sibling rows by `flattenVisibleRows`, so an entry row only needs to know its
+  // own expansion/child state for the chevron and inline create/rename slots.
+  const renderTreeRow = useCallback((row: typeof visibleRows[number]) => {
+    if (row.kind === "folder-header") {
+      const folderKey = row.folderKey;
+      const folder = workspaceRoots.find((candidate) => normalizePath(candidate.root) === folderKey);
+      if (!folder) return null;
+      return (
+        <button
+          className="tree-section-title workspace-folder-title"
+          type="button"
+          data-drop-target={dropTargetPath === folderKey}
+          onClick={() => toggleExplorerExpandedPath(folderKey)}
+          onDragEnter={(event) => { if (!dragOverDirectory(folder.root)) return; event.preventDefault(); }}
+          onDragOver={(event) => {
+            if (!dragOverDirectory(folder.root)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = "move";
+          }}
+          onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void dropEntryIntoDirectory(folder.root); }}
+          onContextMenu={(event) => { event.preventDefault(); setContextMenu({ entry: workspaceToEntry(folder), source: "blank", x: event.clientX, y: event.clientY }); }}
+        >
+          {expandedPaths.has(folderKey) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+          <span>{folder.name}</span>
+        </button>
+      );
+    }
+    if (row.kind === "create") {
+      return <CreateRow create={createEntry} depth={row.depth} onCancel={() => setPendingCreate(null)} pendingCreate={pendingCreate ?? { kind: "file", parentPath: row.parentPath }} />;
+    }
+    const entry = row.entry;
+    const key = row.entryKey;
+    if (pendingRename && normalizePath(pendingRename.entry.path) === key) {
+      return <RenameRow depth={row.depth} entry={entry} onCancel={() => setPendingRename(null)} rename={renameEntry} />;
+    }
+    const isDirectory = entry.kind === "directory";
+    const children = fileTreeDirectories[key] ?? [];
+    return (
+      <FileRow
+        activePath={activeDocument?.path ?? null}
+        clipboardEntry={clipboardEntry}
+        depth={row.depth}
+        entry={entry}
+        expanded={expandedPaths.has(key)}
+        gitStatus={gitDecorations.get(key) ?? null}
+        hasChildren={children.length > 0}
+        isDirectory={isDirectory}
+        isDragging={draggedEntry ? normalizePath(draggedEntry.entry.path) === key : false}
+        isDropTarget={dropTargetPath === key}
+        isSelected={selectedEntryPath === key}
+        pendingParentKey={pendingCreateParentKey}
+        rowKey={key}
+        dragOverDirectory={dragOverDirectory}
+        dragLeaveDirectory={dragLeaveDirectory}
+        dropEntryIntoDirectory={dropEntryIntoDirectory}
+        endEntryDrag={endEntryDrag}
+        openFile={(path) => openFileMutation.mutate(path)}
+        requestDeleteEntry={requestDeleteEntry}
+        setContextMenu={setContextMenu}
+        setSelectedEntryPath={setSelectedEntryPath}
+        startEntryDrag={startEntryDrag}
+        toggleDirectory={toggleDirectory}
+      />
+    );
+  }, [activeDocument?.path, clipboardEntry, createEntry, draggedEntry, dragLeaveDirectory, dragOverDirectory, dropEntryIntoDirectory, dropTargetPath, endEntryDrag, expandedPaths, fileTreeDirectories, gitDecorations, openFileMutation, pendingCreate, pendingCreateParentKey, pendingRename, renameEntry, requestDeleteEntry, selectedEntryPath, startEntryDrag, toggleDirectory, toggleExplorerExpandedPath, workspaceRoots]);
+
   const contextActions = useMemo(() => {
     if (!contextMenu || !workspace) return [];
     const entry = contextMenu.entry;
@@ -617,6 +719,7 @@ export function ExplorerPanel() {
         </div>
         <div
           className="file-tree"
+          ref={treeScrollRef}
           role="tree"
           tabIndex={0}
           onKeyDown={handleExplorerKeyDown}
@@ -636,76 +739,31 @@ export function ExplorerPanel() {
         >
           {fileTreeError && <TreeMessage depth={0} tone="error" text={fileTreeError} />}
           {operationError && <TreeMessage depth={0} tone="error" text={operationError} />}
-          {rootPendingCreate && <CreateRow create={createEntry} onCancel={() => setPendingCreate(null)} pendingCreate={rootPendingCreate} />}
-          {workspaceRoots.map((folder) => {
-            const folderKey = normalizePath(folder.root);
-            const folderEntries = fileTreeDirectories[folderKey] ?? (folder.root === rootPath ? rootEntries : []);
-            return (
-              <Fragment key={folder.root}>
-                {workspaceRoots.length > 1 && (
-                  <button
-                    className="tree-section-title workspace-folder-title"
-                    type="button"
-                    data-drop-target={dropTargetPath === folderKey}
-                    onClick={() => toggleExplorerExpandedPath(folderKey)}
-                    onDragEnter={(event) => {
-                      if (!dragOverDirectory(folder.root)) return;
-                      event.preventDefault();
-                    }}
-                    onDragOver={(event) => {
-                      if (!dragOverDirectory(folder.root)) return;
-                      event.preventDefault();
-                      event.stopPropagation();
-                      event.dataTransfer.dropEffect = "move";
-                    }}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      event.stopPropagation();
-                      void dropEntryIntoDirectory(folder.root);
-                    }}
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-                      setContextMenu({ entry: workspaceToEntry(folder), source: "blank", x: event.clientX, y: event.clientY });
-                    }}
+          {useVirtualTree ? (
+            <div className="file-tree-virtual" style={{ height: treeVirtualizer.getTotalSize() }}>
+              {treeVirtualizer.getVirtualItems().map((item) => {
+                const row = visibleRows[item.index];
+                if (!row) return null;
+                return (
+                  <div
+                    key={item.key}
+                    className="file-tree-virtual-row"
+                    data-index={item.index}
+                    ref={treeVirtualizer.measureElement}
+                    style={{ transform: `translateY(${item.start}px)` }}
                   >
-                    {expandedPaths.has(folderKey) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                    <span>{folder.name}</span>
-                  </button>
-                )}
-                {expandedPaths.has(folderKey) && folderEntries.map((entry) => (
-                  <TreeEntry
-                    activePath={activeDocument?.path ?? null}
-                    clipboardEntry={clipboardEntry}
-                    createEntry={createEntry}
-                    depth={workspaceRoots.length > 1 ? 1 : 0}
-                    directories={fileTreeDirectories}
-                    draggedEntry={draggedEntry}
-                    dragLeaveDirectory={dragLeaveDirectory}
-                    dropEntryIntoDirectory={dropEntryIntoDirectory}
-                    dropTargetPath={dropTargetPath}
-                    dragOverDirectory={dragOverDirectory}
-                    endEntryDrag={endEntryDrag}
-                    entry={entry}
-                    expandedPaths={expandedPaths}
-                    gitDecorations={gitDecorations}
-                    key={entry.path}
-                    openFile={(path) => openFileMutation.mutate(path)}
-                    pendingCreate={pendingCreate}
-                    pendingRename={pendingRename}
-                    renameEntry={renameEntry}
-                    requestDeleteEntry={requestDeleteEntry}
-                    setContextMenu={setContextMenu}
-                    selectedEntryPath={selectedEntryPath}
-                    setSelectedEntryPath={setSelectedEntryPath}
-                    setPendingCreate={setPendingCreate}
-                    setPendingRename={setPendingRename}
-                    startEntryDrag={startEntryDrag}
-                    toggleDirectory={toggleDirectory}
-                  />
-                ))}
+                    {renderTreeRow(row)}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            visibleRows.map((row, index) => (
+              <Fragment key={row.kind === "entry" ? row.entryKey : row.kind === "folder-header" ? `header:${row.folderKey}` : `create:${row.parentPath}:${index}`}>
+                {renderTreeRow(row)}
               </Fragment>
-            );
-          })}
+            ))
+          )}
         </div>
       </section>
 
@@ -718,140 +776,6 @@ export function ExplorerPanel() {
         onConfirm={confirmDeleteEntry}
       />
     </div>
-  );
-}
-
-function TreeEntry({
-  activePath,
-  clipboardEntry,
-  createEntry,
-  depth,
-  directories,
-  draggedEntry,
-  dragLeaveDirectory,
-  dropEntryIntoDirectory,
-  dropTargetPath,
-  dragOverDirectory,
-  endEntryDrag,
-  entry,
-  expandedPaths,
-  gitDecorations,
-  openFile,
-  pendingCreate,
-  pendingRename,
-  renameEntry,
-  requestDeleteEntry,
-  setContextMenu,
-  selectedEntryPath,
-  setSelectedEntryPath,
-  setPendingCreate,
-  setPendingRename,
-  startEntryDrag,
-  toggleDirectory,
-}: {
-  activePath: string | null;
-  clipboardEntry: ClipboardEntry | null;
-  createEntry: (parentPath: string, name: string, kind: PendingCreate["kind"]) => Promise<void>;
-  depth: number;
-  directories: Record<string, FsEntry[]>;
-  draggedEntry: DraggedEntry | null;
-  dragLeaveDirectory: (targetDirectory: string) => void;
-  dropEntryIntoDirectory: (targetDirectory: string) => Promise<void>;
-  dropTargetPath: string | null;
-  dragOverDirectory: (targetDirectory: string) => boolean;
-  endEntryDrag: () => void;
-  entry: FsEntry;
-  expandedPaths: Set<string>;
-  gitDecorations: Map<string, GitDecoStatus>;
-  openFile: (path: string) => void;
-  pendingCreate: PendingCreate | null;
-  pendingRename: PendingRename | null;
-  renameEntry: (entry: FsEntry, name: string) => Promise<void>;
-  requestDeleteEntry: (entry: FsEntry) => void;
-  setContextMenu: (contextMenu: ContextMenuState | null) => void;
-  selectedEntryPath: string | null;
-  setSelectedEntryPath: (path: string | null) => void;
-  setPendingCreate: (pendingCreate: PendingCreate | null) => void;
-  setPendingRename: (pendingRename: PendingRename | null) => void;
-  startEntryDrag: (entry: FsEntry) => void;
-  toggleDirectory: (entry: FsEntry) => void;
-}) {
-  const key = normalizePath(entry.path);
-  const isDirectory = entry.kind === "directory";
-  const isExpanded = expandedPaths.has(key);
-  const children = directories[key] ?? [];
-  const hasChildren = children.length > 0;
-  const pendingParentKey = pendingCreate ? normalizePath(pendingCreate.parentPath) : null;
-  const renameKey = pendingRename ? normalizePath(pendingRename.entry.path) : null;
-
-  return (
-    <Fragment>
-      {renameKey === key ? (
-        <RenameRow depth={depth} entry={entry} onCancel={() => setPendingRename(null)} rename={renameEntry} />
-      ) : (
-        <FileRow
-          activePath={activePath}
-          clipboardEntry={clipboardEntry}
-          depth={depth}
-          entry={entry}
-          expanded={isExpanded}
-          gitStatus={gitDecorations.get(key) ?? null}
-          hasChildren={hasChildren}
-          isDirectory={isDirectory}
-          isDragging={draggedEntry ? normalizePath(draggedEntry.entry.path) === key : false}
-          isDropTarget={dropTargetPath === key}
-          isSelected={selectedEntryPath === key}
-          pendingParentKey={pendingParentKey}
-          rowKey={key}
-          dragOverDirectory={dragOverDirectory}
-          dragLeaveDirectory={dragLeaveDirectory}
-          dropEntryIntoDirectory={dropEntryIntoDirectory}
-          endEntryDrag={endEntryDrag}
-          openFile={openFile}
-          requestDeleteEntry={requestDeleteEntry}
-          setContextMenu={setContextMenu}
-          setSelectedEntryPath={setSelectedEntryPath}
-          startEntryDrag={startEntryDrag}
-          toggleDirectory={toggleDirectory}
-        />
-      )}
-      {isDirectory && isExpanded && (hasChildren || pendingParentKey === key) && (
-        <>
-          {pendingCreate && pendingParentKey === key ? <CreateRow create={createEntry} depth={depth + 1} onCancel={() => setPendingCreate(null)} pendingCreate={pendingCreate} /> : null}
-          {children.map((child) => (
-            <TreeEntry
-              activePath={activePath}
-              clipboardEntry={clipboardEntry}
-              createEntry={createEntry}
-              depth={depth + 1}
-              directories={directories}
-              draggedEntry={draggedEntry}
-              dragLeaveDirectory={dragLeaveDirectory}
-              dropEntryIntoDirectory={dropEntryIntoDirectory}
-              dropTargetPath={dropTargetPath}
-              dragOverDirectory={dragOverDirectory}
-              endEntryDrag={endEntryDrag}
-              entry={child}
-              expandedPaths={expandedPaths}
-              gitDecorations={gitDecorations}
-              key={child.path}
-              openFile={openFile}
-              pendingCreate={pendingCreate}
-              pendingRename={pendingRename}
-              renameEntry={renameEntry}
-              requestDeleteEntry={requestDeleteEntry}
-              setContextMenu={setContextMenu}
-              selectedEntryPath={selectedEntryPath}
-              setSelectedEntryPath={setSelectedEntryPath}
-              setPendingCreate={setPendingCreate}
-              setPendingRename={setPendingRename}
-              startEntryDrag={startEntryDrag}
-              toggleDirectory={toggleDirectory}
-            />
-          ))}
-        </>
-      )}
-    </Fragment>
   );
 }
 

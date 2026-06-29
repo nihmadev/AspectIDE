@@ -183,46 +183,124 @@ fn split_community(adjacency: &[Vec<usize>], members: &[usize]) -> Vec<Vec<usize
     groups.into_values().collect()
 }
 
-/// Louvain modularity maximization on an undirected, unweighted adjacency.
+/// A weighted undirected graph for one Louvain level. `adjacency[u]` lists
+/// `(neighbor, weight)`; a self-loop `(u, w)` carries internal weight accumulated
+/// when communities are contracted. `loops[u]` is twice the self-loop weight on
+/// `u` (the standard Louvain bookkeeping), `degree[u]` the weighted degree
+/// (including loops).
+struct WeightedGraph {
+    adjacency: Vec<Vec<(usize, f64)>>,
+    loops: Vec<f64>,
+    degree: Vec<f64>,
+    two_m: f64,
+}
+
+impl WeightedGraph {
+    /// Lift an unweighted adjacency (each edge weight 1) into the level-0 weighted
+    /// graph Louvain operates on.
+    fn from_unweighted(adjacency: &[Vec<usize>], total_edges: usize) -> Self {
+        let weighted: Vec<Vec<(usize, f64)>> = adjacency
+            .iter()
+            .map(|neighbors| neighbors.iter().map(|&v| (v, 1.0)).collect())
+            .collect();
+        let degree: Vec<f64> = adjacency.iter().map(|a| a.len() as f64).collect();
+        Self {
+            adjacency: weighted,
+            loops: vec![0.0; adjacency.len()],
+            degree,
+            two_m: (2 * total_edges) as f64,
+        }
+    }
+
+    const fn node_count(&self) -> usize {
+        self.adjacency.len()
+    }
+}
+
+/// Multilevel Louvain modularity maximization on an undirected, unweighted
+/// adjacency.
 ///
-/// Returns a per-node community label (dense but not necessarily contiguous).
-/// One level of local moving followed by aggregation, iterated until modularity
-/// stops improving. Deterministic: nodes are visited in index order, ties broken
-/// toward the lowest community id.
+/// Full Louvain, not just one local-moving pass: repeatedly (1) move nodes greedily
+/// to maximize modularity, then (2) **contract** each community into a single
+/// super-node — summing inter-community edge weights and folding intra-community
+/// edges into self-loops — and recurse on that smaller weighted graph. Levels
+/// continue until a pass produces no merge, then every level's labels are projected
+/// back down so the result is a per-original-node community label.
+///
+/// Deterministic: nodes are visited in index order and ties are broken toward the
+/// lowest community id at every level.
 fn louvain(adjacency: &[Vec<usize>], total_edges: usize) -> Vec<usize> {
     let n = adjacency.len();
-    let two_m = (2 * total_edges) as f64;
+    if total_edges == 0 {
+        return (0..n).collect();
+    }
+
+    let mut level = WeightedGraph::from_unweighted(adjacency, total_edges);
+    // `mapping[i]` = the level-0 community label of original node `i`. Updated after
+    // every level by composing the new level's partition through it.
+    let mut mapping: Vec<usize> = (0..n).collect();
+
+    loop {
+        let partition = local_moving(&level);
+        // Renumber the raw labels to a contiguous 0..k. `node_label[s]` is the new
+        // community of this level's super-node `s` (indexed by super-node index).
+        let (node_label, community_count) = renumber(&partition);
+
+        // Compose onto the original nodes: each original node currently maps to a
+        // super-node index of *this* level, which now folds into `node_label`.
+        for label in &mut mapping {
+            *label = node_label[*label];
+        }
+
+        // Converged when local moving placed every super-node in its own community:
+        // contraction would reproduce the same graph, so stop (else we'd loop
+        // forever on a fixed point).
+        if community_count == level.node_count() {
+            break;
+        }
+
+        level = contract(&level, &node_label, community_count);
+    }
+
+    mapping
+}
+
+/// One local-moving pass: greedily move each node to the neighboring community
+/// that most increases modularity, biasing toward staying / the lowest id on ties.
+/// Returns a per-node community label (not necessarily contiguous).
+fn local_moving(graph: &WeightedGraph) -> Vec<usize> {
+    let n = graph.node_count();
+    let two_m = graph.two_m;
     if two_m == 0.0 {
         return (0..n).collect();
     }
-    let degree: Vec<f64> = adjacency.iter().map(|a| a.len() as f64).collect();
 
-    // community[node] = current community label (starts as singletons).
     let mut community: Vec<usize> = (0..n).collect();
-    // Sum of degrees of nodes in each community.
-    let mut comm_degree: Vec<f64> = degree.clone();
+    // Sum of weighted degrees of nodes in each community (seeded as singletons).
+    let mut comm_degree: Vec<f64> = graph.degree.clone();
 
     let mut improved = true;
     while improved {
         improved = false;
         for v in 0..n {
             let current = community[v];
-            // Tally edge weight from v to each neighboring community.
+            // Tally edge weight from v to each neighboring community (self-loops on
+            // v don't move v relative to itself, so they're excluded here).
             let mut weight_to: FxHashMap<usize, f64> = FxHashMap::default();
-            for &u in &adjacency[v] {
+            for &(u, w) in &graph.adjacency[v] {
                 if u != v {
-                    *weight_to.entry(community[u]).or_insert(0.0) += 1.0;
+                    *weight_to.entry(community[u]).or_insert(0.0) += w;
                 }
             }
             // Remove v from its community before evaluating gains.
-            comm_degree[current] -= degree[v];
+            comm_degree[current] -= graph.degree[v];
             let weight_current = weight_to.get(&current).copied().unwrap_or(0.0);
 
             // Pick the community maximizing modularity gain; bias toward staying.
             let mut best = current;
-            let mut best_gain = weight_current - degree[v] * comm_degree[current] / two_m;
+            let mut best_gain = weight_current - graph.degree[v] * comm_degree[current] / two_m;
             for (&candidate, &weight) in &weight_to {
-                let gain = weight - degree[v] * comm_degree[candidate] / two_m;
+                let gain = weight - graph.degree[v] * comm_degree[candidate] / two_m;
                 // Strict improvement, or a near-tie resolved toward the lower
                 // community id (for determinism independent of iteration order).
                 let near_tie = (gain - best_gain).abs() < f64::EPSILON;
@@ -232,7 +310,7 @@ fn louvain(adjacency: &[Vec<usize>], total_edges: usize) -> Vec<usize> {
                 }
             }
 
-            comm_degree[best] += degree[v];
+            comm_degree[best] += graph.degree[v];
             if best != current {
                 community[v] = best;
                 improved = true;
@@ -240,6 +318,78 @@ fn louvain(adjacency: &[Vec<usize>], total_edges: usize) -> Vec<usize> {
         }
     }
     community
+}
+
+/// Renumber a per-super-node partition to contiguous community ids `0..k`,
+/// assigning ids in ascending order of first appearance for determinism. Returns a
+/// vec **indexed by super-node** (same length as `partition`) giving each
+/// super-node's new community id, plus `k`. Indexing by super-node (not by raw
+/// label value) is what lets the caller compose levels directly.
+fn renumber(partition: &[usize]) -> (Vec<usize>, usize) {
+    let max_label = partition.iter().copied().max().unwrap_or(0);
+    let mut remap = vec![usize::MAX; max_label + 1];
+    let mut next = 0;
+    let mut node_label = vec![0usize; partition.len()];
+    for (node, &label) in partition.iter().enumerate() {
+        if remap[label] == usize::MAX {
+            remap[label] = next;
+            next += 1;
+        }
+        node_label[node] = remap[label];
+    }
+    (node_label, next)
+}
+
+/// Contract `graph` by `partition` (already renumbered to `0..community_count`):
+/// every community becomes one super-node, inter-community edge weights are summed,
+/// and intra-community edges fold into the super-node's self-loop. `two_m` is
+/// invariant under contraction (total edge weight is preserved), so modularity is
+/// comparable across levels.
+fn contract(graph: &WeightedGraph, partition: &[usize], community_count: usize) -> WeightedGraph {
+    // Accumulate weights between super-nodes in a map, plus self-loop weight.
+    let mut between: Vec<FxHashMap<usize, f64>> = vec![FxHashMap::default(); community_count];
+    let mut loops = vec![0.0; community_count];
+
+    for v in 0..graph.node_count() {
+        let cv = partition[v];
+        // Carry v's existing self-loop weight into its community's loop.
+        loops[cv] += graph.loops[v];
+        for &(u, w) in &graph.adjacency[v] {
+            let cu = partition[u];
+            if cu == cv {
+                if u == v {
+                    // Self-loop already folded via `graph.loops`; skip to avoid
+                    // double counting (loops are stored separately, not in adjacency).
+                    continue;
+                }
+                // Intra-community edge: each undirected edge is seen from both ends,
+                // so add w/2 per endpoint visit → full weight once into the loop.
+                loops[cv] += w / 2.0;
+            } else {
+                *between[cv].entry(cu).or_insert(0.0) += w;
+            }
+        }
+    }
+
+    // Materialize the contracted adjacency (deterministic neighbor order) and the
+    // weighted degrees (sum of inter-community weights + 2× self-loop, the standard
+    // convention that keeps `sum(degree) == two_m`).
+    let mut adjacency: Vec<Vec<(usize, f64)>> = Vec::with_capacity(community_count);
+    let mut degree = vec![0.0; community_count];
+    for c in 0..community_count {
+        let mut neighbors: Vec<(usize, f64)> = between[c].iter().map(|(&u, &w)| (u, w)).collect();
+        neighbors.sort_unstable_by_key(|&(u, _)| u);
+        let inter: f64 = neighbors.iter().map(|&(_, w)| w).sum();
+        degree[c] = 2.0_f64.mul_add(loops[c], inter);
+        adjacency.push(neighbors);
+    }
+
+    WeightedGraph {
+        adjacency,
+        loops,
+        degree,
+        two_m: graph.two_m,
+    }
 }
 
 /// Deduplicated undirected adjacency list indexed by node index.
@@ -378,6 +528,71 @@ mod tests {
         assert!(communities[0].members.len() >= communities.last().unwrap().members.len());
         let map = node_community_map(&communities);
         assert_eq!(map[&big[0]], 0, "largest clique should be community 0");
+    }
+
+    #[test]
+    fn contract_preserves_total_edge_weight() {
+        // Contraction must keep `two_m` (total weighted degree) invariant — the
+        // property that makes modularity comparable across Louvain levels. Build a
+        // small unweighted graph, contract by an arbitrary partition, and check the
+        // summed weighted degree of the contracted graph equals the original.
+        use super::{contract, WeightedGraph};
+        // Triangle 0-1-2 plus an edge 2-3 (4 nodes, 4 undirected edges).
+        let adjacency = vec![vec![1, 2], vec![0, 2], vec![0, 1, 3], vec![2]];
+        let level = WeightedGraph::from_unweighted(&adjacency, 4);
+        let original_two_m: f64 = level.degree.iter().sum();
+
+        // Merge {0,1} into community 0 and {2,3} into community 1.
+        let node_label = vec![0, 0, 1, 1];
+        let contracted = contract(&level, &node_label, 2);
+        let contracted_two_m: f64 = contracted.degree.iter().sum();
+
+        assert!(
+            (original_two_m - contracted_two_m).abs() < 1e-9,
+            "contraction must preserve total weighted degree: {original_two_m} vs {contracted_two_m}"
+        );
+        assert!(
+            (contracted.two_m - level.two_m).abs() < 1e-9,
+            "two_m is invariant under contraction"
+        );
+    }
+
+    #[test]
+    fn multilevel_collapses_a_chain_of_aggregations() {
+        // Two dense 5-cliques joined by several cross edges form a single optimal
+        // community. Full multilevel Louvain must contract each clique to a
+        // super-node and then merge the two super-nodes on the next level, ending
+        // with ONE community. This exercises the aggregate-and-rerun path the
+        // single-pass implementation lacked.
+        let mut g = CodeGraph::new();
+        let file = g.add_file(std::path::PathBuf::from("a.rs"));
+        let clique = |g: &mut CodeGraph, names: &[&str]| -> Vec<NodeId> {
+            let ids: Vec<NodeId> = names.iter().map(|nm| add(g, file, nm)).collect();
+            for i in 0..ids.len() {
+                for j in (i + 1)..ids.len() {
+                    link(g, ids[i], ids[j]);
+                }
+            }
+            ids
+        };
+        let left = clique(&mut g, &["a0", "a1", "a2", "a3", "a4"]);
+        let right = clique(&mut g, &["b0", "b1", "b2", "b3", "b4"]);
+        // Complete bipartite bridging: the union is a (near-)complete graph, so the
+        // unambiguous modularity optimum is a single merged community.
+        for &l in &left {
+            for &r in &right {
+                link(&mut g, l, r);
+            }
+        }
+        g.finalize();
+
+        let communities = detect(&g);
+        let map = node_community_map(&communities);
+        let c = map[&left[0]];
+        assert!(
+            left.iter().chain(right.iter()).all(|n| map[n] == c),
+            "a densely-bridged pair of cliques must collapse to one community"
+        );
     }
 
     #[test]

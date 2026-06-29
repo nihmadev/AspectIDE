@@ -518,6 +518,7 @@ fn parse_branches(raw: &str) -> Vec<String> {
 fn git_command(root: &Path) -> Command {
     let mut command = Command::new("git");
     hide_process_window(&mut command);
+    apply_non_interactive_env(&mut command);
     command
         .arg("--no-optional-locks")
         .arg("-C")
@@ -531,8 +532,39 @@ fn git_command(root: &Path) -> Command {
             "core.fsmonitor=false",
             "-c",
             "core.quotePath=false",
+            // Never prompt for credentials/passphrases over any helper; combined with
+            // the env below this makes auth-needing operations fail fast instead of
+            // hanging on a hidden prompt until `GIT_TIMEOUT`.
+            "-c",
+            "credential.interactive=false",
+            "-c",
+            "core.askPass=",
         ]);
     command
+}
+
+/// Force git (and the tools it shells out to) into a strictly non-interactive mode.
+///
+/// [`run_git_output`] already caps a hung child at [`GIT_TIMEOUT`], but a credential
+/// prompt, SSH host-key confirmation, or GPG passphrase would still block the AI turn
+/// for the full timeout before being killed. These environment variables make those
+/// operations *fail fast* with a real error instead:
+/// - `GIT_TERMINAL_PROMPT=0` — git never prompts on the terminal for credentials.
+/// - `GIT_ASKPASS`/`SSH_ASKPASS` empty + `DISPLAY` unset — disable GUI/askpass popups.
+/// - `GIT_SSH_COMMAND` with `BatchMode=yes` + `StrictHostKeyChecking=accept-new` —
+///   SSH errors out immediately instead of waiting on a password or host-key prompt.
+/// - `GCM_INTERACTIVE=Never` — Git Credential Manager (common on Windows) stays silent.
+fn apply_non_interactive_env(command: &mut Command) {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "")
+        .env("SSH_ASKPASS", "")
+        .env("GCM_INTERACTIVE", "Never")
+        .env_remove("DISPLAY")
+        .env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10",
+        );
 }
 
 #[cfg(windows)]

@@ -133,3 +133,60 @@ export function validateMoveTarget(entry: FsEntry, targetDirectory: string, dire
 export function displayParentPath(path: string) {
   return displayPath(parentPath(path));
 }
+
+// A single flattened, ready-to-render row of the explorer tree. Only rows that
+// are actually visible (inside an expanded ancestor chain) are emitted, so the
+// virtual list mounts a bounded window regardless of total tree size.
+export type ExplorerRow =
+  | { kind: "folder-header"; path: string; folderKey: string; depth: number }
+  | { kind: "entry"; entry: FsEntry; entryKey: string; depth: number }
+  | { kind: "create"; parentPath: string; depth: number };
+
+// Walks the expanded directory map into a flat, depth-tagged row array suitable
+// for windowed rendering. Mirrors the previous recursive JSX exactly: directory
+// children appear only when the directory is expanded, an inline "create" row is
+// injected directly under the parent whose `pendingCreate` is active, and
+// multi-root workspaces prepend a folder header per root.
+export function flattenVisibleRows(
+  roots: { root: string; name: string }[],
+  directories: Record<string, FsEntry[]>,
+  expandedPaths: Set<string>,
+  pendingCreateParentKey: string | null,
+  fallbackRootEntries: FsEntry[],
+  fallbackRootPath: string,
+): ExplorerRow[] {
+  const rows: ExplorerRow[] = [];
+  const multiRoot = roots.length > 1;
+
+  const pushChildren = (parentKey: string, depth: number) => {
+    if (pendingCreateParentKey === parentKey) rows.push({ kind: "create", parentPath: parentKey, depth });
+    for (const child of directories[parentKey] ?? []) {
+      const childKey = normalizePath(child.path);
+      rows.push({ kind: "entry", entry: child, entryKey: childKey, depth });
+      if (child.kind === "directory" && expandedPaths.has(childKey)) pushChildren(childKey, depth + 1);
+    }
+  };
+
+  for (const folder of roots) {
+    const folderKey = normalizePath(folder.root);
+    const baseDepth = multiRoot ? 1 : 0;
+    if (multiRoot) rows.push({ kind: "folder-header", path: folder.root, folderKey, depth: 0 });
+    if (!multiRoot || expandedPaths.has(folderKey)) {
+      // The primary root may not yet be present in `directories` on first paint;
+      // fall back to the already-loaded root entries so rows never flash empty.
+      const hasDir = directories[folderKey] !== undefined;
+      if (hasDir) {
+        pushChildren(folderKey, baseDepth);
+      } else if (folder.root === fallbackRootPath) {
+        if (pendingCreateParentKey === folderKey) rows.push({ kind: "create", parentPath: folderKey, depth: baseDepth });
+        for (const child of fallbackRootEntries) {
+          const childKey = normalizePath(child.path);
+          rows.push({ kind: "entry", entry: child, entryKey: childKey, depth: baseDepth });
+          if (child.kind === "directory" && expandedPaths.has(childKey)) pushChildren(childKey, baseDepth + 1);
+        }
+      }
+    }
+  }
+
+  return rows;
+}

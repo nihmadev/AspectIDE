@@ -464,9 +464,22 @@ where
                 .header(reqwest::header::ACCEPT, "text/event-stream")
                 .json(&payload);
             let builder = apply_auth(builder, anthropic, api_key.as_deref());
-            let send = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS + 5), builder.send()).await;
+            // Race the connect/send against the cancel flag so a Stop pressed while
+            // connecting to a slow/stalled provider interrupts within one poll tick
+            // instead of waiting out the full send deadline.
+            let send = match race_cancel(
+                builder.send(),
+                Duration::from_secs(CHAT_TIMEOUT_SECS + 5),
+                &should_cancel,
+            )
+            .await
+            {
+                CancelRace::Ready(result) => Ok(result),
+                CancelRace::Cancelled => return Err("cancelled".to_string()),
+                CancelRace::TimedOut => Err(()),
+            };
             let response = match send {
-                Err(_) => {
+                Err(()) => {
                     if attempt < NETWORK_RETRY_BUDGET {
                         let delay = backoff_delay(attempt);
                         emit_retry(
@@ -552,23 +565,32 @@ where
     // would mangle multibyte code points (Cyrillic/CJK/emoji) into U+FFFD.
     let mut byte_tail: Vec<u8> = Vec::new();
     'outer: loop {
-        // Per-chunk idle timeout: aborts only stalls (no bytes for CHAT_TIMEOUT_SECS),
-        // never long-but-actively-streaming generations. Matches the behavior of the
-        // Tauri event-streaming path (`stream_completion`).
-        let chunk = tokio::select! {
-            chunk = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS), stream.next()) => {
-                match chunk {
-                    Ok(c) => c,
-                    Err(_) => return Err("AI stream stalled".to_string()),
-                }
-            }
+        // Per-chunk wait that honours both the idle deadline AND a Stop. `race_cancel`
+        // polls `should_cancel` while awaiting the next chunk, so a Stop pressed during
+        // a *silent* stall (provider sending no bytes) interrupts within one poll tick
+        // instead of being noticed only after a chunk finally arrives — or never, until
+        // the CHAT_TIMEOUT_SECS idle deadline. Aborts only true stalls (no bytes for
+        // CHAT_TIMEOUT_SECS), never long-but-actively-streaming generations. Matches the
+        // intent of the Tauri event-streaming path (`stream_completion`).
+        let chunk = match race_cancel(
+            stream.next(),
+            Duration::from_secs(CHAT_TIMEOUT_SECS),
+            &should_cancel,
+        )
+        .await
+        {
+            CancelRace::Ready(chunk) => chunk,
+            // The in-flight response (and its socket) is dropped on return; the caller's
+            // post-stream cancellation check finalizes the accumulated-so-far body.
+            CancelRace::Cancelled => break 'outer,
+            CancelRace::TimedOut => return Err("AI stream stalled".to_string()),
         };
         let Some(chunk) = chunk else { break 'outer };
 
-        // A Stop pressed mid-stream: bail before processing this chunk so the
-        // response (and its in-flight HTTP connection) is dropped instead of
-        // draining the model's full generation. The accumulated-so-far body is
-        // returned; the caller's post-stream cancellation check finalizes it.
+        // A Stop that landed while this chunk was already in flight (arriving faster
+        // than one poll tick): bail before processing it so the model's remaining
+        // generation isn't drained. The next iteration's race_cancel entry check would
+        // also catch it, but this keeps the original zero-latency per-chunk guarantee.
         if should_cancel() {
             break 'outer;
         }
@@ -1605,6 +1627,51 @@ async fn sleep_backoff_cancelable<C: Fn() -> bool>(attempt: u32, should_cancel: 
     should_cancel()
 }
 
+/// How a `race_cancel` wait ended: the awaited future completed, the poll-based
+/// `should_cancel` predicate fired, or the overall idle deadline elapsed.
+enum CancelRace<T> {
+    Ready(T),
+    Cancelled,
+    TimedOut,
+}
+
+/// Await `fut` while honouring a poll-based cancellation predicate and an overall
+/// idle deadline. The native turn loop only exposes cancellation as a `Fn() -> bool`
+/// flag (no async primitive), so a bare `tokio::select!` cannot wake on Stop. This
+/// races the future against a `CANCEL_POLL_MS` ticker that checks `should_cancel`
+/// and a `deadline` timeout, so a Stop pressed during `builder.send()` or a silent
+/// stalled stream is observed within one tick instead of after the whole deadline.
+/// Without this, the per-chunk `tokio::select!` only checked cancellation *after* a
+/// chunk arrived — a provider that stops sending bytes would ignore Stop for up to
+/// `CHAT_TIMEOUT_SECS`.
+async fn race_cancel<T, Fut, C>(fut: Fut, deadline: Duration, should_cancel: &C) -> CancelRace<T>
+where
+    Fut: std::future::Future<Output = T>,
+    C: Fn() -> bool,
+{
+    const CANCEL_POLL_MS: u64 = 200;
+    if should_cancel() {
+        return CancelRace::Cancelled;
+    }
+    tokio::pin!(fut);
+    let started = std::time::Instant::now();
+    loop {
+        let remaining = match deadline.checked_sub(started.elapsed()) {
+            Some(left) if !left.is_zero() => left,
+            _ => return CancelRace::TimedOut,
+        };
+        let tick = remaining.min(Duration::from_millis(CANCEL_POLL_MS));
+        tokio::select! {
+            output = &mut fut => return CancelRace::Ready(output),
+            () = tokio::time::sleep(tick) => {
+                if should_cancel() {
+                    return CancelRace::Cancelled;
+                }
+            }
+        }
+    }
+}
+
 /// Pick a backoff for a transient HTTP failure. A `Retry-After` header always
 /// wins (the server told us exactly how long). A rate limit (429) without that
 /// header gets a longer floor than the generic backoff — 0.5s/1s does nothing
@@ -2526,5 +2593,43 @@ mod tests {
         // Content accumulated before the error is preserved.
         assert_eq!(acc.content, "hello");
         assert!(acc.stream_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn race_cancel_returns_ready_when_future_completes_first() {
+        let never_cancel = || false;
+        let fut = async { 42_u32 };
+        match race_cancel(fut, Duration::from_secs(5), &never_cancel).await {
+            CancelRace::Ready(v) => assert_eq!(v, 42),
+            _ => panic!("a completed future must yield Ready"),
+        }
+    }
+
+    #[tokio::test]
+    async fn race_cancel_fires_on_pending_cancellation() {
+        // A future that never completes plus a cancel flag that is already set must
+        // return Cancelled promptly (before the deadline) — this is the silent-stall
+        // case where a Stop must interrupt even though no bytes are arriving.
+        let always_cancel = || true;
+        let fut = std::future::pending::<()>();
+        let started = std::time::Instant::now();
+        match race_cancel(fut, Duration::from_secs(30), &always_cancel).await {
+            CancelRace::Cancelled => {}
+            _ => panic!("a set cancel flag must yield Cancelled"),
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "cancellation must not wait out the deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn race_cancel_times_out_on_idle() {
+        let never_cancel = || false;
+        let fut = std::future::pending::<()>();
+        match race_cancel(fut, Duration::from_millis(50), &never_cancel).await {
+            CancelRace::TimedOut => {}
+            _ => panic!("an idle wait past the deadline must yield TimedOut"),
+        }
     }
 }

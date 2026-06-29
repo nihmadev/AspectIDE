@@ -623,6 +623,51 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    // -----------------------------------------------------------------------
+    // F3 regression: host import must match the exact zero-arg/zero-result ABI
+    // signature; a mismatched signature must be rejected at preflight, not at
+    // activation.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn activation_plan_blocks_host_import_with_mismatched_signature() {
+        let root = unique_temp_dir("lux-extension-import-signature");
+        write_extension(
+            &root,
+            "bad-signature",
+            r#"{
+                "id": "lux.bad_signature",
+                "name": "Bad Signature",
+                "version": "0.1.0",
+                "wasm_module": "extension.wasm",
+                "contributes": ["commands"]
+            }"#,
+            false,
+        );
+        // Imports the no-permission `log` host function but declares it with a
+        // `(i32) -> ()` signature instead of the linked `() -> ()`.
+        fs::write(
+            root.join("bad-signature").join("extension.wasm"),
+            lux_wasm_with_host_import_one_param("log"),
+        )
+        .expect("wasm module should be written");
+
+        let plan = extension_activation_plan(&root).expect("activation plan should be built");
+
+        assert!(
+            plan.candidates.is_empty(),
+            "mismatched host import signature should be blocked at preflight"
+        );
+        assert_eq!(plan.blocked.len(), 1);
+        assert!(
+            plan.blocked[0].reason.contains("unsupported signature"),
+            "block reason should mention the signature mismatch: {}",
+            plan.blocked[0].reason
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn activation_plan_blocks_wasm_modules_that_fail_preflight() {
         let root = unique_temp_dir("lux-extension-wasm-preflight");
@@ -1227,6 +1272,33 @@ mod tests {
 
     fn lux_wasm_with_host_import(name: &str) -> Vec<u8> {
         wasm_with_import(LUX_HOST_IMPORT_MODULE, name)
+    }
+
+    /// Builds a Lux host import whose function type takes one `i32` parameter,
+    /// i.e. it does NOT match the linked zero-arg/zero-result host ABI.  Used to
+    /// exercise the F3 signature check.
+    fn lux_wasm_with_host_import_one_param(name: &str) -> Vec<u8> {
+        let mut wasm = WASM_MAGIC_AND_VERSION.to_vec();
+        // Type section: type 0 = (i32) -> (), type 1 = () -> ().
+        let mut type_payload = Vec::new();
+        type_payload.push(0x02); // two types
+        type_payload.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]); // (i32) -> ()
+        type_payload.extend_from_slice(&[0x60, 0x00, 0x00]); // () -> ()
+        push_section(&mut wasm, 1, &type_payload);
+        // Import section: host import referencing the (i32) -> () type (index 0).
+        let mut import_payload = Vec::new();
+        import_payload.push(0x01); // one import
+        push_name(&mut import_payload, LUX_HOST_IMPORT_MODULE);
+        push_name(&mut import_payload, name);
+        import_payload.push(0x00); // import kind: function
+        import_payload.push(0x00); // type index 0
+        push_section(&mut wasm, 2, &import_payload);
+        // The single locally-defined function uses type 1 (() -> ()).
+        push_function_section(&mut wasm, 1);
+        // Export the entrypoint (function index 1: import 0 + local 0).
+        push_export_section(&mut wasm, LUX_EXTENSION_ENTRYPOINT, 1);
+        push_code_section(&mut wasm, &[&[0x0b]]);
+        wasm
     }
 
     fn wasm_with_import(module: &str, name: &str) -> Vec<u8> {

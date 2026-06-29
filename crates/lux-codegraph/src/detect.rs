@@ -215,11 +215,11 @@ pub fn import_cycles(graph: &CodeGraph) -> Vec<ImportCycle> {
     file_cycles_for_kinds(graph, &[EdgeKind::Imports])
 }
 
-/// Detect cycles in the file-level **call/reference** graph (mutual recursion
-/// across files, circular call chains, etc.). This is a separate analysis from
-/// [`import_cycles`] — call cycles are not the same thing as import cycles.
+/// Detect cycles in the file-level **call/reference** graph.
 ///
-/// Returns one [`ImportCycle`] (reusing the type for convenience) per
+/// Mutual recursion across files, circular call chains, etc. This is a separate
+/// analysis from [`import_cycles`] — call cycles are not the same thing as import
+/// cycles. Returns one [`ImportCycle`] (reusing the type for convenience) per
 /// strongly-connected component of size ≥ 2 in the file-level call/reference
 /// adjacency.
 #[must_use]

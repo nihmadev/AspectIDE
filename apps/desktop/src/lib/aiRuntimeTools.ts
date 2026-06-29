@@ -591,7 +591,7 @@ export const runtimeTools: RuntimeToolDefinition[] = [
         prompt: stringSchema("Detailed task for the subagent with all necessary context."),
         subagent_type: stringSchema("generalPurpose, codeReviewer, testRunner, or explorer."),
         model: stringSchema("Optional model slug override."),
-        resume: stringSchema("Optional subagent id to resume from a prior Task result."),
+        resume: stringSchema("Optional id of a still-running subagent to poll for its current state. Resuming an ended (completed/failed/cancelled) run is not supported and returns an error; spawn a new Task instead."),
       }, ["description", "prompt"]),
     },
   },

@@ -119,9 +119,63 @@ pub fn set_todos(session_id: &str, items: Vec<SessionTodo>) {
 // edits against stale assumptions. Keyed per session; paths are stored in their
 // resolved (canonical workspace) form so `./foo`, `foo`, and an absolute path
 // all match the same entry.
+//
+// Each entry also captures a cheap fingerprint of the file at read time (mtime +
+// size). `was_file_read` re-stats the backing file and reports the read as stale
+// when the fingerprint changed, so an edit is never authorized against a file that
+// was mutated *after* the model read it — by a checkpoint restore mid-turn, an
+// external editor, or a concurrent process. A path read but since-changed must be
+// re-read, exactly like one never read at all.
 
-fn read_files() -> &'static Mutex<HashMap<String, std::collections::HashSet<String>>> {
-    static READ_FILES: OnceLock<Mutex<HashMap<String, std::collections::HashSet<String>>>> =
+/// Cheap fingerprint of a file's on-disk state at read time. Compared on edit to
+/// detect a backing file that changed since the model last saw it. `None` for a
+/// field means the platform/filesystem didn't report it; a missing signal never
+/// counts as a match, so the guard fails safe (treats the read as stale).
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ReadStamp {
+    /// Modified time as (seconds, nanos) since the epoch, when available.
+    mtime: Option<(i64, u32)>,
+    /// File length in bytes, when available.
+    len: Option<u64>,
+}
+
+impl ReadStamp {
+    /// Stat `path` into a fingerprint. Returns `None` when the file can't be
+    /// stat'd (deleted/inaccessible) so the caller can treat it as not-read.
+    fn capture(path: &std::path::Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        let mtime = meta.modified().ok().map(|time| {
+            match time.duration_since(std::time::UNIX_EPOCH) {
+                Ok(delta) => (
+                    i64::try_from(delta.as_secs()).unwrap_or(i64::MAX),
+                    delta.subsec_nanos(),
+                ),
+                // Pre-epoch mtime: encode as a negative second so it still compares.
+                Err(err) => (
+                    -i64::try_from(err.duration().as_secs()).unwrap_or(i64::MAX),
+                    err.duration().subsec_nanos(),
+                ),
+            }
+        });
+        Some(Self {
+            mtime,
+            len: Some(meta.len()),
+        })
+    }
+
+    /// True only when both fingerprints carry the same observed mtime. A missing
+    /// mtime on either side is treated as "changed" (fail safe → force a re-read)
+    /// rather than silently authorizing the edit.
+    fn matches(self, current: Self) -> bool {
+        match (self.mtime, current.mtime) {
+            (Some(a), Some(b)) => a == b && self.len == current.len,
+            _ => false,
+        }
+    }
+}
+
+fn read_files() -> &'static Mutex<HashMap<String, HashMap<String, ReadStamp>>> {
+    static READ_FILES: OnceLock<Mutex<HashMap<String, HashMap<String, ReadStamp>>>> =
         OnceLock::new();
     READ_FILES.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -133,25 +187,35 @@ fn read_key(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-/// Marks a file as read within a session (called after a successful Read/InspectFile).
+/// Marks a file as read within a session (called after a successful Read/InspectFile),
+/// fingerprinting its current on-disk state so a later edit can detect intervening
+/// changes. A file that can't be stat'd is recorded with an empty fingerprint, which
+/// never matches on the edit check — so the model is asked to re-read it.
 pub fn mark_file_read(session_id: &str, path: &std::path::Path) {
+    let stamp = ReadStamp::capture(path).unwrap_or(ReadStamp {
+        mtime: None,
+        len: None,
+    });
     if let Ok(mut map) = read_files().lock() {
         map.entry(session_id.trim().to_string())
             .or_default()
-            .insert(read_key(path));
+            .insert(read_key(path), stamp);
     }
 }
 
-/// True when the file has been read in this session.
+/// True when the file was read in this session **and** its backing file is unchanged
+/// since that read (same mtime + size). A since-modified file reports `false` so the
+/// edit guard forces a fresh read against current contents.
 pub fn was_file_read(session_id: &str, path: &std::path::Path) -> bool {
-    read_files()
-        .lock()
-        .ok()
-        .and_then(|map| {
-            map.get(session_id.trim())
-                .map(|set| set.contains(&read_key(path)))
-        })
-        .unwrap_or(false)
+    let recorded = read_files().lock().ok().and_then(|map| {
+        map.get(session_id.trim())
+            .and_then(|set| set.get(&read_key(path)).copied())
+    });
+    let Some(recorded) = recorded else {
+        return false;
+    };
+    // Re-stat now; a deleted/inaccessible file (None) never matches.
+    ReadStamp::capture(path).is_some_and(|current| recorded.matches(current))
 }
 
 /// Clears a session's read set.
@@ -241,42 +305,107 @@ mod tests {
         assert!(get_todos(&session).is_empty());
     }
 
+    /// Create a uniquely-named temp directory for a read-tracking test and return
+    /// it so the caller can drop a real file into it (the guard now stats files).
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lux-read-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn read_tracking_roundtrip_and_isolation() {
         let session = format!("test-read-{}", uuid::Uuid::new_v4());
         let other = format!("test-read-other-{}", uuid::Uuid::new_v4());
-        let path = std::path::Path::new("/work/src/main.rs");
+        let dir = temp_dir();
+        let path = dir.join("main.rs");
+        std::fs::write(&path, "fn main() {}").unwrap();
 
         assert!(
-            !was_file_read(&session, path),
+            !was_file_read(&session, &path),
             "unread file must report false"
         );
-        mark_file_read(&session, path);
+        mark_file_read(&session, &path);
         assert!(
-            was_file_read(&session, path),
+            was_file_read(&session, &path),
             "marked file must report true"
         );
         // Read state is per-session.
         assert!(
-            !was_file_read(&other, path),
+            !was_file_read(&other, &path),
             "read state must not leak across sessions"
         );
 
         clear_read_files(&session);
         assert!(
-            !was_file_read(&session, path),
+            !was_file_read(&session, &path),
             "cleared session forgets reads"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_key_normalizes_path_separators() {
+        // The read key is separator-agnostic so `./foo`, `foo`, and an absolute path
+        // (and back-slash vs forward-slash spellings) collapse to one entry. Tested at
+        // the key level because `was_file_read` also stats the file, and a back-slash
+        // path is not a real file on non-Windows hosts.
+        assert_eq!(
+            read_key(std::path::Path::new("C:\\work\\a.rs")),
+            "C:/work/a.rs"
+        );
+        assert_eq!(
+            read_key(std::path::Path::new("C:/work/a.rs")),
+            "C:/work/a.rs"
         );
     }
 
     #[test]
-    fn read_tracking_normalizes_path_separators() {
-        let session = format!("test-read-norm-{}", uuid::Uuid::new_v4());
-        mark_file_read(&session, std::path::Path::new("C:\\work\\a.rs"));
-        // The same file addressed with forward slashes resolves to the same key.
-        assert!(was_file_read(
-            &session,
-            std::path::Path::new("C:/work/a.rs")
-        ));
+    fn read_is_stale_when_backing_file_changes_after_read() {
+        let session = format!("test-read-stale-{}", uuid::Uuid::new_v4());
+        let dir = temp_dir();
+        let path = dir.join("edit-me.rs");
+        std::fs::write(&path, "v1").unwrap();
+        mark_file_read(&session, &path);
+        assert!(
+            was_file_read(&session, &path),
+            "freshly read file must authorize an edit"
+        );
+
+        // Simulate a checkpoint restore / external edit landing AFTER the read.
+        // The new content is a different length, so the fingerprint differs even on
+        // a filesystem whose mtime resolution is too coarse to advance here.
+        std::fs::write(&path, "v2 — changed on disk after the read").unwrap();
+        assert!(
+            !was_file_read(&session, &path),
+            "a file modified since the read must require a fresh read"
+        );
+
+        // Re-reading the new contents re-authorizes the edit.
+        mark_file_read(&session, &path);
+        assert!(
+            was_file_read(&session, &path),
+            "re-reading the changed file restores authorization"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleted_file_is_not_considered_read() {
+        let session = format!("test-read-del-{}", uuid::Uuid::new_v4());
+        let dir = temp_dir();
+        let path = dir.join("gone.rs");
+        std::fs::write(&path, "temp").unwrap();
+        mark_file_read(&session, &path);
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            !was_file_read(&session, &path),
+            "a deleted file can never satisfy read-before-edit"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -85,7 +85,7 @@ fn rtf_office_preview(path: &Path) -> FilePreview {
     // to give the RTF stripper enough context to produce a full output window;
     // the extra 64 KiB covers any surrounding control words near the cutoff.
     let read_cap = (OFFICE_TEXT_LIMIT as u64).saturating_add(64 * 1024);
-    let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let file_size = fs::metadata(path).map_or(0, |m| m.len());
     let truncated_by_size = file_size > read_cap;
 
     let raw: String = fs::File::open(path)

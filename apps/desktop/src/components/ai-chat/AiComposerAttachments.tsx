@@ -1,5 +1,5 @@
 import { AtSign, Braces, FileCode2, FileText, ImagePlus, X, ZoomIn } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { ComposerAttachment } from "../../lib/aiChatComposerAttachments";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 
@@ -51,7 +51,10 @@ export function mapComposerAttachments(attachments: ComposerAttachment[]): AiCom
   });
 }
 
-export function AiComposerAttachments({ attachments, draggingFiles, removeAttachment, t }: AiComposerAttachmentsProps) {
+// Memoized like its sibling composer sections: the composer parent re-renders on
+// every streamed token, so identity-stable props let the attachment tray bail out
+// instead of reconciling its full chip/image list when attachments are unchanged.
+export const AiComposerAttachments = memo(function AiComposerAttachments({ attachments, draggingFiles, removeAttachment, t }: AiComposerAttachmentsProps) {
   const [previewId, setPreviewId] = useState<string | null>(null);
   const imageAttachments = useMemo(
     () => attachments.filter((attachment) => attachment.kind === "file" && attachment.isImage && attachment.previewUrl),
@@ -192,7 +195,7 @@ export function AiComposerAttachments({ attachments, draggingFiles, removeAttach
       )}
     </>
   );
-}
+});
 
 function formatBytes(bytes: number, t: TranslateFn) {
   if (bytes < 1024) return t("common.fileSize.bytes", { bytes });

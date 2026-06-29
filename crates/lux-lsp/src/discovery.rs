@@ -275,6 +275,10 @@ fn is_ignored_dir(name: &str) -> bool {
 /// and caps the total number of entries visited so a giant or pathological tree
 /// can never stall language-service startup. This is the dominant fix for the
 /// "language service hangs on load" symptom on large repos.
+///
+/// Convenience wrapper that drops the `truncated` flag; only the tests need the
+/// flag-free form (production discovery uses [`detect_extensions_bounded`]).
+#[cfg(test)]
 fn detect_extensions(root: &Path) -> BTreeSet<String> {
     detect_extensions_bounded(root).0
 }

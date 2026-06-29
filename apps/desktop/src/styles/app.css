@@ -1204,6 +1204,19 @@ kbd {
   padding: 1px 0 10px;
 }
 
+/* Virtualized explorer tree: the spacer takes the full scroll height while each
+   windowed row is absolutely positioned by the virtualizer's translateY. */
+.file-tree-virtual {
+  position: relative;
+  width: 100%;
+}
+.file-tree-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+
 .file-row-shell {
   position: relative;
   display: grid;
@@ -1925,6 +1938,10 @@ kbd {
 }
 
 .git-sections { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
+/* Virtualized source-control list: spacer holds full scroll height, each row is
+   absolutely positioned by the virtualizer (large-repo path only). */
+.git-virtual-list { position: relative; width: 100%; }
+.git-virtual-row { position: absolute; top: 0; left: 0; width: 100%; }
 .git-section { display: flex; flex-direction: column; }
 .git-section-head {
   position: sticky;

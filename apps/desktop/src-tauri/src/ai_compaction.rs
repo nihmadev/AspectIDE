@@ -138,20 +138,23 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
         return Err("Compaction summary was empty.".to_string());
     }
 
-    // Validate: if the model output needs truncation, verify the truncated
-    // version still has all required sections non-empty. A blind clip can
-    // silently drop "Errors / blockers", "Critical preserved facts", or
-    // "Open items / next step" — exactly the sections compaction exists to
-    // preserve. If any are missing after truncation, reject so the caller
-    // retries with a more concise generation request.
+    // Validate the stored summary always has every required section present and
+    // non-empty — not only when truncation clips it. A blind clip can silently
+    // drop "Errors / blockers", "Critical preserved facts", or "Open items /
+    // next step" (the sections compaction exists to preserve), but a short yet
+    // malformed generation that fits under the cap is equally unusable as the
+    // agent's only memory of older turns. Either way we reject so the caller
+    // falls back to its deterministic summary instead of storing partial state.
     let result = truncate(&content, MAX_SUMMARY_CHARS);
-    if result != content {
-        if let Err(missing) = validate_summary_sections(&result) {
-            return Err(format!(
-                "Compaction summary exceeds {} chars and {missing}. Regenerate with more concise output.",
-                MAX_SUMMARY_CHARS
-            ));
-        }
+    let clipped = result != content;
+    if let Err(missing) = validate_summary_sections(&result) {
+        return Err(if clipped {
+            format!(
+                "Compaction summary exceeds {MAX_SUMMARY_CHARS} chars and {missing}. Regenerate with more concise output."
+            )
+        } else {
+            format!("Compaction summary {missing}. Regenerate covering all required sections.")
+        });
     }
 
     Ok(result)

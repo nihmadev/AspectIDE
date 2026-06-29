@@ -24,6 +24,14 @@ const MAX_AUTHOR_CHARS: usize = 120;
 /// Maximum byte length for a caller-supplied session ID string. Long IDs waste
 /// memory in the hash map key and can indicate abuse; truncate silently.
 const MAX_SESSION_ID_BYTES: usize = 256;
+/// Minimum byte length for a session ID that is allowed to *establish* a board.
+/// The blackboard's authorization boundary is the unguessability of the session
+/// id (chat session ids are `crypto.randomUUID()` v4 — 122 bits of entropy, 36
+/// chars). Enforcing a floor here means the backend itself rejects trivially
+/// guessable / enumerable namespaces (e.g. `"default"`, `"1"`, `"chat"`) instead
+/// of trusting the caller to supply an opaque token. Real ids (UUIDs ≥ 36 chars,
+/// `test-<uuid>` ≥ 41 chars) comfortably clear this; short squattable ids do not.
+const MIN_SESSION_ID_BYTES: usize = 16;
 /// Per-session resident byte budget (approximate, based on content + topic +
 /// author UTF-8 byte lengths). Prevents runaway agent loops from consuming
 /// hundreds of MiB with 8 k-char entries × 500 entries × many sessions.
@@ -103,6 +111,16 @@ fn sanitize_session_id(session_id: &str) -> String {
     trimmed[..end].to_string()
 }
 
+/// Authorization guard for the blackboard: a session id may only address a board
+/// if it is long enough to be an opaque, unguessable token (see
+/// [`MIN_SESSION_ID_BYTES`]). The blackboard has no other server-side trust
+/// boundary, so this rejects short/enumerable namespaces that a hostile or buggy
+/// caller could squat to read or clear another session's agent findings.
+/// `sanitized` must already have passed through [`sanitize_session_id`].
+fn is_authorized_session_id(sanitized: &str) -> bool {
+    sanitized.len() >= MIN_SESSION_ID_BYTES
+}
+
 /// Post a message to a session's blackboard. Returns the stored entry.
 #[tauri::command]
 pub fn ai_blackboard_post(
@@ -113,8 +131,11 @@ pub fn ai_blackboard_post(
 ) -> Result<BlackboardEntry, String> {
     // Clamp session_id to prevent hash-map key bloat from arbitrarily long strings.
     let session_id = sanitize_session_id(&session_id);
-    if session_id.is_empty() {
-        return Err("blackboard post requires a session id".to_string());
+    if !is_authorized_session_id(&session_id) {
+        // Reject short/guessable namespaces so the board's only trust boundary —
+        // the unguessable session token — cannot be squatted (finding: A2A
+        // blackboard authorization). Empty ids fail this too.
+        return Err("blackboard post requires an opaque session id".to_string());
     }
     let content = clamp_chars(&content, MAX_CONTENT_CHARS);
     if content.is_empty() {
@@ -182,7 +203,8 @@ pub fn ai_blackboard_read(
     limit: Option<usize>,
 ) -> Result<Vec<BlackboardEntry>, String> {
     let session_id = sanitize_session_id(&session_id);
-    if session_id.is_empty() {
+    if !is_authorized_session_id(&session_id) {
+        // A guessable/short id can never read another session's findings.
         return Ok(Vec::new());
     }
     let guard = board()
@@ -215,7 +237,8 @@ pub fn ai_blackboard_read(
 #[tauri::command]
 pub fn ai_blackboard_clear(session_id: String) -> Result<(), String> {
     let session_id = sanitize_session_id(&session_id);
-    if session_id.is_empty() {
+    if !is_authorized_session_id(&session_id) {
+        // A guessable/short id can never clear another session's findings.
         return Ok(());
     }
     let mut guard = board()
@@ -288,6 +311,44 @@ mod tests {
     fn rejects_empty_content() {
         let session = format!("test-{}", uuid::Uuid::new_v4());
         assert!(ai_blackboard_post(session, "a".into(), "t".into(), "   ".into()).is_err());
+    }
+
+    #[test]
+    fn rejects_guessable_short_session_id() {
+        // Short/enumerable namespaces must not be able to establish a board, and
+        // must read as empty / clear as a no-op (authorization boundary).
+        for guessable in ["default", "chat", "1", "session", ""] {
+            assert!(
+                ai_blackboard_post(
+                    guessable.into(),
+                    "a".into(),
+                    "t".into(),
+                    "secret finding".into(),
+                )
+                .is_err(),
+                "post must reject guessable id {guessable:?}"
+            );
+            assert!(ai_blackboard_read(guessable.into(), None, None)
+                .unwrap()
+                .is_empty());
+            assert!(ai_blackboard_clear(guessable.into()).is_ok());
+        }
+    }
+
+    #[test]
+    fn accepts_uuid_session_id() {
+        // A real chat session id (crypto.randomUUID, 36 chars) clears the floor.
+        let session = uuid::Uuid::new_v4().to_string();
+        assert!(session.len() >= MIN_SESSION_ID_BYTES);
+        let entry = ai_blackboard_post(
+            session.clone(),
+            "explorer".into(),
+            "auth".into(),
+            "found it".into(),
+        )
+        .unwrap();
+        assert_eq!(entry.content, "found it");
+        assert_eq!(ai_blackboard_read(session, None, None).unwrap().len(), 1);
     }
 
     #[test]

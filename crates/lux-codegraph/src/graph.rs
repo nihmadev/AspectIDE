@@ -188,6 +188,14 @@ pub struct CodeGraph {
     // ── Built by `finalize` ──
     by_name: FxHashMap<Symbol, Vec<NodeId>>,
     by_file: FxHashMap<FileId, Vec<NodeId>>,
+    /// Per-node lowercase name, parallel to `nodes`. Computed once at finalize so
+    /// case-insensitive [`crate::query::resolve`] does not allocate a fresh
+    /// lowercase `String` for every node on every lookup (the hot AI-navigation
+    /// path). Index by [`NodeId::index`].
+    lower_names: Vec<Box<str>>,
+    /// Exact case-insensitive name buckets: lowercase name → all nodes whose name
+    /// lowercases to it. Lets the dominant exact-match query skip the full scan.
+    by_lower_name: FxHashMap<Box<str>, Vec<NodeId>>,
     out_offsets: Vec<u32>,
     out_adjacent: Vec<Adjacent>,
     in_offsets: Vec<u32>,
@@ -242,6 +250,7 @@ impl CodeGraph {
         }
         self.dedup_edges();
         self.build_name_and_file_indexes();
+        self.build_lowercase_name_index();
         let node_count = self.nodes.len();
         (self.out_offsets, self.out_adjacent) =
             build_csr(node_count, &self.edges, |edge| (edge.from, edge.to));
@@ -269,6 +278,30 @@ impl CodeGraph {
             let id = NodeId(u32::try_from(index).expect("node index exceeded u32"));
             self.by_name.entry(node.name).or_default().push(id);
             self.by_file.entry(node.file).or_default().push(id);
+        }
+    }
+
+    /// Cache each node's lowercase name and an exact case-insensitive bucket map.
+    /// Done once here so case-insensitive name resolution is allocation-free in the
+    /// query path. Bucket node lists keep node-id order (the `nodes` iteration
+    /// order), so callers get stable, deterministic results.
+    fn build_lowercase_name_index(&mut self) {
+        self.lower_names.clear();
+        self.lower_names.reserve(self.nodes.len());
+        self.by_lower_name.clear();
+        for (index, node) in self.nodes.iter().enumerate() {
+            let id = NodeId(u32::try_from(index).expect("node index exceeded u32"));
+            let lower: Box<str> = self
+                .interner
+                .resolve(node.name)
+                .unwrap_or("")
+                .to_ascii_lowercase()
+                .into_boxed_str();
+            self.by_lower_name
+                .entry(lower.clone())
+                .or_default()
+                .push(id);
+            self.lower_names.push(lower);
         }
     }
 
@@ -328,6 +361,22 @@ impl CodeGraph {
             .lookup(name)
             .and_then(|symbol| self.by_name.get(&symbol))
             .map_or(&[], Vec::as_slice)
+    }
+
+    /// All nodes whose name lowercases to `lower` (an exact case-insensitive
+    /// match). `lower` must already be lowercase. Empty slice when none match.
+    /// O(1) — backed by the bucket map built in [`CodeGraph::finalize`].
+    #[must_use]
+    pub fn nodes_by_lowercase_name(&self, lower: &str) -> &[NodeId] {
+        self.by_lower_name.get(lower).map_or(&[], Vec::as_slice)
+    }
+
+    /// The cached lowercase name of a node, or `None` for an out-of-range id.
+    /// Populated by [`CodeGraph::finalize`]; avoids re-lowercasing in hot query
+    /// loops (prefix/substring matching).
+    #[must_use]
+    pub fn lowercase_name_of(&self, id: NodeId) -> Option<&str> {
+        self.lower_names.get(id.index()).map(AsRef::as_ref)
     }
 
     /// All nodes defined in `file`. Empty slice when the file has none.

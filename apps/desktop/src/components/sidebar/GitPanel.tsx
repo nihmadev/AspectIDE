@@ -1,5 +1,6 @@
 import { Check, ChevronDown, GitBranch, Loader2, Minus, Plus, Trash2, Undo2, ArrowDown, ArrowUp, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { displayPath, joinPath } from "../../lib/fileTree";
 import { categorizeGitFile, gitDecoBadge, type GitDecoStatus } from "../../lib/gitDecorations";
 import { useTranslation } from "../../lib/i18n/useTranslation";
@@ -10,6 +11,24 @@ import { GitDiffModal } from "./GitDiffModal";
 import { readErrorMessage, TreeMessage } from "./SidebarShared";
 
 type DiffCount = { additions: number; deletions: number };
+type SectionAction = { icon: React.ReactNode; label: string; danger?: boolean; onClick: () => void };
+
+// Fixed height of a single git file row + a section header row, in px (matches
+// .git-file-open height and the .git-section-head sticky band in app.css).
+const GIT_ROW_HEIGHT = 24;
+const GIT_HEADER_HEIGHT = 28;
+// Total changed/staged files above which the file lists render through a single
+// windowed list instead of mounting every row. Below this the eager render with
+// sticky section headers is kept verbatim — the common, fast case.
+const GIT_VIRTUALIZE_THRESHOLD = 200;
+const GIT_OVERSCAN = 12;
+
+// One flattened, ready-to-render row of the source-control change list. Section
+// headers and their stage/unstage/discard actions are carried inline so a single
+// virtualizer can window headers and file rows together.
+type GitRow =
+  | { kind: "header"; key: string; title: string; count: number; action: SectionAction; secondaryAction?: SectionAction }
+  | { kind: "file"; key: string; file: GitFileStatus; staged: boolean };
 
 export function GitPanel() {
   const { t } = useTranslation();
@@ -140,6 +159,45 @@ export function GitPanel() {
     setDiffTarget({ path: file.path, name: baseName(file.path) });
   }, []);
 
+  // Flatten staged + changed sections into a single windowable row array so very
+  // large repos (thousands of generated/changed files) render a bounded window
+  // instead of every DOM row. Section headers carry their bulk actions inline.
+  const gitRows = useMemo<GitRow[]>(() => {
+    const rows: GitRow[] = [];
+    if (staged.length > 0) {
+      rows.push({
+        kind: "header",
+        key: "header-staged",
+        title: t("sidebar.git.stagedChanges"),
+        count: staged.length,
+        action: { icon: <Minus size={13} />, label: t("sidebar.git.unstageAll"), onClick: () => unstage([]) },
+      });
+      for (const file of staged) rows.push({ kind: "file", key: `staged-${file.path}`, file, staged: true });
+    }
+    if (changes.length > 0) {
+      rows.push({
+        kind: "header",
+        key: "header-changes",
+        title: t("sidebar.git.changes"),
+        count: changes.length,
+        action: { icon: <Plus size={13} />, label: t("sidebar.git.stageAll"), onClick: () => stage([]) },
+        secondaryAction: { icon: <Undo2 size={13} />, label: t("sidebar.git.discardAll"), danger: true, onClick: () => discard(changes.map((file) => file.path), t("sidebar.git.allChanges")) },
+      });
+      for (const file of changes) rows.push({ kind: "file", key: `changes-${file.path}`, file, staged: false });
+    }
+    return rows;
+  }, [changes, discard, stage, staged, t, unstage]);
+  const useVirtualGit = files.length >= GIT_VIRTUALIZE_THRESHOLD;
+
+  const gitScrollRef = useRef<HTMLDivElement | null>(null);
+  const gitVirtualizer = useVirtualizer({
+    count: gitRows.length,
+    getScrollElement: () => gitScrollRef.current,
+    getItemKey: (index) => gitRows[index]?.key ?? index,
+    estimateSize: (index) => (gitRows[index]?.kind === "header" ? GIT_HEADER_HEIGHT : GIT_ROW_HEIGHT),
+    overscan: GIT_OVERSCAN,
+  });
+
   if (!workspace) {
     return (
       <div className="panel-content git-panel-content">
@@ -221,52 +279,85 @@ export function GitPanel() {
 
       {error && <TreeMessage depth={0} tone="error" text={error} />}
 
-      <div className="git-sections">
-        {staged.length > 0 && (
-          <GitSection
-            title={t("sidebar.git.stagedChanges")}
-            count={staged.length}
-            action={{ icon: <Minus size={13} />, label: t("sidebar.git.unstageAll"), onClick: () => unstage([]) }}
-          >
-            {staged.map((file) => (
-              <GitFileRow
-                key={`staged-${file.path}`}
-                file={file}
-                staged
-                count={diffCounts.get(normalizeKey(file.path))}
-                onOpen={() => openDiff(file)}
-                onPrimary={() => unstage([file.path])}
-                onDiscard={() => discard([file.path], baseName(file.path))}
-                t={t}
-              />
-            ))}
-          </GitSection>
-        )}
-        {changes.length > 0 && (
-          <GitSection
-            title={t("sidebar.git.changes")}
-            count={changes.length}
-            action={{ icon: <Plus size={13} />, label: t("sidebar.git.stageAll"), onClick: () => stage([]) }}
-            secondaryAction={{ icon: <Undo2 size={13} />, label: t("sidebar.git.discardAll"), danger: true, onClick: () => discard(changes.map((file) => file.path), t("sidebar.git.allChanges")) }}
-          >
-            {changes.map((file) => (
-              <GitFileRow
-                key={`changes-${file.path}`}
-                file={file}
-                count={diffCounts.get(normalizeKey(file.path))}
-                onOpen={() => openDiff(file)}
-                onPrimary={() => stage([file.path])}
-                onDiscard={() => discard([file.path], baseName(file.path))}
-                t={t}
-              />
-            ))}
-          </GitSection>
-        )}
-        {files.length === 0 && (
+      <div className="git-sections" ref={gitScrollRef}>
+        {files.length === 0 ? (
           <div className="git-clean">
             <Check size={16} />
             <span>{t("sidebar.git.clean")}</span>
           </div>
+        ) : useVirtualGit ? (
+          <div className="git-virtual-list" style={{ height: gitVirtualizer.getTotalSize() }}>
+            {gitVirtualizer.getVirtualItems().map((item) => {
+              const row = gitRows[item.index];
+              if (!row) return null;
+              return (
+                <div
+                  key={item.key}
+                  className="git-virtual-row"
+                  data-index={item.index}
+                  ref={gitVirtualizer.measureElement}
+                  style={{ transform: `translateY(${item.start}px)` }}
+                >
+                  {row.kind === "header" ? (
+                    <GitSectionHead title={row.title} count={row.count} action={row.action} secondaryAction={row.secondaryAction} />
+                  ) : (
+                    <GitFileRow
+                      file={row.file}
+                      staged={row.staged}
+                      count={diffCounts.get(normalizeKey(row.file.path))}
+                      onOpen={() => openDiff(row.file)}
+                      onPrimary={() => (row.staged ? unstage([row.file.path]) : stage([row.file.path]))}
+                      onDiscard={() => discard([row.file.path], baseName(row.file.path))}
+                      t={t}
+                    />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <>
+            {staged.length > 0 && (
+              <GitSection
+                title={t("sidebar.git.stagedChanges")}
+                count={staged.length}
+                action={{ icon: <Minus size={13} />, label: t("sidebar.git.unstageAll"), onClick: () => unstage([]) }}
+              >
+                {staged.map((file) => (
+                  <GitFileRow
+                    key={`staged-${file.path}`}
+                    file={file}
+                    staged
+                    count={diffCounts.get(normalizeKey(file.path))}
+                    onOpen={() => openDiff(file)}
+                    onPrimary={() => unstage([file.path])}
+                    onDiscard={() => discard([file.path], baseName(file.path))}
+                    t={t}
+                  />
+                ))}
+              </GitSection>
+            )}
+            {changes.length > 0 && (
+              <GitSection
+                title={t("sidebar.git.changes")}
+                count={changes.length}
+                action={{ icon: <Plus size={13} />, label: t("sidebar.git.stageAll"), onClick: () => stage([]) }}
+                secondaryAction={{ icon: <Undo2 size={13} />, label: t("sidebar.git.discardAll"), danger: true, onClick: () => discard(changes.map((file) => file.path), t("sidebar.git.allChanges")) }}
+              >
+                {changes.map((file) => (
+                  <GitFileRow
+                    key={`changes-${file.path}`}
+                    file={file}
+                    count={diffCounts.get(normalizeKey(file.path))}
+                    onOpen={() => openDiff(file)}
+                    onPrimary={() => stage([file.path])}
+                    onDiscard={() => discard([file.path], baseName(file.path))}
+                    t={t}
+                  />
+                ))}
+              </GitSection>
+            )}
+          </>
         )}
       </div>
 
@@ -281,8 +372,6 @@ export function GitPanel() {
   );
 }
 
-type SectionAction = { icon: React.ReactNode; label: string; danger?: boolean; onClick: () => void };
-
 function GitSection({ title, count, action, secondaryAction, children }: {
   title: string;
   count: number;
@@ -292,24 +381,37 @@ function GitSection({ title, count, action, secondaryAction, children }: {
 }) {
   return (
     <section className="git-section">
-      <header className="git-section-head">
-        <h3>{title}</h3>
-        <span className="git-section-count">{count}</span>
-        <div className="git-section-actions">
-          {secondaryAction && (
-            <button type="button" data-danger={secondaryAction.danger || undefined} title={secondaryAction.label} aria-label={secondaryAction.label} onClick={secondaryAction.onClick}>
-              {secondaryAction.icon}
-            </button>
-          )}
-          {action && (
-            <button type="button" title={action.label} aria-label={action.label} onClick={action.onClick}>
-              {action.icon}
-            </button>
-          )}
-        </div>
-      </header>
+      <GitSectionHead title={title} count={count} action={action} secondaryAction={secondaryAction} />
       {children}
     </section>
+  );
+}
+
+// Section header band (title, count badge, bulk stage/unstage/discard actions).
+// Shared by the eager sectioned render and the virtualized header rows.
+function GitSectionHead({ title, count, action, secondaryAction }: {
+  title: string;
+  count: number;
+  action?: SectionAction;
+  secondaryAction?: SectionAction;
+}) {
+  return (
+    <header className="git-section-head">
+      <h3>{title}</h3>
+      <span className="git-section-count">{count}</span>
+      <div className="git-section-actions">
+        {secondaryAction && (
+          <button type="button" data-danger={secondaryAction.danger || undefined} title={secondaryAction.label} aria-label={secondaryAction.label} onClick={secondaryAction.onClick}>
+            {secondaryAction.icon}
+          </button>
+        )}
+        {action && (
+          <button type="button" title={action.label} aria-label={action.label} onClick={action.onClick}>
+            {action.icon}
+          </button>
+        )}
+      </div>
+    </header>
   );
 }
 

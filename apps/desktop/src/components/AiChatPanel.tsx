@@ -132,9 +132,8 @@ import { getActiveTurnId } from "../lib/aiActiveTurns";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { useAiChatScroll } from "../lib/useAiChatScroll";
 import { useAiChatComposerAttachments } from "../lib/useAiChatComposerAttachments";
+import { useComposerSessionDraft } from "../lib/useComposerSessionDraft";
 import {
-  getComposerAttachments,
-  getComposerDraft,
   setComposerAttachments,
   setComposerDraft,
 } from "../lib/aiChatComposerSession";
@@ -488,22 +487,20 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     resizeComposerTextarea();
   }, [message]);
 
-  const hydratedComposerSessionRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (hydratedComposerSessionRef.current === activeAiChatSessionId) return;
-    hydratedComposerSessionRef.current = activeAiChatSessionId;
-    const nextMessage = getComposerDraft(activeAiChatSessionId);
-    const nextAttachments = getComposerAttachments(activeAiChatSessionId);
-    // Always hydrate from the target session's own persisted draft. Carrying the
-    // previous session's unsaved text into a new session would silently send the
-    // wrong prompt to the model. The outgoing draft is already persisted on every
-    // keystroke via setComposerDraft (called from updateMessage).
-    setMessage(nextMessage);
-    setAttachments(nextAttachments);
+  const resetComposerUi = useCallback(() => {
     setContextOpen(false);
     setDraggingFiles(false);
-    requestAnimationFrame(() => resizeComposerTextarea());
-  }, [activeAiChatSessionId, resizeComposerTextarea]);
+  }, []);
+  // Deterministically hydrate the composer from the active session's own persisted
+  // draft/attachments on every session switch (see useComposerSessionDraft) so a
+  // previous session's unsaved prompt never leaks into a different AI session.
+  useComposerSessionDraft({
+    sessionId: activeAiChatSessionId,
+    setMessage,
+    setAttachments,
+    resetComposerUi,
+    resizeComposerTextarea,
+  });
 
   useEffect(() => {
     setSendError(null);

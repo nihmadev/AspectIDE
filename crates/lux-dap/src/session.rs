@@ -1014,26 +1014,44 @@ impl DebugSessionManager {
     }
 
     async fn wait_for_configuration_done(&mut self, session_id: Uuid) -> AppResult<()> {
-        if self.configuration_done_sent(session_id)? {
-            return Ok(());
+        if !self.configuration_done_sent(session_id)? {
+            tokio::time::timeout(TIMEOUT_METADATA, async {
+                loop {
+                    let message = self.recv_message(session_id).await?;
+                    self.apply_message(session_id, message).await?;
+                    if self.configuration_done_sent(session_id)? {
+                        return Ok::<(), AppError>(());
+                    }
+                }
+            })
+            .await
+            .map_err(|_| {
+                AppError::Service(
+                    "debug adapter did not emit initialized before configurationDone within 8 \
+                     seconds"
+                        .into(),
+                )
+            })??;
         }
 
-        tokio::time::timeout(TIMEOUT_METADATA, async {
-            loop {
-                let message = self.recv_message(session_id).await?;
-                self.apply_message(session_id, message).await?;
-                if self.configuration_done_sent(session_id)? {
-                    return Ok(());
-                }
-            }
-        })
-        .await
-        .map_err(|_| {
-            AppError::Service(
-                "debug adapter did not emit initialized before configurationDone within 8 seconds"
-                    .into(),
-            )
-        })?
+        // If a `configurationDone` request was actually sent (the adapter
+        // advertised `supportsConfigurationDoneRequest`), wait for and validate
+        // its response so a rejected request fails startup instead of being
+        // parked as an unrelated pending response while the session is marked
+        // started. Adapters that do not support the request leave the seq unset
+        // and skip the wait.
+        if let Some(seq) = self.configuration_done_seq(session_id)? {
+            self.wait_for_response(session_id, seq, "configurationDone")
+                .await?;
+        }
+        Ok(())
+    }
+
+    fn configuration_done_seq(&self, session_id: Uuid) -> AppResult<Option<u64>> {
+        self.sessions
+            .get(&session_id)
+            .map(|session| session.configuration_done_seq)
+            .ok_or_else(|| AppError::NotFound(format!("debug session {session_id}")))
     }
 
     fn apply_response(&mut self, session_id: Uuid, response: DapResponse) -> AppResult<()> {
@@ -1992,6 +2010,87 @@ mod tests {
         assert_eq!(second, Some(json!({"result": "second"})));
     }
 
+    #[tokio::test]
+    async fn wait_for_configuration_done_fails_when_adapter_rejects_request() {
+        let (update_tx, _update_rx) = mpsc::unbounded_channel();
+        let mut manager = DebugSessionManager::new(update_tx);
+        let (message_tx, session_id) =
+            insert_configured_session(&mut manager, /* configuration_done_seq */ Some(7));
+
+        // The adapter rejects the configurationDone request keyed by seq 7.
+        message_tx
+            .send(DapMessage::Response(DapResponse {
+                request_seq: 7,
+                success: false,
+                command: "configurationDone".to_string(),
+                message: Some("not ready".to_string()),
+                body: None,
+            }))
+            .expect("configurationDone rejection should enqueue");
+
+        let result = manager.wait_for_configuration_done(session_id).await;
+        let error = result.expect_err("rejected configurationDone must fail startup");
+        assert!(
+            error.to_string().contains("not ready"),
+            "error should surface adapter rejection message: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_configuration_done_skips_wait_when_unsupported() {
+        let (update_tx, _update_rx) = mpsc::unbounded_channel();
+        let mut manager = DebugSessionManager::new(update_tx);
+        // No configuration_done_seq means the adapter did not advertise support,
+        // so no response is expected and the wait resolves immediately.
+        let (_message_tx, session_id) =
+            insert_configured_session(&mut manager, /* configuration_done_seq */ None);
+
+        manager
+            .wait_for_configuration_done(session_id)
+            .await
+            .expect("unsupported configurationDone should resolve without a response");
+    }
+
+    /// Insert a session that has already passed the `initialized` handshake
+    /// (`configuration_done_sent == true`) so `wait_for_configuration_done`
+    /// proceeds straight to the response-validation step.
+    fn insert_configured_session(
+        manager: &mut DebugSessionManager,
+        configuration_done_seq: Option<u64>,
+    ) -> (mpsc::UnboundedSender<DapMessage>, Uuid) {
+        let mut child = spawn_sleeping_child();
+        let stdin = child.stdin.take().expect("test child stdin should exist");
+        let (message_tx, messages) = mpsc::unbounded_channel();
+        let info = debug_session_info(DebugSessionStatus::Running);
+        let session_id = info.id;
+        manager.sessions.insert(
+            session_id,
+            DebugSession {
+                info,
+                writer: DapWriter::Stdio(stdin),
+                child,
+                read_task: tokio::spawn(async {}),
+                stderr_task: tokio::spawn(async {}),
+                messages,
+                next_seq: 8,
+                disconnect_sent: false,
+                configuration_done_sent: true,
+                capabilities: Capabilities {
+                    supports_configuration_done_request: configuration_done_seq.is_some(),
+                },
+                configuration_done_seq,
+                breakpoints_by_path: BTreeMap::new(),
+                resolved_breakpoints_by_path: BTreeMap::new(),
+                pending_breakpoint_requests: BTreeMap::new(),
+                pending_responses: BTreeMap::new(),
+                threads: BTreeMap::new(),
+                thread_states: BTreeMap::new(),
+                _pre_exec_was_paused: false,
+            },
+        );
+        (message_tx, session_id)
+    }
+
     fn debug_session_info(status: DebugSessionStatus) -> DebugSessionInfo {
         DebugSessionInfo {
             id: Uuid::new_v4(),
@@ -2016,6 +2115,34 @@ mod tests {
             .stderr(Stdio::null())
             .kill_on_drop(true);
         command.spawn().expect("test child should spawn")
+    }
+
+    /// Spawn a child that stays alive (killed on drop) so adapter-exit detection
+    /// in `wait_for_response_body` does not race with response delivery.
+    fn spawn_sleeping_child() -> Child {
+        let mut command = sleeping_command();
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        command.spawn().expect("test child should spawn")
+    }
+
+    #[cfg(windows)]
+    fn sleeping_command() -> Command {
+        let mut command = Command::new("cmd");
+        // `pause` waits for input that never arrives; the child is killed on drop.
+        command.args(["/C", "pause"]);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+
+    #[cfg(not(windows))]
+    fn sleeping_command() -> Command {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("sleep 30");
+        command
     }
 
     #[cfg(windows)]
