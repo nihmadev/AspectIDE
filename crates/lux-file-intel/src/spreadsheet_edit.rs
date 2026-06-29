@@ -25,6 +25,11 @@ const MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 /// signals a crafted decompression bomb whose header understates its size.
 const MAX_COMPRESSION_RATIO: u64 = 1000;
 
+/// Maximum on-disk size for non-zip (CFB/legacy) spreadsheet formats such as
+/// `.xls` and `.fods`. These have no zip-decompression amplification but
+/// calamine still materialises the full file, so a flat ceiling prevents OOM.
+const MAX_LEGACY_SPREADSHEET_BYTES: u64 = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpreadsheetEditDocument {
@@ -54,6 +59,16 @@ pub fn spreadsheet_write_from_text(path: &Path, text: &str) -> AppResult<PathBuf
             document.format
         )));
     }
+    // Refuse to save a truncated view: the unseen sheets/rows/columns would be
+    // silently destroyed. The caller must either re-load with larger limits or
+    // edit the file externally when it exceeds the edit caps.
+    if document.truncated {
+        return Err(AppError::Service(
+            "refusing to overwrite: workbook was truncated on load — \
+             unseen sheets, rows, or columns would be permanently lost"
+                .to_string(),
+        ));
+    }
     let save_path = resolve_spreadsheet_save_path(path);
     if save_path.as_path() != path && save_path.exists() {
         return Err(AppError::Service(format!(
@@ -75,11 +90,24 @@ fn resolve_spreadsheet_save_path(path: &Path) -> PathBuf {
 
 /// Reject zip-container spreadsheets whose declared uncompressed payload would
 /// exhaust memory once calamine materializes a sheet. Non-zip formats (.xls
-/// CFB, flat .fods) carry no decompression amplification and are left to the
-/// loader. Shared with the preview path in `lib.rs`, which faces the same OOM
-/// vector via `worksheet_range`.
+/// CFB, flat .fods) carry no decompression amplification, but calamine still
+/// materialises the full file, so a flat file-size ceiling prevents OOM there.
+/// Shared with the preview path in `lib.rs`, which faces the same OOM vector
+/// via `worksheet_range`.
 pub fn guard_decompression_bomb(path: &Path) -> AppResult<()> {
     if !matches!(extension(path).as_str(), "xlsx" | "xlsm" | "xlsb" | "ods") {
+        // Non-zip legacy formats: check flat file size before open_workbook_auto.
+        let size = std::fs::metadata(path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if size > MAX_LEGACY_SPREADSHEET_BYTES {
+            return Err(AppError::Service(format!(
+                "spreadsheet rejected: file size {:.1} MiB exceeds the {} MiB ceiling \
+                 for non-zip workbooks — open externally for large legacy files",
+                size as f64 / (1024.0 * 1024.0),
+                MAX_LEGACY_SPREADSHEET_BYTES / (1024 * 1024)
+            )));
+        }
         return Ok(());
     }
     let file = std::fs::File::open(path)?;
@@ -163,7 +191,12 @@ fn write_spreadsheet_document(path: &Path, document: &SpreadsheetEditDocument) -
             "unsupported spreadsheet save format: {ext}"
         )));
     }
+    write_xlsx_document_atomic(path, document)
+}
 
+/// Build an XLSX workbook and atomically rename it over `path` so a
+/// mid-write serialization failure can never corrupt the original file.
+fn write_xlsx_document_atomic(path: &Path, document: &SpreadsheetEditDocument) -> AppResult<()> {
     let mut book = new_file_empty_worksheet();
     for (index, sheet) in document.sheets.iter().enumerate() {
         let sheet_name = if sheet.name.trim().is_empty() {
@@ -190,7 +223,17 @@ fn write_spreadsheet_document(path: &Path, document: &SpreadsheetEditDocument) -
             .map_err(|error| AppError::Service(error.to_string()))?;
     }
 
-    writer::xlsx::write(&book, path).map_err(|error| AppError::Service(error.to_string()))
+    // Write to a sibling temp file first; rename atomically on success so a
+    // partial write (disk full, serializer error) never corrupts the original.
+    let temp = temp_sibling_path(path);
+    if let Err(error) = writer::xlsx::write(&book, &temp) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(AppError::Service(error.to_string()));
+    }
+    std::fs::rename(&temp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        AppError::Service(error.to_string())
+    })
 }
 
 fn write_ods_document(path: &Path, document: &SpreadsheetEditDocument) -> AppResult<()> {
@@ -221,7 +264,35 @@ fn write_ods_document(path: &Path, document: &SpreadsheetEditDocument) -> AppRes
     if document.sheets.is_empty() {
         workbook.push_sheet(Sheet::new("Sheet1"));
     }
-    write_ods(&mut workbook, path).map_err(|error| AppError::Service(error.to_string()))
+    // Write to a sibling temp file first; rename atomically on success so a
+    // partial write never corrupts the original ODS file.
+    let temp = temp_sibling_path(path);
+    if let Err(error) = write_ods(&mut workbook, &temp) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(AppError::Service(error.to_string()));
+    }
+    std::fs::rename(&temp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&temp);
+        AppError::Service(error.to_string())
+    })
+}
+
+/// A unique sibling path used as an atomic write staging area, matching the
+/// pattern in `delimited_edit` for CSV files.
+fn temp_sibling_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("spreadsheet");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    parent.join(format!(
+        ".{file_name}.lux-tmp-{}-{}",
+        std::process::id(),
+        nanos
+    ))
 }
 
 fn to_cell_address(row_index: usize, column_index: usize) -> String {

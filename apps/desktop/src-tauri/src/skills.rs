@@ -19,16 +19,24 @@ fn global_root(app: &AppHandle) -> Result<PathBuf, String> {
         .join("skills"))
 }
 
-/// Discovery roots in priority order: project first (so it shadows global).
+/// Discovery roots in priority order. Security: GLOBAL is listed first so a
+/// `read_skill`/`discover_skills` slug collision resolves to the user's own global
+/// skill — a repository-controlled `<workspace>/.lux/skills` skill can therefore no
+/// longer SILENTLY shadow a trusted global skill of the same slug and be fed to the
+/// agent as first-class instructions (a prompt-injection supply-chain vector when
+/// opening an untrusted repo). Project skills are still discoverable (and badged
+/// `Project` via their `SkillScope`) so the user can review/manage them, but they
+/// cannot override a global skill without the user renaming/removing the global one.
+/// Full per-workspace trust gating of automatic project-skill matching is tracked
+/// as a followup (needs persistent trust state).
 fn discovery_roots(
     app: &AppHandle,
     state: &State<'_, SharedState>,
 ) -> Result<Vec<(SkillScope, PathBuf)>, String> {
-    let mut roots = Vec::new();
+    let mut roots = vec![(SkillScope::Global, global_root(app)?)];
     if let Ok(root) = workspace_root(state) {
         roots.push((SkillScope::Project, root.join(".lux").join("skills")));
     }
-    roots.push((SkillScope::Global, global_root(app)?));
     Ok(roots)
 }
 

@@ -154,9 +154,11 @@ pub fn was_file_read(session_id: &str, path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Clears a session's read set (e.g. when a turn checkpoint is restored and prior
-/// reads no longer reflect on-disk state). Currently exposed for completeness.
-#[cfg(test)]
+/// Clears a session's read set.
+///
+/// Must be called at the start of every turn so reads from a previous turn
+/// do not authorize edits against files whose on-disk state may have changed.
+/// Also useful after a checkpoint restore where prior reads are stale.
 pub fn clear_read_files(session_id: &str) {
     if let Ok(mut map) = read_files().lock() {
         map.remove(session_id.trim());

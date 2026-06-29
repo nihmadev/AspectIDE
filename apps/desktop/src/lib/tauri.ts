@@ -1,5 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { decodeIpcResult, expectArray, type IpcDecoder } from "./tauriDecode";
+import { readStringField, safeListen } from "./tauriEvents";
+import {
+  createDesktopRuntimeError,
+  desktopRuntimeRequiredMessage,
+  isBrowserPreviewRuntime,
+  isTauriRuntime,
+} from "./tauriRuntime";
 import type {
   BufferId,
   DebugBreakpointsUpdate,
@@ -474,9 +481,14 @@ export type AiChatCompletionStreamResponse = {
   streamId: string;
 };
 
+/** Closed discriminant for the streaming chat-completion channel. Mirrors the
+ *  exact `kind` strings emitted by ai_chat_backend.rs (chunk/done/error/cancelled)
+ *  so handlers stay exhaustive instead of collapsing to `string`. */
+export type AiChatStreamEventKind = "chunk" | "done" | "error" | "cancelled";
+
 export type AiChatStreamEvent = {
   streamId: string;
-  kind: "chunk" | "done" | "error" | "cancelled" | string;
+  kind: AiChatStreamEventKind;
   data?: unknown;
   error?: string | null;
 };
@@ -694,31 +706,28 @@ export type AiSymbolContextResponse = {
   notes: string[];
 };
 
-export const isTauriRuntime = () => Boolean((window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+// Runtime guards now live in tauriRuntime.ts (dependency-free, shared with the
+// event layer). Re-exported here so every existing `from "./tauri"` import is
+// unaffected by the split.
+export { createDesktopRuntimeError, desktopRuntimeRequiredMessage, isBrowserPreviewRuntime, isTauriRuntime };
 
-export const isBrowserPreviewRuntime = () => !isTauriRuntime() && import.meta.env.VITE_LUX_BROWSER_PREVIEW === "1";
-
-export function desktopRuntimeRequiredMessage(feature: string) {
-  return `${feature} requires the Lux desktop runtime. Browser fallbacks are available only in explicit preview mode.`;
-}
-
-export function createDesktopRuntimeError(feature: string) {
-  return new Error(desktopRuntimeRequiredMessage(feature));
-}
-
-async function invokeRequired<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+async function invokeRequired<T>(command: string, args?: Record<string, unknown>, decode?: IpcDecoder<T>): Promise<T> {
   if (!isTauriRuntime()) {
     throw createDesktopRuntimeError(`Command ${command}`);
   }
-  return invoke<T>(command, args);
+  const raw = await invoke<T>(command, args);
+  // `T` is erased at runtime; when a decoder is supplied, validate/normalize the
+  // payload at the boundary so backend drift can't corrupt trusted frontend state.
+  return decode ? decodeIpcResult(command, raw, decode) : raw;
 }
 
-async function invokeOptional<T>(command: string, args: Record<string, unknown> | undefined, fallback: () => T): Promise<T> {
+async function invokeOptional<T>(command: string, args: Record<string, unknown> | undefined, fallback: () => T, decode?: IpcDecoder<T>): Promise<T> {
   if (!isTauriRuntime()) {
     if (isBrowserPreviewRuntime()) return fallback();
     throw createDesktopRuntimeError(`Command ${command}`);
   }
-  return invoke<T>(command, args);
+  const raw = await invoke<T>(command, args);
+  return decode ? decodeIpcResult(command, raw, decode) : raw;
 }
 
 const browserSettings = new Map<string, SettingValue>();
@@ -764,10 +773,13 @@ export const luxCommands = {
   // must never block JS-side session teardown.
   aiSessionDispose: (sessionId: string) => invokeOptional<void>("ai_session_dispose", { sessionId }, () => undefined),
   workspacePickFolder: () => invokeOptional<WorkspaceInfo | null>("workspace_pick_folder", undefined, () => null),
-  fsReadDir: (path: string) => invokeRequired<FsEntry[]>("fs_read_dir", { path }),
-  fsReadTree: (path: string) => invokeRequired<FsEntry[]>("fs_read_tree", { path }),
+  // The file-tree reads feed trusted explorer/AI-index state, so they validate the
+  // payload shape at the IPC boundary (expectArray) instead of trusting the erased
+  // generic. A non-array here is a real backend contract break, not a soft-fail.
+  fsReadDir: (path: string) => invokeRequired<FsEntry[]>("fs_read_dir", { path }, expectArray<FsEntry>),
+  fsReadTree: (path: string) => invokeRequired<FsEntry[]>("fs_read_tree", { path }, expectArray<FsEntry>),
   fsReadText: (path: string, maxBytes?: number) => invokeRequired<FsReadTextResponse>("fs_read_text", { path, maxBytes }),
-  fsListFiles: (maxResults = 2_500) => invokeRequired<FsEntry[]>("fs_list_files", { maxResults }),
+  fsListFiles: (maxResults = 2_500) => invokeRequired<FsEntry[]>("fs_list_files", { maxResults }, expectArray<FsEntry>),
   fsCreateFile: (path: string) => invokeRequired<void>("fs_create_file", { path }),
   fsCreateDir: (path: string) => invokeRequired<void>("fs_create_dir", { path }),
   fsRename: (from: string, to: string) => invokeRequired<void>("fs_rename", { from, to }),
@@ -884,7 +896,11 @@ export const luxCommands = {
   aiResolveTurnQuestion: (turnId: string, requestId: string, answer: { answer: string; cancelled: boolean }) =>
     invokeRequired<null>("ai_resolve_turn_question", { turnId, requestId, answer }),
   aiCancelTurn: (turnId: string) => invokeRequired<null>("ai_cancel_turn", { turnId }),
-  aiInjectMessage: (sessionId: string, text: string) => invokeRequired<null>("ai_inject_message", { sessionId, text }),
+  /** Stage a user message into a running turn. Scoped by session+turn so a
+   *  restarted turn can't drain input meant for an earlier one (must match the
+   *  `ai_inject_message` handler signature: session_id, turn_id, text). */
+  aiInjectMessage: (sessionId: string, turnId: string, text: string) =>
+    invokeRequired<null>("ai_inject_message", { sessionId, turnId, text }),
   mcpConnectAll: () => invokeRequired<McpServerStatus[]>("mcp_connect_all"),
   mcpConnect: (config: McpServerConfig) => invokeRequired<McpServerStatus>("mcp_connect", { config }),
   mcpDisconnect: (id: string) => invokeRequired<null>("mcp_disconnect", { id }),
@@ -1163,24 +1179,25 @@ function defaultKeybindingProfile(): KeybindingProfile {
 }
 
 export async function subscribeLuxEvents(handler: (event: LuxEvent) => void) {
-  if (!isTauriRuntime()) {
-    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://event");
-    return () => undefined;
-  }
-  return listen<LuxEvent>("lux://event", (event) => handler(event.payload));
+  return safeListen<LuxEvent>("lux://event", handler, { label: "lux://event" });
 }
 
 export async function subscribeAiChatStream(handler: (event: AiChatStreamEvent) => void) {
-  if (!isTauriRuntime()) {
-    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://ai-chat-stream");
-    return () => undefined;
-  }
-  return listen<AiChatStreamEvent>("lux://ai-chat-stream", (event) => handler(event.payload));
+  return safeListen<AiChatStreamEvent>("lux://ai-chat-stream", handler, {
+    label: "lux://ai-chat-stream",
+    // A thrown handler or malformed chunk must not leave the stream wedged: emit a
+    // synthetic `error` event so the transport promise rejects and the chat recovers.
+    onError: (error, raw) => {
+      const streamId = readStringField(raw, "streamId");
+      if (streamId) handler({ streamId, kind: "error", error: error instanceof Error ? error.message : String(error) });
+    },
+  });
 }
 
 export async function subscribeUpdateProgress(handler: (event: UpdateProgress) => void) {
+  // Update progress is non-essential telemetry: stay silent (no throw) off-desktop.
   if (!isTauriRuntime()) return () => undefined;
-  return listen<UpdateProgress>("lux://update", (event) => handler(event.payload));
+  return safeListen<UpdateProgress>("lux://update", handler, { label: "lux://update" });
 }
 
 /** Input for the native Rust turn-loop (`ai_run_turn`). */
@@ -1232,14 +1249,19 @@ export type AiTurnPlanStep = { title: string; detail: string; file: string };
 /** A key design decision in a PresentPlan proposal: chosen approach + tradeoff. */
 export type AiPlanDecision = { option: string; tradeoff: string };
 
+/** Status phases emitted by statusChange (mirrors ai_turn.rs StatusChange.phase). */
+export type AiTurnPhase = "thinking" | "streaming" | "running-tools" | "waiting-approval";
+/** Terminal status of a completed tool call (mirrors ai_turn.rs ToolCallCompleted.status). */
+export type AiTurnToolStatus = "success" | "error";
+
 /** Native turn-loop events emitted by the Rust `ai_run_turn` command. */
 export type AiTurnEvent =
   | { kind: "assistantCreated"; turnId: string; messageId: string }
   | { kind: "streamDelta"; turnId: string; content: string; reasoning: string }
-  | { kind: "statusChange"; turnId: string; phase: string }
+  | { kind: "statusChange"; turnId: string; phase: AiTurnPhase }
   | { kind: "userMessageInjected"; turnId: string; text: string }
   | { kind: "toolCallStarted"; turnId: string; callId: string; tool: string; input: string }
-  | { kind: "toolCallCompleted"; turnId: string; callId: string; status: string; output: string; error: string | null }
+  | { kind: "toolCallCompleted"; turnId: string; callId: string; status: AiTurnToolStatus; output: string; error: string | null }
   | { kind: "approvalRequired"; turnId: string; requestId: string; tool: string; title: string; summary: string; preview: string; risk: string }
   | { kind: "questionRequired"; turnId: string; requestId: string; question: string; detail: string; options: AiTurnQuestionOption[]; multiSelect: boolean; allowCustom: boolean; htmlPreview: string }
   | { kind: "planProposed"; turnId: string; planId: string; title: string; summary: string; steps: AiTurnPlanStep[]; alternatives: AiPlanDecision[]; risks: string[]; verification: string[]; quality: number; coaching: string[]; autoStart: boolean }
@@ -1250,11 +1272,15 @@ export type AiTurnEvent =
   | { kind: "turnCancelled"; turnId: string };
 
 export async function subscribeAiTurn(handler: (event: AiTurnEvent) => void) {
-  if (!isTauriRuntime()) {
-    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://ai-turn");
-    return () => undefined;
-  }
-  return listen<AiTurnEvent>("lux://ai-turn", (event) => handler(event.payload));
+  return safeListen<AiTurnEvent>("lux://ai-turn", handler, {
+    label: "lux://ai-turn",
+    // A throwing handler mid-turn (e.g. during streamDelta/approvalRequired) must not
+    // strand the turn UI: synthesize a turnError so the loop surfaces a real failure.
+    onError: (error, raw) => {
+      const turnId = readStringField(raw, "turnId");
+      if (turnId) handler({ kind: "turnError", turnId, error: error instanceof Error ? error.message : String(error) });
+    },
+  });
 }
 
 /** One language server in the managed-install catalog, with live installed-state. */
@@ -1280,11 +1306,7 @@ export type LspInstallEvent =
   | { kind: "finished"; languageId: string; success: boolean; path: string | null; error: string | null };
 
 export async function subscribeLspInstall(handler: (event: LspInstallEvent) => void) {
-  if (!isTauriRuntime()) {
-    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://lsp-install");
-    return () => undefined;
-  }
-  return listen<LspInstallEvent>("lux://lsp-install", (event) => handler(event.payload));
+  return safeListen<LspInstallEvent>("lux://lsp-install", handler, { label: "lux://lsp-install" });
 }
 
 /** One managed language runtime (Node/Rust/Python), with live installed-state. */
@@ -1307,11 +1329,7 @@ export type RuntimeProvisionEvent =
   | { kind: "finished"; id: string; success: boolean; path: string | null; error: string | null };
 
 export async function subscribeRuntimeProvision(handler: (event: RuntimeProvisionEvent) => void) {
-  if (!isTauriRuntime()) {
-    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://runtime-provision");
-    return () => undefined;
-  }
-  return listen<RuntimeProvisionEvent>("lux://runtime-provision", (event) => handler(event.payload));
+  return safeListen<RuntimeProvisionEvent>("lux://runtime-provision", handler, { label: "lux://runtime-provision" });
 }
 
 /** Summary returned by code_graph_build / reflected in code_graph_status. */
@@ -1368,10 +1386,6 @@ export type CodeGraphEvent =
   | { kind: "updated"; nodeCount: number; edgeCount: number };
 
 export async function subscribeCodeGraph(handler: (event: CodeGraphEvent) => void) {
-  if (!isTauriRuntime()) {
-    if (!isBrowserPreviewRuntime()) throw createDesktopRuntimeError("Event stream lux://code-graph");
-    return () => undefined;
-  }
-  return listen<CodeGraphEvent>("lux://code-graph", (event) => handler(event.payload));
+  return safeListen<CodeGraphEvent>("lux://code-graph", handler, { label: "lux://code-graph" });
 }
 

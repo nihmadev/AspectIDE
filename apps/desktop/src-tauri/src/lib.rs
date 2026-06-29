@@ -157,6 +157,16 @@ struct AppState {
     /// background build and a manual rebuild from doing duplicate full walks for
     /// the same workspace. See `code_graph::BuildGuard`.
     code_graph_building_gen: std::sync::atomic::AtomicU64,
+    /// Coalescing buffer for incremental code-graph updates. While one incremental
+    /// rebuild runs (it takes the index out of `code_graph`), file-watch batches that
+    /// arrive in the gap stash their paths here instead of being dropped; the active
+    /// rebuild drains and re-applies them on completion. See
+    /// `code_graph::handle_fs_batch`.
+    code_graph_pending_paths: std::sync::Mutex<Vec<PathBuf>>,
+    /// True while an incremental code-graph update is in flight. Distinguishes "index
+    /// is `None` because a rebuild took it" from "index is `None` because nothing is
+    /// built yet", so a concurrent batch can coalesce instead of bailing out.
+    code_graph_updating: std::sync::atomic::AtomicBool,
 }
 
 type SharedState = Arc<AppState>;
@@ -327,22 +337,37 @@ async fn fs_list_files(
         .map_err(String::from)
 }
 
+// Every raw FS command resolves caller-supplied paths through the workspace guard
+// before touching disk: sources (must already exist) via `resolve_workspace_path`,
+// new/destination paths via `resolve_workspace_path_for_write`. This confines the
+// renderer/extension/AI surface to the open workspace and rejects absolute or
+// `..`-escaping targets, instead of forwarding raw `PathBuf`s straight to `lux_fs`.
 #[tauri::command]
-fn fs_create_file(app: AppHandle, path: PathBuf) -> Result<(), String> {
+fn fs_create_file(app: AppHandle, state: State<'_, SharedState>, path: PathBuf) -> Result<(), String> {
+    let path = resolve_workspace_path_for_write(&state, &path)?;
     lux_fs::create_file(&path).map_err(String::from)?;
     emit_event(&app, LuxEvent::FsChanged { path })?;
     Ok(())
 }
 
 #[tauri::command]
-fn fs_create_dir(app: AppHandle, path: PathBuf) -> Result<(), String> {
+fn fs_create_dir(app: AppHandle, state: State<'_, SharedState>, path: PathBuf) -> Result<(), String> {
+    let path = resolve_workspace_path_for_write(&state, &path)?;
     lux_fs::create_dir(&path).map_err(String::from)?;
     emit_event(&app, LuxEvent::FsChanged { path })?;
     Ok(())
 }
 
 #[tauri::command]
-fn fs_rename(app: AppHandle, from: PathBuf, to: PathBuf) -> Result<(), String> {
+fn fs_rename(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    from: PathBuf,
+    to: PathBuf,
+) -> Result<(), String> {
+    // Source must exist inside the workspace; destination is a new path inside it.
+    let from = resolve_workspace_path(&state, &from)?;
+    let to = resolve_workspace_path_for_write(&state, &to)?;
     lux_fs::rename(&from, &to).map_err(String::from)?;
     emit_event(&app, LuxEvent::FsChanged { path: from })?;
     emit_event(&app, LuxEvent::FsChanged { path: to })?;
@@ -350,21 +375,33 @@ fn fs_rename(app: AppHandle, from: PathBuf, to: PathBuf) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn fs_copy(app: AppHandle, from: PathBuf, to: PathBuf) -> Result<(), String> {
+fn fs_copy(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    from: PathBuf,
+    to: PathBuf,
+) -> Result<(), String> {
+    let from = resolve_workspace_path(&state, &from)?;
+    let to = resolve_workspace_path_for_write(&state, &to)?;
     lux_fs::copy_path(&from, &to).map_err(String::from)?;
     emit_event(&app, LuxEvent::FsChanged { path: to })?;
     Ok(())
 }
 
 #[tauri::command]
-fn fs_delete(app: AppHandle, path: PathBuf) -> Result<(), String> {
+fn fs_delete(app: AppHandle, state: State<'_, SharedState>, path: PathBuf) -> Result<(), String> {
+    let path = resolve_workspace_path(&state, &path)?;
     lux_fs::delete(&path).map_err(String::from)?;
     emit_event(&app, LuxEvent::FsChanged { path })?;
     Ok(())
 }
 
 #[tauri::command]
-fn fs_reveal_in_file_explorer(path: PathBuf) -> Result<(), String> {
+fn fs_reveal_in_file_explorer(
+    state: State<'_, SharedState>,
+    path: PathBuf,
+) -> Result<(), String> {
+    let path = resolve_workspace_path(&state, &path)?;
     lux_fs::reveal_in_file_explorer(path).map_err(String::from)
 }
 

@@ -130,6 +130,20 @@ impl TerminalService {
             .map_err(|error| AppError::Service(error.to_string()))?;
 
         let session_id = info.id;
+
+        // Insert the session BEFORE spawning the reader thread. If the shell exits
+        // before the reader thread starts, the cleanup removes a not-yet-inserted
+        // id and the session leaks as a live entry. By inserting first we guarantee
+        // the reader's removal is always coherent with the map state.
+        self.sessions.lock().map_err(lock_error)?.insert(
+            info.id,
+            Arc::new(TerminalSession {
+                writer: Mutex::new(writer),
+                child,
+                master: Mutex::new(pair.master),
+            }),
+        );
+
         let handler = Arc::clone(&self.output_handler);
         let sessions = Arc::clone(&self.sessions);
         thread::spawn(move || {
@@ -140,15 +154,6 @@ impl TerminalService {
             let removed = sessions.lock().ok().and_then(|mut s| s.remove(&session_id));
             drop(removed);
         });
-
-        self.sessions.lock().map_err(lock_error)?.insert(
-            info.id,
-            Arc::new(TerminalSession {
-                writer: Mutex::new(writer),
-                child,
-                master: Mutex::new(pair.master),
-            }),
-        );
 
         Ok(info)
     }

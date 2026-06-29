@@ -31,8 +31,9 @@ pub use results::{
     diagnostics_update_from_publish, parse_code_action_result, parse_completion_result,
     parse_definition_result, parse_document_symbol_result, parse_folding_range_result,
     parse_hover_result, parse_inlay_hint_result, parse_semantic_token_legend_from_initialize,
-    parse_semantic_tokens_result, parse_signature_help_result, parse_text_edits_result,
-    parse_workspace_edit_result, parse_workspace_symbol_result, workspace_diagnostics_from_publish,
+    parse_semantic_tokens_result, parse_signature_help_result, parse_text_document_sync_kind,
+    parse_text_edits_result, parse_workspace_edit_result, parse_workspace_symbol_result,
+    workspace_diagnostics_from_publish,
 };
 pub use transport::{
     drain_lsp_frames, encode_lsp_message, parse_lsp_notification, parse_lsp_response, LspFrame,
@@ -94,6 +95,25 @@ pub struct LspSession {
     request_id: u64,
     opened_documents: BTreeMap<PathBuf, u64>,
     semantic_token_legend: Option<SemanticTokenLegend>,
+    /// How this server wants `textDocument/didChange` payloads, parsed from the
+    /// `initialize` reply. Drives whether we send ranged edits, full text, or skip.
+    sync_kind: TextDocumentSyncKind,
+}
+
+/// The server's declared `textDocumentSync` change mode (LSP `TextDocumentSyncKind`).
+///
+/// We default to `Full`: it is the safest, universally-accepted payload when a
+/// server doesn't advertise a mode, avoiding the corruption risk of sending ranged
+/// edits to a server that can't apply them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextDocumentSyncKind {
+    /// Server doesn't want incremental change notifications at all.
+    None,
+    /// Server wants the full document text on every change.
+    #[default]
+    Full,
+    /// Server accepts ranged incremental edits.
+    Incremental,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -701,6 +721,7 @@ impl LspSession {
             request_id: 0,
             opened_documents: BTreeMap::new(),
             semantic_token_legend: None,
+            sync_kind: TextDocumentSyncKind::default(),
         };
         session.initialize().await?;
         Ok(session)
@@ -756,8 +777,19 @@ impl LspSession {
             return Ok(());
         }
 
-        self.write_message(&did_change_edits_notification(document, edits))
-            .await?;
+        // Honor the server's declared sync mode: ranged edits ONLY when the server
+        // advertised `Incremental`. A `Full`-sync server would mis-apply ranged
+        // changes (corrupting its view), and a `None`-sync server wants nothing.
+        let message = match self.sync_kind {
+            TextDocumentSyncKind::Incremental => {
+                Some(did_change_edits_notification(document, edits))
+            }
+            TextDocumentSyncKind::Full => Some(did_change_notification(document)),
+            TextDocumentSyncKind::None => None,
+        };
+        if let Some(message) = message {
+            self.write_message(&message).await?;
+        }
         self.opened_documents.insert(path.clone(), document.version);
         Ok(())
     }
@@ -1195,6 +1227,14 @@ impl LspSession {
             .result
             .as_ref()
             .and_then(parse_semantic_token_legend_from_initialize);
+
+        // Record the server's declared change-sync mode so we never send ranged
+        // edits to a server that requires full text (or no change sync at all).
+        self.sync_kind = response
+            .result
+            .as_ref()
+            .map(parse_text_document_sync_kind)
+            .unwrap_or_default();
 
         self.write_message(&initialized_notification()).await
     }
@@ -2149,6 +2189,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_text_document_sync_kind_handles_number_object_and_default() {
+        // Numeric form.
+        assert_eq!(
+            parse_text_document_sync_kind(&json!({ "capabilities": { "textDocumentSync": 2 } })),
+            TextDocumentSyncKind::Incremental
+        );
+        assert_eq!(
+            parse_text_document_sync_kind(&json!({ "capabilities": { "textDocumentSync": 0 } })),
+            TextDocumentSyncKind::None
+        );
+        // Object form with a `change` field.
+        assert_eq!(
+            parse_text_document_sync_kind(
+                &json!({ "capabilities": { "textDocumentSync": { "change": 1, "openClose": true } } })
+            ),
+            TextDocumentSyncKind::Full
+        );
+        // Missing capability → safe Full default (never silently send ranged edits).
+        assert_eq!(
+            parse_text_document_sync_kind(&json!({ "capabilities": {} })),
+            TextDocumentSyncKind::Full
+        );
+    }
+
+    #[test]
     fn parse_code_action_result_accepts_workspace_edits_and_disabled_actions() {
         let uri = if cfg!(windows) {
             "file:///C:/work/project/src/lib.rs"
@@ -2178,14 +2243,16 @@ mod tests {
                 "disabled": {"reason": "requires valid selection"}
             },
             {
-                "title": "Server command without edit is ignored",
+                "title": "Organize imports (server command)",
                 "command": {"command": "server.command", "title": "Run"}
             }
         ]);
 
         let actions = parse_code_action_result(&value);
 
-        assert_eq!(actions.len(), 2);
+        // Command-only actions are now SURFACED (with a non-applicable reason),
+        // not silently dropped — so the count is 3, including the command action.
+        assert_eq!(actions.len(), 3);
         assert_eq!(actions[0].title, "Remove unused import");
         assert_eq!(actions[0].kind.as_deref(), Some("quickfix"));
         assert!(actions[0].is_preferred);
@@ -2210,6 +2277,18 @@ mod tests {
             Some("requires valid selection")
         );
         assert!(actions[1].edit.is_none());
+
+        // The command-only action is present, has no edit, and carries a reason
+        // explaining why it can't be applied directly.
+        assert_eq!(actions[2].title, "Organize imports (server command)");
+        assert!(actions[2].edit.is_none());
+        assert!(
+            actions[2]
+                .disabled_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("command")),
+            "command-only action should carry an explanatory reason"
+        );
     }
 
     #[test]

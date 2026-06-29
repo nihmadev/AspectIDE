@@ -389,6 +389,12 @@ pub async fn runtime_provision(app: AppHandle, id: String) -> Result<String, Str
     if let (true, Some(path)) = probe(&app, runtime) {
         return Ok(path.to_string_lossy().to_string());
     }
+    // Reclaim any tombstoned trees a previous locked/crashed replace left behind
+    // (now likely unlocked), so they don't accumulate in app data.
+    if let Ok(root) = runtime_root(&app) {
+        sweep_tombstones(&root).await;
+        sweep_tombstones(&root.join("go")).await; // Go's SDK tombstones live under go/
+    }
 
     emit_runtime(
         &app,
@@ -523,13 +529,8 @@ async fn provision_node(app: &AppHandle) -> Result<String, String> {
         .await?
         .unwrap_or_else(|| staging.clone());
     let dest = node_dir(app)?;
-    let _ = tokio::fs::remove_dir_all(&dest).await;
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    move_dir(&inner, &dest).await?;
+    // Replace atomically via tombstone — never move into a half-deleted dest.
+    replace_runtime_dir(&inner, &dest).await?;
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
     progress(app, "node", 96, "Verifying");
@@ -623,13 +624,8 @@ async fn provision_go(app: &AppHandle) -> Result<String, String> {
         .await?
         .unwrap_or_else(|| staging.clone());
     let sdk_dest = go_dir(app)?.join("sdk");
-    let _ = tokio::fs::remove_dir_all(&sdk_dest).await;
-    if let Some(parent) = sdk_dest.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    move_dir(&inner, &sdk_dest).await?;
+    // Replace atomically via tombstone — never move into a half-deleted dest.
+    replace_runtime_dir(&inner, &sdk_dest).await?;
     let _ = tokio::fs::remove_dir_all(&staging).await;
 
     progress(app, "go", 96, "Verifying");
@@ -740,32 +736,65 @@ async fn provision_python(app: &AppHandle) -> Result<String, String> {
 
     progress(app, "python", 64, "Extracting");
     let dest = python_dir(app)?;
-    let _ = tokio::fs::remove_dir_all(&dest).await;
-    extract_archive(&archive, &dest, "zip").await?;
+    // Extract into a staging dir, then atomically swap it into place — never extract
+    // over a half-deleted old tree (the ENOTEMPTY/mixed-version footgun on Windows).
+    let staging = root.join("python-staging");
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    extract_archive(&archive, &staging, "zip").await?;
     let _ = tokio::fs::remove_file(&archive).await;
 
     // Embeddable Python disables `site` (and thus pip) by default. Uncomment the
     // `import site` line in the `pythonXY._pth` file so pip/installed packages work.
     progress(app, "python", 78, "Enabling pip");
-    enable_embeddable_site(&dest).await?;
-    // Bootstrap pip — non-fatal (python.exe alone already counts as installed), but
-    // surface failures instead of silently dropping them so a broken pip is visible.
-    if let Err(why) = bootstrap_pip(&client, &dest).await {
-        tracing::warn!("Python pip bootstrap failed (continuing without pip): {why}");
+    enable_embeddable_site(&staging).await?;
+    // pip is part of the managed-Python contract: the `ty` language server installs
+    // through it, so a Python with no pip is a broken runtime that later fails with no
+    // self-repair. Bootstrap into the staging tree and FAIL provisioning if it can't
+    // be made available, rather than marking python.exe ready and breaking ty later.
+    if let Err(why) = bootstrap_pip(&client, &staging).await {
+        return Err(format!("Python pip bootstrap failed: {why}"));
     }
+
+    replace_runtime_dir(&staging, &dest).await?;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
 
     progress(app, "python", 96, "Verifying");
     finalize_marker(app, Runtime::Python)
 }
 
-/// Fetch and run `get-pip.py` inside the managed embeddable Python so the `ty`
-/// language server's `pip` is available. Errors are returned (not swallowed) so the
-/// caller can log them; pip is optional, so the caller treats this as non-fatal.
+/// Make `pip` available in the managed Python so the `ty` language server can be
+/// installed. Prefers the bundled, network-free `ensurepip` (no remote code), and
+/// only falls back to the network `get-pip.py` bootstrap when `ensurepip` is absent
+/// (the case for Windows embeddable builds, which ship without it).
 ///
-/// `get-pip.py` is a rolling, unversioned bootstrap with no stable published hash,
-/// so a static pin would break on every upstream refresh. It is fetched over HTTPS
-/// from `PyPA` and executed only inside the isolated managed runtime dir.
+/// SECURITY: `get-pip.py` is a rolling, unversioned bootstrap with no stable
+/// published hash, so a hard SHA pin would break on every upstream refresh. We
+/// minimise exposure by (1) trying `ensurepip` first so the remote path is skipped
+/// whenever possible, and (2) fetching over HTTPS and executing only inside the
+/// isolated managed runtime dir. A fuller supply-chain fix (bundling verified
+/// pip/setuptools/wheel wheels and installing them with `--require-hashes`) is
+/// tracked as a followup.
 async fn bootstrap_pip(client: &reqwest::Client, dest: &Path) -> Result<(), String> {
+    // 1) Network-free path: `python -m ensurepip --upgrade`. Skips remote code
+    //    entirely on any managed Python that bundles ensurepip.
+    if let Some(py) = crate::lsp_install::resolve_in_dir(dest, "python") {
+        let ensurepip = run_command_env(
+            &py,
+            &[
+                "-m".to_string(),
+                "ensurepip".to_string(),
+                "--upgrade".to_string(),
+            ],
+            Some(dest),
+            &[],
+        )
+        .await;
+        if ensurepip.is_ok_and(|step| step.success) {
+            return Ok(());
+        }
+    }
+
+    // 2) Fallback: fetch + run get-pip.py (embeddable Python lacks ensurepip).
     let body = client
         .get(GET_PIP_URL)
         .send()
@@ -1100,6 +1129,127 @@ async fn single_child_dir(dir: &Path) -> Result<Option<PathBuf>, String> {
         }
     }
     Ok(found)
+}
+
+/// Atomically replace the managed runtime directory `dest` with the freshly-staged
+/// `staged` tree, never writing into a half-deleted destination.
+///
+/// The old `let _ = remove_dir_all(dest); move_dir(staged, dest)` pattern silently
+/// ignored deletion failures — common on Windows when AV/a running tool locks a file
+/// (ENOTEMPTY / file-in-use) — and then merged the new install into the stale tree,
+/// producing mixed-version toolchains and repeat ENOTEMPTY failures. Instead: move
+/// any existing `dest` aside to a unique tombstone (with retry/backoff), failing with
+/// an actionable error if it is locked, and only then move `staged` into place. The
+/// tombstone is best-effort deleted; survivors are swept on the next provision.
+async fn replace_runtime_dir(staged: &Path, dest: &Path) -> Result<(), String> {
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    if tokio::fs::metadata(dest).await.is_ok() {
+        let tombstone = tombstone_path(dest);
+        move_aside_with_retry(dest, &tombstone).await?;
+        // Best-effort: a still-locked tombstone is cleaned by `sweep_tombstones`.
+        let _ = tokio::fs::remove_dir_all(&tombstone).await;
+    }
+    move_dir(staged, dest).await
+}
+
+/// A unique sibling path for retiring an in-use runtime dir, e.g.
+/// `node` → `.node.tombstone-<nanos>`. Hidden + timestamped so it neither collides
+/// nor (being a dotfile) is picked up by tool discovery before it is swept.
+fn tombstone_path(dest: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let name = dest
+        .file_name()
+        .map_or_else(|| "runtime".to_string(), |n| n.to_string_lossy().to_string());
+    dest.with_file_name(format!(".{name}.tombstone-{nanos}"))
+}
+
+/// Rename `from` → `to`, retrying with exponential backoff to ride out transient
+/// Windows file locks (AV scan, a language server/terminal still holding a handle).
+/// Fails with a user-actionable message if the directory stays locked.
+async fn move_aside_with_retry(from: &Path, to: &Path) -> Result<(), String> {
+    const ATTEMPTS: u32 = 5;
+    let mut delay = std::time::Duration::from_millis(100);
+    for attempt in 1..=ATTEMPTS {
+        match tokio::fs::rename(from, to).await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt == ATTEMPTS => {
+                return Err(format!(
+                    "managed runtime at {} is in use and could not be replaced \
+                     (close running terminals/language servers and try again): {error}",
+                    from.display()
+                ));
+            }
+            Err(_) => {
+                tokio::time::sleep(delay).await;
+                delay *= 2;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort sweep of leftover tombstones from a previous crashed/locked replace.
+/// Called before provisioning so a since-unlocked stale tree is reclaimed.
+async fn sweep_tombstones(root: &Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name();
+        if name.to_string_lossy().contains(".tombstone-") {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+        }
+    }
+}
+
+/// Verify the MANAGED Python has a working `pip`, repairing it if not.
+///
+/// Embeddable Python's pip bootstrap is best-effort during provisioning (python.exe
+/// alone marks the runtime ready), so a later pip-dependent LSP install (`ty`) could
+/// hit a managed Python with no pip and no way to self-heal. This probes `pip` and,
+/// if missing, re-runs the bootstrap once under the Python lock, failing with a
+/// repairable error if it still cannot be installed. No-op when there is no managed
+/// Python (a system Python owns its own pip).
+pub async fn ensure_managed_pip(app: &AppHandle) -> Result<(), String> {
+    let dest = python_dir(app)?;
+    let Some(python) = crate::lsp_install::resolve_in_dir(&dest, "python") else {
+        return Ok(());
+    };
+    if pip_available(&python).await {
+        return Ok(());
+    }
+    let _guard = PYTHON_LOCK.lock().await;
+    // Re-check under the lock: a queued caller may have just repaired pip.
+    if pip_available(&python).await {
+        return Ok(());
+    }
+    let client = http_client()?;
+    enable_embeddable_site(&dest).await?;
+    bootstrap_pip(&client, &dest)
+        .await
+        .map_err(|why| format!("managed Python pip is missing and bootstrap failed: {why}"))?;
+    if pip_available(&python).await {
+        Ok(())
+    } else {
+        Err("managed Python pip is still unavailable after bootstrap".to_string())
+    }
+}
+
+async fn pip_available(python: &Path) -> bool {
+    run_command_env(
+        python,
+        &["-m".to_string(), "pip".to_string(), "--version".to_string()],
+        None,
+        &[],
+    )
+    .await
+    .is_ok_and(|result| result.success)
 }
 
 /// Move `from` to `to`, falling back to recursive copy when a plain rename is not

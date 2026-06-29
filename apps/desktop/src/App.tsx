@@ -102,8 +102,12 @@ export function App() {
   const activeDocumentId = useLuxStore((state) => state.activeDocumentId);
   const activeEditorGroupId = useLuxStore((state) => state.activeEditorGroupId);
   const editorGroups = useLuxStore((state) => state.editorGroups);
-  const openDocuments = useLuxStore((state) => state.openDocuments);
-  const hasOpenDocuments = openDocuments.length > 0;
+  // Narrow selector instead of subscribing to the whole openDocuments array: the root
+  // shell only needs to know whether any docs are open. The full array changes identity
+  // on every keystroke/agent edit, which previously re-rendered the entire workbench
+  // shell and re-registered the global keydown listener on each edit. Handlers that need
+  // the full list read it imperatively via useLuxStore.getState().
+  const hasOpenDocuments = useLuxStore((state) => state.openDocuments.length > 0);
   const { requestCloseDocuments } = useEditorCloseGuard();
   const [recentWorkspaces, setRecentWorkspaces] = useState<RecentWorkspace[]>([]);
   const [bottomPanelMaximized, setBottomPanelMaximized] = useState(false);
@@ -153,7 +157,7 @@ export function App() {
   const showLoadSkeleton = projectLoadSummary.stage === "opening" || projectLoadSummary.stage === "files";
 
   const openProject = () => {
-    requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
+    requestCloseDocuments(closedDocumentIdsForAllDocuments(useLuxStore.getState().openDocuments), () => {
       // Pick the folder FIRST — the loading overlay must not appear on click or while
       // the system dialog is open (and never at all if the user cancels).
       void luxCommands.workspacePickFolder().then((picked) => {
@@ -183,7 +187,7 @@ export function App() {
   };
 
   const openRecentWorkspace = (root: string) => {
-    requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
+    requestCloseDocuments(closedDocumentIdsForAllDocuments(useLuxStore.getState().openDocuments), () => {
       setProjectLoad({ active: true, error: null, progress: 8, root, stage: "opening", workspaceName: null });
       // WorkspaceChanged event drives setWorkspace + the load stages — see openProject.
       void luxCommands.workspaceOpen(root).then(() => {
@@ -566,8 +570,11 @@ export function App() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      // Read the full document list imperatively so this listener does NOT depend on the
+      // openDocuments array (which churns per keystroke). It stays registered across edits.
+      const documents = useLuxStore.getState().openDocuments;
       const match = keybindingDispatcherRef.current.handleKeyDown(event, {
-        dirtyEditors: openDocuments.some((document) => document.is_dirty),
+        dirtyEditors: documents.some((document) => document.is_dirty),
         editor: Boolean(activeDocumentId),
         workspace: Boolean(workspace),
       });
@@ -582,7 +589,7 @@ export function App() {
         openBottomPanel,
         toggleBottomPanel,
         openProject,
-        openDocuments,
+        openDocuments: documents,
         requestCloseDocuments,
         selectNextDocument,
         selectPreviousDocument,
@@ -599,7 +606,7 @@ export function App() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [activeDocumentId, activeEditorGroupId, closeDocumentInActiveGroup, editorGroups, openBottomPanel, toggleBottomPanel, openDocuments, requestCloseDocuments, selectNextDocument, selectPreviousDocument, setActiveActivity, setCommandPaletteOpen, setSettingsOpen, setSidebarVisible, splitActiveEditor, toggleAiChat, toggleSidebar, upsertDocument, workspace]);
+  }, [activeDocumentId, activeEditorGroupId, closeDocumentInActiveGroup, editorGroups, openBottomPanel, toggleBottomPanel, requestCloseDocuments, selectNextDocument, selectPreviousDocument, setActiveActivity, setCommandPaletteOpen, setSettingsOpen, setSidebarVisible, splitActiveEditor, toggleAiChat, toggleSidebar, upsertDocument, workspace]);
 
   if (!workspace) {
     if (workspaceMode === "agent") {

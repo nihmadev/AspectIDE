@@ -12,6 +12,16 @@ import { defaultEditorPreferences, mergeEditorPreferences, type EditorPreference
 import { normalizePath, sameWorkspaceRoot, type FileTreeDirectories } from "./fileTree";
 import { DEFAULT_LOCALE, type Locale } from "./i18n";
 import { defaultKeybindingProfile } from "./keybindings";
+import { applyTextEdits } from "./documentEdits";
+import {
+  fileTreeDirectoriesEqual,
+  flattenDiagnostics,
+  fsEntriesEqual,
+  gitStatusEqual,
+  languageServersEqual,
+  searchResponsesEqual,
+} from "./storeEquality";
+import { appendTerminalChunks, emptyTerminalBuffer, terminalOutputCoalescer } from "./terminalOutput";
 import type { TerminalOutputBuffer } from "./terminalTypes";
 import type { DebugBreakpointsUpdate, DebugResolvedBreakpoint, DebugSourceBreakpoint, DocumentEditResult, DocumentSnapshot, FsEntry, GitStatus, KeybindingProfile, LanguageServerInfo, SearchResponse, TerminalSessionInfo, TextEdit, WorkspaceDiagnostic, WorkspaceInfo } from "./types";
 
@@ -103,7 +113,6 @@ export function isAiChatSessionBusyStatus(status: AiChatSessionStatus) {
 }
 
 const DEFAULT_EDITOR_GROUP_ID = "editor-group-1";
-const MAX_TERMINAL_BUFFER_CHARS = 120_000;
 const createEditorGroupId = () => `editor-group-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 const createEmptyEditorGroup = (id = DEFAULT_EDITOR_GROUP_ID): EditorGroup => ({ id, documentIds: [], activeDocumentId: null });
 const createAiChatSessionId = () => `chat-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -261,6 +270,8 @@ type LuxState = {
   closeTerminalSession: (terminalId: string) => void;
   closeAllTerminalSessions: () => void;
   appendTerminalOutput: (terminalId: string, data: string) => void;
+  /** Internal: commits a coalesced batch of terminal chunks (one frame's worth). */
+  commitTerminalOutput: (pending: ReadonlyMap<string, string[]>) => void;
   clearTerminalOutput: (terminalId: string) => void;
   clearAllTerminalOutput: () => void;
   setGitStatus: (status: GitStatus | null) => void;
@@ -444,15 +455,25 @@ export const useLuxStore = create<LuxState>((set, get) => ({
       }),
     })),
   updateAiChatMessage: (sessionId, messageId, patch) =>
-    set((state) => ({
-      aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
-        ? {
-            ...session,
-            messages: session.messages.map((message) => message.id === messageId ? { ...message, ...patch } : message),
-            updatedAt: Date.now(),
-          }
-        : session),
-    })),
+    set((state) => {
+      // Token streaming calls this for every delta. Locate the target session and
+      // message by index and bail early when either is missing or the patch is a
+      // no-op, so a redundant patch does not wake every store subscriber or bump
+      // session metadata. Only the matching session/message is rebuilt.
+      const sessionIndex = state.aiChatSessions.findIndex((session) => session.id === sessionId);
+      if (sessionIndex === -1) return {};
+      const session = state.aiChatSessions[sessionIndex];
+      const messageIndex = session.messages.findIndex((message) => message.id === messageId);
+      if (messageIndex === -1) return {};
+      const current = session.messages[messageIndex];
+      if (isNoOpMessagePatch(current, patch)) return {};
+
+      const messages = session.messages.slice();
+      messages[messageIndex] = { ...current, ...patch };
+      const aiChatSessions = state.aiChatSessions.slice();
+      aiChatSessions[sessionIndex] = { ...session, messages, updatedAt: Date.now() };
+      return { aiChatSessions };
+    }),
   replaceAiChatMessages: (sessionId, messages, options) =>
     set((state) => ({
       aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
@@ -538,8 +559,13 @@ export const useLuxStore = create<LuxState>((set, get) => ({
     set((state) => ({
       workspaceFolders: state.workspaceFolders.filter((folder) => folder.root !== root),
     })),
-  setFileEntries: (fileEntries) => set({ fileEntries }),
-  setFileTreeDirectories: (fileTreeDirectories) => set({ fileTreeDirectories }),
+  // Equality-aware: explorer/source-control/search/LSP snapshots are frequently
+  // re-sent unchanged by polling/events; skipping the write avoids re-rendering
+  // large UI regions for a semantically identical payload (new reference only).
+  setFileEntries: (fileEntries) =>
+    set((state) => fsEntriesEqual(state.fileEntries, fileEntries) ? {} : { fileEntries }),
+  setFileTreeDirectories: (fileTreeDirectories) =>
+    set((state) => fileTreeDirectoriesEqual(state.fileTreeDirectories, fileTreeDirectories) ? {} : { fileTreeDirectories }),
   setFileTreeLoading: (fileTreeLoading) => set({ fileTreeLoading }),
   setFileTreeError: (fileTreeError) => set({ fileTreeError }),
   setExplorerExpandedPaths: (paths) => set({ explorerExpandedPaths: normalizePathList(paths) }),
@@ -814,8 +840,13 @@ export const useLuxStore = create<LuxState>((set, get) => ({
         editorGroups: editorGroups.map((group) => group.id === activeGroup.id ? { ...group, activeDocumentId } : group),
       };
     }),
-  setSearchResponse: (searchResponse) => set({ searchResponse }),
-  setTerminal: (terminal) => set((state) => terminal ? upsertTerminalState(state, terminal, true) : { terminal: null, terminalSessions: [], activeTerminalId: null, terminalOutputBuffers: {} }),
+  setSearchResponse: (searchResponse) =>
+    set((state) => searchResponsesEqual(state.searchResponse, searchResponse) ? {} : { searchResponse }),
+  setTerminal: (terminal) => set((state) => {
+    if (terminal) return upsertTerminalState(state, terminal, true);
+    terminalOutputCoalescer.discard();
+    return { terminal: null, terminalSessions: [], activeTerminalId: null, terminalOutputBuffers: {} };
+  }),
   upsertTerminalSession: (terminal, makeActive = true) => set((state) => upsertTerminalState(state, terminal, makeActive)),
   setActiveTerminal: (terminalId) =>
     set((state) => {
@@ -827,6 +858,9 @@ export const useLuxStore = create<LuxState>((set, get) => ({
     set((state) => {
       const terminalSessions = state.terminalSessions.filter((session) => session.id !== terminalId);
       if (terminalSessions.length === state.terminalSessions.length) return {};
+      // Drop any chunks still queued for the closed terminal so a pending frame
+      // flush cannot recreate its buffer after removal.
+      terminalOutputCoalescer.discard(terminalId);
       const terminalOutputBuffers = { ...state.terminalOutputBuffers };
       delete terminalOutputBuffers[terminalId];
       const activeStillExists = terminalSessions.find((session) => session.id === state.activeTerminalId) ?? null;
@@ -838,25 +872,42 @@ export const useLuxStore = create<LuxState>((set, get) => ({
         terminalOutputBuffers,
       };
     }),
-  closeAllTerminalSessions: () => set({ terminal: null, terminalSessions: [], activeTerminalId: null, terminalOutputBuffers: {} }),
-  appendTerminalOutput: (terminalId, data) =>
+  closeAllTerminalSessions: () => {
+    terminalOutputCoalescer.discard();
+    set({ terminal: null, terminalSessions: [], activeTerminalId: null, terminalOutputBuffers: {} });
+  },
+  // High-volume PTY/tool output is coalesced: chunks are queued and committed once
+  // per animation frame (see terminalOutput.ts) instead of doing O(buffer-size)
+  // string work and waking every store subscriber on each individual byte.
+  appendTerminalOutput: (terminalId, data) => terminalOutputCoalescer.enqueue(terminalId, data),
+  commitTerminalOutput: (pending) =>
     set((state) => {
-      if (!terminalId || !data) return {};
-      return {
-        terminalOutputBuffers: {
-          ...state.terminalOutputBuffers,
-          [terminalId]: appendTerminalBuffer(state.terminalOutputBuffers[terminalId], data),
-        },
-      };
+      let changed = false;
+      const terminalOutputBuffers = { ...state.terminalOutputBuffers };
+      for (const [terminalId, chunks] of pending) {
+        const next = appendTerminalChunks(terminalOutputBuffers[terminalId], chunks);
+        if (next !== terminalOutputBuffers[terminalId]) {
+          terminalOutputBuffers[terminalId] = next;
+          changed = true;
+        }
+      }
+      return changed ? { terminalOutputBuffers } : {};
     }),
   clearTerminalOutput: (terminalId) =>
     set((state) => {
       if (!terminalId || !state.terminalOutputBuffers[terminalId]) return {};
+      // Flush-proof the clear by dropping queued chunks for this terminal first.
+      terminalOutputCoalescer.discard(terminalId);
       return { terminalOutputBuffers: { ...state.terminalOutputBuffers, [terminalId]: emptyTerminalBuffer() } };
     }),
-  clearAllTerminalOutput: () => set({ terminalOutputBuffers: {} }),
-  setGitStatus: (gitStatus) => set({ gitStatus }),
-  setLanguageServers: (languageServers) => set({ languageServers }),
+  clearAllTerminalOutput: () => {
+    terminalOutputCoalescer.discard();
+    set({ terminalOutputBuffers: {} });
+  },
+  setGitStatus: (gitStatus) =>
+    set((state) => gitStatusEqual(state.gitStatus, gitStatus) ? {} : { gitStatus }),
+  setLanguageServers: (languageServers) =>
+    set((state) => languageServersEqual(state.languageServers, languageServers) ? {} : { languageServers }),
   setLanguageServersLoading: (languageServersLoading) => set({ languageServersLoading }),
   setDiagnosticsForPath: (path, diagnostics) =>
     set((state) => ({
@@ -907,13 +958,19 @@ export const useLuxStore = create<LuxState>((set, get) => ({
   setBottomPanelTab: (bottomPanelTab) => set({ bottomPanelTab }),
 }));
 
+// Wire the terminal-output coalescer to flush batched PTY chunks into the store.
+terminalOutputCoalescer.setSink((pending) => useLuxStore.getState().commitTerminalOutput(pending));
+
 export const selectActiveDocument = (state: LuxState) =>
   state.openDocuments.find((document) => document.id === state.activeDocumentId) ?? null;
 
 export const selectActiveAiChatSession = (state: LuxState) =>
   state.aiChatSessions.find((session) => session.id === state.activeAiChatSessionId) ?? state.aiChatSessions[0] ?? null;
 
-export const selectDiagnostics = (state: LuxState) => Object.values(state.diagnosticsByPath).flat();
+// Stable, memoized flatten: returns the same array reference until diagnosticsByPath
+// changes, so diagnostics-bound UI no longer re-renders on unrelated store writes
+// (AI token deltas, terminal output) the way `Object.values(...).flat()` forced.
+export const selectDiagnostics = (state: LuxState) => flattenDiagnostics(state.diagnosticsByPath);
 
 function createInitialAiChatState(workspaceRoot: string | null = null): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
   const session = createAiChatSession(workspaceRoot);
@@ -1038,6 +1095,17 @@ function sessionSegmentScore(session: AiChatSession) {
   return session.messages.reduce((score, message) => score + (message.segments?.length ?? 0), 0);
 }
 
+/** True when every key in `patch` already holds an identical (Object.is) value on
+ *  the message. Conservative by design: it only reports a no-op when nothing would
+ *  change, so it can never drop a real streaming update (new array/string refs
+ *  always differ), but it does skip the redundant patches that streaming emits. */
+function isNoOpMessagePatch(message: AiChatMessage, patch: Partial<AiChatMessage>): boolean {
+  for (const key of Object.keys(patch) as Array<keyof AiChatMessage>) {
+    if (!Object.is(message[key], patch[key])) return false;
+  }
+  return true;
+}
+
 function sortAiChatSessionsForStore(sessions: AiChatSession[]) {
   return sessions.sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt);
 }
@@ -1142,55 +1210,3 @@ function upsertTerminalState(state: LuxState, terminal: TerminalSessionInfo, mak
   };
 }
 
-function emptyTerminalBuffer(): TerminalOutputBuffer {
-  return { text: "", updatedAt: null, bytes: 0, chunks: 0, truncated: false };
-}
-
-function appendTerminalBuffer(current: TerminalOutputBuffer | undefined, data: string): TerminalOutputBuffer {
-  const previous = current ?? emptyTerminalBuffer();
-  const combined = `${previous.text}${data}`;
-  const overflow = combined.length > MAX_TERMINAL_BUFFER_CHARS;
-  return {
-    text: overflow ? combined.slice(combined.length - MAX_TERMINAL_BUFFER_CHARS) : combined,
-    updatedAt: new Date().toISOString(),
-    bytes: previous.bytes + data.length,
-    chunks: previous.chunks + 1,
-    truncated: previous.truncated || overflow,
-  };
-}
-
-function applyTextEdits(text: string, edits: TextEdit[]) {
-  let nextText = text;
-  for (const edit of edits) {
-    const start = positionToStringOffset(nextText, edit.start_line, edit.start_column);
-    const end = positionToStringOffset(nextText, edit.end_line, edit.end_column);
-    nextText = `${nextText.slice(0, start)}${edit.text}${nextText.slice(end)}`;
-  }
-  return nextText;
-}
-
-function positionToStringOffset(text: string, line: number, column: number) {
-  if (line < 1 || column < 1) throw new Error("Text edit positions are 1-based");
-
-  let currentLine = 1;
-  let currentColumn = 1;
-  for (let index = 0; index < text.length;) {
-    if (currentLine === line && currentColumn === column) return index;
-
-    const codePoint = text.codePointAt(index);
-    if (codePoint === undefined) break;
-    const width = codePoint > 0xffff ? 2 : 1;
-    const char = text.slice(index, index + width);
-    index += width;
-
-    if (char === "\n") {
-      currentLine += 1;
-      currentColumn = 1;
-    } else {
-      currentColumn += width;
-    }
-  }
-
-  if (currentLine === line && currentColumn === column) return text.length;
-  throw new Error(`Text edit position ${line}:${column} is outside the document`);
-}

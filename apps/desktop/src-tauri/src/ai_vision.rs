@@ -56,6 +56,20 @@ const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const DEFAULT_MAX_DIMENSION: u32 = 2000;
 /// Lower bound for the caller-supplied dimension cap, to avoid degenerate sizes.
 const MIN_MAX_DIMENSION: u32 = 256;
+/// Hard upper bound for the caller-supplied dimension cap. Prevents a buggy
+/// frontend or malicious tool call from bypassing the downscale safety net and
+/// sending oversized images that explode model vision tokens and encoder memory.
+/// 4096 covers all current provider limits; larger values must be allowlisted.
+const MAX_MAX_DIMENSION: u32 = 4096;
+/// Pixel-bomb guard: reject decoded images whose total pixel count exceeds this
+/// limit even if their compressed byte size passed MAX_SOURCE_BYTES. A hostile
+/// compressed PNG (e.g. 16k×16k solid colour) can decode to hundreds of MiB
+/// while easily fitting in a 16 MiB compressed file.
+const MAX_DECODED_PIXELS: u64 = 4096 * 4096; // ≈ 67 MP, well above any model vision cap
+/// Encoded base64 payload length limit applied *before* decoding a data URL
+/// (base64 expands ~33 %, so this matches MAX_SOURCE_BYTES after decode).
+/// Using ceiling division: ceil(MAX_SOURCE_BYTES * 4 / 3).
+const MAX_DATA_URL_BASE64_LEN: usize = ((MAX_SOURCE_BYTES * 4).div_ceil(3)) as usize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TargetFormat {
@@ -121,10 +135,13 @@ pub fn encode_vision_image(
     resolved_path: Option<PathBuf>,
 ) -> Result<VisionEncodeResponse, String> {
     let target = TargetFormat::parse(request.format.as_deref().unwrap_or("png"));
+    // Clamp within [MIN_MAX_DIMENSION, MAX_MAX_DIMENSION]: a lower bound prevents
+    // degenerate sizes; an upper bound stops a caller from disabling downscale
+    // by passing an arbitrarily large value (finding: caller-controlled max bypass).
     let max_dimension = request
         .max_dimension
         .unwrap_or(DEFAULT_MAX_DIMENSION)
-        .max(MIN_MAX_DIMENSION);
+        .clamp(MIN_MAX_DIMENSION, MAX_MAX_DIMENSION);
 
     let (bytes, hint_mime) = load_source(&request, resolved_path)?;
 
@@ -236,6 +253,10 @@ fn load_source(
 }
 
 /// Splits a `data:<mime>;base64,<payload>` URL into raw bytes + declared MIME.
+///
+/// Size guard is applied to the *encoded* payload length before any allocation
+/// to prevent a large base64 string from causing a multi-hundred-MiB decode
+/// before the check fires (finding: data URL size checked only after allocation).
 fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> {
     let rest = data_url
         .strip_prefix("data:")
@@ -243,13 +264,31 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
     let (meta, payload) = rest
         .split_once(',')
         .ok_or_else(|| "dataUrl is missing a comma separator".to_string())?;
-    if !meta.contains("base64") {
+
+    // Require "base64" token and reject any non-standard metadata variant
+    // (e.g. ";base64;extra") that might smuggle unsanitised MIME values.
+    if !meta.contains(";base64") {
         return Err("dataUrl is not base64-encoded".to_string());
     }
+
+    let payload = payload.trim();
+
+    // Reject before allocation: base64 encodes 3 bytes as 4 chars, so a
+    // payload length above MAX_DATA_URL_BASE64_LEN guarantees the decoded
+    // result would exceed MAX_SOURCE_BYTES.
+    if payload.len() > MAX_DATA_URL_BASE64_LEN {
+        return Err(format!(
+            "image data URL is too large for vision preprocessing: {} encoded chars",
+            payload.len()
+        ));
+    }
+
     let mime = meta.split(';').next().filter(|value| !value.is_empty());
     let bytes = general_purpose::STANDARD
-        .decode(payload.trim())
+        .decode(payload)
         .map_err(|error| format!("dataUrl base64 decode failed: {error}"))?;
+    // Post-decode check as a belt-and-suspenders safety net (padding variations
+    // mean the pre-check is an approximation for non-canonical base64).
     if bytes.len() as u64 > MAX_SOURCE_BYTES {
         return Err(format!(
             "image is too large for vision preprocessing: {} bytes",
@@ -262,8 +301,29 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
 /// Attempts to decode the source into a [`DynamicImage`]. Returns `None` for
 /// formats `image` cannot read (HEIC/AVIF/SVG, …) so the caller can passthrough.
 /// Borrows `bytes` so the caller retains ownership for the passthrough path.
+///
+/// Pixel-bomb guard: rejects images whose decoded pixel count exceeds
+/// MAX_DECODED_PIXELS even when their compressed size is within MAX_SOURCE_BYTES,
+/// preventing hostile compressed inputs (e.g. 16 k×16 k solid-colour PNG) from
+/// exhausting memory.
 fn decode_source(bytes: &[u8], hint_mime: Option<String>) -> Option<DecodedSource> {
     let format = image::guess_format(bytes).ok();
+
+    // Read just the image header to get dimensions before full decode.
+    // `ImageReader::into_dimensions` avoids allocating the full pixel buffer,
+    // so a 16 k×16 k PNG that sneaks under MAX_SOURCE_BYTES never expands.
+    if let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+    {
+        if let Ok((w, h)) = reader.into_dimensions() {
+            if u64::from(w) * u64::from(h) > MAX_DECODED_PIXELS {
+                // Treat as undecodable: forward bytes untouched; this mirrors
+                // the HEIC/AVIF passthrough path so the model still receives them.
+                return None;
+            }
+        }
+    }
+
     let image = image::load_from_memory(bytes).ok()?;
     // The source decoded successfully, so passthrough forwards the REAL bytes;
     // the content-sniffed `format` is therefore authoritative for the emitted

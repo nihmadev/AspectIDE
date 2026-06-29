@@ -128,6 +128,7 @@ import {
 import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision, AiToolApprovalRequest } from "../lib/aiChatTypes";
 import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
 import { isTauriRuntime, luxCommands } from "../lib/tauri";
+import { getActiveTurnId } from "../lib/aiActiveTurns";
 import { useVoiceInput } from "../lib/useVoiceInput";
 import { useAiChatScroll } from "../lib/useAiChatScroll";
 import { useAiChatComposerAttachments } from "../lib/useAiChatComposerAttachments";
@@ -221,7 +222,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const activeSessionClosed = Boolean(activeChatSession?.closedAt);
   const sendingSessionId = runtimeSnapshot.sendingSessionId;
   const activeSessionBusy = sendingSessionId === activeAiChatSessionId || isAiChatSessionBusyStatus(activeStatus);
-  const showStopGeneration = Boolean(sendingSessionId) || isAiChatSessionBusyStatus(activeStatus);
+  // Show the Stop button only when the active session is busy, not when any
+  // background session is running. Background activity is surfaced via the
+  // cross-session banner so Stop doesn't silently cancel the wrong session.
+  const showStopGeneration = sendingSessionId === activeAiChatSessionId || isAiChatSessionBusyStatus(activeStatus);
   const pendingCrossSessionApproval = useMemo(() => {
     const pending = findAnyPendingToolApproval(aiChatSessions);
     if (!pending || pending.sessionId === activeAiChatSessionId) return null;
@@ -326,7 +330,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     t,
     hasGlobalInstructions: aiPreferences.globalInstructions.trim().length > 0,
     hasProjectInstructions: projectInstructions.trim().length > 0,
-  }), [aiIndex.status, aiPreferences, attachments, contextUsageKey, message.length, pinnedEditorPaths, runtimeInstructionText, selectedAgent, selectedModel, t, projectInstructions]);
+  // Depend on `message` (not `message.length`) so replacing the composer text with
+  // different content of the same length still recomputes the context budget.
+}), [aiIndex.status, aiPreferences, attachments, contextUsageKey, message, pinnedEditorPaths, runtimeInstructionText, selectedAgent, selectedModel, t, projectInstructions]);
 
   useEffect(() => {
     loadChatCheckpointStore();
@@ -480,7 +486,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     hydratedComposerSessionRef.current = activeAiChatSessionId;
     const nextMessage = getComposerDraft(activeAiChatSessionId);
     const nextAttachments = getComposerAttachments(activeAiChatSessionId);
-    setMessage((current) => (current.trim() && !nextMessage.trim() ? current : nextMessage));
+    // Always hydrate from the target session's own persisted draft. Carrying the
+    // previous session's unsaved text into a new session would silently send the
+    // wrong prompt to the model. The outgoing draft is already persisted on every
+    // keystroke via setComposerDraft (called from updateMessage).
+    setMessage(nextMessage);
     setAttachments(nextAttachments);
     setContextOpen(false);
     setDraggingFiles(false);
@@ -671,7 +681,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   };
 
   const handleCancelSend = useCallback(() => {
-    const sessionId = sendingSessionId
+    // Cancel only the active session. A background session that is currently
+    // running should be cancelled via the cross-session banner, not from
+    // this panel's composer stop button (which belongs to the active session).
+    const sessionId = (sendingSessionId === activeAiChatSessionId ? sendingSessionId : null)
       ?? (isAiChatSessionBusyStatus(activeStatus) ? activeAiChatSessionId : null);
     if (!sessionId) return;
     const pendingContinuation = goalContinuationTimersRef.current.get(sessionId);
@@ -1182,8 +1195,12 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       if (isActiveTurn()) setAiChatSessionStatus(sessionId, "idle");
     } catch (error) {
       if (isAbortError(error)) {
-        setAiChatSessionStatus(sessionId, "idle");
-        trimCancelledAssistantShell(sessionId, replaceAiChatMessages);
+        // Guard with isActiveTurn() so a stale aborted promise cannot overwrite
+        // a newer running turn's "idle" status or trim its assistant shell.
+        if (isActiveTurn()) {
+          setAiChatSessionStatus(sessionId, "idle");
+          trimCancelledAssistantShell(sessionId, replaceAiChatMessages);
+        }
         return;
       }
       if (!isActiveTurn()) return;
@@ -1480,12 +1497,12 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
   const handleReviewAction = useCallback((messageId: string) => {
     if (!activeChatSession || activeSessionBusy || activeSessionClosed) return;
-    // Send the review instruction straight to the agent as a review-request turn. The
-    // full prompt reaches the model as the message content, but the chat renders a badge
-    // (not the raw text) and the composer draft is left untouched. messageId scopes the
-    // review to "the turn whose Review button was clicked" for the model's benefit.
-    const prompt = t("aiChat.review.prompt");
-    void handleSend(prompt, undefined, { reviewRequest: true, force: true });
+    // Build a model-side prompt that scopes the review to the exact turn the user
+    // clicked. The displayed badge comes from reviewRequest:true, so the raw prompt
+    // text is never rendered in the chat — only the scoped model message is sent.
+    const basePrompt = t("aiChat.review.prompt");
+    const scopedPrompt = `${basePrompt}\n\n<!-- review-target-message-id: ${messageId} -->`;
+    void handleSend(basePrompt, undefined, { reviewRequest: true, force: true, modelMessageOverride: scopedPrompt });
   }, [activeChatSession, activeSessionBusy, activeSessionClosed, handleSend, t]);
 
   const handleMentionSelect = useCallback((candidate: AiMentionCandidate) => {
@@ -1701,6 +1718,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       if (!session || session.closedAt) continue;
       const running = sendingSessionId === entry.sessionId || isAiChatSessionBusyStatus(session.status);
       if (!running) continue;
+      // ai_inject_message is scoped by session+turn, so we need the live turn_id.
+      // If it isn't published yet (the native turn hasn't launched), leave the chip
+      // as a "recommendation" and retry on the next tick instead of mis-routing it.
+      const turnId = getActiveTurnId(entry.sessionId);
+      if (!turnId) continue;
       // Mark in-flight BEFORE the await so a re-render can't double-inject. The chip
       // is NOT removed here — it is removed only when Rust confirms the fold-in
       // (onUserMessageInjected), so a turn that ends before the drain never loses it.
@@ -1708,7 +1730,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       const pending = injectedTextBySessionRef.current.get(entry.sessionId) ?? [];
       pending.push(entry.text);
       injectedTextBySessionRef.current.set(entry.sessionId, pending);
-      void luxCommands.aiInjectMessage(entry.sessionId, entry.text)
+      void luxCommands.aiInjectMessage(entry.sessionId, turnId, entry.text)
         .catch(() => {
           // Inject call itself failed — un-track so the end-of-turn drain re-sends it
           // as a follow-up turn (flip to "queued") instead of stranding it.

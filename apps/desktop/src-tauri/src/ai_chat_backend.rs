@@ -89,6 +89,11 @@ pub struct AiChatCompletionStreamRequest {
     api_key: Option<String>,
     payload: Value,
     stream_id: Option<String>,
+    /// Provider wire protocol (`openai-compatible` default, or `anthropic`).
+    /// Selects the endpoint, auth headers, and SSE accumulator. Defaults so
+    /// older frontend payloads (which omit this field) stay valid.
+    #[serde(default = "default_protocol")]
+    protocol: String,
 }
 
 impl AiChatCompletionStreamRequest {
@@ -429,8 +434,11 @@ where
     } else {
         completion_endpoint(&request.base_url)?
     };
+    // Use connect_timeout only — not a whole-request timeout — so a long but
+    // actively-streaming agent turn is never killed by a per-request deadline.
+    // Genuine idle stalls are caught per-chunk below via tokio::select!.
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
         .build()
         .map_err(|error| error.to_string())?;
     let stream_ready = stream_payload(request.payload);
@@ -469,7 +477,10 @@ where
                             "request timed out",
                             delay,
                         );
-                        tokio::time::sleep(delay).await;
+                        // Cancellable sleep: a Stop during retry backoff exits immediately.
+                        if sleep_backoff_cancelable(attempt, &should_cancel).await {
+                            return Err("cancelled".to_string());
+                        }
                         attempt += 1;
                         continue;
                     }
@@ -486,7 +497,9 @@ where
                             "connection failed",
                             delay,
                         );
-                        tokio::time::sleep(delay).await;
+                        if sleep_backoff_cancelable(attempt, &should_cancel).await {
+                            return Err("cancelled".to_string());
+                        }
                         attempt += 1;
                         continue;
                     }
@@ -507,7 +520,9 @@ where
                         format!("HTTP {status}"),
                         delay,
                     );
-                    tokio::time::sleep(delay).await;
+                    if sleep_backoff_cancelable(attempt, &should_cancel).await {
+                        return Err("cancelled".to_string());
+                    }
                     attempt += 1;
                     continue;
                 }
@@ -536,7 +551,20 @@ where
     // splits on arbitrary byte boundaries, so decoding each chunk independently
     // would mangle multibyte code points (Cyrillic/CJK/emoji) into U+FFFD.
     let mut byte_tail: Vec<u8> = Vec::new();
-    'outer: while let Some(chunk) = stream.next().await {
+    'outer: loop {
+        // Per-chunk idle timeout: aborts only stalls (no bytes for CHAT_TIMEOUT_SECS),
+        // never long-but-actively-streaming generations. Matches the behavior of the
+        // Tauri event-streaming path (`stream_completion`).
+        let chunk = tokio::select! {
+            chunk = timeout(Duration::from_secs(CHAT_TIMEOUT_SECS), stream.next()) => {
+                match chunk {
+                    Ok(c) => c,
+                    Err(_) => return Err("AI stream stalled".to_string()),
+                }
+            }
+        };
+        let Some(chunk) = chunk else { break 'outer };
+
         // A Stop pressed mid-stream: bail before processing this chunk so the
         // response (and its in-flight HTTP connection) is dropped instead of
         // draining the model's full generation. The accumulated-so-far body is
@@ -690,6 +718,10 @@ struct StreamAccumulator {
     in_think: bool,
     think_resolved: bool,
     think_carry: String,
+    /// A mid-stream error event (`{"error":{...}}`) sent by an OpenAI-compatible
+    /// gateway on an already-200 SSE stream. Must fail the turn rather than being
+    /// finalized as empty/truncated content.
+    stream_error: Option<String>,
 }
 
 /// Opening / closing inline-thinking tags recognized in streamed `content`.
@@ -705,6 +737,37 @@ struct StreamToolCall {
 
 impl StreamAccumulator {
     fn ingest<F: FnMut(&str, &str)>(&mut self, value: &Value, on_delta: &mut F) {
+        // OpenAI-compatible gateways can send `{"error":{...}}` on a 200 stream.
+        // Capture the first one so the turn fails instead of returning empty content.
+        if self.stream_error.is_none() {
+            let err_msg = value
+                .get("error")
+                .and_then(|e| {
+                    e.get("message")
+                        .and_then(Value::as_str)
+                        .or_else(|| e.as_str())
+                })
+                .or_else(|| {
+                    // Some gateways send a top-level `{"message":"..."}` error shape.
+                    if value.get("choices").is_none() {
+                        value.get("message").and_then(Value::as_str)
+                    } else {
+                        None
+                    }
+                });
+            if let Some(msg) = err_msg {
+                let kind = value
+                    .get("error")
+                    .and_then(|e| e.get("code").or_else(|| e.get("type")))
+                    .and_then(Value::as_str);
+                self.stream_error = Some(match kind {
+                    Some(k) => format!("AI provider stream error ({k}): {msg}"),
+                    None => format!("AI provider stream error: {msg}"),
+                });
+                return;
+            }
+        }
+
         if let Some(usage) = value.get("usage") {
             if !usage.is_null() {
                 self.usage = Some(usage.clone());
@@ -1109,12 +1172,13 @@ impl StreamMode {
         }
     }
 
-    /// A mid-stream operational error captured during ingest (Anthropic only).
+    /// A mid-stream operational error captured during ingest (Anthropic typed
+    /// event or OpenAI-compatible `{"error":...}` frame on a 200 stream).
     /// `None` means the stream completed without a typed error event.
     fn stream_error(&self) -> Option<&str> {
         match self {
             Self::Anthropic(acc) => acc.error.as_deref(),
-            Self::OpenAi(_) => None,
+            Self::OpenAi(acc) => acc.stream_error.as_deref(),
         }
     }
 
@@ -1252,12 +1316,21 @@ pub fn history_save(
         sessions: request.sessions,
         updated_at: Utc::now(),
     };
-    let temporary_path = history_temp_path(&path);
-    std::fs::write(
-        &temporary_path,
-        serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
+    let serialized =
+        serde_json::to_vec_pretty(&document).map_err(|error| error.to_string())?;
+
+    // Serialize all writes through a process-level mutex. A unique temp-file id
+    // per write (defense in depth) ensures two callers that somehow both acquire
+    // the lock sequentially each operate on their own temp path.
+    let _guard = history_save_lock()
+        .lock()
+        .map_err(|_| "history save lock poisoned".to_string())?;
+
+    let write_id = uuid::Uuid::new_v4().to_string();
+    let temporary_path = history_temp_path(&path, &write_id);
+    std::fs::write(&temporary_path, serialized).map_err(|error| error.to_string())?;
+    // Atomic replace: on POSIX `rename` is atomic; on Windows it may fail if the
+    // destination exists (NTFS), so remove first under the lock.
     if path.exists() {
         std::fs::remove_file(&path).map_err(|error| error.to_string())?;
     }
@@ -1389,16 +1462,56 @@ fn history_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join(HISTORY_FILE))
 }
 
-fn history_temp_path(path: &Path) -> PathBuf {
-    path.with_extension("json.tmp")
+/// Process-level mutex that serializes all history writes. A single shared temp
+/// path plus concurrent callers is a classic read-modify-rename race: two saves
+/// could overwrite each other's temp file, or a rename could follow a different
+/// caller's delete. Holding this lock for the entire write+rename sequence turns
+/// concurrent autosaves into safe sequential ones.
+fn history_save_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+/// Unique temp path for each write: `ai-chat-history.<uuid>.tmp` in the same
+/// directory. A per-write unique name means even without the process mutex two
+/// writes can never clobber the same temp file — defense in depth on Windows
+/// where the rename is also atomic.
+fn history_temp_path(path: &Path, id: &str) -> PathBuf {
+    path.with_extension(format!("{id}.tmp"))
 }
 
 fn recover_history_temp_file(path: &Path) -> Result<(), String> {
-    let temporary_path = history_temp_path(path);
-    if path.exists() || !temporary_path.exists() {
+    // Main file is intact — nothing to recover.
+    if path.exists() {
         return Ok(());
     }
-    std::fs::rename(&temporary_path, path).map_err(|error| error.to_string())
+    // Scan the directory for any leftover `ai-chat-history.*.tmp` files written
+    // by the new per-write unique-id scheme and recover the newest one.
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("ai-chat-history");
+    let candidate = std::fs::read_dir(dir)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name();
+                    let s = name.to_string_lossy();
+                    // Match both the legacy single-path `ai-chat-history.json.tmp`
+                    // and the new per-write `ai-chat-history.<uuid>.tmp` names.
+                    s.starts_with(stem) && s.ends_with(".tmp")
+                })
+                .max_by_key(|e| e.metadata().ok().and_then(|m| m.modified().ok()))
+        });
+    if let Some(entry) = candidate {
+        let _ = std::fs::rename(entry.path(), path);
+    }
+    Ok(())
 }
 
 /// Attach provider auth to a request builder. Anthropic uses `x-api-key` plus the
@@ -1473,6 +1586,23 @@ fn backoff_delay(attempt: u32) -> Duration {
 
 async fn sleep_backoff(attempt: u32) {
     tokio::time::sleep(backoff_delay(attempt)).await;
+}
+
+/// Cancellable backoff sleep: sleeps in 250ms increments and checks `should_cancel`
+/// after each tick. Returns `true` if the sleep was interrupted by cancellation.
+/// This lets `completion_streaming` honour a Stop during connection-phase retries
+/// without requiring a full `CancellationToken` plumbing through every call site.
+async fn sleep_backoff_cancelable<C: Fn() -> bool>(attempt: u32, should_cancel: &C) -> bool {
+    const TICK_MS: u64 = 250;
+    let total = backoff_delay(attempt);
+    let ticks = (total.as_millis() / u128::from(TICK_MS)).max(1) as u32;
+    for _ in 0..ticks {
+        if should_cancel() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(TICK_MS)).await;
+    }
+    should_cancel()
 }
 
 /// Pick a backoff for a transient HTTP failure. A `Retry-After` header always
@@ -1590,7 +1720,20 @@ async fn stream_completion(
     request: AiChatCompletionStreamRequest,
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> Result<StreamCompletion, String> {
-    let endpoint = completion_endpoint(&request.base_url)?;
+    // Respect the provider protocol — Anthropic needs a different endpoint,
+    // auth headers, and request translation. Previously this path always used
+    // `/chat/completions` + bearer auth, breaking Anthropic streaming entirely.
+    let anthropic = crate::ai_anthropic::is_anthropic(&request.protocol);
+    let endpoint = if anthropic {
+        crate::ai_anthropic::messages_endpoint(&request.base_url)?
+    } else {
+        completion_endpoint(&request.base_url)?
+    };
+    let base_payload = if anthropic {
+        crate::ai_anthropic::to_anthropic_request(&request.payload)
+    } else {
+        request.payload.clone()
+    };
     // No total request timeout here: a long agent turn may actively stream for
     // longer than CHAT_TIMEOUT_SECS and must not be aborted mid-generation. The
     // connection phase is bounded by connect_timeout (and the wrapping send
@@ -1599,7 +1742,7 @@ async fn stream_completion(
         .connect_timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
         .build()
         .map_err(|error| error.to_string())?;
-    let payload = stream_payload(request.payload);
+    let payload = stream_payload(base_payload);
     let api_key = request
         .api_key
         .as_deref()
@@ -1612,14 +1755,13 @@ async fn stream_completion(
     let response = {
         let mut attempt: u32 = 0;
         loop {
-            let mut builder = client
+            let builder = client
                 .post(endpoint.as_str())
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
                 .header(reqwest::header::ACCEPT, "text/event-stream")
                 .json(&payload);
-            if let Some(key) = &api_key {
-                builder = builder.bearer_auth(key);
-            }
+            // Use provider-correct auth (x-api-key + anthropic-version vs bearer).
+            let builder = apply_auth(builder, anthropic, api_key.as_deref());
 
             let send = tokio::select! {
                 _ = &mut cancel_rx => return Ok(StreamCompletion::Cancelled),
@@ -1629,7 +1771,11 @@ async fn stream_completion(
             let response = match send {
                 Err(_) => {
                     if attempt < MAX_TRANSIENT_RETRIES {
-                        sleep_backoff(attempt).await;
+                        // Cancellable sleep: a Stop during backoff exits immediately.
+                        tokio::select! {
+                            _ = &mut cancel_rx => return Ok(StreamCompletion::Cancelled),
+                            () = sleep_backoff(attempt) => {}
+                        }
                         attempt += 1;
                         continue;
                     }
@@ -1637,7 +1783,10 @@ async fn stream_completion(
                 }
                 Ok(Err(error)) => {
                     if attempt < MAX_TRANSIENT_RETRIES && is_transient_reqwest_error(&error) {
-                        sleep_backoff(attempt).await;
+                        tokio::select! {
+                            _ = &mut cancel_rx => return Ok(StreamCompletion::Cancelled),
+                            () = sleep_backoff(attempt) => {}
+                        }
                         attempt += 1;
                         continue;
                     }
@@ -1656,7 +1805,10 @@ async fn stream_completion(
                 if attempt < budget && is_transient_status(status) {
                     let delay = retry_after_delay(response.headers())
                         .unwrap_or_else(|| backoff_delay(attempt));
-                    tokio::time::sleep(delay).await;
+                    tokio::select! {
+                        _ = &mut cancel_rx => return Ok(StreamCompletion::Cancelled),
+                        () = tokio::time::sleep(delay) => {}
+                    }
                     attempt += 1;
                     continue;
                 }
@@ -1669,9 +1821,12 @@ async fn stream_completion(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    // Carry an incomplete trailing UTF-8 sequence across chunks: bytes_stream()
-    // splits on arbitrary byte boundaries, so decoding each chunk independently
-    // would mangle multibyte code points (Cyrillic/CJK/emoji) into U+FFFD.
+    // Full decoded body, kept so a provider that ignores `stream:true` and
+    // returns a single non-SSE JSON object can still be parsed below.
+    let mut raw_body = String::new();
+    // Whether any SSE `data:` event was actually forwarded to the frontend.
+    let mut ingested_event = false;
+    // Carry an incomplete trailing UTF-8 sequence across chunks.
     let mut byte_tail: Vec<u8> = Vec::new();
     loop {
         // Per-chunk idle timeout: cuts only stalls (no bytes for CHAT_TIMEOUT_SECS),
@@ -1688,15 +1843,11 @@ async fn stream_completion(
             break;
         };
         let bytes = chunk.map_err(|error| stream_chunk_error(&error))?;
+        if raw_body.len() < MAX_SSE_BUFFER {
+            raw_body.push_str(&String::from_utf8_lossy(&bytes));
+        }
         byte_tail.extend_from_slice(&bytes);
-        // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
-        // invalid byte (e.g. a stray 0xFF from a misbehaving provider) is replaced
-        // with U+FFFD like the old from_utf8_lossy and skipped, instead of pinning
-        // valid_up_to at 0 forever (which would stall emission and grow byte_tail
-        // without bound past MAX_SSE_BUFFER). Looping means valid content *after*
-        // an invalid byte is appended to `buffer` now rather than deferred a chunk
-        // or dropped at end-of-stream, so byte_tail only ever retains an incomplete
-        // trailing code point (<= 3 bytes) carried to the next chunk.
+        // Drain byte_tail fully each chunk, handling partial multibyte sequences.
         loop {
             let (valid_up_to, invalid_len) = match std::str::from_utf8(&byte_tail) {
                 Ok(text) => {
@@ -1721,22 +1872,60 @@ async fn stream_completion(
         if buffer.len() > MAX_SSE_BUFFER {
             return Err("AI stream buffer exceeded limit".to_string());
         }
-        if emit_stream_sse_events(app, stream_id, &mut buffer)? {
+        if emit_stream_sse_events(app, stream_id, &mut buffer, &mut ingested_event)? {
             return Ok(StreamCompletion::Done);
         }
     }
 
-    // Flush any trailing bytes (a truncated final code point becomes U+FFFD) so a
-    // final event that ends without a `\n\n` delimiter is still processed below.
+    // Flush any trailing bytes.
     if !byte_tail.is_empty() {
         buffer.push_str(&String::from_utf8_lossy(&byte_tail));
     }
     normalize_sse_buffer_newlines(&mut buffer);
-    if emit_stream_sse_events(app, stream_id, &mut buffer)? {
+    if emit_stream_sse_events(app, stream_id, &mut buffer, &mut ingested_event)? {
         return Ok(StreamCompletion::Done);
     }
-    if !buffer.trim().is_empty() && emit_stream_sse_event(app, stream_id, buffer.trim())? {
+    if !buffer.trim().is_empty()
+        && emit_stream_sse_event(app, stream_id, buffer.trim(), &mut ingested_event)?
+    {
         return Ok(StreamCompletion::Done);
+    }
+
+    // Non-SSE fallback: some gateways ignore `stream:true` and return a plain
+    // JSON object. Parse it and emit a synthetic chunk+done so the frontend
+    // renders the answer instead of seeing an empty completed turn.
+    if !ingested_event {
+        let trimmed = raw_body.trim();
+        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+            let normalized = if anthropic && value.get("choices").is_none() {
+                crate::ai_anthropic::from_anthropic_response(&value)
+            } else {
+                value
+            };
+            // Only emit if the response carries actual content/tool_calls.
+            let has_content = normalized
+                .pointer("/choices/0/message/content")
+                .and_then(Value::as_str)
+                .map_or(false, |s| !s.is_empty());
+            let has_tools = normalized
+                .pointer("/choices/0/message/tool_calls")
+                .and_then(Value::as_array)
+                .map_or(false, |a| !a.is_empty());
+            if has_content || has_tools {
+                emit_stream_event(
+                    app,
+                    AiChatStreamEvent {
+                        stream_id: stream_id.to_string(),
+                        kind: "chunk".to_string(),
+                        data: Some(serde_json::json!({
+                            "choices": [{ "delta": normalized.pointer("/choices/0/message")
+                                .cloned().unwrap_or(Value::Null) }]
+                        })),
+                        error: None,
+                    },
+                )?;
+            }
+        }
     }
 
     emit_stream_event(
@@ -1791,22 +1980,33 @@ fn normalize_sse_buffer_newlines(buffer: &mut String) {
     }
 }
 
+/// Drain all complete SSE events from `buffer` (delimited by `\n\n`), emitting
+/// each to the Tauri event bus. Returns `true` when a `[DONE]` sentinel is found
+/// (caller should stop draining). `ingested` is set to `true` whenever a real
+/// `data:` event (not keep-alive or [DONE]) is forwarded — used by the non-SSE
+/// fallback to detect whether the provider spoke SSE at all.
 fn emit_stream_sse_events(
     app: &AppHandle,
     stream_id: &str,
     buffer: &mut String,
+    ingested: &mut bool,
 ) -> Result<bool, String> {
     while let Some(index) = buffer.find("\n\n") {
         let event = buffer[..index].to_string();
         buffer.drain(..index + 2);
-        if emit_stream_sse_event(app, stream_id, &event)? {
+        if emit_stream_sse_event(app, stream_id, &event, ingested)? {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn emit_stream_sse_event(app: &AppHandle, stream_id: &str, event: &str) -> Result<bool, String> {
+fn emit_stream_sse_event(
+    app: &AppHandle,
+    stream_id: &str,
+    event: &str,
+    ingested: &mut bool,
+) -> Result<bool, String> {
     let Some(data) = sse_event_data(event) else {
         return Ok(false);
     };
@@ -1832,6 +2032,7 @@ fn emit_stream_sse_event(app: &AppHandle, stream_id: &str, event: &str) -> Resul
     let Ok(value) = serde_json::from_str::<Value>(&data) else {
         return Ok(false);
     };
+    *ingested = true;
     emit_stream_event(
         app,
         AiChatStreamEvent {
@@ -2284,9 +2485,46 @@ mod tests {
         // The StreamMode wrapper surfaces it to completion_streaming.
         let mode = StreamMode::Anthropic(acc);
         assert!(mode.stream_error().is_some());
-        // The OpenAI accumulator never reports a stream error.
-        assert!(StreamMode::OpenAi(StreamAccumulator::default())
-            .stream_error()
-            .is_none());
+    }
+
+    #[test]
+    fn openai_stream_captures_mid_stream_error_frame() {
+        // OpenAI-compatible gateways send `{"error":{...}}` on a 200 SSE stream.
+        let mut acc = StreamAccumulator::default();
+        let mut noop = |_: &str, _: &str| {};
+
+        // A partial content frame followed by an error frame.
+        acc.ingest(
+            &serde_json::json!({"choices":[{"delta":{"content":"partial"}}]}),
+            &mut noop,
+        );
+        acc.ingest(
+            &serde_json::json!({"error":{"code":"rate_limit_exceeded","message":"Rate limit hit"}}),
+            &mut noop,
+        );
+
+        let mode = StreamMode::OpenAi(acc);
+        let err = mode.stream_error().expect("error must be captured");
+        assert!(err.contains("rate_limit_exceeded"), "error should include code");
+        assert!(err.contains("Rate limit hit"), "error should include message");
+    }
+
+    #[test]
+    fn openai_stream_error_does_not_swallow_partial_content() {
+        // Even when an error arrives, the partial content accumulated before it
+        // should still be accessible via into_response_body.
+        let mut acc = StreamAccumulator::default();
+        let mut noop = |_: &str, _: &str| {};
+        acc.ingest(
+            &serde_json::json!({"choices":[{"delta":{"content":"hello"}}]}),
+            &mut noop,
+        );
+        acc.ingest(
+            &serde_json::json!({"error":{"message":"context length exceeded"}}),
+            &mut noop,
+        );
+        // Content accumulated before the error is preserved.
+        assert_eq!(acc.content, "hello");
+        assert!(acc.stream_error.is_some());
     }
 }

@@ -3,8 +3,9 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::{
-    cmp::Reverse,
     collections::HashMap,
+    fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -184,7 +185,12 @@ impl DocumentStore {
         let path = payload.path.ok_or_else(|| {
             AppError::InvalidPath("untitled document requires a save path".to_string())
         })?;
-        std::fs::write(path, &payload.text)?;
+        // Atomic save: a direct `fs::write` truncates the target before the new
+        // bytes are durably on disk, so a disk-full error, crash, or AV lock can
+        // leave the user's file empty or half-written. Write a sibling temp file,
+        // fsync it, then rename over the target so the on-disk file is always
+        // either the old or the new content — never a corrupt intermediate.
+        atomic_write(&path, payload.text.as_bytes())?;
         Ok(self.finish_save(id, payload.version)?.0)
     }
 
@@ -277,6 +283,56 @@ impl DocumentStore {
     }
 }
 
+/// Durably write `bytes` to `path` via a sibling temp file + atomic rename.
+///
+/// The target is never truncated in place: we create `.<name>.lux-tmp-<pid>-<nanos>`
+/// next to it, write + flush + `sync_all` (so the bytes hit the disk, not just the
+/// page cache), then `rename` over the target. On any failure the temp file is
+/// removed and the original is left untouched. The sibling lives in the same
+/// directory so the rename stays on one filesystem (cross-device renames fail).
+fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
+    let temp_path = temp_sibling_path(path);
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+
+    if let Err(error) = fs::rename(&temp_path, path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+/// A hidden, per-process, per-call sibling path used as the atomic-write staging
+/// file. The `.` prefix keeps it out of casual listings; pid + nanos avoid
+/// collisions between concurrent saves of the same file.
+fn temp_sibling_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("document");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    parent.join(format!(
+        ".{file_name}.lux-tmp-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
 pub fn apply_text_edit(text: &mut String, edit: &TextEdit) -> AppResult<()> {
     let start = position_to_byte_offset(text, edit.start_line, edit.start_column)?;
     let end = position_to_byte_offset(text, edit.end_line, edit.end_column)?;
@@ -291,21 +347,62 @@ pub fn apply_text_edit(text: &mut String, edit: &TextEdit) -> AppResult<()> {
 }
 
 pub fn apply_text_edits(text: &mut String, edits: &[TextEdit]) -> AppResult<()> {
-    let mut ordered_edits = edits.iter().collect::<Vec<_>>();
-    ordered_edits.sort_by_key(|edit| Reverse(text_edit_order_key(edit)));
-    for edit in ordered_edits {
-        apply_text_edit(text, edit)?;
+    if edits.is_empty() {
+        return Ok(());
+    }
+
+    // Resolve every edit against the *original* document once, up front. Applying
+    // edits one-by-one in reverse only stays correct if the ranges do not overlap;
+    // an AI tool or LSP adapter emitting overlapping ranges would otherwise have
+    // its later edits interpreted against already-mutated text and silently corrupt
+    // the file. We therefore precompute byte ranges, reject overlaps, and only then
+    // mutate — turning silent corruption into a clear, fail-fast error.
+    let mut ranges: Vec<ResolvedEdit<'_>> = edits
+        .iter()
+        .map(|edit| {
+            let start = position_to_byte_offset(text, edit.start_line, edit.start_column)?;
+            let end = position_to_byte_offset(text, edit.end_line, edit.end_column)?;
+            if start > end {
+                return Err(AppError::Service(format!(
+                    "invalid edit range: start {start} is after end {end}"
+                )));
+            }
+            Ok(ResolvedEdit {
+                start,
+                end,
+                text: &edit.text,
+            })
+        })
+        .collect::<AppResult<Vec<_>>>()?;
+
+    // Sort by start ascending so an overlap is always a clash with the immediate
+    // predecessor. Adjacent ranges (and multiple zero-width inserts at the same
+    // offset) are permitted; a strict `start < previous_end` is the only overlap.
+    ranges.sort_by_key(|edit| (edit.start, edit.end));
+    for window in ranges.windows(2) {
+        let (previous, current) = (&window[0], &window[1]);
+        if current.start < previous.end {
+            return Err(AppError::Service(format!(
+                "overlapping edits: range {}..{} overlaps {}..{}",
+                previous.start, previous.end, current.start, current.end
+            )));
+        }
+    }
+
+    // Apply from the end of the document backwards so each replacement leaves the
+    // offsets of the not-yet-applied (earlier) edits unchanged.
+    for edit in ranges.iter().rev() {
+        text.replace_range(edit.start..edit.end, edit.text);
     }
     Ok(())
 }
 
-const fn text_edit_order_key(edit: &TextEdit) -> (u32, u32, u32, u32) {
-    (
-        edit.start_line,
-        edit.start_column,
-        edit.end_line,
-        edit.end_column,
-    )
+/// An edit resolved to absolute byte offsets in the original document, ready for
+/// overlap validation and back-to-front application.
+struct ResolvedEdit<'a> {
+    start: usize,
+    end: usize,
+    text: &'a str,
 }
 
 pub fn position_to_byte_offset(text: &str, line: u32, column: u32) -> AppResult<usize> {
@@ -494,6 +591,105 @@ mod tests {
             .expect("edits should apply");
 
         assert_eq!(updated.text, "a beta g");
+    }
+
+    #[test]
+    fn apply_edits_rejects_overlapping_ranges() {
+        let mut text = "alpha beta gamma".to_string();
+        // Two edits whose original ranges overlap (1..6 and 3..10) must fail fast
+        // instead of silently corrupting the buffer.
+        let edits = vec![
+            TextEdit {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 6,
+                text: "x".to_string(),
+            },
+            TextEdit {
+                start_line: 1,
+                start_column: 4,
+                end_line: 1,
+                end_column: 11,
+                text: "y".to_string(),
+            },
+        ];
+
+        let error = apply_text_edits(&mut text, &edits).expect_err("overlap must be rejected");
+        assert!(error.to_string().contains("overlapping"));
+        // The buffer is left untouched when validation fails.
+        assert_eq!(text, "alpha beta gamma");
+    }
+
+    #[test]
+    fn apply_edits_allows_adjacent_and_same_point_inserts() {
+        let mut text = "ab".to_string();
+        // Adjacent ranges (1..1 insert + 1..2 replace) and zero-width inserts at the
+        // same offset are not overlaps and must apply cleanly.
+        let edits = vec![
+            TextEdit {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 1,
+                text: "[".to_string(),
+            },
+            TextEdit {
+                start_line: 1,
+                start_column: 1,
+                end_line: 1,
+                end_column: 2,
+                text: "A".to_string(),
+            },
+        ];
+
+        apply_text_edits(&mut text, &edits).expect("adjacent edits should apply");
+        assert_eq!(text, "[Ab");
+    }
+
+    #[test]
+    fn save_file_writes_atomically_without_leaving_temp_files() {
+        let mut store = DocumentStore::default();
+        let path = std::env::temp_dir().join(format!(
+            "lux-editor-atomic-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_nanos())
+        ));
+        std::fs::write(&path, "original").expect("seed file");
+        let document = store
+            .open_file(&path)
+            .expect("open should succeed");
+        store
+            .update_text(document.id, "updated contents".to_string())
+            .expect("update should succeed");
+
+        let saved = store.save_file(document.id).expect("save should succeed");
+        assert!(!saved.is_dirty);
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read back"),
+            "updated contents"
+        );
+        // The staging sibling for *this* file must be gone after a successful
+        // rename (scope the check to our own file name to stay robust under the
+        // parallel test runner).
+        let our_temp_marker = format!(
+            ".{}.lux-tmp-",
+            path.file_name().unwrap().to_string_lossy()
+        );
+        let leftover = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(&our_temp_marker)
+            });
+        assert!(!leftover, "atomic save must not leave temp files behind");
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

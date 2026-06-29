@@ -1,9 +1,12 @@
-use std::{fs, io::Read, path::Path};
+use std::{
+    fs,
+    io::{BufReader, Cursor, Read},
+    path::Path,
+};
 
 use cfb::CompoundFile;
 use lux_core::{AppError, AppResult, ArchiveEntryPreview, FileInspectionOptions, FilePreview};
 use quick_xml::{events::Event, Reader as XmlReader};
-use std::io::Cursor;
 use zip::ZipArchive;
 
 const OFFICE_TEXT_LIMIT: usize = 80_000;
@@ -77,14 +80,37 @@ fn odf_zip_office_preview(path: &Path, options: &FileInspectionOptions) -> AppRe
 }
 
 fn rtf_office_preview(path: &Path) -> FilePreview {
-    let raw = fs::read_to_string(path).unwrap_or_else(|_| {
-        String::from_utf8_lossy(&fs::read(path).unwrap_or_default()).into_owned()
-    });
-    let text = truncate_chars(&strip_rtf(&raw), OFFICE_TEXT_LIMIT);
+    // Read only a bounded prefix so a huge .rtf cannot exhaust memory before the
+    // text limit is applied.  We read slightly more bytes than OFFICE_TEXT_LIMIT
+    // to give the RTF stripper enough context to produce a full output window;
+    // the extra 64 KiB covers any surrounding control words near the cutoff.
+    let read_cap = (OFFICE_TEXT_LIMIT as u64).saturating_add(64 * 1024);
+    let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let truncated_by_size = file_size > read_cap;
+
+    let raw: String = fs::File::open(path)
+        .ok()
+        .map(|f| {
+            let mut buf = Vec::new();
+            BufReader::new(f)
+                .take(read_cap)
+                .read_to_end(&mut buf)
+                .ok();
+            // Try UTF-8 first; fall back to lossy decode for legacy encodings.
+            match String::from_utf8(buf) {
+                Ok(s) => s,
+                Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
+            }
+        })
+        .unwrap_or_default();
+
+    let stripped = strip_rtf(&raw);
+    let truncated = truncated_by_size || stripped.len() > OFFICE_TEXT_LIMIT;
+    let text = truncate_chars(&stripped, OFFICE_TEXT_LIMIT);
     FilePreview::Office {
         text,
         parts: Vec::new(),
-        truncated: raw.len() > OFFICE_TEXT_LIMIT,
+        truncated,
     }
 }
 

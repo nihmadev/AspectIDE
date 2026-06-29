@@ -4,7 +4,6 @@ import type { CSSProperties, DragEvent, KeyboardEvent as ReactKeyboardEvent, Mou
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useEditorCloseGuard } from "../EditorCloseGuard";
-import { closedDocumentIdsForAllDocuments } from "../../lib/editorCloseTargets";
 import { fileIconForName } from "../../lib/fileIcons";
 import { displayPath, joinPath, normalizePath, parentPath } from "../../lib/fileTree";
 import { useTranslation } from "../../lib/i18n/useTranslation";
@@ -98,6 +97,34 @@ export function ExplorerPanel() {
     onSuccess: upsertDocument,
     onError: (error) => setOperationError(readErrorMessage(error, t)),
   });
+
+  // Retargets open documents whose path is at or inside `sourcePath` to the
+  // equivalent path under `destinationPath` after a rename/move operation.
+  // Closes the stale tab and reopens the file at the new location. Dirty
+  // content is discarded — the renamed file on disk already holds the last
+  // saved state, which is the correct ground-truth after a FS rename.
+  const retargetMovedDocuments = useCallback(async (sourcePath: string, destinationPath: string) => {
+    const { openDocuments: docs } = useLuxStore.getState();
+    const affected = docs.filter((doc) => doc.path && pathIsInsideEntry(sourcePath, doc.path));
+    if (affected.length === 0) return;
+    const sourceNorm = normalizePath(sourcePath);
+    await Promise.all(affected.map(async (doc) => {
+      if (!doc.path) return;
+      const docNorm = normalizePath(doc.path);
+      const newPath =
+        docNorm === sourceNorm
+          ? destinationPath
+          : joinPath(destinationPath, docNorm.slice(sourceNorm.length + 1));
+      // Close stale tab before opening the retargeted one
+      closeDocument(doc.id);
+      try {
+        upsertDocument(await luxCommands.editorOpenFile(newPath));
+      } catch {
+        // New path unreachable (e.g. directory that contains this file was
+        // not fully moved yet) — leave tab closed instead of keeping stale path.
+      }
+    }));
+  }, [closeDocument, upsertDocument]);
 
   const refreshSeq = useRef(0);
   const refreshTree = useCallback(async () => {
@@ -206,7 +233,11 @@ export function ExplorerPanel() {
 
       try {
         setOperationError(null);
-        await luxCommands.fsRename(entry.path, joinPath(parentPath(entry.path), trimmed));
+        const destination = joinPath(parentPath(entry.path), trimmed);
+        await luxCommands.fsRename(entry.path, destination);
+        // Retarget any open editors that were pointing at the old path so
+        // subsequent saves and AI tool calls reach the correct location.
+        await retargetMovedDocuments(entry.path, destination);
         await refreshTree();
       } catch (error) {
         setOperationError(readErrorMessage(error, t));
@@ -214,7 +245,7 @@ export function ExplorerPanel() {
         setPendingRename(null);
       }
     },
-    [refreshTree, t],
+    [refreshTree, retargetMovedDocuments, t],
   );
 
   const deleteEntry = useCallback(
@@ -280,6 +311,8 @@ export function ExplorerPanel() {
         setOperationError(null);
         if (clipboardEntry.operation === "cut") {
           await luxCommands.fsRename(clipboardEntry.entry.path, destination);
+          // Retarget open editors that referred to the cut source path.
+          await retargetMovedDocuments(clipboardEntry.entry.path, destination);
           setClipboardEntry(null);
         } else {
           await luxCommands.fsCopy(clipboardEntry.entry.path, destination);
@@ -290,7 +323,7 @@ export function ExplorerPanel() {
         setOperationError(readErrorMessage(error, t));
       }
     },
-    [clipboardEntry, ensureExplorerExpandedPath, fileTreeDirectories, refreshTree, t],
+    [clipboardEntry, ensureExplorerExpandedPath, fileTreeDirectories, refreshTree, retargetMovedDocuments, t],
   );
 
   const moveEntryInto = useCallback(
@@ -307,7 +340,10 @@ export function ExplorerPanel() {
 
       try {
         setOperationError(null);
-        await luxCommands.fsRename(entry.path, joinPath(targetDirectory, entry.name));
+        const destination = joinPath(targetDirectory, entry.name);
+        await luxCommands.fsRename(entry.path, destination);
+        // Retarget open editors that referred to the dragged entry's old path.
+        await retargetMovedDocuments(entry.path, destination);
         await refreshTree();
         ensureExplorerExpandedPath(targetDirectory);
       } catch (error) {
@@ -318,7 +354,7 @@ export function ExplorerPanel() {
         setDropTargetPath(null);
       }
     },
-    [ensureExplorerExpandedPath, fileTreeDirectories, refreshTree, t],
+    [ensureExplorerExpandedPath, fileTreeDirectories, refreshTree, retargetMovedDocuments, t],
   );
 
   const copyAbsolutePath = useCallback(async (entry: FsEntry) => {
@@ -367,7 +403,12 @@ export function ExplorerPanel() {
   }, [addWorkspaceFolder, loadWorkspaceRoot, t]);
 
   const removeFolderFromWorkspace = useCallback((root: string) => {
-    requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
+    // Only close documents that belong to the folder being removed — leave
+    // documents from other workspace roots (and untitled buffers) untouched.
+    const affectedDocumentIds = openDocuments
+      .filter((doc) => doc.path && pathIsInsideEntry(root, doc.path))
+      .map((doc) => doc.id);
+    requestCloseDocuments(affectedDocumentIds, () => {
       const remainingFolders = workspaceRoots.filter((folder) => normalizePath(folder.root) !== normalizePath(root));
       removeWorkspaceFolder(root);
       if (remainingFolders.length === 0) {

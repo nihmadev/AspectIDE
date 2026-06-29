@@ -8,9 +8,11 @@ import { pruneStaleToolOutputs } from "./aiChatContextCompaction";
 import { bridgeNativeToolCompleted, bridgeNativeToolStarted } from "./aiNativeOrchestrationBridge";
 import { captureNativeEditBefore, NATIVE_FILE_EDIT_TOOLS, registerNativeEditReview } from "./aiNativeFileReview";
 import { clearPendingQuestionsForSession, registerPendingQuestion } from "./aiPendingQuestion";
+import { clearActiveTurn, registerActiveTurn } from "./aiActiveTurns";
 import { clearPendingPlansForSession, getPendingPlanForSession, registerPendingPlan } from "./aiPendingPlan";
 import { browserSessionName, ensureBrowserStream } from "./agentBrowser";
 import { bumpBrowserStreamRefresh } from "./aiChatTurnRuntime";
+import { loadProjectAgentsSnip } from "./aiProjectAgentsSnip";
 import { isTauriRuntime, luxCommands, subscribeAiTurn, type AiRunTurnInput, type AiTurnEvent } from "./tauri";
 
 /**
@@ -98,6 +100,9 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
       if (abortListener) input.abortSignal.removeEventListener("abort", abortListener);
       // Cancel any coalesced streaming frame so no flush lands after settle.
       timeline.dispose();
+      // Drop the session→turn mapping so mid-work injection can't target a dead
+      // turn after this one settles (guarded so a newer turn isn't unmapped).
+      clearActiveTurn(input.chatSessionId, turnId);
     };
 
     const settleResolve = (message: AiChatMessage) => {
@@ -361,14 +366,22 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
     };
     input.abortSignal.addEventListener("abort", abortListener, { once: true });
 
+    // Publish the live turn_id for this session so the UI's mid-work injection
+    // effect can target THIS turn (ai_inject_message is scoped by session+turn).
+    registerActiveTurn(input.chatSessionId, turnId);
+
     void subscribeAiTurn(handleEvent)
       .then((stop) => {
         unlisten = stop;
         if (resolved) { stop(); return; }
-        // Launch the native turn after the subscription is live.
-        void luxCommands.aiRunTurn(buildRunTurnInput(input, turnId, messageId)).catch((error) => {
-          settleReject(error);
-        });
+        // Launch the native turn after the subscription is live. The run-turn input
+        // is built async because it loads the project AGENTS snippet (same as the TS
+        // prompt path) so native and TS turns share project-defined agent guidance.
+        void buildRunTurnInput(input, turnId, messageId)
+          .then((runTurnInput) => luxCommands.aiRunTurn(runTurnInput))
+          .catch((error) => {
+            settleReject(error);
+          });
       })
       .catch((error) => settleReject(error));
   });
@@ -383,8 +396,12 @@ function mapPhase(phase: string): "thinking" | "streaming" | "running-tools" | "
   }
 }
 
-function buildRunTurnInput(input: AiChatSendInput, turnId: string, messageId: string): AiRunTurnInput {
+async function buildRunTurnInput(input: AiChatSendInput, turnId: string, messageId: string): Promise<AiRunTurnInput> {
   const selectedModelAlias = input.selectedModel.alias || input.selectedModel.id;
+  // Load repository AGENTS.md guidance (walks up from the active file to the root),
+  // mirroring buildInitialMessages on the TS path. Best-effort: a read failure must
+  // not block the turn, so fall back to an empty snippet.
+  const projectAgentsSnip = await loadProjectAgentsSnip(input).catch(() => "");
   return {
     turnId,
     messageId,
@@ -430,7 +447,7 @@ function buildRunTurnInput(input: AiChatSendInput, turnId: string, messageId: st
       agentInstructions: input.selectedAgentInstructions,
       globalInstructions: input.globalInstructions,
       projectInstructions: input.projectInstructions,
-      projectAgentsSnip: "",
+      projectAgentsSnip,
       toolApprovalMode: input.preferences.toolApprovalMode,
       toolRoundLimit: input.preferences.toolRoundLimit,
       selectedEffortId: input.preferences.selectedEffortId,

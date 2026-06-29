@@ -78,14 +78,20 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
   }, [refresh, t]);
 
   const wipeAll = useCallback(async () => {
-    if (!window.confirm(t("settings.memory.confirmWipe"))) return;
+    // memoryWipe(null) is scoped to the *active workspace's* store on the backend
+    // (with_memory → workspace_root), not global. Name the project in the prompt so
+    // the user can see exactly which project's memory they are about to erase.
+    const prompt = workspace
+      ? `${t("settings.memory.confirmWipe")}\n\n${workspace.name}`
+      : t("settings.memory.confirmWipe");
+    if (!window.confirm(prompt)) return;
     try {
       await luxCommands.memoryWipe(null);
       void refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
-  }, [refresh, t]);
+  }, [refresh, t, workspace]);
 
   const categories = useMemo(() => stats?.byCategory ?? [], [stats]);
 

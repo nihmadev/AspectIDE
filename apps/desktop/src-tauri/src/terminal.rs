@@ -4,7 +4,7 @@ use lux_core::TerminalSessionInfo;
 use tauri::State;
 use uuid::Uuid;
 
-use super::{lock_error, SharedState};
+use super::{lock_error, resolve_workspace_path, SharedState};
 
 #[tauri::command]
 pub fn terminal_create(
@@ -15,7 +15,23 @@ pub fn terminal_create(
     rows: Option<u16>,
 ) -> Result<TerminalSessionInfo, String> {
     let cwd = match cwd {
-        Some(path) => path,
+        // A caller-supplied cwd is resolved through the workspace guard so a shell
+        // can never be spawned outside the open project (the terminal is a powerful
+        // AI/renderer surface). `resolve_workspace_path` requires the path to exist
+        // and rejects absolute/`..`-escaping targets; reject non-directories too.
+        Some(path) => {
+            let resolved = resolve_workspace_path(&state, &path)?;
+            if !resolved.is_dir() {
+                return Err(format!(
+                    "terminal cwd is not a directory: {}",
+                    resolved.display()
+                ));
+            }
+            resolved
+        }
+        // No cwd given: default to the workspace root. With no workspace open this
+        // falls back to the process cwd — a user-only convenience that carries no
+        // caller-controlled path, so it can't be used to escape a workspace.
         None => state
             .workspace
             .lock()

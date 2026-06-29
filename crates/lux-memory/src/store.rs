@@ -58,6 +58,14 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE OF content, category ON me
 END;
 ";
 
+/// Hard ceiling for a single plain `list` page. A model/tool-driven request can
+/// ask for a huge `limit`; without a cap one call could read and allocate the
+/// entire memory table. Pagination via `offset` still walks the whole store.
+const MAX_LIST_LIMIT: usize = 500;
+/// Max embedded rows scanned when merging a semantic-recall pool, so hybrid
+/// search stays bounded even on a large store with many embeddings.
+const EMBEDDED_SCAN_CAP: usize = 512;
+
 /// Unqualified column list for reads against `memories` alone.
 const COLS: &str = "id, category, content, metadata, importance, pinned, source, created_at, updated_at, last_accessed_at, access_count, (embedding IS NOT NULL) AS has_embedding";
 /// `memories.`-qualified column list for joins against `memories_fts`
@@ -73,6 +81,9 @@ struct Candidate {
     memory: Memory,
     raw_lex: Option<f64>,
     lexical: f64,
+    /// Cosine similarity to the query embedding, precomputed when this candidate
+    /// came from the embedded-pool scan (so the scoring loop need not re-fetch it).
+    embed_sim: Option<f64>,
 }
 
 impl MemoryStore {
@@ -202,12 +213,11 @@ impl MemoryStore {
             values.push(SqlValue::Text(category.clone()));
         }
         sql.push_str(&format!(" ORDER BY {order} LIMIT ? OFFSET ?"));
-        // Saturate the cast: an absurd (caller-supplied) usize > i64::MAX would wrap
-        // negative, which SQLite reads as "unbounded LIMIT" / "OFFSET 0" — silently
-        // returning the whole table. i64::MAX caps it instead.
-        values.push(SqlValue::Integer(
-            i64::try_from(opts.limit).unwrap_or(i64::MAX),
-        ));
+        // Clamp the caller-supplied limit to a sane page ceiling so one tool/model
+        // request can't read and allocate the whole table. (The saturating cast
+        // alone would still honor an absurd-but-< i64::MAX limit.)
+        let limit = opts.limit.min(MAX_LIST_LIMIT);
+        values.push(SqlValue::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
         values.push(SqlValue::Integer(
             i64::try_from(opts.offset).unwrap_or(i64::MAX),
         ));
@@ -243,12 +253,22 @@ impl MemoryStore {
                     memory,
                     raw_lex: None,
                     lexical: 0.0,
+                    embed_sim: None,
                 })
                 .collect()
         };
 
         if opts.include_pinned {
             self.augment_with_pinned(&mut candidates, opts)?;
+        }
+
+        // Hybrid recall: a memory can match strongly by embedding while sharing no
+        // FTS token with the query. Such rows never reach the lexical/salience seed
+        // above, so when an embedding is supplied we merge in a bounded, category-
+        // filtered pool of embedded rows. Cosine scoring below then lets a real
+        // semantic match surface even with zero lexical overlap.
+        if opts.query_embedding.is_some() {
+            self.augment_with_embedded(&mut candidates, opts)?;
         }
 
         // Normalize the lexical sub-scores across the candidate set (order-preserving).
@@ -275,13 +295,22 @@ impl MemoryStore {
                 );
                 let mut lexical = candidate.lexical;
                 if let Some(query_vec) = &opts.query_embedding {
-                    if candidate.memory.has_embedding {
-                        if let Some(stored) = self.embedding_of(&candidate.memory.id).ok().flatten()
-                        {
-                            // Map cosine [-1,1] → [0,1] and let it lift a weak lexical hit.
-                            let sim = f64::from(cosine_similarity(query_vec, &stored));
-                            lexical = lexical.max((sim + 1.0) / 2.0);
+                    // Reuse the similarity precomputed by the embedded-pool scan;
+                    // otherwise fetch it for lexical/pinned candidates that carry
+                    // an embedding but weren't scored during augmentation.
+                    let sim = candidate.embed_sim.or_else(|| {
+                        if candidate.memory.has_embedding {
+                            self.embedding_of(&candidate.memory.id)
+                                .ok()
+                                .flatten()
+                                .map(|stored| f64::from(cosine_similarity(query_vec, &stored)))
+                        } else {
+                            None
                         }
+                    });
+                    if let Some(sim) = sim {
+                        // Map cosine [-1,1] → [0,1] and let it lift a weak lexical hit.
+                        lexical = lexical.max((sim + 1.0) / 2.0);
                     }
                 }
                 let score = blend(
@@ -417,6 +446,7 @@ impl MemoryStore {
                     memory,
                     raw_lex: Some(-rank),
                     lexical: 0.0,
+                    embed_sim: None,
                 })
             })
             .map_err(to_service)?;
@@ -446,8 +476,63 @@ impl MemoryStore {
                     memory,
                     raw_lex: None,
                     lexical: 0.0,
+                    embed_sim: None,
                 });
             }
+        }
+        Ok(())
+    }
+
+    /// Merge a bounded pool of embedded rows into `candidates`, scoring each by
+    /// cosine to the query embedding. This is what makes semantic-only recall work
+    /// (a strong embedding match with no shared FTS token). Bounded by
+    /// `EMBEDDED_SCAN_CAP` and ordered by salience so the most relevant embedded
+    /// rows are considered first on large stores.
+    fn augment_with_embedded(
+        &self,
+        candidates: &mut Vec<Candidate>,
+        opts: &SearchOptions,
+    ) -> AppResult<()> {
+        let Some(query_vec) = opts.query_embedding.as_deref() else {
+            return Ok(());
+        };
+        if query_vec.is_empty() {
+            return Ok(());
+        }
+        let present: HashSet<String> = candidates.iter().map(|c| c.memory.id.clone()).collect();
+
+        let mut sql = format!(
+            "SELECT {COLS}, embedding FROM memories WHERE embedding IS NOT NULL"
+        );
+        let mut values: Vec<SqlValue> = Vec::new();
+        if let Some(category) = &opts.category {
+            sql.push_str(" AND category = ?");
+            values.push(SqlValue::Text(category.clone()));
+        }
+        sql.push_str(&format!(
+            " ORDER BY pinned DESC, importance DESC, last_accessed_at DESC LIMIT {EMBEDDED_SCAN_CAP}"
+        ));
+        let mut stmt = self.conn.prepare(&sql).map_err(to_service)?;
+        let rows = stmt
+            .query_map(params_from_iter(values), |row| {
+                let memory = row_to_memory(row)?;
+                let blob: Vec<u8> = row.get(12)?;
+                Ok((memory, blob))
+            })
+            .map_err(to_service)?;
+        for row in rows {
+            let (memory, blob) = row.map_err(to_service)?;
+            if present.contains(&memory.id) {
+                continue;
+            }
+            let stored = decode_embedding(&blob);
+            let sim = f64::from(cosine_similarity(query_vec, &stored));
+            candidates.push(Candidate {
+                memory,
+                raw_lex: None,
+                lexical: 0.0,
+                embed_sim: Some(sim),
+            });
         }
         Ok(())
     }
@@ -734,6 +819,61 @@ mod tests {
             )
             .unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn embedding_recalls_semantic_only_memory_without_shared_tokens() {
+        // A memory whose TEXT shares no token with the query, but whose embedding
+        // is close, must still be recalled via the embedded-pool scan.
+        let store = store();
+        let target = store
+            .create(NewMemory {
+                embedding: Some(vec![1.0, 0.0, 0.0]),
+                ..new_memory("semantic", "the deployment pipeline runs nightly")
+            })
+            .unwrap();
+        store
+            .create(NewMemory {
+                embedding: Some(vec![0.0, 1.0, 0.0]),
+                ..new_memory("semantic", "unrelated note about colors")
+            })
+            .unwrap();
+
+        let hits = store
+            .search(
+                // No lexical overlap with the target content at all.
+                "zzz qqq",
+                &SearchOptions {
+                    query_embedding: Some(vec![0.99, 0.01, 0.0]),
+                    touch: false,
+                    ..SearchOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            hits.first().map(|h| h.memory.id.as_str()),
+            Some(target.id.as_str()),
+            "semantic-only memory must surface first via embedding recall"
+        );
+    }
+
+    #[test]
+    fn list_clamps_absurd_limit_to_cap() {
+        let store = store();
+        for index in 0..3 {
+            store
+                .create(new_memory("core", &format!("note {index}")))
+                .unwrap();
+        }
+        // A huge caller-supplied limit must be clamped, not honored verbatim.
+        let listed = store
+            .list(&SearchOptions {
+                limit: usize::MAX,
+                ..SearchOptions::default()
+            })
+            .unwrap();
+        assert!(listed.len() <= super::MAX_LIST_LIMIT);
+        assert_eq!(listed.len(), 3);
     }
 
     #[test]

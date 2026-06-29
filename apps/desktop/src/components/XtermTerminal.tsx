@@ -9,19 +9,11 @@ import "@xterm/xterm/css/xterm.css";
 const webPrompt = "$ ";
 
 type XtermTerminalProps = {
-  /**
-   * The FULL accumulated output buffer for this session. The always-on global
-   * terminalOutput listener (App.tsx) appends every PTY chunk into the store
-   * buffer synchronously, so this prop captures 100% of the output with no race.
-   * We render it incrementally (delta writes) — this is what makes a brand-new
-   * terminal show its shell prompt instead of staying blank.
-   */
-  bufferText?: string;
   clearToken: number;
   session: TerminalSessionInfo | null;
 };
 
-export function XtermTerminal({ bufferText = "", clearToken, session }: XtermTerminalProps) {
+export function XtermTerminal({ clearToken, session }: XtermTerminalProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -31,6 +23,16 @@ export function XtermTerminal({ bufferText = "", clearToken, session }: XtermTer
   const writtenLenRef = useRef(0);
   const webPromptWrittenRef = useRef(false);
   const appendTerminalOutput = useLuxStore((state) => state.appendTerminalOutput);
+  // Subscribe ONLY to THIS session's buffer slice. Previously BottomPanel subscribed to
+  // the whole terminalOutputBuffers map and threaded every session's text down, so a PTY
+  // chunk on any terminal re-rendered the entire bottom panel (all tabs, controls, and
+  // every mounted terminal slot). Selecting a single session's text here means an append
+  // only wakes the one terminal it belongs to. The always-on global terminalOutput
+  // listener (App.tsx) keeps this buffer authoritative, so we still render the FULL
+  // accumulated output incrementally (delta writes) with no race.
+  const bufferText = useLuxStore((state) =>
+    session ? (state.terminalOutputBuffers[session.id]?.text ?? "") : "",
+  );
 
   useEffect(() => {
     sessionRef.current = session;

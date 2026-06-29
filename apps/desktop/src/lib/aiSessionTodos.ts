@@ -17,7 +17,13 @@ export type AiSessionTodo = {
 const todosBySession = new Map<string, AiSessionTodo[]>();
 const listeners = new Set<() => void>();
 
+// Monotonic revision counter — incremented on every mutation so useSyncExternalStore
+// subscribers see a fresh snapshot value even when the underlying Map identity (and
+// size) is unchanged, e.g., a single todo status change within an existing session.
+let todosRevision = 0;
+
 function emit() {
+  todosRevision += 1;
   for (const listener of listeners) listener();
 }
 
@@ -26,8 +32,9 @@ export function subscribeAiSessionTodos(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
+/** Returns the monotonic revision so useSyncExternalStore detects every mutation. */
 export function getAiSessionTodosSnapshot() {
-  return todosBySession;
+  return todosRevision;
 }
 
 export function listAiSessionTodos(sessionId: string) {

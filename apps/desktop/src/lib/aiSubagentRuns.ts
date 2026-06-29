@@ -102,6 +102,28 @@ export function appendSubagentTranscript(id: string, content: string, role: Suba
   emit();
 }
 
+/**
+ * Update the most recent assistant transcript entry in-place for streaming patches.
+ * Instead of appending a growing prefix on every streaming chunk (causing duplicate/
+ * balloon allocations), we replace the last assistant entry's content with the
+ * accumulated full text and only emit once. If there is no existing assistant entry
+ * to update, falls back to appendSubagentTranscript.
+ */
+export function updateLastSubagentTranscript(id: string, fullContent: string) {
+  const run = runs.get(id);
+  if (!run || !fullContent.trim()) return;
+  const transcript = [...run.transcript];
+  const lastIdx = transcript.length - 1;
+  if (lastIdx >= 0 && transcript[lastIdx].role === "assistant") {
+    // Replace in-place — same id/at so React doesn't unmount/remount the entry.
+    transcript[lastIdx] = { ...transcript[lastIdx], content: fullContent.trim() };
+    runs.set(id, { ...run, transcript, revision: run.revision + 1 });
+    emit();
+  } else {
+    appendSubagentTranscript(id, fullContent);
+  }
+}
+
 export function getSubagentRun(id: string) {
   return runs.get(id) ?? null;
 }

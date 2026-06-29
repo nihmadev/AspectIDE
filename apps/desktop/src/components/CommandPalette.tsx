@@ -36,6 +36,7 @@ import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { displayPath as formatPath, normalizePath } from "../lib/fileTree";
 import { useLuxStore, type Activity } from "../lib/store";
 import { luxCommands } from "../lib/tauri";
+import { spawnTerminalSession } from "../lib/terminalSpawn";
 import { pickAndOpenWorkspace, reloadWorkspace } from "../lib/workspaceActions";
 import type { ExtensionCommandExecution, ExtensionCommandRoute, FsEntry, LspWorkspaceSymbol } from "../lib/types";
 
@@ -71,7 +72,6 @@ export function CommandPalette() {
   const languageServers = useLuxStore((state) => state.languageServers);
   const setLanguageServers = useLuxStore((state) => state.setLanguageServers);
   const setLanguageServersLoading = useLuxStore((state) => state.setLanguageServersLoading);
-  const upsertTerminalSession = useLuxStore((state) => state.upsertTerminalSession);
   const keybindingProfile = useLuxStore((state) => state.keybindingProfile);
   const upsertDocument = useLuxStore((state) => state.upsertDocument);
   const setPendingEditorReveal = useLuxStore((state) => state.setPendingEditorReveal);
@@ -462,8 +462,11 @@ export function CommandPalette() {
         shortcut: shortcutFor("workbench.action.terminal.toggleTerminal", keybindingProfile),
         icon: TerminalSquare,
         run: () => {
+          // Open the terminal tab and create the session through the shared guarded
+          // spawner. BottomPanel's auto-spawn also routes through it, so the in-flight
+          // guard prevents the two paths from racing into two shells.
           openBottomPanel("terminal");
-          void luxCommands.terminalCreate().then((terminal) => upsertTerminalSession(terminal, true)).catch(() => undefined);
+          void spawnTerminalSession().catch(() => undefined);
         },
       },
       {
@@ -528,7 +531,6 @@ export function CommandPalette() {
       setGitStatus,
       setSidebarVisible,
       setSettingsOpen,
-      upsertTerminalSession,
       setWorkspace,
       sidebarVisible,
       splitActiveEditor,

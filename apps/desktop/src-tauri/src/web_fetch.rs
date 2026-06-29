@@ -1,5 +1,5 @@
 use std::{
-    net::{IpAddr, SocketAddr, ToSocketAddrs},
+    net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     time::Duration,
 };
 
@@ -338,23 +338,70 @@ fn is_localhost_name(host: &str) -> bool {
     host == "localhost" || host.ends_with(".localhost")
 }
 
+const fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+    ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        // 100.64.0.0/10 — CGNAT (RFC 6598); not "private" per std but never public.
+        || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
+        // 192.0.0.0/24 — IETF protocol assignments (RFC 6890).
+        || (ip.octets()[0] == 192 && ip.octets()[1] == 0 && ip.octets()[2] == 0)
+        // 198.18.0.0/15 — benchmarking (RFC 2544).
+        || (ip.octets()[0] == 198 && (ip.octets()[1] & 0xfe) == 18)
+}
+
 const fn is_private_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(ip) => {
-            ip.is_private()
-                || ip.is_loopback()
-                || ip.is_link_local()
-                || ip.is_broadcast()
-                || ip.is_documentation()
-                || ip.is_unspecified()
-        }
+        IpAddr::V4(ip) => is_private_ipv4(ip),
         IpAddr::V6(ip) => {
+            // IPv4-mapped (`::ffff:a.b.c.d`) and IPv4-compatible (`::a.b.c.d`)
+            // literals tunnel an IPv4 destination through an `IpAddr::V6`; route the
+            // embedded address through the IPv4 predicate so `[::ffff:127.0.0.1]`
+            // can't slip past the loopback/RFC1918 checks. `const` forbids
+            // `to_ipv4_mapped`, so decode the mapping from the raw segments.
+            if let Some(v4) = embedded_ipv4(ip.segments()) {
+                return is_private_ipv4(v4);
+            }
             ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_unique_local()
                 || ip.is_unicast_link_local()
                 || ip.segments()[0] & 0xffc0 == 0xfe80
         }
+    }
+}
+
+/// Extract an IPv4 address embedded in an IPv6 literal: both IPv4-mapped
+/// (`::ffff:0:0/96`) and the deprecated IPv4-compatible (`::/96`, excluding the
+/// `::`/`::1` specials) forms. Returns `None` for genuine IPv6 addresses.
+const fn embedded_ipv4(segments: [u16; 8]) -> Option<Ipv4Addr> {
+    // The high 80 bits (segments 0..=4) are zero for both embedded forms; segment 5
+    // is the discriminator (0xffff = mapped, 0x0000 = compatible) and 6..=7 hold the
+    // IPv4 octets.
+    let high_zero = segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0;
+    let marker = segments[5];
+    let high_octets = segments[6];
+    let low_octets = segments[7];
+    let v4 = Ipv4Addr::new(
+        (high_octets >> 8) as u8,
+        (high_octets & 0xff) as u8,
+        (low_octets >> 8) as u8,
+        (low_octets & 0xff) as u8,
+    );
+    let is_mapped = marker == 0xffff; // ::ffff:a.b.c.d
+    // ::a.b.c.d — exclude the `::`/`::1` specials (not real embedded IPv4).
+    let is_compatible = marker == 0 && (high_octets != 0 || low_octets > 1);
+    if high_zero && (is_mapped || is_compatible) {
+        Some(v4)
+    } else {
+        None
     }
 }
 
@@ -461,6 +508,26 @@ mod tests {
         assert!(is_private_ip("192.168.1.20".parse().unwrap()));
         assert!(is_private_ip("::1".parse().unwrap()));
         assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_guard_blocks_ipv4_mapped_ipv6_bypass() {
+        // The SSRF bypass: IPv4-mapped/compatible IPv6 literals carrying a private
+        // IPv4 destination must be rejected, not treated as opaque IPv6.
+        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip("::ffff:192.168.1.1".parse().unwrap()));
+        assert!(is_private_ip("::127.0.0.1".parse().unwrap()));
+        // A mapped *public* address is still allowed (don't over-block).
+        assert!(!is_private_ip("::ffff:8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn private_ip_guard_blocks_cgnat_and_benchmark_ranges() {
+        assert!(is_private_ip("100.64.0.1".parse().unwrap())); // CGNAT
+        assert!(is_private_ip("198.18.0.1".parse().unwrap())); // benchmarking
+        assert!(is_private_ip("192.0.0.1".parse().unwrap())); // IETF protocol
+        assert!(!is_private_ip("100.128.0.1".parse().unwrap())); // outside CGNAT /10
     }
 
     #[test]

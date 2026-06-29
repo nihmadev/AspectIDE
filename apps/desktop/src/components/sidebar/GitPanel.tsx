@@ -31,23 +31,34 @@ export function GitPanel() {
   const changes = useMemo(() => files.filter(isChanged), [files]);
   const repoRoot = workspace?.root ?? null;
 
-  // Per-file +/− line counts (HEAD vs working), refreshed with the status.
+  // Stable signature of the current file-set; gitDiff is only refetched when
+  // the set of changed/staged paths actually changes, not on every poll tick.
+  const fileSetSignature = files.map((f) => `${f.path}:${f.index_status}:${f.worktree_status}`).join("|");
+  const lastFetchedSignatureRef = useRef<string | null>(null);
+
+  // Per-file +/− line counts (HEAD vs working).  Uses a lightweight signature
+  // to skip redundant full-diff fetches when only metadata (e.g. timestamps)
+  // changed without altering which paths are modified.
   useEffect(() => {
     if (!gitStatus || files.length === 0) {
       setDiffCounts(new Map());
+      lastFetchedSignatureRef.current = null;
       return;
     }
+    // Skip if the file-set hasn't changed since the last successful fetch.
+    if (lastFetchedSignatureRef.current === fileSetSignature) return;
     let cancelled = false;
     luxCommands.gitDiff()
       .then((diff) => {
         if (cancelled) return;
+        lastFetchedSignatureRef.current = fileSetSignature;
         const map = new Map<string, DiffCount>();
         for (const file of diff.files) map.set(normalizeKey(file.path), { additions: file.additions, deletions: file.deletions });
         setDiffCounts(map);
       })
       .catch(() => { if (!cancelled) setDiffCounts(new Map()); });
     return () => { cancelled = true; };
-  }, [gitStatus, files.length]);
+  }, [gitStatus, fileSetSignature]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Close the branch menu on outside click / Escape.
   useEffect(() => {

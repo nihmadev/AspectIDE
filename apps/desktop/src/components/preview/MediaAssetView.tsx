@@ -1,16 +1,30 @@
 import { useTranslation } from "../../lib/i18n/useTranslation";
 import { useFileAssetUrl } from "../../lib/useFileAssetUrl";
 
+type ResolvedAsset = {
+  error: string | null;
+  loading: boolean;
+  url: string | null;
+};
+
 type MediaAssetViewProps = {
   alt: string;
   kind: "audio" | "image" | "video";
   path: string;
   reloadKey?: number;
+  // Pre-resolved asset state. When supplied, MediaAssetView does NOT fetch the file
+  // itself — this avoids the duplicate full-file base64 transfer + main-thread decode
+  // that happens when both the owning pane and this view independently load the asset.
+  // The owner fetches once via useFileAssetUrl and passes the result down.
+  asset?: ResolvedAsset;
 };
 
-export function MediaAssetView({ alt, kind, path, reloadKey = 0 }: MediaAssetViewProps) {
+export function MediaAssetView({ alt, kind, path, reloadKey = 0, asset }: MediaAssetViewProps) {
   const { t } = useTranslation();
-  const { error, loading, url } = useFileAssetUrl(path, reloadKey);
+  // Fetch internally only when the owner did not provide an asset. Passing a null path
+  // makes the hook a no-op, keeping hook order stable regardless of the `asset` prop.
+  const own = useFileAssetUrl(asset ? null : path, reloadKey);
+  const { error, loading, url } = asset ?? own;
 
   if (loading && !url) {
     return <div className="file-preview-loading">{t("filePreview.status.loading")}</div>;

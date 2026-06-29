@@ -3,14 +3,29 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use futures_util::stream::StreamExt;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::time::{timeout, Duration};
 
 const AI_TEST_HEALTH_TIMEOUT_SECS: u64 = 180;
 const AI_TEST_HEALTH_MAX_OUTPUT_CHARS: usize = 24_000;
+/// Per-stream raw capture cap (bytes). A runner can emit megabytes of output;
+/// capturing it all would balloon memory before the char-based `truncate_output`
+/// trims it for display. Stop reading once a stream passes this — the child keeps
+/// running and is reaped by `wait()` / killed on timeout. 2 MiB comfortably covers
+/// the ~24k-char display budget while bounding worst-case memory.
+const AI_TEST_HEALTH_MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 const AI_TEST_HEALTH_SCAN_MAX_DEPTH: usize = 4;
 const AI_TEST_HEALTH_MAX_RUNNERS: usize = 12;
+/// Global wall-clock budget for an entire health probe. Without it, 12 runners ×
+/// 180s each could stall an AI turn-loop feedback signal for up to 36 minutes on a
+/// broken/hanging monorepo. Once exhausted, not-yet-started plans return as
+/// `skipped` so the loop always gets a bounded, timely answer.
+const AI_TEST_HEALTH_GLOBAL_BUDGET_SECS: u64 = 360;
+/// How many plans run at once. Bounded concurrency cuts total latency versus the
+/// old strictly-sequential loop while not oversubscribing the machine.
+const AI_TEST_HEALTH_CONCURRENCY: usize = 4;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const WATCH_EXCLUDED_COMPONENTS: &[&str] = &[
@@ -944,11 +959,48 @@ async fn run_test_health_plans(
     }
 
     let started = std::time::Instant::now();
-    let skipped = plans.len().saturating_sub(AI_TEST_HEALTH_MAX_RUNNERS);
-    let mut runners = Vec::new();
-    for plan in plans.into_iter().take(AI_TEST_HEALTH_MAX_RUNNERS) {
-        runners.push(run_single_test_health_plan(&root, plan).await);
+    let over_cap = plans.len().saturating_sub(AI_TEST_HEALTH_MAX_RUNNERS);
+    let selected: Vec<TestHealthPlan> = plans.into_iter().take(AI_TEST_HEALTH_MAX_RUNNERS).collect();
+    let selected_count = selected.len();
+
+    // Run plans with bounded concurrency under a single global budget. When the budget
+    // elapses, the remaining plans resolve immediately as `skipped` (rather than each
+    // burning its own 180s), so the whole probe is bounded for the AI loop.
+    let budget = tokio::time::sleep(Duration::from_secs(AI_TEST_HEALTH_GLOBAL_BUDGET_SECS));
+    tokio::pin!(budget);
+    let mut runners = Vec::with_capacity(selected_count);
+    let mut stream = futures_util::stream::iter(
+        selected
+            .into_iter()
+            .map(|plan| run_single_test_health_plan(&root, plan)),
+    )
+    .buffer_unordered(AI_TEST_HEALTH_CONCURRENCY);
+
+    loop {
+        tokio::select! {
+            // Bias toward draining results so finished runners are always collected.
+            biased;
+            maybe = stream.next() => {
+                match maybe {
+                    Some(result) => runners.push(result),
+                    None => break, // all selected plans finished
+                }
+            }
+            () = &mut budget => {
+                // Budget exhausted: stop awaiting (dropped futures kill their children
+                // via kill_on_drop) and return a partial-but-timely result.
+                break;
+            }
+        }
     }
+
+    // Drop the stream (and any in-flight, now-cancelled plan futures, which still
+    // borrow `root`) before moving `root` into the response below.
+    drop(stream);
+
+    // Anything not collected when we stopped is reported skipped (over the runner cap
+    // plus any that the global budget cut short).
+    let skipped = over_cap + selected_count.saturating_sub(runners.len());
     let total_duration_ms = started.elapsed().as_millis();
     Ok(test_health_response_from_runners(
         root,
@@ -979,15 +1031,16 @@ async fn run_single_test_health_plan(root: &Path, plan: TestHealthPlan) -> TestH
             let mut stdout_pipe = child.stdout.take();
             let mut stderr_pipe = child.stderr.take();
             let collect = async {
-                use tokio::io::AsyncReadExt;
-                let mut out = Vec::new();
-                let mut err = Vec::new();
-                if let Some(pipe) = stdout_pipe.as_mut() {
-                    let _ = pipe.read_to_end(&mut out).await;
-                }
-                if let Some(pipe) = stderr_pipe.as_mut() {
-                    let _ = pipe.read_to_end(&mut err).await;
-                }
+                // Drain BOTH pipes truly concurrently with `join!`. Reading stdout to
+                // EOF first (the previous behaviour) let a runner that writes a lot of
+                // stderr fill the stderr pipe, block the child, keep stdout open, and
+                // wedge the read until the 180s timeout — a false timeout on common
+                // failing suites. Each stream is capped so a chatty runner can't grow
+                // the buffer unbounded.
+                let (out, err) = tokio::join!(
+                    read_stream_capped(stdout_pipe.as_mut()),
+                    read_stream_capped(stderr_pipe.as_mut()),
+                );
                 let status = child.wait().await;
                 (status, out, err)
             };
@@ -1246,6 +1299,38 @@ struct CollectedOutput {
     status: std::process::ExitStatus,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+}
+
+/// Drain one child pipe to EOF, stopping early once
+/// [`AI_TEST_HEALTH_MAX_CAPTURE_BYTES`] is buffered so a chatty runner can't grow
+/// the capture without bound. Keeps reading-and-discarding the rest so the pipe
+/// never fills and blocks the child (the real cause of the stderr-deadlock). Read
+/// errors end collection with whatever was captured.
+async fn read_stream_capped<R>(pipe: Option<&mut R>) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut captured = Vec::new();
+    let Some(pipe) = pipe else {
+        return captured;
+    };
+    // Heap-allocated so this buffer isn't part of the (awaited) future's stack frame.
+    let mut scratch = vec![0u8; 16 * 1024];
+    loop {
+        match pipe.read(&mut scratch).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                if captured.len() < AI_TEST_HEALTH_MAX_CAPTURE_BYTES {
+                    let room = AI_TEST_HEALTH_MAX_CAPTURE_BYTES - captured.len();
+                    captured.extend_from_slice(&scratch[..read.min(room)]);
+                }
+                // Past the cap we keep reading but discard, draining the pipe so the
+                // child never blocks on a full buffer.
+            }
+        }
+    }
+    captured
 }
 
 fn shell_command(command_line: &str) -> tokio::process::Command {

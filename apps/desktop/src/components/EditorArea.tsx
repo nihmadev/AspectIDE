@@ -599,7 +599,10 @@ function EditorGroupPane({
               fontSize={editorPreferences.fontSize}
               lineHeight={editorPreferences.lineHeight}
               minimap={editorPreferences.minimap}
-              onChange={(text) => applySpreadsheetChanges(activeDocument.id, text)}
+              onChange={(value, event) => {
+                if (!isEditableDocument) return;
+                applyEditorChanges(activeDocument.id, event, value);
+              }}
               readOnly={!isEditableDocument}
               renderWhitespace={editorPreferences.renderWhitespace}
               smoothScrolling={editorPreferences.smoothScrolling}
@@ -620,7 +623,10 @@ function EditorGroupPane({
               fontSize={editorPreferences.fontSize}
               lineHeight={editorPreferences.lineHeight}
               minimap={editorPreferences.minimap}
-              onChange={(text) => applySpreadsheetChanges(activeDocument.id, text)}
+              onChange={(value, event) => {
+                if (!isEditableDocument) return;
+                applyEditorChanges(activeDocument.id, event, value);
+              }}
               readOnly={!isEditableDocument}
               renderWhitespace={editorPreferences.renderWhitespace}
               smoothScrolling={editorPreferences.smoothScrolling}

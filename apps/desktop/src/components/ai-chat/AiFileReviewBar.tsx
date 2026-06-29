@@ -50,6 +50,11 @@ export function AiFileReviewBar({ documentPath, sessionId }: AiFileReviewBarProp
   if (!documentPath || pending.length === 0) return null;
   const review = pending[0];
   const language = inferLanguage(documentPath);
+  // Resolve the selected hunk to its real modified-text start line so the diff
+  // editor reveals the actual location instead of an estimated ordinal.
+  const activeHunkLine = activeHunkId
+    ? review.hunks.find((hunk) => hunk.id === activeHunkId)?.afterStartLine ?? null
+    : null;
 
   return (
     <div className="ai-file-review-bar" data-expanded={expanded} data-preview={review.previewOnly || undefined}>
@@ -118,7 +123,7 @@ export function AiFileReviewBar({ documentPath, sessionId }: AiFileReviewBarProp
             beforeText={review.beforeText}
             afterText={review.afterText}
             language={language}
-            activeHunkId={activeHunkId}
+            activeHunkLine={activeHunkLine}
           />
           <div className="ai-file-review-actions">
             <button type="button" className="primary" onClick={() => void acceptPendingFileReview(review.id)}>

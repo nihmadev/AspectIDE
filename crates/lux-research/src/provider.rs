@@ -2,7 +2,13 @@
 //! keyless DuckDuckGo HTML fallback. Pure: callers do the HTTP and hand the body
 //! back here to parse.
 
+use std::net::{IpAddr, Ipv6Addr};
+
 use crate::model::{FocusMode, SearchHit};
+
+/// Localhost names (and aliases) that must never become a fetchable source even
+/// before DNS resolution.
+const BLOCKED_HOST_NAMES: &[&str] = &["localhost", "ip6-localhost", "ip6-loopback"];
 
 /// Build a SearxNG JSON search URL for `query` under `focus`.
 #[must_use]
@@ -25,11 +31,11 @@ pub fn parse_searxng_json(json: &serde_json::Value) -> Vec<SearchHit> {
         .iter()
         .filter_map(|item| {
             let url = item.get("url").and_then(|value| value.as_str())?.trim();
-            if url.is_empty() {
-                return None;
-            }
+            // SSRF gate: drop any provider URL that isn't a safe, public http(s)
+            // source before it can ever reach the fetch layer.
+            let url = validate_source_url(url)?;
             Some(SearchHit {
-                url: url.to_string(),
+                url,
                 title: string_field(item, "title"),
                 snippet: string_field(item, "content"),
                 engine: item
@@ -190,12 +196,123 @@ fn normalize_ddg_href(href: &str) -> String {
     } else {
         href.to_string()
     };
-    let lower = resolved.trim_start().to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") {
-        resolved
-    } else {
-        String::new()
+    // Funnel through the shared SSRF gate so a DDG redirect can't smuggle a
+    // loopback/metadata/private host (or userinfo-obfuscated one) into a source.
+    validate_source_url(resolved.trim_start()).unwrap_or_default()
+}
+
+/// The single SSRF gate every provider URL passes through before becoming a
+/// [`SearchHit`]. Returns the normalized URL when it is a safe, fetchable public
+/// http(s) source, or `None` to drop it. Rejects: non-http(s) schemes, embedded
+/// userinfo (`user:pass@host`), localhost aliases, and any IP literal that is
+/// loopback, private, link-local (incl. the `169.254.169.254` cloud-metadata
+/// address), unique-local, multicast, or unspecified. Hostnames that aren't IP
+/// literals are allowed through here; the fetch layer must re-validate the
+/// resolved address after DNS and after every redirect hop.
+#[must_use]
+pub fn validate_source_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    let rest = strip_http_scheme(url)?;
+    // Authority ends at the first '/', '?' or '#'.
+    let authority_end = rest
+        .find(['/', '?', '#'])
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() {
+        return None;
     }
+    // Reject userinfo: `https://example.com@127.0.0.1/` resolves to the host
+    // AFTER the '@', so anything before it is an obfuscation vector.
+    if authority.contains('@') {
+        return None;
+    }
+    let host = host_from_authority(authority);
+    if host.is_empty() || is_blocked_host(&host) {
+        return None;
+    }
+    Some(url.to_string())
+}
+
+/// Lowercased scheme strip: returns the post-`scheme://` remainder for http(s)
+/// only (the one place the http/https allowlist is enforced).
+fn strip_http_scheme(url: &str) -> Option<&str> {
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("https://") {
+        Some(&url["https://".len()..])
+    } else if lower.starts_with("http://") {
+        Some(&url["http://".len()..])
+    } else {
+        None
+    }
+}
+
+/// Extract the host from an `authority` (`host[:port]`), unwrapping a bracketed
+/// IPv6 literal (`[::1]:8080` → `::1`).
+fn host_from_authority(authority: &str) -> String {
+    if let Some(after) = authority.strip_prefix('[') {
+        // IPv6 literal: host is everything up to the closing bracket.
+        return after
+            .split(']')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+    }
+    authority
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+/// Whether `host` is a name/IP we must never fetch (SSRF guard).
+fn is_blocked_host(host: &str) -> bool {
+    if BLOCKED_HOST_NAMES.contains(&host) {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(ip) => is_blocked_ip(&ip),
+        // A non-IP hostname passes the literal check; DNS-time re-validation in
+        // the fetch layer is what closes the rebinding gap.
+        Err(_) => false,
+    }
+}
+
+/// Reject loopback, private, link-local (incl. cloud metadata), unique-local,
+/// multicast, and unspecified addresses.
+fn is_blocked_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local() // 169.254.0.0/16 — includes 169.254.169.254 metadata
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || v4.is_documentation()
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                || is_unique_local_v6(v6)
+                || is_link_local_v6(v6)
+                // An IPv4-mapped address (::ffff:127.0.0.1) must be judged by its
+                // embedded v4 so it can't bypass the v4 rules above.
+                || v6.to_ipv4_mapped().is_some_and(|v4| is_blocked_ip(&IpAddr::V4(v4)))
+        }
+    }
+}
+
+/// `fc00::/7` unique-local (the IPv6 analogue of RFC1918). Hand-rolled because
+/// `Ipv6Addr::is_unique_local` is unstable.
+fn is_unique_local_v6(ip: &Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// `fe80::/10` link-local. Hand-rolled because `Ipv6Addr::is_unicast_link_local`
+/// is unstable.
+fn is_link_local_v6(ip: &Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
 fn strip_tags(html: &str) -> String {
@@ -370,5 +487,55 @@ mod tests {
     fn percent_roundtrip() {
         assert_eq!(percent_decode(&percent_encode("a b/c?d")), "a b/c?d");
         assert_eq!(percent_decode("a+b"), "a b");
+    }
+
+    #[test]
+    fn validate_source_url_allows_public_https() {
+        assert_eq!(
+            validate_source_url("https://example.com/page?q=1"),
+            Some("https://example.com/page?q=1".to_string())
+        );
+        assert_eq!(
+            validate_source_url("http://docs.rs/"),
+            Some("http://docs.rs/".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_source_url_blocks_ssrf_targets() {
+        // Non-http(s) schemes.
+        assert_eq!(validate_source_url("javascript:alert(1)"), None);
+        assert_eq!(validate_source_url("file:///etc/passwd"), None);
+        // Loopback / localhost aliases.
+        assert_eq!(validate_source_url("http://127.0.0.1/"), None);
+        assert_eq!(validate_source_url("http://localhost:8080/admin"), None);
+        assert_eq!(validate_source_url("http://[::1]/"), None);
+        // Cloud metadata + link-local.
+        assert_eq!(validate_source_url("http://169.254.169.254/latest/meta-data"), None);
+        // RFC1918 / private + ULA.
+        assert_eq!(validate_source_url("http://10.0.0.5/"), None);
+        assert_eq!(validate_source_url("http://192.168.1.1/"), None);
+        assert_eq!(validate_source_url("http://172.16.0.1/"), None);
+        assert_eq!(validate_source_url("http://[fc00::1]/"), None);
+        // Userinfo obfuscation: the real host is AFTER the '@'.
+        assert_eq!(validate_source_url("https://example.com@127.0.0.1/"), None);
+        // IPv4-mapped IPv6 loopback must not bypass the v4 rules.
+        assert_eq!(validate_source_url("http://[::ffff:127.0.0.1]/"), None);
+        // Unspecified.
+        assert_eq!(validate_source_url("http://0.0.0.0/"), None);
+    }
+
+    #[test]
+    fn searxng_json_drops_ssrf_urls() {
+        let json = serde_json::json!({
+            "results": [
+                { "url": "https://safe.example/ok", "title": "ok" },
+                { "url": "http://169.254.169.254/latest", "title": "metadata" },
+                { "url": "http://localhost/internal", "title": "loopback" }
+            ]
+        });
+        let hits = parse_searxng_json(&json);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].url, "https://safe.example/ok");
     }
 }

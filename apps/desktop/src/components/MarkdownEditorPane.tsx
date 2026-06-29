@@ -1,10 +1,17 @@
 import { marked } from "marked";
 import { lazy, Suspense, useMemo } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
+import type { editor } from "monaco-editor";
 import { useTranslation } from "../lib/i18n/useTranslation";
+import { sanitizeMarkdownHtml } from "../lib/sanitizeHtml";
+import { useDebouncedValue } from "../lib/useDebouncedValue";
 import type { DocumentSnapshot } from "../lib/types";
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
+
+// Re-rendering the preview on every keypress is wasted work for large docs; the source
+// pane stays live while the preview catches up shortly after typing pauses.
+const PREVIEW_DEBOUNCE_MS = 180;
 
 type MarkdownEditorPaneProps = {
   document: DocumentSnapshot;
@@ -13,7 +20,7 @@ type MarkdownEditorPaneProps = {
   fontSize: number;
   lineHeight: number;
   minimap: boolean;
-  onChange: (value: string) => void;
+  onChange: (value: string | undefined, event: editor.IModelContentChangedEvent) => void;
   readOnly: boolean;
   renderWhitespace: "none" | "boundary" | "selection" | "trailing" | "all";
   smoothScrolling: boolean;
@@ -38,13 +45,17 @@ export function MarkdownEditorPane({
   wordWrap,
 }: MarkdownEditorPaneProps) {
   const { t } = useTranslation();
+  // Debounce only the (expensive, secondary) preview render — document state still
+  // updates synchronously via incremental edits so saves/LSP stay accurate.
+  const debouncedText = useDebouncedValue(document.text, PREVIEW_DEBOUNCE_MS);
   const previewHtml = useMemo(() => {
     try {
-      return marked.parse(document.text || "", { async: false }) as string;
+      // Workspace markdown is untrusted: parse then sanitize before injecting as HTML.
+      return sanitizeMarkdownHtml(marked.parse(debouncedText || "", { async: false }) as string);
     } catch {
-      return `<pre>${escapeHtml(document.text)}</pre>`;
+      return `<pre>${escapeHtml(debouncedText)}</pre>`;
     }
-  }, [document.text]);
+  }, [debouncedText]);
 
   return (
     <div className="markdown-editor-pane">
@@ -57,7 +68,7 @@ export function MarkdownEditorPane({
               path={`markdown-source:${document.id}`}
               language={document.language_id}
               value={document.text}
-              onChange={(value) => onChange(value ?? "")}
+              onChange={onChange}
               options={{
                 automaticLayout: true,
                 fontFamily,

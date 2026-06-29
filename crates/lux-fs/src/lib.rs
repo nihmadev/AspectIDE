@@ -3,14 +3,15 @@
 #![allow(clippy::missing_errors_doc)]
 
 use std::{
+    collections::BinaryHeap,
     fs,
-    path::Path,
+    path::{Component, Path, PathBuf},
     process::Command,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
 };
-
-#[cfg(all(unix, not(target_os = "macos")))]
-use std::path::PathBuf;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -20,15 +21,56 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 use chrono::{DateTime, Utc};
 use ignore::{WalkBuilder, WalkState};
-use lux_core::{scan_threads, AppResult, FsEntry, FsEntryKind};
+use lux_core::{acquire_scan_workers, AppError, AppResult, FsEntry, FsEntryKind, ScanWorkers};
+
+/// Hard ceiling on entries materialized by an unbounded [`read_tree`] crawl.
+///
+/// `read_tree` deliberately disables ignore handling (it mirrors a raw recursive
+/// `read_dir`), so on a monorepo or a tree containing `node_modules`, build output,
+/// or a network mount it could otherwise allocate an unbounded vector and block for
+/// a long time. The cap turns a pathological workspace into a truncated-but-bounded
+/// result instead of an OOM/stall. It is generous enough that ordinary projects are
+/// never truncated.
+const MAX_TREE_ENTRIES: usize = 200_000;
+
+/// Returns whether `path` is hidden relative to `root`: any path component below
+/// `root` that begins with a dot makes the whole entry hidden (e.g. a file inside
+/// `.git/` or `.venv/`). Components of `root` itself are never considered — only the
+/// portion the walk descended into — so opening a workspace whose own folder starts
+/// with a dot does not mark every file hidden.
+///
+/// Centralizing this here keeps `read_dir`, `read_tree`, and the `list_files*`
+/// family consistent; previously name-only checks and full-path checks disagreed for
+/// files living under a hidden ancestor.
+fn is_hidden_path(path: &Path, root: &Path) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    relative.components().any(|component| {
+        matches!(component, Component::Normal(segment)
+            if segment.to_string_lossy().starts_with('.'))
+    })
+}
+
+/// Number of worker threads a walk should use, reserved from the process-global
+/// scan budget so concurrent scans/searches share it instead of each spawning the
+/// full count. The returned guard must be kept alive for the whole walk.
+fn reserve_walk_workers() -> ScanWorkers {
+    acquire_scan_workers()
+}
+
+/// Upper bound on the heap capacity pre-reserved by [`list_files`] so a caller that
+/// passes an enormous `max_results` cannot force a giant up-front allocation; the
+/// heap still grows on demand up to `max_results` if that many files actually exist.
+const MAX_LIST_HEAP_RESERVE: usize = 4_096;
 
 pub fn read_dir(path: impl AsRef<Path>) -> AppResult<Vec<FsEntry>> {
+    let root = path.as_ref();
     let mut entries = Vec::new();
-    for entry in fs::read_dir(path)? {
+    for entry in fs::read_dir(root)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
         let metadata = entry.metadata()?;
         let name = entry.file_name().to_string_lossy().to_string();
+        let entry_path = entry.path();
         let kind = if file_type.is_dir() {
             FsEntryKind::Directory
         } else if file_type.is_file() {
@@ -40,9 +82,9 @@ pub fn read_dir(path: impl AsRef<Path>) -> AppResult<Vec<FsEntry>> {
         };
 
         entries.push(FsEntry {
-            is_hidden: name.starts_with('.'),
+            is_hidden: is_hidden_path(&entry_path, root),
             name,
-            path: entry.path(),
+            path: entry_path,
             kind,
             size: metadata.len(),
             modified_at: metadata.modified().ok().map(DateTime::<Utc>::from),
@@ -58,13 +100,43 @@ pub fn read_dir(path: impl AsRef<Path>) -> AppResult<Vec<FsEntry>> {
     Ok(entries)
 }
 
-pub fn read_tree(root: impl AsRef<Path>) -> AppResult<Vec<FsEntry>> {
-    let root = root.as_ref().to_path_buf();
+/// Result of a bounded tree crawl.
+///
+/// Carries the collected entries plus whether the walk hit its entry cap
+/// (`truncated`) and how many entries were skipped due to walker or metadata errors
+/// (`skipped_errors`) instead of being silently dropped.
+#[derive(Debug, Default)]
+pub struct TreeScan {
+    pub entries: Vec<FsEntry>,
+    pub truncated: bool,
+    pub skipped_errors: usize,
+}
 
-    // Parallel walk of the full tree (no ignore/hidden filtering — `read_tree`
-    // mirrors a raw recursive `read_dir` and includes directories themselves).
-    // Per-thread visitors push into a shared buffer; metadata `stat`s run across
-    // worker threads, which is the dominant cost on large or networked trees.
+pub fn read_tree(root: impl AsRef<Path>) -> AppResult<Vec<FsEntry>> {
+    // The legacy entry point keeps its `Vec<FsEntry>` contract for existing callers;
+    // it is now backed by the bounded crawl so a pathological workspace can no longer
+    // allocate without limit. Truncation/error metadata is available via
+    // [`read_tree_bounded`] for callers that want to surface it.
+    Ok(read_tree_bounded(root, MAX_TREE_ENTRIES).entries)
+}
+
+/// Parallel full-tree crawl (no ignore/hidden filtering — mirrors a raw recursive
+/// `read_dir` and includes directories themselves), bounded to `max_entries`.
+///
+/// Per-thread visitors push into a shared buffer; metadata `stat`s run across worker
+/// threads, the dominant cost on large or networked trees. The walk stops early via
+/// [`WalkState::Quit`] once `max_entries` is reached so an unbounded monorepo or a
+/// tree full of `node_modules`/build output cannot stall the IDE or exhaust memory.
+/// Walker/metadata errors are counted rather than dropped, so callers can tell the
+/// difference between "no such files" and "files we could not read".
+#[must_use]
+pub fn read_tree_bounded(root: impl AsRef<Path>, max_entries: usize) -> TreeScan {
+    let root = root.as_ref().to_path_buf();
+    if max_entries == 0 {
+        return TreeScan::default();
+    }
+
+    let workers = reserve_walk_workers();
     let mut builder = WalkBuilder::new(&root);
     builder
         .hidden(false)
@@ -73,14 +145,19 @@ pub fn read_tree(root: impl AsRef<Path>) -> AppResult<Vec<FsEntry>> {
         .git_exclude(false)
         .git_global(false)
         .parents(false)
-        .threads(scan_threads());
+        .threads(workers.count());
 
     let collected: Arc<Mutex<Vec<FsEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    let errors = Arc::new(AtomicUsize::new(0));
     builder.build_parallel().run(|| {
         let collected = Arc::clone(&collected);
+        let errors = Arc::clone(&errors);
         let root = root.clone();
         Box::new(move |result| {
+            // A directory we could not descend / a vanished path: record it as a
+            // skipped error instead of silently omitting it.
             let Ok(entry) = result else {
+                errors.fetch_add(1, Ordering::Relaxed);
                 return WalkState::Continue;
             };
             // The walker yields the root itself first; skip it to match the
@@ -88,14 +165,25 @@ pub fn read_tree(root: impl AsRef<Path>) -> AppResult<Vec<FsEntry>> {
             if entry.path() == root {
                 return WalkState::Continue;
             }
-            if let Some(record) = entry_to_fs_entry(&entry) {
-                if let Ok(mut buffer) = collected.lock() {
-                    buffer.push(record);
+            match entry_to_fs_entry(&entry, &root) {
+                Some(record) => {
+                    if let Ok(mut buffer) = collected.lock() {
+                        buffer.push(record);
+                        // Cap reached: tell every worker to stop walking so we never
+                        // materialize the rest of the tree.
+                        if buffer.len() >= max_entries {
+                            return WalkState::Quit;
+                        }
+                    }
+                }
+                None => {
+                    errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
             WalkState::Continue
         })
     });
+    drop(workers);
 
     // `run` has returned, so every worker thread is joined and no other `Arc`
     // clone survives — reclaim the buffer without cloning.
@@ -103,13 +191,20 @@ pub fn read_tree(root: impl AsRef<Path>) -> AppResult<Vec<FsEntry>> {
         .ok()
         .and_then(|mutex| mutex.into_inner().ok())
         .unwrap_or_default();
+    let truncated = entries.len() >= max_entries;
+    entries.truncate(max_entries);
     entries.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(entries)
+    TreeScan {
+        entries,
+        truncated,
+        skipped_errors: errors.load(Ordering::Relaxed),
+    }
 }
 
 /// Builds an [`FsEntry`] from a walker entry, classifying its kind and reading
-/// metadata. Returns `None` when the entry cannot be stat-ed or named.
-fn entry_to_fs_entry(entry: &ignore::DirEntry) -> Option<FsEntry> {
+/// metadata. `root` anchors ancestor-aware hidden detection. Returns `None` when
+/// the entry cannot be stat-ed or named.
+fn entry_to_fs_entry(entry: &ignore::DirEntry, root: &Path) -> Option<FsEntry> {
     let file_type = entry.file_type()?;
     let path = entry.path();
     let metadata = entry.metadata().ok();
@@ -126,7 +221,7 @@ fn entry_to_fs_entry(entry: &ignore::DirEntry) -> Option<FsEntry> {
         FsEntryKind::Other
     };
     Some(FsEntry {
-        is_hidden: name.starts_with('.'),
+        is_hidden: is_hidden_path(path, root),
         name,
         path: path.to_path_buf(),
         kind,
@@ -137,24 +232,68 @@ fn entry_to_fs_entry(entry: &ignore::DirEntry) -> Option<FsEntry> {
     })
 }
 
+/// An [`FsEntry`] ordered solely by path so it can live in a [`BinaryHeap`]. The
+/// heap is a max-heap on path, which lets [`list_files`] keep only the
+/// lexicographically smallest `max_results` paths and evict the current largest in
+/// `O(log n)` without ever holding the whole workspace in memory.
+struct PathOrdered(FsEntry);
+
+impl PartialEq for PathOrdered {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.path == other.0.path
+    }
+}
+impl Eq for PathOrdered {}
+impl PartialOrd for PathOrdered {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for PathOrdered {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.path.cmp(&other.0.path)
+    }
+}
+
+/// Push `record` into a bounded max-heap that retains only the smallest
+/// `max_results` paths: fill until full, then replace the current maximum whenever a
+/// smaller path arrives. Caps memory at `max_results` regardless of workspace size.
+fn offer_to_bounded_heap(heap: &mut BinaryHeap<PathOrdered>, record: FsEntry, max_results: usize) {
+    if heap.len() < max_results {
+        heap.push(PathOrdered(record));
+    } else if let Some(largest) = heap.peek() {
+        if record.path < largest.0.path {
+            heap.pop();
+            heap.push(PathOrdered(record));
+        }
+    }
+}
+
 pub fn list_files(root: impl AsRef<Path>, max_results: usize) -> AppResult<Vec<FsEntry>> {
     let root = root.as_ref().to_path_buf();
+    if max_results == 0 {
+        return Ok(Vec::new());
+    }
+    let workers = reserve_walk_workers();
     let mut builder = WalkBuilder::new(&root);
     builder
         .hidden(false)
         .git_ignore(true)
         .git_exclude(true)
         .parents(true)
-        .threads(scan_threads());
+        .threads(workers.count());
 
-    // Parallel walk: each worker thread collects matching files into a shared
-    // buffer, so the many `metadata` syscalls fan out across cores. We gather all
-    // matches first, then sort by path and truncate — this makes the result
-    // deterministic (the previous serial walk truncated in nondeterministic walk
-    // order before sorting), while still honoring `max_results`.
-    let collected: Arc<Mutex<Vec<FsEntry>>> = Arc::new(Mutex::new(Vec::new()));
+    // Parallel walk: each worker thread offers matching files into a shared bounded
+    // max-heap, so the many `metadata` syscalls fan out across cores while memory
+    // stays capped at `max_results` instead of holding every path in a giant `Vec`
+    // before truncating. The result is the deterministic lexicographically-smallest
+    // `max_results` paths.
+    let heap: Arc<Mutex<BinaryHeap<PathOrdered>>> = Arc::new(Mutex::new(
+        BinaryHeap::with_capacity(max_results.min(MAX_LIST_HEAP_RESERVE)),
+    ));
     builder.build_parallel().run(|| {
-        let collected = Arc::clone(&collected);
+        let heap = Arc::clone(&heap);
+        let root = root.clone();
         Box::new(move |result| {
             let Ok(entry) = result else {
                 return WalkState::Continue;
@@ -176,30 +315,29 @@ pub fn list_files(root: impl AsRef<Path>, max_results: usize) -> AppResult<Vec<F
                 return WalkState::Continue;
             };
             let record = FsEntry {
-                is_hidden: path
-                    .components()
-                    .any(|component| component.as_os_str().to_string_lossy().starts_with('.')),
+                is_hidden: is_hidden_path(&path, &root),
                 name,
                 path,
                 kind: FsEntryKind::File,
                 size: metadata.len(),
                 modified_at: metadata.modified().ok().map(DateTime::<Utc>::from),
             };
-            if let Ok(mut buffer) = collected.lock() {
-                buffer.push(record);
+            if let Ok(mut buffer) = heap.lock() {
+                offer_to_bounded_heap(&mut buffer, record, max_results);
             }
             WalkState::Continue
         })
     });
+    drop(workers);
 
     // `run` has returned, so every worker thread is joined and no other `Arc`
-    // clone survives — reclaim the buffer without cloning.
-    let mut entries = Arc::try_unwrap(collected)
+    // clone survives — reclaim the heap without cloning, then emit in path order.
+    let heap = Arc::try_unwrap(heap)
         .ok()
         .and_then(|mutex| mutex.into_inner().ok())
         .unwrap_or_default();
+    let mut entries: Vec<FsEntry> = heap.into_iter().map(|ordered| ordered.0).collect();
     entries.sort_by(|left, right| left.path.cmp(&right.path));
-    entries.truncate(max_results);
     Ok(entries)
 }
 
@@ -222,18 +360,20 @@ pub fn list_files_matching(
     if max_matches == 0 {
         return Ok(Vec::new());
     }
+    let workers = reserve_walk_workers();
     let mut builder = WalkBuilder::new(&root);
     builder
         .hidden(false)
         .git_ignore(true)
         .git_exclude(true)
         .parents(true)
-        .threads(scan_threads());
+        .threads(workers.count());
 
     let collected: Arc<Mutex<Vec<FsEntry>>> = Arc::new(Mutex::new(Vec::new()));
     builder.build_parallel().run(|| {
         let collected = Arc::clone(&collected);
         let predicate = &predicate;
+        let root = root.clone();
         Box::new(move |result| {
             let Ok(entry) = result else {
                 return WalkState::Continue;
@@ -258,9 +398,7 @@ pub fn list_files_matching(
                 return WalkState::Continue;
             };
             let record = FsEntry {
-                is_hidden: path
-                    .components()
-                    .any(|component| component.as_os_str().to_string_lossy().starts_with('.')),
+                is_hidden: is_hidden_path(&path, &root),
                 name,
                 path,
                 kind: FsEntryKind::File,
@@ -278,6 +416,7 @@ pub fn list_files_matching(
             WalkState::Continue
         })
     });
+    drop(workers);
 
     let mut entries = Arc::try_unwrap(collected)
         .ok()
@@ -286,6 +425,133 @@ pub fn list_files_matching(
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     entries.truncate(max_matches);
     Ok(entries)
+}
+
+/// A root-bound view over the filesystem mutation APIs.
+///
+/// The bare `create_file`/`create_dir`/`rename`/`copy_path`/`delete` free functions
+/// accept arbitrary paths and run destructive `std::fs` operations directly — fine
+/// for a trusted caller that has already validated its paths, but unsafe as the
+/// surface for renderer/AI/extension-supplied paths. `WorkspaceFs` is the safe form:
+/// every requested path is resolved against `root` and proven to stay inside it
+/// (rejecting absolute inputs and `..` escapes) *before* any byte is touched, so an
+/// agent-supplied `../../etc/passwd` or `C:\Windows\...` is turned into
+/// [`AppError::InvalidPath`] instead of a write outside the workspace.
+#[derive(Debug, Clone)]
+pub struct WorkspaceFs {
+    root: PathBuf,
+}
+
+impl WorkspaceFs {
+    /// Bind mutations to `root` (the opened workspace directory).
+    #[must_use]
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// The workspace root these mutations are confined to.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Create an empty file at a workspace-relative path, materializing any
+    /// intermediate directories. Creating `notes/today.md` in an empty workspace
+    /// must succeed and produce the `notes/` folder — the bare `create_file` free
+    /// function only opens the leaf and would fail when an ancestor is missing. The
+    /// parent is an ancestor of the already-confined target, so it is provably inside
+    /// the workspace and safe to create.
+    pub fn create_file(&self, relative: impl AsRef<Path>) -> AppResult<PathBuf> {
+        let path = self.confine(relative.as_ref())?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        create_file(&path)?;
+        Ok(path)
+    }
+
+    /// Create a directory (and parents) at a workspace-relative path.
+    pub fn create_dir(&self, relative: impl AsRef<Path>) -> AppResult<PathBuf> {
+        let path = self.confine(relative.as_ref())?;
+        create_dir(&path)?;
+        Ok(path)
+    }
+
+    /// Rename/move within the workspace; both endpoints are confined.
+    pub fn rename(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> AppResult<(PathBuf, PathBuf)> {
+        let from = self.confine(from.as_ref())?;
+        let to = self.confine(to.as_ref())?;
+        rename(&from, &to)?;
+        Ok((from, to))
+    }
+
+    /// Copy within the workspace; both endpoints are confined.
+    pub fn copy_path(&self, from: impl AsRef<Path>, to: impl AsRef<Path>) -> AppResult<(PathBuf, PathBuf)> {
+        let from = self.confine(from.as_ref())?;
+        let to = self.confine(to.as_ref())?;
+        copy_path(&from, &to)?;
+        Ok((from, to))
+    }
+
+    /// Delete a workspace-relative file or directory tree.
+    pub fn delete(&self, relative: impl AsRef<Path>) -> AppResult<PathBuf> {
+        let path = self.confine(relative.as_ref())?;
+        delete(&path)?;
+        Ok(path)
+    }
+
+    /// Resolve `candidate` against the workspace root and prove it stays inside.
+    fn confine(&self, candidate: &Path) -> AppResult<PathBuf> {
+        confine_to_root(&self.root, candidate)
+    }
+}
+
+/// Join `candidate` onto `root` and prove the result stays inside `root`, returning
+/// the absolute path. Rejects absolute inputs (which would make `Path::join` discard
+/// `root`) and any `..` traversal that climbs above the workspace. The candidate's
+/// own components are normalized lexically before the check so a not-yet-existing
+/// target (a file we are about to create) still validates — only `root` must exist
+/// to be canonicalized.
+fn confine_to_root(root: &Path, candidate: &Path) -> AppResult<PathBuf> {
+    if candidate.is_absolute() {
+        return Err(AppError::InvalidPath(format!(
+            "path must be relative to the workspace: {}",
+            candidate.display()
+        )));
+    }
+
+    let base = root
+        .canonicalize()
+        .unwrap_or_else(|_| root.to_path_buf());
+    let mut resolved = base.clone();
+    for component in candidate.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => resolved.push(segment),
+            Component::ParentDir => {
+                // Pop only within the workspace; never climb above `root`.
+                if !resolved.pop() || !resolved.starts_with(&base) {
+                    return Err(AppError::InvalidPath(format!(
+                        "path escapes the workspace: {}",
+                        candidate.display()
+                    )));
+                }
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(AppError::InvalidPath(format!(
+                    "path must be relative to the workspace: {}",
+                    candidate.display()
+                )));
+            }
+        }
+    }
+    if !resolved.starts_with(&base) {
+        return Err(AppError::InvalidPath(format!(
+            "path escapes the workspace: {}",
+            candidate.display()
+        )));
+    }
+    Ok(resolved)
 }
 
 pub fn create_file(path: impl AsRef<Path>) -> AppResult<()> {
@@ -464,7 +730,9 @@ mod tests {
 
     use lux_core::FsEntryKind;
 
-    use super::{list_files, read_tree};
+    use super::{
+        list_files, read_tree, read_tree_bounded, WorkspaceFs,
+    };
 
     fn test_root(tag: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -581,6 +849,101 @@ mod tests {
         let mut sorted = rels.clone();
         sorted.sort();
         assert_eq!(rels, sorted);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_tree_bounded_caps_entries_and_reports_truncation() {
+        let root = test_root("tree-bounded");
+        build_fixture(&root);
+        // The fixture has more than two entries; a cap of 2 must truncate and flag it.
+        let scan = read_tree_bounded(&root, 2);
+        assert_eq!(scan.entries.len(), 2, "entry cap must hold");
+        assert!(scan.truncated, "hitting the cap must set truncated");
+        // A generous cap returns everything and is not flagged truncated.
+        let full = read_tree_bounded(&root, 100_000);
+        assert!(!full.truncated);
+        assert!(full.entries.len() > 2);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn list_files_bounded_heap_keeps_lexicographically_smallest() {
+        let root = test_root("list-bounded");
+        build_fixture(&root);
+        // With a cap of 2 the bounded heap must return exactly the two smallest
+        // (non-ignored) paths, identical to taking the first 2 of the full sort.
+        let limited = list_files(&root, 2).expect("list_files should succeed");
+        let mut full = list_files(&root, 100_000).expect("full list");
+        full.truncate(2);
+        assert_eq!(
+            limited.iter().map(|entry| &entry.path).collect::<Vec<_>>(),
+            full.iter().map(|entry| &entry.path).collect::<Vec<_>>(),
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn files_under_hidden_directory_are_marked_hidden_everywhere() {
+        let root = test_root("hidden");
+        std::fs::create_dir_all(root.join(".config/nested")).expect("hidden dir");
+        std::fs::write(root.join(".config/nested/app.toml"), "x = 1\n").expect("hidden file");
+        std::fs::write(root.join("visible.txt"), "hi\n").expect("visible file");
+
+        // read_tree must flag the file under `.config/` as hidden via its ancestor,
+        // not just dotfiles by name.
+        let tree = read_tree(&root).expect("read_tree should succeed");
+        let hidden_under_dir = tree
+            .iter()
+            .find(|entry| entry.path.ends_with("app.toml"))
+            .expect("nested file present");
+        assert!(
+            hidden_under_dir.is_hidden,
+            "file under a hidden ancestor must be hidden in read_tree"
+        );
+        let visible = tree
+            .iter()
+            .find(|entry| entry.path.ends_with("visible.txt"))
+            .expect("visible file present");
+        assert!(!visible.is_hidden);
+
+        // list_files must agree with read_tree on the same file.
+        let listed = list_files(&root, 1000).expect("list_files should succeed");
+        let listed_hidden = listed
+            .iter()
+            .find(|entry| entry.path.ends_with("app.toml"))
+            .expect("nested file present in list_files");
+        assert!(
+            listed_hidden.is_hidden,
+            "list_files and read_tree must agree on hidden status"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn workspace_fs_confines_mutations_to_the_root() {
+        let root = test_root("confine");
+        std::fs::create_dir_all(&root).expect("root dir");
+        let workspace = WorkspaceFs::new(&root);
+
+        // A normal relative path is created inside the workspace.
+        let created = workspace
+            .create_file("notes/today.md")
+            .expect("relative create should succeed");
+        assert!(created.starts_with(root.canonicalize().unwrap_or(root.clone())));
+        assert!(created.exists());
+
+        // `..` traversal that escapes the workspace is rejected before touching disk.
+        let escape = workspace.create_file("../escape.md");
+        assert!(escape.is_err(), "parent-dir escape must be rejected");
+
+        // An absolute path is rejected (it would otherwise discard the root on join).
+        let absolute_target = std::env::temp_dir().join("lux-fs-should-not-exist.md");
+        let absolute = workspace.create_file(&absolute_target);
+        assert!(absolute.is_err(), "absolute path must be rejected");
+        assert!(!absolute_target.exists());
 
         std::fs::remove_dir_all(&root).ok();
     }

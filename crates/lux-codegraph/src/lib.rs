@@ -50,7 +50,8 @@ pub mod resolve;
 pub use cache::{FileMeta, CACHE_VERSION};
 pub use community::{detect as detect_communities, Community};
 pub use detect::{
-    god_nodes, import_cycles, surprising_connections, GodNode, ImportCycle, Surprise,
+    file_dependency_cycles, god_nodes, import_cycles, surprising_connections, GodNode, ImportCycle,
+    Surprise,
 };
 pub use export::{to_graph_html, to_graph_json, to_report};
 pub use graph::{Adjacent, CodeGraph, Confidence, Edge, EdgeKind, FileId, Node, NodeId, Symbol};

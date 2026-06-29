@@ -1,5 +1,5 @@
 import type { PersistedFileCheckpoint } from "./aiChatCheckpointStore";
-import { getFileCheckpoint, listFileCheckpoints, upsertFileCheckpoint, workspaceCheckpointKey } from "./aiChatCheckpointStore";
+import { getFileCheckpoint, listFileCheckpoints, removeFileCheckpoint, upsertFileCheckpoint, workspaceCheckpointKey } from "./aiChatCheckpointStore";
 import type { AiChatSendInput, AiToolApprovalRequest } from "./aiChatTypes";
 import { createCheckpointRestoreApproval } from "./aiRuntimeApprovals";
 import { mergeDiffAndStatusFiles } from "./aiRuntimeDiagnostics";
@@ -160,6 +160,9 @@ function deleteCheckpoint(args: UnknownRecord, input: AiChatSendInput): ToolResu
   const store = checkpointStore(workspaceRoot);
   const removedAt = store.findIndex((candidate) => candidate.id === checkpoint.id);
   if (removedAt >= 0) store.splice(removedAt, 1);
+  // Persist the removal too; without this the deleted checkpoint reappears after a
+  // reload (the persisted store is the source of truth for checkpointStore()).
+  removeFileCheckpoint(workspaceRoot, checkpoint.id);
   return toolJson("Checkpoint", {
     status: "deleted",
     checkpoint: checkpointSummary(checkpoint),

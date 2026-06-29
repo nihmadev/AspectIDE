@@ -4,7 +4,7 @@ import { getAiSessionGoal, setAiSessionGoal } from "./aiSessionGoal";
 import { sanitizeSessionGoal, sanitizeSessionTodos } from "./aiSessionOrchestrationSanitize";
 import { replaceAiSessionTodos } from "./aiSessionTodos";
 import { spawnSubagent, resolveSubagentType } from "./aiSubagents";
-import { countRunningSubagents } from "./aiSubagentRuns";
+import { countRunningSubagents, getSubagentRun } from "./aiSubagentRuns";
 import { resolveMaxParallelSubagents } from "./aiSubagentPolicy";
 import { booleanArg, clamp, isRecord, numberArg, stringArg, stringArrayArg, toolJson, topCounts, truncateText, type ToolResult, type UnknownRecord } from "./aiRuntimeShared";
 import { luxCommands, type McpServerConfig } from "./tauri";
@@ -441,6 +441,38 @@ export async function taskSubagentTool(args: UnknownRecord, input: AiChatSendInp
   const description = stringArg(args, "description", "").trim();
   const prompt = stringArg(args, "prompt", "").trim();
   if (!description || !prompt) throw new Error("Task requires description and prompt.");
+
+  const resumeId = stringArg(args, "resume", "").trim();
+  if (resumeId) {
+    // resume is not yet supported: the TS subagent store retains no persistent channel
+    // to inject a follow-up prompt into a completed run. Return an explicit error rather
+    // than silently spawning a duplicate agent with a mismatched id in the output.
+    const existing = getSubagentRun(resumeId);
+    if (!existing) {
+      throw new Error(`Task resume: unknown subagent id "${resumeId}". The id may have been pruned from the in-memory run store (max 32 completed runs per session). Spawn a new Task instead.`);
+    }
+    if (existing.status === "running") {
+      // Already active — return its current state so the parent knows it is still live.
+      return toolJson("Task", {
+        agentId: existing.id,
+        subagentType: existing.subagentType,
+        depth: existing.depth,
+        parentAgentId: existing.parentAgentId,
+        childAgentIds: [],
+        summary: existing.summary || "still running",
+        status: existing.status,
+        note: "Task is still running. Poll again or wait for it to complete before resuming.",
+      });
+    }
+    // Completed/failed/cancelled: resume is not supported for ended runs. Fail clearly
+    // instead of spawning a silent duplicate.
+    throw new Error(
+      `Task resume is not supported for ${existing.status} runs. ` +
+      `Subagent "${resumeId}" has already ended with summary: ${existing.summary || "(no summary)"}. ` +
+      "Spawn a new Task if further work is needed.",
+    );
+  }
+
   const maxParallel = resolveMaxParallelSubagents(input.preferences);
   if (countRunningSubagents(input.chatSessionId) >= maxParallel) {
     throw new Error(`Parallel subagent limit reached (${maxParallel}). Wait for a running Task to finish or cancel it.`);
@@ -462,7 +494,6 @@ export async function taskSubagentTool(args: UnknownRecord, input: AiChatSendInp
     parentAgentId: result.parentAgentId,
     childAgentIds: result.childAgentIds,
     summary: result.summary,
-    resume: stringArg(args, "resume", "").trim() || null,
   });
 }
 

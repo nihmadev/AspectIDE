@@ -291,14 +291,52 @@ export function tokenizeRelatedQuery(query: string) {
 
 export function resolveWorkspacePath(path: string, workspaceRoot: string) {
   const normalized = normalizePathSlashes(path.trim());
-  if (!workspaceRoot || /^[a-z]:\//i.test(normalized) || normalized.startsWith("/")) return normalized;
-  return `${normalizePathSlashes(workspaceRoot).replace(/\/+$/, "")}/${normalized.replace(/^\/+/, "")}`;
+  const isAbsolute = /^[a-z]:\//i.test(normalized) || normalized.startsWith("/");
+  // Canonicalize `.`/`..` segments so a workspace-relative input like `../outside.ts`
+  // resolves to its real location (outside the root) instead of a `<root>/../outside.ts`
+  // string that fools a naive prefix check. The containment guard below then rejects it.
+  if (!workspaceRoot || isAbsolute) return canonicalizeNormalizedPath(normalized);
+  const root = normalizePathSlashes(workspaceRoot).replace(/\/+$/, "");
+  return canonicalizeNormalizedPath(`${root}/${normalized.replace(/^\/+/, "")}`);
 }
 
 export function isPathInsideWorkspace(path: string, workspaceRoot: string) {
-  const root = normalizePathSlashes(workspaceRoot).replace(/\/+$/, "").toLowerCase();
-  const normalized = normalizePathSlashes(path).replace(/\/+$/, "").toLowerCase();
+  // Canonicalize BOTH sides before the prefix check: a traversal escape such as
+  // `<root>/../outside` must collapse to its real path so it can no longer pass
+  // `startsWith(<root>/)`. (Symlink/junction resolution still needs the backend
+  // canonical guard — this is the string-level invariant.)
+  const root = canonicalizeNormalizedPath(normalizePathSlashes(workspaceRoot).replace(/\/+$/, "")).toLowerCase();
+  const normalized = canonicalizeNormalizedPath(normalizePathSlashes(path).replace(/\/+$/, "")).toLowerCase();
   return Boolean(root) && (normalized === root || normalized.startsWith(`${root}/`));
+}
+
+/**
+ * Collapse `.`/`..` segments in an already slash-normalized path. Preserves a
+ * leading POSIX `/` or Windows `C:/` drive root; `..` at the root boundary is
+ * clamped (dropped) like real OS path resolution, so the result can never point
+ * above its own root for the containment check.
+ */
+function canonicalizeNormalizedPath(path: string) {
+  const driveMatch = path.match(/^([a-zA-Z]:)\/?/);
+  let root = "";
+  let rest = path;
+  if (driveMatch) {
+    root = `${driveMatch[1]}/`;
+    rest = path.slice(driveMatch[0].length);
+  } else if (path.startsWith("/")) {
+    root = "/";
+    rest = path.slice(1);
+  }
+  const out: string[] = [];
+  for (const segment of rest.split("/")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") {
+      out.pop();
+      continue;
+    }
+    out.push(segment);
+  }
+  return `${root}${out.join("/")}`;
 }
 
 export function isLowSignalRelatedPath(path: string) {

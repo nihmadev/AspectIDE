@@ -7,7 +7,7 @@ use lux_core::{
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
-use super::{emit_event, lock_error, lsp, SharedState};
+use super::{emit_event, lock_error, lsp, resolve_workspace_path_for_write, SharedState};
 
 #[tauri::command]
 pub async fn editor_open_file(
@@ -229,8 +229,14 @@ async fn apply_workspace_edit_files(
     edited_documents: &mut Vec<DocumentSnapshot>,
     changed_paths: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
+    // Validate the WHOLE edit set against the workspace boundary BEFORE touching any
+    // file. A workspace edit (LSP rename / code action, possibly AI-triggered) may
+    // name arbitrary `file_edit.path`s; resolving each through the workspace guard
+    // rejects absolute/`..`-escaping targets so a malicious or buggy server can't
+    // write outside the project. Doing it up front avoids a partial commit where the
+    // first few files are written and a later out-of-bounds path aborts mid-batch.
+    let mut planned: Vec<(PathBuf, Vec<TextEdit>)> = Vec::with_capacity(edit.files.len());
     for file_edit in edit.files {
-        let path = file_edit.path;
         let text_edits = file_edit
             .edits
             .into_iter()
@@ -245,7 +251,11 @@ async fn apply_workspace_edit_files(
         if text_edits.is_empty() {
             continue;
         }
+        let path = resolve_workspace_path_for_write(state, &file_edit.path)?;
+        planned.push((path, text_edits));
+    }
 
+    for (path, text_edits) in planned {
         let edited_open_document = {
             let mut documents = state.documents.lock().map_err(lock_error)?;
             documents

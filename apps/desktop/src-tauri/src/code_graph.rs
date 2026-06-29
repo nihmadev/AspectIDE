@@ -134,6 +134,16 @@ fn build_in_flight(state: &SharedState, generation: u64) -> bool {
     state.code_graph_building_gen.load(Ordering::Acquire) == generation
 }
 
+/// Release incremental-update ownership and discard any stashed pending paths. Used
+/// on the terminal branches where a full build (which re-reads disk) supersedes the
+/// incremental work, so leftover paths would be stale.
+fn clear_pending_update(state: &SharedState) {
+    if let Ok(mut pending) = state.code_graph_pending_paths.lock() {
+        pending.clear();
+    }
+    state.code_graph_updating.store(false, Ordering::SeqCst);
+}
+
 // ── Progress events ──
 
 #[derive(Debug, Clone, Serialize)]
@@ -373,19 +383,29 @@ pub async fn code_graph_export_html(state: State<'_, SharedState>) -> Result<Str
         |name| name.to_string_lossy().to_string(),
     );
 
-    with_index(&state, |index| {
+    // Generate the HTML UNDER the lock (it needs the graph), but release the lock
+    // before the filesystem write — a full visualization can be large, and holding
+    // the graph mutex across `create_dir_all` + `write` blocked incremental updates,
+    // status checks, and AI code-graph tools for the duration of disk I/O.
+    let html = with_index(&state, |index| {
         let graph = index.graph();
         let communities = lux_codegraph::detect_communities(graph);
-        let html = lux_codegraph::to_graph_html(graph, &communities, &root, &title);
+        Ok(lux_codegraph::to_graph_html(graph, &communities, &root, &title))
+    })
+    .await?;
 
-        let dir = root.join(".lux");
+    let dir = root.join(".lux");
+    let path = dir.join("code-graph.html");
+    let write_path = path.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
         std::fs::create_dir_all(&dir)
             .map_err(|e| format!("Could not create .lux directory: {e}"))?;
-        let path = dir.join("code-graph.html");
-        std::fs::write(&path, html).map_err(|e| format!("Could not write visualization: {e}"))?;
-        Ok(path.to_string_lossy().to_string())
+        std::fs::write(&write_path, html)
+            .map_err(|e| format!("Could not write visualization: {e}"))
     })
     .await
+    .map_err(|e| e.to_string())??;
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// Persist the current in-memory graph's parse cache, then drop it.
@@ -470,11 +490,18 @@ pub fn start_build_on_workspace(
             }
             Ok(Err(e)) => {
                 tracing::warn!(error = %e, "background code-graph build failed");
-                emit_finished_error(&app, &format!("{e}"));
+                // Suppress the failure event if the workspace changed mid-build, just
+                // like the success path does — otherwise a stale build failing after a
+                // switch makes the NEW workspace's graph look broken.
+                if generation_current(&state, generation) {
+                    emit_finished_error(&app, &format!("{e}"));
+                }
             }
             Err(e) => {
                 tracing::warn!(error = %e, "code-graph spawn_blocking crashed");
-                emit_finished_error(&app, &format!("task panicked: {e}"));
+                if generation_current(&state, generation) {
+                    emit_finished_error(&app, &format!("task panicked: {e}"));
+                }
             }
         }
     });
@@ -484,7 +511,14 @@ pub fn start_build_on_workspace(
 /// watcher. Re-parses all of them and rebuilds the graph **once** (no per-file
 /// stampede), doing the CPU-heavy rebuild on the blocking pool so the async
 /// runtime is never pinned, and holding the graph mutex only for the brief
-/// take/put swap. Drops the result if the workspace changed mid-rebuild.
+/// take/put swap.
+///
+/// Concurrency: an incremental rebuild takes the index OUT of the mutex while it
+/// runs. A batch arriving in that window previously saw `None` and silently
+/// returned, leaving its saved files stale in the graph. Instead we coalesce — late
+/// batches stash their paths in `code_graph_pending_paths` (guarded by the
+/// `code_graph_updating` flag) and the in-flight rebuild drains and re-applies them
+/// before finishing, so no file-watch batch is dropped.
 pub fn handle_fs_batch(app: &AppHandle, state: &SharedState, paths: Vec<PathBuf>, generation: u64) {
     if paths.is_empty() {
         return;
@@ -495,48 +529,112 @@ pub fn handle_fs_batch(app: &AppHandle, state: &SharedState, paths: Vec<PathBuf>
     if build_in_flight(state, generation) {
         return;
     }
+
+    // Acquire update ownership: `swap` returns the prior value, so a `true` means an
+    // incremental update is already running. In that case hand it our paths (it drains
+    // `code_graph_pending_paths` before finishing) instead of racing it for the
+    // currently-`None` slot and dropping the batch.
+    if state.code_graph_updating.swap(true, Ordering::AcqRel) {
+        if let Ok(mut pending) = state.code_graph_pending_paths.lock() {
+            pending.extend(paths);
+        }
+        return;
+    }
+
     let app = app.clone();
     let state = state.clone();
     tauri::async_runtime::spawn(async move {
-        // Take the index out under a short lock so the rebuild runs off the mutex.
-        let Some(mut index) = state.code_graph.lock().await.take() else {
-            return; // not built yet — the initial build will pick these up
-        };
-        let updated = tokio::task::spawn_blocking(move || {
-            let changed = index.update_files(&paths);
-            let node_count = index.graph().node_count();
-            let edge_count = index.graph().edge_count();
-            (index, changed, node_count, edge_count)
-        })
-        .await;
-        let Ok((index, changed, node_count, edge_count)) = updated else {
-            tracing::warn!("code-graph incremental update task panicked");
-            return;
-        };
-        // Restore under the lock, but stand down if a full build committed a fresher
-        // graph while we rebuilt off-mutex. We took the slot to `None` above, so a
-        // `Some` now means a full build (or a later incremental) repopulated it and
-        // our copy is stale; `build_in_flight` catches a full build that acquired
-        // the slot during our window but has not committed yet (it will commit a
-        // disk-current graph). Either way the authoritative full build wins —
-        // closing the take/rebuild/restore clobber window the synchronous fast-path
-        // check above cannot. A full build always re-reads disk, so dropping our
-        // incremental result loses nothing.
-        if generation_current(&state, generation) {
-            let mut guard = state.code_graph.lock().await;
-            if guard.is_none() && !build_in_flight(&state, generation) {
-                *guard = Some(index);
-                drop(guard);
-                // Tell the Settings card the counts moved (only when they actually did).
-                if changed {
-                    emit_graph(
-                        &app,
-                        &CodeGraphEvent::Updated {
-                            node_count,
-                            edge_count,
-                        },
-                    );
+        // We own the update flag (set by the caller above). Always clear it on the way
+        // out so a future batch can start a fresh update.
+        let mut batch = paths;
+        loop {
+            // Take the index out under a short lock so the rebuild runs off the mutex.
+            let Some(mut index) = state.code_graph.lock().await.take() else {
+                // Not built yet — the initial build will pick these up. Release the
+                // flag and stash nothing; a full build re-reads disk anyway.
+                state.code_graph_updating.store(false, Ordering::Release);
+                return;
+            };
+            let batch_paths = std::mem::take(&mut batch);
+            let updated = tokio::task::spawn_blocking(move || {
+                let changed = index.update_files(&batch_paths);
+                let node_count = index.graph().node_count();
+                let edge_count = index.graph().edge_count();
+                (index, changed, node_count, edge_count)
+            })
+            .await;
+            let Ok((index, changed, node_count, edge_count)) = updated else {
+                tracing::warn!("code-graph incremental update task panicked");
+                state.code_graph_updating.store(false, Ordering::Release);
+                return;
+            };
+
+            // Restore under the lock, but stand down if a full build committed a
+            // fresher graph while we rebuilt off-mutex. We took the slot to `None`
+            // above, so a `Some` now means a full build (or later incremental)
+            // repopulated it and our copy is stale; `build_in_flight` catches a full
+            // build that acquired the slot during our window but has not committed yet
+            // (it will commit a disk-current graph). The authoritative full build
+            // wins; a full build always re-reads disk, so dropping our result is safe.
+            if generation_current(&state, generation) {
+                let mut guard = state.code_graph.lock().await;
+                if guard.is_none() && !build_in_flight(&state, generation) {
+                    *guard = Some(index);
+                    drop(guard);
+                    if changed {
+                        emit_graph(
+                            &app,
+                            &CodeGraphEvent::Updated {
+                                node_count,
+                                edge_count,
+                            },
+                        );
+                    }
+                } else {
+                    // A full build owns the slot now — it re-reads disk, so drop our
+                    // stale copy AND any stashed paths (already covered) and stop.
+                    drop(guard);
+                    clear_pending_update(&state);
+                    return;
                 }
+            } else {
+                // Workspace changed mid-rebuild; a new generation's build covers disk.
+                clear_pending_update(&state);
+                return;
+            }
+
+            // Drain any paths batches stashed while we were rebuilding. If none, clear
+            // the flag and finish; if the slot was emptied between the clear and a
+            // concurrent enqueue, the next batch starts a fresh update.
+            let pending = state
+                .code_graph_pending_paths
+                .lock()
+                .map(|mut p| std::mem::take(&mut *p))
+                .unwrap_or_default();
+            if pending.is_empty() {
+                state.code_graph_updating.store(false, Ordering::Release);
+                // Re-check: a batch may have enqueued after our drain but before the
+                // flag cleared. If so, it stashed paths and saw the flag set, so it
+                // returned expecting us to handle them — pick them up.
+                let leftover = state
+                    .code_graph_pending_paths
+                    .lock()
+                    .map(|mut p| std::mem::take(&mut *p))
+                    .unwrap_or_default();
+                if leftover.is_empty() {
+                    return;
+                }
+                // Re-acquire ownership and loop again with the leftover paths.
+                if state.code_graph_updating.swap(true, Ordering::AcqRel) {
+                    // Someone else already took ownership; hand the paths back.
+                    if let Ok(mut p) = state.code_graph_pending_paths.lock() {
+                        p.extend(leftover);
+                    }
+                    return;
+                }
+                batch = leftover;
+            } else {
+                batch = pending;
             }
         }
     });

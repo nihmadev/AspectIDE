@@ -1,10 +1,12 @@
 //! Native `RulesContext`, `DocsContext`, `MemoryContext` tools — Stage 4.
 //!
 //! All three follow the same pattern: list workspace files → filter by path
-//! pattern → score by query tokens → read top-N files → return JSON.
+//! pattern → score by query tokens + content hits → read top-N files → return JSON.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
+use lux_core::SearchOptions;
 use serde::Serialize;
 use tauri::State;
 use tokio::io::AsyncReadExt;
@@ -13,6 +15,11 @@ use crate::ai_semantic;
 use crate::{workspace_root, SharedState};
 
 const MAX_FILE_BYTES: u64 = 12_000;
+/// Bonus applied per unique token found inside a candidate file's content.
+const CONTENT_TOKEN_BONUS: i64 = 30;
+/// Cap on the total content-match bonus so that a single highly-repetitive hit
+/// cannot drown out well-known rule/memory files.
+const CONTENT_BONUS_CAP: i64 = 90;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,13 +112,66 @@ async fn context_source_tool(
     let max_files = max_files.clamp(1, 40);
     let max_scan = max_scan.clamp(500, 20_000);
 
-    let entries = {
+    // Scan candidate files and run indexed content search concurrently.
+    let entries_future = {
         let root = root.clone();
         tokio::task::spawn_blocking(move || lux_fs::list_files(root, max_scan))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?
     };
+
+    // Content search: run when a query is present so we can boost candidates whose
+    // file bodies mention the query tokens (path-only scoring misses these).
+    let search_future = {
+        let root = root.clone();
+        let query_str = query_str.clone();
+        let do_search = !query_str.is_empty();
+        tokio::task::spawn_blocking(move || -> Option<HashMap<String, i64>> {
+            if !do_search {
+                return None;
+            }
+            // A generous hit budget: we just need to discover which files match,
+            // not rank fine-grained line-level hits.
+            let options = SearchOptions {
+                case_sensitive: false,
+                whole_word: false,
+                use_regex: false,
+                include_hidden: false,
+                include_globs: Vec::new(),
+                exclude_globs: vec![
+                    "node_modules/**".to_string(),
+                    "target/**".to_string(),
+                    "dist/**".to_string(),
+                ],
+                max_results: 200,
+            };
+            let response = lux_search::query(root, query_str, &options).ok()?;
+            // Build a map: normalised absolute path → content bonus.
+            // Multiple hits in the same file are collapsed to a capped bonus.
+            let mut bonus_map: HashMap<String, i64> = HashMap::new();
+            for hit in &response.hits {
+                let p = ai_semantic::normalize_slashes_pub(&hit.path.to_string_lossy())
+                    .to_lowercase();
+                let entry = bonus_map.entry(p).or_insert(0);
+                *entry = (*entry + CONTENT_TOKEN_BONUS).min(CONTENT_BONUS_CAP);
+            }
+            Some(bonus_map)
+        })
+    };
+
+    let (entries_result, search_result) = tokio::join!(entries_future, search_future);
+
+    let entries = entries_result
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    // Content bonus map: silently degrade to empty on any error (best-effort).
+    let content_bonus: HashMap<String, i64> = search_result
+        .map_err(|e| {
+            tracing::warn!(%e, "context_source_tool: content search task failed");
+            e.to_string()
+        })
+        .ok()
+        .flatten()
+        .unwrap_or_default();
 
     let mut candidates: Vec<(String, String, i64)> = entries
         .iter()
@@ -123,7 +183,12 @@ async fn context_source_tool(
         })
         .filter(|(_, rel)| filter(rel, &root_str))
         .map(|(path, rel)| {
-            let score = score_context_file(&rel, &tokens);
+            let mut score = score_context_file(&rel, &tokens);
+            // Content-match bonus: boost files whose bodies contain the query tokens,
+            // so content-relevant docs/memories surface even when their path is generic.
+            if let Some(bonus) = content_bonus.get(&path.to_lowercase()) {
+                score += bonus;
+            }
             (path, rel, score)
         })
         .collect();
@@ -244,6 +309,12 @@ const RULES_FILENAMES: &[&str] = &[
 ];
 
 fn is_rules_path(rel: &str, _root: &str) -> bool {
+    // Never import rule files from dependency/vendor/build trees — doing so would
+    // let a `node_modules/pkg/AGENTS.md` inject arbitrary instructions into the AI
+    // context (prompt-injection vector).
+    if ai_semantic::is_low_signal_path_pub(rel) {
+        return false;
+    }
     let lower = rel.to_lowercase();
     let basename = lower.rsplit('/').next().unwrap_or(&lower);
     RULES_FILENAMES.contains(&basename)
@@ -328,6 +399,19 @@ mod tests {
         assert!(is_rules_path("AGENTS.md", ""));
         assert!(is_rules_path(".cursor/rules/my-rule.md", ""));
         assert!(!is_rules_path("src/app.ts", ""));
+        // Security: dependency/vendor rule files must never be imported.
+        assert!(
+            !is_rules_path("node_modules/pkg/AGENTS.md", ""),
+            "node_modules AGENTS.md must be rejected"
+        );
+        assert!(
+            !is_rules_path("node_modules/pkg/claude.md", ""),
+            "node_modules claude.md must be rejected"
+        );
+        assert!(
+            !is_rules_path("vendor/lib/.cursorrules", ""),
+            "vendor .cursorrules must be rejected"
+        );
     }
 
     #[test]

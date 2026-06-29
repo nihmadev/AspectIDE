@@ -51,23 +51,26 @@ pub fn parse_skill(slug: &str, scope: SkillScope, path: &Path, text: &str) -> Sk
 #[must_use]
 pub fn render_skill_markdown(draft: &SkillDraft) -> String {
     let mut out = String::from("---\n");
-    out.push_str(&format!("name: {}\n", draft.name.trim()));
+    out.push_str(&format!("name: {}\n", sanitize_scalar(draft.name.trim())));
     if let Some(title) = draft
         .title
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        out.push_str(&format!("title: {title}\n"));
+        out.push_str(&format!("title: {}\n", sanitize_scalar(title)));
     }
-    out.push_str(&format!("description: {}\n", draft.description.trim()));
+    out.push_str(&format!(
+        "description: {}\n",
+        sanitize_scalar(draft.description.trim())
+    ));
     if let Some(when) = draft
         .when_to_use
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        out.push_str(&format!("when_to_use: {when}\n"));
+        out.push_str(&format!("when_to_use: {}\n", sanitize_scalar(when)));
     }
     if !draft.allowed_tools.is_empty() {
         out.push_str(&format!(
@@ -85,6 +88,19 @@ pub fn render_skill_markdown(draft: &SkillDraft) -> String {
     out.push_str(draft.body.trim());
     out.push('\n');
     out
+}
+
+/// Sanitize a scalar value for inline YAML frontmatter by collapsing newlines
+/// (which would inject new keys or close the block early) into a single space.
+/// The `---` fence pattern is also collapsed so it cannot close the frontmatter
+/// block prematurely.
+fn sanitize_scalar(value: &str) -> String {
+    // Replace any form of line break with a space, then collapse runs.
+    value
+        .replace("\r\n", " ")
+        .replace(['\r', '\n'], " ")
+        // Squash `---` to avoid accidental fence close mid-value.
+        .replace("---", "- - -")
 }
 
 /// Split leading `---`-fenced frontmatter from the body. Returns an empty map +
@@ -197,6 +213,44 @@ mod tests {
             "---\nname: x\nno close",
         );
         assert_eq!(skill.body, "---\nname: x\nno close");
+    }
+
+    #[test]
+    fn render_sanitizes_newlines_and_fence_in_scalars() {
+        let draft = SkillDraft {
+            name: "injected\n---\nevil: true".into(),
+            description: "line1\r\nline2".into(),
+            enabled: true,
+            body: "body".into(),
+            ..SkillDraft::default()
+        };
+        let rendered = render_skill_markdown(&draft);
+        // The rendered YAML must have exactly two `---` lines (open + close fence).
+        let fence_count = rendered.lines().filter(|line| line.trim() == "---").count();
+        assert_eq!(fence_count, 2, "injected fence must not open extra blocks");
+        // The injected content must NOT appear as a standalone YAML key line.
+        // (It may still appear as text inside the `name:` value, which is safe.)
+        assert!(
+            !rendered.lines().any(|line| line.trim() == "evil: true"),
+            "injected key must not appear as a standalone frontmatter line"
+        );
+        // After parsing the round-tripped skill, `evil` must not be a frontmatter key.
+        let skill = parse_skill(
+            "injected",
+            SkillScope::Project,
+            &PathBuf::from("x"),
+            &rendered,
+        );
+        // The description newline must be collapsed to a space.
+        assert!(
+            !skill.description.contains('\n'),
+            "description must not contain newlines after round-trip"
+        );
+        // The name must not contain a raw newline.
+        assert!(
+            !skill.name.contains('\n'),
+            "name must not contain newlines after round-trip"
+        );
     }
 
     #[test]

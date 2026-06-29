@@ -15,10 +15,56 @@ use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 
 use crate::cache::{self, FileMeta, PriorCache};
-use crate::graph::{CodeGraph, Confidence, Edge, EdgeKind, Node, NodeId};
+use crate::graph::{CodeGraph, Confidence, Edge, EdgeKind, FileId, Node, NodeId};
 use crate::lang::Lang;
-use crate::parse::{parse_source, ParsedFile, RefKind};
+use crate::parse::{parse_source, ParsedFile, RefKind, Span, SymbolKind};
 use crate::resolve::{enclosing_def, resolve_targets, Placed, Resolution};
+
+/// A zero-width span used for synthetic nodes that have no source location.
+const SYNTHETIC_SPAN: Span = Span {
+    start_byte: 0,
+    end_byte: 0,
+    start_row: 0,
+    start_col: 0,
+    end_row: 0,
+    end_col: 0,
+};
+
+/// Normalize a path to an absolute, lexically-cleaned form without touching the
+/// filesystem (so it works for deleted files too). This keeps watcher-delivered
+/// paths and build-walk paths under the same map key regardless of:
+///
+/// * Relative vs. absolute input (on Windows watchers often send absolute paths
+///   even when the index root was opened as relative).
+/// * `./` prefixes or internal `foo/../bar` components.
+/// * Drive-letter casing differences on Windows (not addressed here — relies on
+///   the OS and the WalkBuilder emitting consistent casing).
+///
+/// Full `canonicalize` is intentionally *not* used: it resolves symlinks (wrong
+/// — WalkBuilder does NOT follow symlinks, so we must stay consistent) and fails
+/// for deleted files (wrong — `remove_file` is called *after* deletion).
+fn normalize_path(path: &Path) -> PathBuf {
+    // Make absolute relative to the current directory if needed.
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    // Lexically resolve `.` and `..` components.
+    let mut cleaned = PathBuf::new();
+    for component in abs.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                cleaned.pop();
+            }
+            c => cleaned.push(c),
+        }
+    }
+    cleaned
+}
 
 /// Files larger than this are skipped.
 ///
@@ -171,6 +217,13 @@ impl Index {
         if !root.is_dir() {
             return Err(IndexError::NotADirectory(root.to_path_buf()));
         }
+        // Canonicalize the root so the stored key matches whatever the OS
+        // returns from watcher events. Falls back to lexical normalization
+        // (which is still correct for non-symlink paths).
+        let root = root
+            .canonicalize()
+            .unwrap_or_else(|_| normalize_path(root));
+        let root = root.as_path();
         let paths = collect_source_files(root);
         let (files, cache_dirty) = assemble_files(&paths, prior)?;
         let graph = build_graph(&files);
@@ -237,7 +290,11 @@ impl Index {
     /// the file from the index (it may have been deleted or renamed). Returns
     /// `true` when the index changed.
     pub fn update_file(&mut self, path: impl AsRef<Path>) -> bool {
-        let changed = self.stage_file(path.as_ref());
+        // Normalize before any map lookup so watcher paths (possibly relative,
+        // differently-cased, or symlink-resolved) always hit the same key as
+        // the build walk used.
+        let path = normalize_path(path.as_ref());
+        let changed = self.stage_file(&path);
         if changed {
             self.cache_dirty = true;
             self.graph = build_graph(&self.files);
@@ -252,7 +309,8 @@ impl Index {
     pub fn update_files<P: AsRef<Path>>(&mut self, paths: &[P]) -> bool {
         let mut changed = false;
         for path in paths {
-            changed |= self.stage_file(path.as_ref());
+            let path = normalize_path(path.as_ref());
+            changed |= self.stage_file(&path);
         }
         if changed {
             self.cache_dirty = true;
@@ -264,7 +322,11 @@ impl Index {
     /// Drop a file (e.g. deleted on disk) and rebuild. Returns `true` when the
     /// file was present and removed.
     pub fn remove_file(&mut self, path: impl AsRef<Path>) -> bool {
-        if self.files.remove(path.as_ref()).is_some() {
+        // Normalize so the key matches what was indexed during the build walk.
+        // For deleted files, `canonicalize` would fail, so we use the cheaper
+        // normalize_path (absolute + lexical clean) instead.
+        let path = normalize_path(path.as_ref());
+        if self.files.remove(&path).is_some() {
             self.cache_dirty = true;
             self.graph = build_graph(&self.files);
             true
@@ -293,16 +355,30 @@ impl Index {
         }
         let entry = Lang::from_path(path).and_then(|lang| {
             // Gate on the size first (cheap stat), then parse the bytes.
-            if FileMeta::of(path)?.size > MAX_FILE_BYTES {
+            let pre_meta = FileMeta::of(path)?;
+            if pre_meta.size > MAX_FILE_BYTES {
                 return None;
             }
             let source = std::fs::read_to_string(path).ok()?;
             let parsed = parse_source(lang, &source).ok()?;
-            // Re-stat *after* the read so the stored fingerprint matches the bytes we
-            // actually parsed — not a pre-read stat that a concurrent write could
-            // have invalidated. Keeps the cache honest about what it holds.
-            let meta = FileMeta::of(path)?;
-            Some(FileEntry { meta, parsed })
+            // Re-stat *after* the read to detect concurrent writes: if the
+            // fingerprint changed between the read and this stat, the bytes we
+            // parsed may already be stale. Retry once to get a stable pair;
+            // if the file is still in flux, skip this cycle (the watcher will
+            // deliver another event).
+            let post_meta = FileMeta::of(path)?;
+            if post_meta != pre_meta {
+                // One retry with a fresh read.
+                let source2 = std::fs::read_to_string(path).ok()?;
+                let parsed2 = parse_source(lang, &source2).ok()?;
+                let meta2 = FileMeta::of(path)?;
+                if meta2 != post_meta {
+                    // Still in flux — skip; watcher will fire again.
+                    return None;
+                }
+                return Some(FileEntry { meta: meta2, parsed: parsed2 });
+            }
+            Some(FileEntry { meta: post_meta, parsed })
         });
         match entry {
             Some(entry) => {
@@ -536,19 +612,59 @@ fn add_nesting_edges(graph: &mut CodeGraph, placed: &[Placed]) {
 /// Reference edges: each [`RawRef`] is attributed to its enclosing definition
 /// (the source) and linked to the definition(s) its name resolves to. The edge's
 /// confidence reflects *how* the name resolved (local / unique-global / ambiguous).
+///
+/// File-scope references (imports, top-level calls, etc.) that have no enclosing
+/// definition are attributed to a synthetic per-file module node so that
+/// file-level import/dependency edges are not silently dropped from the graph.
+/// This is the main path through which `import` edges reach the graph and make
+/// [`crate::detect::import_cycles`] meaningful.
 fn add_reference_edges(
     graph: &mut CodeGraph,
     parsed: &ParsedFile,
-    file_id: crate::graph::FileId,
+    file_id: FileId,
     placed: &[Placed],
 ) {
+    // Lazily create the synthetic file-module node the first time a file-scope
+    // reference needs a source.  We avoid creating it eagerly so files with no
+    // file-scope references add no extra node.
+    let mut file_module: Option<NodeId> = None;
+    let mut get_file_module = |graph: &mut CodeGraph| -> NodeId {
+        if let Some(id) = file_module {
+            return id;
+        }
+        // Name the synthetic node after the file stem so graph exports are readable.
+        let name_str = graph
+            .file_path(file_id)
+            .and_then(|p| p.file_stem())
+            .and_then(|s| s.to_str())
+            .unwrap_or("<module>")
+            .to_string();
+        let name = graph.intern(&name_str);
+        let id = graph.add_node(Node {
+            name,
+            kind: SymbolKind::Module,
+            file: file_id,
+            span: SYNTHETIC_SPAN,
+            name_span: SYNTHETIC_SPAN,
+        });
+        file_module = Some(id);
+        id
+    };
+
     let mut edges = Vec::new();
     for reference in &parsed.refs {
         // A reference is not a node, so nothing to exclude — find the tightest
         // definition whose extent contains it.
-        let Some(source) = enclosing_def(placed, reference.span, None) else {
-            continue; // file-scope reference: no owning definition to attribute it to
+        let source = match enclosing_def(placed, reference.span, None) {
+            Some(s) => s,
+            None => {
+                // File-scope reference (imports, top-level uses, etc.): attach
+                // to the synthetic module node so the edge is preserved in the
+                // graph rather than being silently discarded.
+                get_file_module(graph)
+            }
         };
+
         let global = graph.nodes_by_name(&reference.name);
         if global.is_empty() {
             continue; // external / stdlib name — no node to point at
@@ -559,7 +675,15 @@ fn add_reference_edges(
             .filter(|&n| graph.node(n).is_some_and(|node| node.file == file_id))
             .collect();
         let kind = edge_kind(reference.kind);
-        let (targets, resolution) = resolve_targets(&same_file, global, Some(source));
+        // For Call references, allow self-loops so recursive functions produce a
+        // Call edge to themselves.  For other reference kinds keep the original
+        // behaviour (exclude the enclosing definition to avoid noise from a def
+        // whose extent covers its own name token being counted as a self-ref).
+        let self_excl = match reference.kind {
+            RefKind::Call => None,
+            _ => Some(source),
+        };
+        let (targets, resolution) = resolve_targets(&same_file, global, self_excl);
         let confidence = confidence_of(resolution);
         for target in targets {
             edges.push(Edge {

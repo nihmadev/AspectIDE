@@ -25,6 +25,16 @@ const INSTALL_TIMEOUT_SECS: u64 = 900;
 /// and stay parallel, so the lock is scoped to npm only.
 static NPM_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Per-target install locks for the non-npm methods. Each writes a distinct shared
+/// directory/toolchain that a concurrent run of the SAME method would corrupt
+/// (file-in-use / ENOTEMPTY / partial binary): `install_go` → `<lsp>/go/bin`,
+/// `install_pip` → `<lsp>/pip`, `install_rustup` → the shared rustup toolchain.
+/// Distinct methods still run in parallel (separate locks); only same-method
+/// concurrency (double-click, two Settings panels, AI-driven retries) is serialized.
+static GO_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PIP_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static RUSTUP_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// How a given language server is obtained. Each variant maps to a concrete
 /// package-manager invocation in `install_server`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,6 +285,35 @@ async fn run_install(
     }
 }
 
+/// Acquire a per-target install lock, surfacing a "waiting" progress step if it is
+/// already held so the UI explains the pause instead of looking stuck.
+async fn acquire_install_lock<'lock>(
+    app: &AppHandle,
+    language_id: &str,
+    lock: &'lock tokio::sync::Mutex<()>,
+    command: &str,
+) -> tokio::sync::MutexGuard<'lock, ()> {
+    if let Ok(guard) = lock.try_lock() {
+        return guard;
+    }
+    progress(
+        app,
+        language_id,
+        15,
+        &format!("Waiting for another {command} install to finish"),
+    );
+    lock.lock().await
+}
+
+/// If `command` already resolves in the managed dir, return its path — used after
+/// acquiring an install lock to skip redundant work a concurrent install just did.
+fn already_installed(app: &AppHandle, command: &str) -> Option<String> {
+    managed_bin_dirs(app)
+        .iter()
+        .find_map(|dir| resolve_in_dir(dir, command))
+        .map(|path| path.to_string_lossy().to_string())
+}
+
 async fn install_npm(
     app: &AppHandle,
     language_id: &str,
@@ -299,17 +338,7 @@ async fn install_npm(
         .map_err(|e| e.to_string())?;
     // Serialize concurrent npm installs into the shared prefix (see NPM_INSTALL_LOCK).
     // Held across `npm install` + `finalize` so no two npm processes ever overlap.
-    let _npm_guard = if let Ok(guard) = NPM_INSTALL_LOCK.try_lock() {
-        guard
-    } else {
-        progress(
-            app,
-            language_id,
-            15,
-            "Waiting for another npm install to finish",
-        );
-        NPM_INSTALL_LOCK.lock().await
-    };
+    let _npm_guard = acquire_install_lock(app, language_id, &NPM_INSTALL_LOCK, "npm").await;
     progress(app, language_id, 25, "Downloading via npm");
     // `--prefix` installs into <prefix>/node_modules and <prefix>/node_modules/.bin.
     let mut args = vec![
@@ -341,6 +370,12 @@ async fn install_go(
     root: &Path,
     pkg: &str,
 ) -> Result<String, String> {
+    // Serialize same-target installs into `<lsp>/go/bin`; if a queued duplicate
+    // already produced the binary, return it without re-running `go install`.
+    let _guard = acquire_install_lock(app, language_id, &GO_INSTALL_LOCK, command).await;
+    if let Some(path) = already_installed(app, command) {
+        return Ok(path);
+    }
     // On a clean machine, provision the managed Go SDK first, then resolve it.
     let go = if let Some(go) = resolve_tool(app, "go") {
         go
@@ -401,6 +436,12 @@ async fn install_pip(
     root: &Path,
     pkg: &str,
 ) -> Result<String, String> {
+    // Serialize same-target installs into `<lsp>/pip`; a queued duplicate that
+    // already produced the console script short-circuits before re-running pip.
+    let _guard = acquire_install_lock(app, language_id, &PIP_INSTALL_LOCK, command).await;
+    if let Some(path) = already_installed(app, command) {
+        return Ok(path);
+    }
     // Bring up managed Python on a machine with no system Python, then resolve it.
     // Mirrors the npm/go/rustup installers so a clean box can install ty unaided.
     let python = if let Some(python) =
@@ -416,6 +457,12 @@ async fn install_pip(
             .or_else(|| resolve_tool(app, "python"))
             .ok_or_else(|| "Python was set up but is still not resolvable.".to_string())?
     };
+    // Self-repair: a managed Python provisioned before pip was a hard requirement (or
+    // whose bootstrap was skipped) may have no pip. Ensure it before the pip install
+    // so `ty` doesn't fail with an unrepairable "No module named pip".
+    if crate::runtime_provision::is_managed_path(app, &python) {
+        crate::runtime_provision::ensure_managed_pip(app).await?;
+    }
     let target = root.join("pip");
     tokio::fs::create_dir_all(&target)
         .await
@@ -448,6 +495,12 @@ async fn install_rustup(
     command: &str,
     component: &str,
 ) -> Result<String, String> {
+    // Serialize concurrent rustup component installs (they mutate one shared
+    // toolchain); a queued duplicate that already added the component returns early.
+    let _guard = acquire_install_lock(app, language_id, &RUSTUP_INSTALL_LOCK, command).await;
+    if let Some(path) = already_installed(app, command) {
+        return Ok(path);
+    }
     // On a clean machine, provision the managed Rust toolchain — rustup-init already
     // installs the `rust-analyzer` component, so this single step can fully satisfy us.
     let rustup = if let Some(rustup) = resolve_tool(app, "rustup") {
@@ -567,16 +620,27 @@ fn resolve_tool(app: &AppHandle, tool: &str) -> Option<PathBuf> {
     resolve_on_path(tool)
 }
 
-/// Resolve a command on the system PATH, honoring Windows executable extensions.
+/// On Windows, the order in which executable extensions are tried. Native binaries
+/// (`.com`/`.exe`) are preferred over script shims (`.bat`/`.cmd`) — mirroring the
+/// default `PATHEXT` precedence — so a `.cmd`/`.bat` dropped next to a real
+/// `go.exe`/`python.exe`/`rustup.exe` can't shadow it and shrink the PATH-injection
+/// surface. `npm`/`npx`, which genuinely ship only as `.cmd` shims on Windows, are
+/// still found because `.cmd` remains in the list (just later).
+#[cfg(windows)]
+const WINDOWS_EXE_EXTENSIONS: &[&str] = &[".com", ".exe", ".bat", ".cmd"];
+
+/// Resolve a command on the system PATH, honoring Windows executable extensions in
+/// native-first `PATHEXT`-style order.
 pub fn resolve_on_path(command: &str) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        for ext in [".cmd", ".exe", ".bat", ""] {
+        for ext in WINDOWS_EXE_EXTENSIONS {
             if let Ok(path) = which::which(format!("{command}{ext}")) {
                 return Some(path);
             }
         }
-        None
+        // Last resort: let `which` apply the system PATHEXT itself for a bare name.
+        which::which(command).ok()
     }
     #[cfg(not(windows))]
     {
@@ -585,20 +649,22 @@ pub fn resolve_on_path(command: &str) -> Option<PathBuf> {
 }
 
 /// Resolve `command` inside a specific directory (managed bin dir), applying
-/// Windows executable extensions.
+/// Windows executable extensions in native-first order.
 pub fn resolve_in_dir(dir: &Path, command: &str) -> Option<PathBuf> {
-    let direct = dir.join(command);
-    if direct.is_file() {
-        return Some(direct);
-    }
     #[cfg(windows)]
     {
-        for ext in [".cmd", ".exe", ".bat", ".com"] {
+        // Prefer an explicit native/script extension over a bare, possibly
+        // non-executable file of the same stem.
+        for ext in WINDOWS_EXE_EXTENSIONS {
             let candidate = dir.join(format!("{command}{ext}"));
             if candidate.is_file() {
                 return Some(candidate);
             }
         }
+    }
+    let direct = dir.join(command);
+    if direct.is_file() {
+        return Some(direct);
     }
     None
 }

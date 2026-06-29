@@ -1,23 +1,27 @@
 import { lazy, Suspense, useEffect, useMemo, useRef } from "react";
 import type { editor } from "monaco-editor";
-import type { FileDiffHunk } from "../../lib/aiFileDiffHunks";
 
 const DiffEditor = lazy(() => import("@monaco-editor/react").then((module) => ({ default: module.DiffEditor })));
+
+const DEFAULT_LANGUAGE = "plaintext";
 
 type AiMonacoDiffReviewProps = {
   beforeText: string;
   afterText: string;
   language?: string;
-  activeHunkId?: string | null;
-  onHunkPositions?: (positions: Array<{ hunkId: string; lineNumber: number }>) => void;
+  /**
+   * 1-based start line of the selected hunk in the modified text. Driven from the
+   * real `FileDiffHunk.afterStartLine` (not an estimated ordinal), so selecting a
+   * hunk reveals its true location in the review editor.
+   */
+  activeHunkLine?: number | null;
 };
 
 export function AiMonacoDiffReview({
   beforeText,
   afterText,
-  language = "plaintext",
-  activeHunkId,
-  onHunkPositions,
+  language = DEFAULT_LANGUAGE,
+  activeHunkLine,
 }: AiMonacoDiffReviewProps) {
   const editorRef = useRef<editor.IStandaloneDiffEditor | null>(null);
 
@@ -33,16 +37,11 @@ export function AiMonacoDiffReview({
     diffWordWrap: "on",
   }), []);
 
+  // Reveal the selected hunk by its real line. The editor instance is not yet
+  // mounted on the first run, so `onMount` performs the initial reveal too.
   useEffect(() => {
-    const instance = editorRef.current;
-    if (!instance || !activeHunkId) return;
-    const modified = instance.getModifiedEditor();
-    const line = findHunkLine(afterText, activeHunkId);
-    if (line > 0) {
-      modified.revealLineInCenter(line);
-      modified.setPosition({ lineNumber: line, column: 1 });
-    }
-  }, [activeHunkId, afterText]);
+    revealHunkLine(editorRef.current, activeHunkLine);
+  }, [activeHunkLine]);
 
   return (
     <div className="ai-monaco-diff-review">
@@ -55,7 +54,7 @@ export function AiMonacoDiffReview({
           options={options}
           onMount={(instance) => {
             editorRef.current = instance;
-            onHunkPositions?.([]);
+            revealHunkLine(instance, activeHunkLine);
           }}
         />
       </Suspense>
@@ -63,10 +62,12 @@ export function AiMonacoDiffReview({
   );
 }
 
-function findHunkLine(afterText: string, hunkId: string) {
-  const match = hunkId.match(/hunk-(\d+)/);
-  if (!match) return 1;
-  const index = Number(match[1]) - 1;
-  const lines = afterText.split(/\r?\n/);
-  return Math.min(lines.length, Math.max(1, index * 8 + 1));
+/** Center the modified editor on a 1-based line, clamped to the model's bounds. */
+function revealHunkLine(instance: editor.IStandaloneDiffEditor | null, line: number | null | undefined) {
+  if (!instance || line == null || line < 1) return;
+  const modified = instance.getModifiedEditor();
+  const lineCount = modified.getModel()?.getLineCount() ?? line;
+  const target = Math.min(line, lineCount);
+  modified.revealLineInCenter(target);
+  modified.setPosition({ lineNumber: target, column: 1 });
 }

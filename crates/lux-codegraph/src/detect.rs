@@ -200,15 +200,38 @@ pub struct ImportCycle {
     pub files: Vec<String>,
 }
 
-/// Detect cycles in the file-level dependency graph.
+/// Detect cycles in the file-level **import** graph.
+///
+/// Only [`EdgeKind::Imports`] edges are considered; call/reference edges between
+/// mutually-recursive functions in different files are intentionally excluded so
+/// that genuine import cycles are not confused with cross-file call cycles.
 ///
 /// Edges between definitions are projected to their files; a strongly-connected
 /// component of size ≥ 2 in that file graph is a cycle. One representative cycle
-/// per component is returned (its files in a stable order). Self-imports are
-/// ignored. Ports the intent of `find_import_cycles` (file-granular cycles).
+/// per component is returned (its files in a stable order). Ports the intent of
+/// `find_import_cycles` (file-granular cycles).
 #[must_use]
 pub fn import_cycles(graph: &CodeGraph) -> Vec<ImportCycle> {
-    // Build the file→file adjacency from all non-structural cross-file edges.
+    file_cycles_for_kinds(graph, &[EdgeKind::Imports])
+}
+
+/// Detect cycles in the file-level **call/reference** graph (mutual recursion
+/// across files, circular call chains, etc.). This is a separate analysis from
+/// [`import_cycles`] — call cycles are not the same thing as import cycles.
+///
+/// Returns one [`ImportCycle`] (reusing the type for convenience) per
+/// strongly-connected component of size ≥ 2 in the file-level call/reference
+/// adjacency.
+#[must_use]
+pub fn file_dependency_cycles(graph: &CodeGraph) -> Vec<ImportCycle> {
+    file_cycles_for_kinds(
+        graph,
+        &[EdgeKind::Calls, EdgeKind::References, EdgeKind::Implements],
+    )
+}
+
+/// Build file→file SCCs restricted to the given edge kinds.
+fn file_cycles_for_kinds(graph: &CodeGraph, kinds: &[EdgeKind]) -> Vec<ImportCycle> {
     let mut file_adj: FxHashMap<usize, rustc_hash::FxHashSet<usize>> = FxHashMap::default();
     for i in 0..graph.node_count() {
         let from = NodeId::from_raw(u32::try_from(i).unwrap_or(u32::MAX));
@@ -216,7 +239,7 @@ pub fn import_cycles(graph: &CodeGraph) -> Vec<ImportCycle> {
             continue;
         };
         for adj in graph.out_neighbors(from) {
-            if adj.kind == EdgeKind::Defines {
+            if !kinds.contains(&adj.kind) {
                 continue;
             }
             if let Some(to_file) = graph.node(adj.node).map(|n| n.file.index()) {
@@ -370,7 +393,9 @@ impl Tarjan<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{god_nodes, import_cycles, surprising_connections, DEFAULT_GOD_NODES};
+    use super::{
+        file_dependency_cycles, god_nodes, import_cycles, surprising_connections, DEFAULT_GOD_NODES,
+    };
     use crate::community;
     use crate::index::Index;
     use std::io::Write;
@@ -436,21 +461,31 @@ mod tests {
     }
 
     #[test]
-    fn import_cycle_between_two_files_is_detected() {
-        // a.rs calls into b.rs and b.rs calls back into a.rs → a 2-file cycle.
+    fn call_cycle_between_two_files_is_detected_as_dependency_cycle() {
+        // a.rs calls into b.rs and b.rs calls back → a cross-file call cycle, NOT
+        // an import cycle.  import_cycles must return empty; file_dependency_cycles
+        // must find the cycle.
         let root = workspace(&[
             ("a.rs", "pub fn a_fn() { b_fn(); }\n"),
             ("b.rs", "pub fn b_fn() { a_fn(); }\n"),
         ]);
         let index = Index::build(&root).expect("build");
-        let cycles = import_cycles(index.graph());
 
-        assert_eq!(
-            cycles.len(),
-            1,
-            "expected exactly one file cycle, got {cycles:?}"
+        // import_cycles should NOT fire — there are no import edges here.
+        let import = import_cycles(index.graph());
+        assert!(
+            import.is_empty(),
+            "call cycles must not appear as import cycles, got {import:?}"
         );
-        assert_eq!(cycles[0].files.len(), 2);
+
+        // file_dependency_cycles SHOULD find the call cycle.
+        let dep = file_dependency_cycles(index.graph());
+        assert_eq!(
+            dep.len(),
+            1,
+            "expected exactly one dependency cycle, got {dep:?}"
+        );
+        assert_eq!(dep[0].files.len(), 2);
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -463,6 +498,7 @@ mod tests {
         ]);
         let index = Index::build(&root).expect("build");
         assert!(import_cycles(index.graph()).is_empty());
+        assert!(file_dependency_cycles(index.graph()).is_empty());
 
         std::fs::remove_dir_all(&root).ok();
     }

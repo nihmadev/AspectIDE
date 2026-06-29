@@ -91,9 +91,10 @@ pub enum Resolution {
 /// A name with no candidates (external / standard-library symbol) yields an empty
 /// vec and contributes no edge — expected, not an error.
 ///
-/// `self_node` is the reference's own enclosing definition when known; it is
-/// never returned, so a recursive call does not create a self-loop unless the
-/// function genuinely has a same-named sibling.
+/// `self_node` is the reference's own enclosing definition when known; when
+/// provided, that node is excluded from the result set so non-recursive name
+/// captures don't create accidental self-loops. Pass `None` for calls and
+/// references where self-loops are semantically valid (recursive functions).
 #[must_use]
 pub fn resolve_targets(
     same_file: &[NodeId],

@@ -14,7 +14,7 @@ use lux_core::{
 use serde_json::Value;
 
 use super::{
-    DiagnosticsUpdate, SemanticTokenLegend, CLIENT_SEMANTIC_TOKEN_MODIFIERS,
+    DiagnosticsUpdate, SemanticTokenLegend, TextDocumentSyncKind, CLIENT_SEMANTIC_TOKEN_MODIFIERS,
     CLIENT_SEMANTIC_TOKEN_TYPES,
 };
 
@@ -145,6 +145,30 @@ pub fn parse_semantic_token_legend_from_initialize(value: &Value) -> Option<Sema
         token_types,
         token_modifiers,
     })
+}
+
+/// Parse the server's `textDocumentSync` change mode from the `initialize` reply.
+///
+/// `textDocumentSync` is either a number (`TextDocumentSyncKind`) or an object
+/// with a `change` field of the same kind: `0 = None`, `1 = Full`, `2 = Incremental`.
+/// Anything missing/unknown falls back to `Full` — the safe default that every
+/// server accepts, so we never send ranged edits a server can't apply.
+#[must_use]
+pub fn parse_text_document_sync_kind(value: &Value) -> TextDocumentSyncKind {
+    let sync = value
+        .get("capabilities")
+        .and_then(|caps| caps.get("textDocumentSync"));
+    let change = match sync {
+        Some(Value::Number(number)) => number.as_i64(),
+        Some(Value::Object(_)) => sync.and_then(|sync| sync.get("change")).and_then(Value::as_i64),
+        _ => None,
+    };
+    match change {
+        Some(0) => TextDocumentSyncKind::None,
+        Some(2) => TextDocumentSyncKind::Incremental,
+        // 1 (Full) and any unknown/missing value default to Full.
+        _ => TextDocumentSyncKind::Full,
+    }
 }
 
 #[must_use]
@@ -293,6 +317,13 @@ pub fn parse_code_action_result(value: &Value) -> Vec<LspCodeAction> {
         .unwrap_or_default()
 }
 
+/// Shown for an action that carries only a server `command` (no `edit`). We don't
+/// yet drive `workspace/executeCommand`, but the action is real — surfacing it
+/// (instead of silently dropping it) keeps the quick-fix/refactor visible to the
+/// user and the AI rather than vanishing.
+const COMMAND_ONLY_ACTION_REASON: &str =
+    "This action runs a language-server command, which Lux can't execute yet — apply it from the server's own UI.";
+
 fn parse_code_action(value: &Value) -> Option<LspCodeAction> {
     let title = value.get("title")?.as_str()?.to_string();
     let disabled_reason = value
@@ -301,9 +332,18 @@ fn parse_code_action(value: &Value) -> Option<LspCodeAction> {
         .and_then(Value::as_str)
         .map(str::to_string);
     let edit = value.get("edit").and_then(parse_workspace_edit_result);
-    if edit.is_none() && disabled_reason.is_none() {
-        return None;
-    }
+    // A code action is valid with ONLY a `command` (LSP allows this for quick
+    // fixes/refactors). Previously those were dropped; now we surface them with a
+    // clear, non-applicable reason so they don't silently disappear from the IDE.
+    let has_command = value
+        .get("command")
+        .is_some_and(|command| !command.is_null());
+    let disabled_reason = match (&disabled_reason, &edit, has_command) {
+        (Some(_), _, _) => disabled_reason,
+        (None, None, true) => Some(COMMAND_ONLY_ACTION_REASON.to_string()),
+        (None, None, false) => return None,
+        (None, Some(_), _) => None,
+    };
 
     Some(LspCodeAction {
         title,

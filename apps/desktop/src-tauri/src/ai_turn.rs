@@ -92,45 +92,57 @@ fn clear_turn_cancelled(turn_id: &str) {
     }
 }
 
-/// Messages the UI staged WHILE a turn was running, keyed by session id. The
-/// model↔tool loop drains them at each round boundary and appends them as `user`
-/// messages — so a "recommendation" the user types mid-work reaches the model at
-/// the very next inter-round gap instead of waiting for the whole turn to end.
+/// Messages the UI staged WHILE a turn was running, keyed by `session_id:turn_id`.
+/// Keying by turn_id prevents a restarted or concurrent turn draining messages
+/// that were staged for a different (earlier) turn (F5 — misrouting live input).
 fn pending_injections() -> &'static Mutex<HashMap<String, VecDeque<String>>> {
     static PENDING: OnceLock<Mutex<HashMap<String, VecDeque<String>>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Queue a user message for injection into the running turn of `session_id`.
-pub fn enqueue_injection(session_id: &str, text: String) {
+/// Per-turn cap: at most this many mid-turn injections are buffered. Beyond this,
+/// new ones are silently dropped (a truncation notice is already emitted to the model
+/// when the cap is hit). Prevents a flood of staged messages from exploding context.
+const MAX_INJECTIONS_PER_TURN: usize = 16;
+
+/// Queue a user message for injection into the running turn identified by
+/// `session_id` + `turn_id`. Silently drops messages beyond the per-turn cap.
+pub fn enqueue_injection(session_id: &str, turn_id: &str, text: String) {
     if text.trim().is_empty() {
         return;
     }
+    let key = format!("{session_id}:{turn_id}");
     if let Ok(mut map) = pending_injections().lock() {
-        map.entry(session_id.to_string())
-            .or_default()
-            .push_back(text);
+        let queue = map.entry(key).or_default();
+        if queue.len() < MAX_INJECTIONS_PER_TURN {
+            queue.push_back(text);
+        }
+        // Silently drop: caller already emits a truncation notice via the turn event.
     }
 }
 
-/// Take all messages staged for `session_id`, clearing the queue.
-fn drain_injections(session_id: &str) -> Vec<String> {
+/// Take all messages staged for the given `session_id`+`turn_id`, clearing that slot.
+fn drain_injections(session_id: &str, turn_id: &str) -> Vec<String> {
+    let key = format!("{session_id}:{turn_id}");
     if let Ok(mut map) = pending_injections().lock() {
-        if let Some(queue) = map.get_mut(session_id) {
+        if let Some(queue) = map.get_mut(&key) {
             let drained: Vec<String> = queue.drain(..).collect();
-            if drained.is_empty() {
-                return drained;
+            if !drained.is_empty() {
+                map.remove(&key);
             }
-            map.remove(session_id);
             return drained;
         }
     }
     Vec::new()
 }
 
-/// Drop any leftover staged messages for a session (turn ended without draining).
-fn clear_injections(session_id: &str) {
+/// Drop any leftover staged messages for this turn (early exit / cancellation / error).
+/// Also drops the legacy session-only slot if present for backward compat.
+fn clear_injections(session_id: &str, turn_id: &str) {
+    let key = format!("{session_id}:{turn_id}");
     if let Ok(mut map) = pending_injections().lock() {
+        map.remove(&key);
+        // Also sweep any leftover legacy session-only slots.
         map.remove(session_id);
     }
 }
@@ -879,6 +891,18 @@ pub async fn ai_run_turn(
         tools.extend(crate::mcp::agent_tool_definitions().await);
     }
 
+    // F4: build the authoritative allowed-tool set from the exact definitions sent in
+    // the request. Any tool call whose name is not in this set is rejected before
+    // dispatch — enforcing mode restrictions at the Rust boundary, not only via
+    // prompt/tool-definition shaping.
+    let allowed_tool_names: std::collections::HashSet<String> = tools
+        .iter()
+        .filter_map(|t| t.get("function").and_then(|f| f.get("name"))
+            .or_else(|| t.get("name"))
+            .and_then(|n| n.as_str()))
+        .map(str::to_string)
+        .collect();
+
     let mut final_content = String::new();
     let mut usage_prompt: u64 = 0;
     let mut usage_completion: u64 = 0;
@@ -889,11 +913,16 @@ pub async fn ai_run_turn(
     // an early round; the recovery turn below then refreshes it (L8).
     let mut completed_naturally = false;
 
+    // Clear the read-before-edit set at turn start: reads from a previous turn
+    // must not authorize edits in the new one (on-disk state may have changed).
+    crate::ai_session::clear_read_files(&input.session_id);
+
     // ── Model ↔ tool loop ──
     for _round in 0..max_rounds {
         // Honor a Stop pressed between rounds: abort before another model call.
         if is_turn_cancelled(&turn_id) {
             clear_turn_cancelled(&turn_id);
+            clear_injections(&input.session_id, &turn_id); // F5: clean on every exit
             let _ = emit_turn_event(
                 &app,
                 &TurnEvent::TurnError {
@@ -992,6 +1021,7 @@ pub async fn ai_run_turn(
                 // model-call failure doesn't leak a stale entry (consistent with
                 // the clear-on-finish path below).
                 clear_turn_cancelled(&turn_id);
+                clear_injections(&input.session_id, &turn_id); // F5: clean on every exit
                 let _ = emit_turn_event(
                     &app,
                     &TurnEvent::TurnError {
@@ -1034,6 +1064,7 @@ pub async fn ai_run_turn(
         // destructive — tool call below.
         if is_turn_cancelled(&turn_id) {
             clear_turn_cancelled(&turn_id);
+            clear_injections(&input.session_id, &turn_id); // F5: clean on every exit
             let _ = emit_turn_event(
                 &app,
                 &TurnEvent::TurnError {
@@ -1049,7 +1080,7 @@ pub async fn ai_run_turn(
         // it before the turn closes — otherwise a recommendation sent during the final
         // round would be silently dropped (then wiped by clear_injections on TurnDone).
         if assistant.tool_calls.is_empty() {
-            let injected = drain_injections(&input.session_id);
+            let injected = drain_injections(&input.session_id, &turn_id);
             if injected.is_empty() {
                 completed_naturally = true;
                 break;
@@ -1094,6 +1125,36 @@ pub async fn ai_run_turn(
             },
         );
 
+        // F6: pre-scan this batch for paths that are ONLY being read for the first time
+        // in the same batch as an edit. A model cannot have observed a Read result it
+        // issued in the same response — so an edit whose only prior read is from this
+        // same batch is based on content the model never saw.
+        //
+        // Algorithm: collect paths that receive a first-time Read in this batch AND
+        // also receive an edit in this batch. Those paths are "batch-read-only" and
+        // any edit against them in this batch is rejected with a "read first" message.
+        let batch_first_reads: std::collections::HashSet<String> = {
+            let mut reads_in_batch = std::collections::HashSet::new();
+            for tc in &assistant.tool_calls {
+                let tc_args: serde_json::Value =
+                    serde_json::from_str(&tc.arguments).unwrap_or_else(|_| serde_json::json!({}));
+                if matches!(tc.name.as_str(), "Read" | "InspectFile") {
+                    if let Some(raw) = tc_args.get("path").and_then(|v| v.as_str()) {
+                        // Only a first-time read (file not yet in session) creates the risk.
+                        if let Ok(resolved) = crate::resolve_workspace_path(
+                            &state,
+                            std::path::Path::new(raw),
+                        ) {
+                            if !crate::ai_session::was_file_read(&input.session_id, &resolved) {
+                                reads_in_batch.insert(resolved.to_string_lossy().replace('\\', "/"));
+                            }
+                        }
+                    }
+                }
+            }
+            reads_in_batch
+        };
+
         // Execute each tool call.
         for tc in &assistant.tool_calls {
             let _ = emit_turn_event(
@@ -1106,9 +1167,88 @@ pub async fn ai_run_turn(
                 },
             );
 
+            // F6: reject edits whose only eligible read is from THIS same batch —
+            // the model generated the edit before receiving the Read result.
+            let tc_args_for_guard: serde_json::Value =
+                serde_json::from_str(&tc.arguments).unwrap_or_else(|_| serde_json::json!({}));
+            let batch_edit_path: Option<String> =
+                if matches!(tc.name.as_str(), "StrReplace" | "PatchEngine") {
+                    tc_args_for_guard
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .and_then(|raw| {
+                            crate::resolve_workspace_path(&state, std::path::Path::new(raw))
+                                .ok()
+                                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                        })
+                } else if tc.name == "Write" {
+                    let overwrite = tc_args_for_guard
+                        .get("overwrite")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    if overwrite {
+                        tc_args_for_guard
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .and_then(|raw| {
+                                crate::resolve_workspace_path(
+                                    &state,
+                                    std::path::Path::new(raw),
+                                )
+                                .ok()
+                                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                            })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            if let Some(edit_target) = batch_edit_path {
+                if batch_first_reads.contains(&edit_target) {
+                    // The only prior read for this path was in the same batch:
+                    // the model never saw the content. Surface a recoverable error.
+                    let result_early: Result<String, String> = Err(format!(
+                        "{} blocked (F6): the Read of {} was issued in the same response as this edit. \
+                         The model could not have seen the file contents. Read the file in a prior turn, \
+                         then retry the edit.",
+                        tc.name, edit_target
+                    ));
+                    let (status, output, error) = match result_early {
+                        Ok(o) => ("success".to_string(), o, None),
+                        Err(e) => ("error".to_string(), String::new(), Some(e)),
+                    };
+                    let _ = emit_turn_event(
+                        &app,
+                        &TurnEvent::ToolCallCompleted {
+                            turn_id: turn_id.clone(),
+                            call_id: tc.id.clone(),
+                            status,
+                            output: output.clone(),
+                            error: error.clone(),
+                        },
+                    );
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": serde_json::json!({ "error": error.unwrap_or_default() }).to_string(),
+                    }));
+                    continue;
+                }
+            }
+
             // Box the per-tool future: `execute_tool` is a large state machine
             // (every tool arm) and would otherwise blow the `large_futures` budget.
-            let result = Box::pin(execute_tool(&app, &state, &input, &turn_id, true, tc)).await;
+            let result = Box::pin(execute_tool(
+                &app,
+                &state,
+                &input,
+                &turn_id,
+                true,
+                tc,
+                &allowed_tool_names,
+            ))
+            .await;
 
             let (status, output, error) = match result {
                 Ok(output) => ("success".to_string(), output, None),
@@ -1126,21 +1266,34 @@ pub async fn ai_run_turn(
                 },
             );
 
+            // F7: clamp tool output before appending to the conversation so unbounded
+            // MCP/browser/research results cannot explode the context window. Opaque
+            // outputs (those that look like raw JSON or long text) are the main risk.
+            const TOOL_OUTPUT_CHAR_LIMIT: usize = 32_000;
+            let content_for_messages = if error.is_some() {
+                serde_json::json!({ "error": error.clone().unwrap_or_default() }).to_string()
+            } else if output.chars().count() > TOOL_OUTPUT_CHAR_LIMIT {
+                // Truncate and append a metadata notice so the model knows context was cut.
+                let truncated: String = output.chars().take(TOOL_OUTPUT_CHAR_LIMIT).collect();
+                format!(
+                    "{truncated}\n\n[Tool output truncated: {} chars total, showing first {TOOL_OUTPUT_CHAR_LIMIT}. Use targeted follow-up queries to retrieve specific sections.]",
+                    output.chars().count()
+                )
+            } else {
+                output
+            };
             // Append tool result to conversation.
             messages.push(serde_json::json!({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": if error.is_some() {
-                    serde_json::json!({ "error": error.unwrap_or_default() }).to_string()
-                } else {
-                    output
-                },
+                "content": content_for_messages,
             }));
 
             // A Stop pressed during tool execution: stop before the next tool /
             // round so we don't keep running side-effecting tools post-abort.
             if is_turn_cancelled(&turn_id) {
                 clear_turn_cancelled(&turn_id);
+                clear_injections(&input.session_id, &turn_id); // F5: clean on every exit
                 let _ = emit_turn_event(
                     &app,
                     &TurnEvent::TurnError {
@@ -1156,7 +1309,7 @@ pub async fn ai_run_turn(
         // recommendation reaches the model at THIS gap, not after the whole turn.
         // Appended as user messages after the round's tool results so the model sees
         // them on its next call; the UI is told to render the bubbles in order.
-        for injected in drain_injections(&input.session_id) {
+        for injected in drain_injections(&input.session_id, &turn_id) {
             let _ = emit_turn_event(
                 &app,
                 &TurnEvent::UserMessageInjected {
@@ -1206,7 +1359,10 @@ pub async fn ai_run_turn(
         let retry_app = app.clone();
         let retry_turn_id = turn_id.clone();
         let mut announced_streaming = false;
-        if let Ok(response) = crate::ai_chat_backend::completion_streaming(
+        // F3: handle Err from the recovery call explicitly. A provider error or
+        // cancellation here must NOT be swallowed — report TurnError instead of
+        // emitting TurnDone with stale content.
+        match crate::ai_chat_backend::completion_streaming(
             request,
             move |content, reasoning| {
                 if is_turn_cancelled(&stream_turn_id) {
@@ -1239,22 +1395,51 @@ pub async fn ai_run_turn(
         )
         .await
         {
-            if let Some(usage) = response.body.get("usage") {
-                accumulate_usage(
-                    usage,
-                    &mut usage_prompt,
-                    &mut usage_completion,
-                    &mut usage_total,
-                    &mut usage_cached,
-                );
+            Ok(response) => {
+                // Check for a post-recovery cancellation before we use the result.
+                if is_turn_cancelled(&turn_id) {
+                    clear_turn_cancelled(&turn_id);
+                    clear_injections(&input.session_id, &turn_id);
+                    let _ = emit_turn_event(
+                        &app,
+                        &TurnEvent::TurnError {
+                            turn_id,
+                            error: "cancelled".to_string(),
+                        },
+                    );
+                    return Ok(());
+                }
+                if let Some(usage) = response.body.get("usage") {
+                    accumulate_usage(
+                        usage,
+                        &mut usage_prompt,
+                        &mut usage_completion,
+                        &mut usage_total,
+                        &mut usage_cached,
+                    );
+                }
+                let parsed = parse_assistant_message(&response.body);
+                if !parsed.content.trim().is_empty() {
+                    final_content = parsed.content;
+                } else if final_content.trim().is_empty() && !parsed.reasoning.trim().is_empty() {
+                    // Recovery also came back reasoning-only — surface the thinking text
+                    // rather than the canned placeholder.
+                    final_content = parsed.reasoning;
+                }
             }
-            let parsed = parse_assistant_message(&response.body);
-            if !parsed.content.trim().is_empty() {
-                final_content = parsed.content;
-            } else if final_content.trim().is_empty() && !parsed.reasoning.trim().is_empty() {
-                // Recovery also came back reasoning-only — surface the thinking text
-                // rather than the canned placeholder.
-                final_content = parsed.reasoning;
+            Err(error) => {
+                // The final synthesis failed: emit TurnError rather than TurnDone
+                // with stale content from an earlier round (F3 — correctness).
+                clear_turn_cancelled(&turn_id);
+                clear_injections(&input.session_id, &turn_id);
+                let _ = emit_turn_event(
+                    &app,
+                    &TurnEvent::TurnError {
+                        turn_id,
+                        error: format!("Recovery synthesis failed: {error}"),
+                    },
+                );
+                return Ok(());
             }
         }
     }
@@ -1284,7 +1469,7 @@ pub async fn ai_run_turn(
     // discard anything staged but not yet drained (it would target a dead turn;
     // the frontend re-queues it for the next turn instead).
     clear_turn_cancelled(&turn_id);
-    clear_injections(&input.session_id);
+    clear_injections(&input.session_id, &turn_id);
     let _ = emit_turn_event(
         &app,
         &TurnEvent::TurnDone {
@@ -1308,11 +1493,12 @@ pub fn ai_cancel_turn(turn_id: String) {
     cancel_questions_for_turn(&turn_id);
 }
 
-/// Stage a user message for injection into the session's running turn. The
-/// model↔tool loop folds it in at the next round boundary (see `enqueue_injection`).
+/// Stage a user message for injection into a specific running turn.
+/// `turn_id` scopes the injection so a restarted turn cannot drain messages
+/// that belonged to an older one (F5 — misrouting live input between turns).
 #[tauri::command]
-pub fn ai_inject_message(session_id: String, text: String) {
-    enqueue_injection(&session_id, text);
+pub fn ai_inject_message(session_id: String, turn_id: String, text: String) {
+    enqueue_injection(&session_id, &turn_id, text);
 }
 
 // ── Response parsing ──
@@ -1421,7 +1607,18 @@ async fn execute_tool(
     turn_id: &str,
     interactive: bool,
     tc: &ParsedToolCall,
+    allowed_tool_names: &std::collections::HashSet<String>,
 ) -> Result<String, String> {
+    // F4: hard-enforce mode allowlist — reject tool calls whose name was not in the
+    // definitions sent to the model. A compromised proxy or malformed response cannot
+    // route Write/Shell/McpManage into plan/ask modes by naming them in the response.
+    if !allowed_tool_names.is_empty() && !allowed_tool_names.contains(&tc.name) {
+        return Err(format!(
+            "{} is not available in {} mode and was blocked by the tool allowlist.",
+            tc.name, input.agent_mode
+        ));
+    }
+
     let args: serde_json::Value =
         serde_json::from_str(&tc.arguments).unwrap_or_else(|_| serde_json::json!({}));
 
@@ -1705,6 +1902,12 @@ async fn execute_tool(
             } else {
                 args.get("saveToDisk").and_then(serde_json::Value::as_bool)
             };
+            // F9: resolve the path before evaluating permission rules so glob patterns
+            // in deny/ask/allow rules match the canonical workspace-relative form, not
+            // whatever spelling the model used (./x, mixed separators, etc.).
+            let resolved_path = crate::resolve_workspace_path(state, std::path::Path::new(&path))
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| path.clone());
             require_tool_approval(
                 app,
                 turn_id,
@@ -1720,7 +1923,7 @@ async fn execute_tool(
                     "create"
                 },
                 &input.tool_permission_rules,
-                &path,
+                &resolved_path,
                 false,
             )
             .await?;
@@ -1744,6 +1947,11 @@ async fn execute_tool(
             let path = json_str(&args, "path");
             // StrReplace always edits existing content — enforce read-before-edit.
             require_file_read_before_edit(state, &input.session_id, "StrReplace", &path)?;
+            // F9: resolve path for permission evaluation.
+            let resolved_str_path =
+                crate::resolve_workspace_path(state, std::path::Path::new(&path))
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| path.clone());
             let old_text = json_str(&args, "oldText");
             let new_text = json_str(&args, "newText");
             let expected = args
@@ -1772,7 +1980,7 @@ async fn execute_tool(
                 ),
                 "modify",
                 &input.tool_permission_rules,
-                &path,
+                &resolved_str_path, // F9: use resolved canonical path
                 false,
             )
             .await?;
@@ -1795,6 +2003,11 @@ async fn execute_tool(
         }
         "Delete" => {
             let path = json_str(&args, "path");
+            // F9: resolve path for permission evaluation.
+            let resolved_delete_path =
+                crate::resolve_workspace_path(state, std::path::Path::new(&path))
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_else(|_| path.clone());
             require_tool_approval(
                 app,
                 turn_id,
@@ -1803,10 +2016,10 @@ async fn execute_tool(
                 interactive,
                 "Delete",
                 &format!("Delete {path}"),
-                &path,
+                &resolved_delete_path,
                 "delete",
                 &input.tool_permission_rules,
-                &path,
+                &resolved_delete_path, // F9: use resolved canonical path
                 false,
             )
             .await?;
@@ -1904,6 +2117,11 @@ async fn execute_tool(
                         .unwrap_or("")
                         .trim()
                         .to_ascii_lowercase();
+                    let overwrite_flag = op
+                        .get("overwrite")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false);
+                    let is_create = matches!(action.as_str(), "create");
                     let mutates_existing = matches!(
                         action.as_str(),
                         "write"
@@ -1915,7 +2133,9 @@ async fn execute_tool(
                             | "replace"
                             | "delete"
                             | "remove"
-                    );
+                    // F8: treat create+overwrite on an existing file as an existing-file
+                    // mutation — require a prior eligible read rather than bypassing the guard.
+                    ) || (is_create && overwrite_flag);
                     if !mutates_existing {
                         continue;
                     }
@@ -1942,21 +2162,52 @@ async fn execute_tool(
             };
             let dry_run = args.get("dryRun").and_then(serde_json::Value::as_bool);
             if !dry_run.unwrap_or(false) {
-                require_tool_approval(
-                    app,
-                    turn_id,
-                    tc,
-                    effective_approval_mode,
-                    interactive,
-                    "PatchEngine",
-                    &format!("{} operations", operations.len()),
-                    "multi-file patch",
-                    "modify",
-                    &input.tool_permission_rules,
-                    &guarded_paths.join(" "),
-                    false,
-                )
-                .await?;
+                // F9: resolve each guarded path before permission evaluation so
+                // deny/ask/allow rules match the canonical form, not model spellings.
+                let resolved_patch_targets: Vec<String> = guarded_paths
+                    .iter()
+                    .map(|p| {
+                        crate::resolve_workspace_path(state, std::path::Path::new(p))
+                            .map(|r| r.to_string_lossy().replace('\\', "/"))
+                            .unwrap_or_else(|_| p.clone())
+                    })
+                    .collect();
+                // Evaluate each target independently so a deny on any one blocks all.
+                for resolved_target in &resolved_patch_targets {
+                    require_tool_approval(
+                        app,
+                        turn_id,
+                        tc,
+                        effective_approval_mode,
+                        interactive,
+                        "PatchEngine",
+                        &format!("{} operations", operations.len()),
+                        resolved_target,
+                        "modify",
+                        &input.tool_permission_rules,
+                        resolved_target,
+                        false,
+                    )
+                    .await?;
+                }
+                // If there are no guarded paths (all creates), still require one gate.
+                if resolved_patch_targets.is_empty() {
+                    require_tool_approval(
+                        app,
+                        turn_id,
+                        tc,
+                        effective_approval_mode,
+                        interactive,
+                        "PatchEngine",
+                        &format!("{} operations", operations.len()),
+                        "multi-file patch",
+                        "modify",
+                        &input.tool_permission_rules,
+                        "patch",
+                        false,
+                    )
+                    .await?;
+                }
             }
             let result = crate::ai_tools::ai_file_patch(
                 app.clone(),
@@ -2174,7 +2425,25 @@ async fn execute_tool(
         }
 
         "TestHealth" => {
+            // F10: TestHealth runs project test/build commands — gate it like Shell
+            // so it cannot execute project scripts from read-only modes without approval.
             let root = crate::workspace_root(state)?;
+            let root_str = root.to_string_lossy().to_string();
+            require_tool_approval(
+                app,
+                turn_id,
+                tc,
+                effective_approval_mode,
+                interactive,
+                "TestHealth",
+                "Run workspace test health check",
+                &root_str,
+                "execute",
+                &input.tool_permission_rules,
+                &root_str,
+                false,
+            )
+            .await?;
             let result = crate::test_health::run(root).await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
@@ -2194,10 +2463,26 @@ async fn execute_tool(
         | "BrowserChat" | "BrowserDashboard" | "BrowserInstall" | "BrowserHelp"
         | "BrowserDoctor" | "BrowserInvoke" => {
             let browser_args = build_browser_args(&tc.name, &args);
-            if matches!(
-                tc.name.as_str(),
-                "BrowserOpen" | "BrowserAct" | "BrowserClose" | "BrowserChat" | "BrowserInstall"
-            ) {
+            // F1: Classify every browser tool by side-effect risk. Previously only
+            // 5 tools were gated; BrowserInvoke (raw CLI escape hatch), BrowserDoctor
+            // with --fix, and BrowserScreenshot with a write path were ungated.
+            let browser_is_side_effecting = match tc.name.as_str() {
+                // Always side-effecting: opens connections, mutates pages, installs.
+                "BrowserOpen" | "BrowserAct" | "BrowserClose" | "BrowserChat"
+                | "BrowserInstall" => true,
+                // BrowserInvoke is a raw CLI escape hatch — always side-effecting.
+                "BrowserInvoke" => true,
+                // BrowserDoctor with --fix runs repair commands; read-only without it.
+                "BrowserDoctor" => args
+                    .get("fix")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                // BrowserScreenshot with a file path writes to disk.
+                "BrowserScreenshot" => args.get("path").and_then(|v| v.as_str()).is_some(),
+                // BrowserSnapshot, BrowserStatus, BrowserDashboard, BrowserHelp are read-only.
+                _ => false,
+            };
+            if browser_is_side_effecting {
                 require_tool_approval(
                     app,
                     turn_id,
@@ -2391,6 +2676,8 @@ async fn execute_tool(
             }
 
             // Interactive: emit the question and suspend on the oneshot channel.
+            // F2: check emit success before awaiting; a missing frontend card would
+            // otherwise cause the turn to hang forever.
             let rx = register_question(turn_id, &tc.id);
             let _ = emit_turn_event(
                 app,
@@ -2399,7 +2686,7 @@ async fn execute_tool(
                     phase: "waiting-approval".to_string(),
                 },
             );
-            let _ = emit_turn_event(
+            if let Err(emit_err) = emit_turn_event(
                 app,
                 &TurnEvent::QuestionRequired {
                     turn_id: turn_id.to_string(),
@@ -2411,18 +2698,34 @@ async fn execute_tool(
                     allow_custom,
                     html_preview,
                 },
-            );
-            match rx.await {
-                Ok(answer) if !answer.cancelled && !answer.answer.trim().is_empty() => {
+            ) {
+                cancel_questions_for_turn(turn_id);
+                return Err(format!(
+                    "AskUser question could not be delivered to the UI ({emit_err}); question skipped."
+                ));
+            }
+            // Timeout prevents deadlock when the card is destroyed mid-turn (F2).
+            const QUESTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+            match tokio::time::timeout(QUESTION_TIMEOUT, rx).await {
+                Ok(Ok(answer)) if !answer.cancelled && !answer.answer.trim().is_empty() => {
                     Ok(serde_json::json!({ "answer": answer.answer }).to_string())
                 }
-                Ok(_) => Ok(serde_json::json!({
+                Ok(Ok(_)) => Ok(serde_json::json!({
                     "answer": "",
                     "dismissed": true,
                     "note": "User dismissed the question without answering. Proceed with your best judgment or ask again only if truly blocked."
                 })
                 .to_string()),
-                Err(_) => Err("AskUser channel closed before an answer arrived.".to_string()),
+                Ok(Err(_)) => Err("AskUser channel closed before an answer arrived.".to_string()),
+                Err(_elapsed) => {
+                    cancel_questions_for_turn(turn_id);
+                    Ok(serde_json::json!({
+                        "answer": "",
+                        "dismissed": true,
+                        "note": "AskUser timed out waiting for a response. Proceed with your best judgment."
+                    })
+                    .to_string())
+                }
             }
         }
 
@@ -2926,10 +3229,49 @@ async fn execute_tool(
             }).to_string())
         }
         "FailureAnalyzer" => {
-            // FailureAnalyzer: TestHealth + diagnostics → analysis.
+            // FailureAnalyzer: TestHealth (project test commands) + diagnostics → analysis.
+            // F10: gate the test-health branch behind approval, matching the Shell
+            // safety contract. Allow the user to opt out with `includeTestHealth:false`.
+            let include_test_health = args
+                .get("includeTestHealth")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
             let root = crate::workspace_root(state).ok();
-            let test_result = if let Some(root) = root {
-                crate::test_health::run(root).await.ok()
+            let test_result = if include_test_health {
+                if let Some(ref root) = root {
+                    let root_str = root.to_string_lossy().to_string();
+                    // Gate test-health execution through the normal approval flow.
+                    if let Err(e) = require_tool_approval(
+                        app,
+                        turn_id,
+                        tc,
+                        effective_approval_mode,
+                        interactive,
+                        "FailureAnalyzer/TestHealth",
+                        "Run workspace test health check (FailureAnalyzer)",
+                        &root_str,
+                        "execute",
+                        &input.tool_permission_rules,
+                        &root_str,
+                        false,
+                    )
+                    .await
+                    {
+                        // If approval is denied / rejected, skip the test-health step
+                        // but still return diagnostics — partial analysis is useful.
+                        return Ok(serde_json::json!({
+                            "testHealth": serde_json::Value::Null,
+                            "testHealthSkipped": true,
+                            "testHealthSkipReason": e,
+                            "diagnosticCount": crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default().len(),
+                            "notes": ["TestHealth step was not approved; diagnostics only."],
+                        })
+                        .to_string());
+                    }
+                    crate::test_health::run(root.clone()).await.ok()
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -3359,6 +3701,15 @@ async fn run_subagent(
         if read_only { "ask" } else { &parent.agent_mode },
         parent.agent_browser_enabled,
     );
+    // F4: build the subagent's own allowlist so it cannot dispatch tools outside
+    // its mode either (a read_only subagent must not execute Write/Shell/etc.).
+    let subagent_allowed: std::collections::HashSet<String> = tools
+        .iter()
+        .filter_map(|t| t.get("function").and_then(|f| f.get("name"))
+            .or_else(|| t.get("name"))
+            .and_then(|n| n.as_str()))
+        .map(str::to_string)
+        .collect();
 
     let mut final_content = String::new();
     for _round in 0..MAX_SUBAGENT_ROUNDS {
@@ -3429,7 +3780,7 @@ async fn run_subagent(
                 Err("Nested subagents are not allowed (depth limit).".to_string())
             } else {
                 // Subagent tool calls don't emit UI events (isolated context).
-                Box::pin(execute_tool(app, state, parent, agent_id, false, child)).await
+                Box::pin(execute_tool(app, state, parent, agent_id, false, child, &subagent_allowed)).await
             };
             let content = match result {
                 Ok(output) => output,
@@ -3513,8 +3864,11 @@ async fn require_tool_approval(
         ));
     }
     // Emit approval request and wait for decision from UI.
+    // F2: check emit success; if the event cannot be delivered there is no
+    // frontend listener and awaiting forever would deadlock the turn. Clean up
+    // the registered channel and return a recoverable error instead.
     let rx = register_approval(turn_id, &tc.id);
-    let _ = emit_turn_event(
+    if let Err(emit_err) = emit_turn_event(
         app,
         &TurnEvent::ApprovalRequired {
             turn_id: turn_id.to_string(),
@@ -3525,10 +3879,27 @@ async fn require_tool_approval(
             preview: preview.to_string(),
             risk: risk.to_string(),
         },
-    );
-    match rx.await {
-        Ok(ApprovalDecision::Approved) => Ok(()),
-        _ => Err(format!("{tool} was rejected by the user.")),
+    ) {
+        // Drop the stale channel so it doesn't leak in approval_channels().
+        cancel_approvals_for_turn(turn_id);
+        return Err(format!(
+            "{tool} approval could not be delivered to the UI ({emit_err}); tool skipped."
+        ));
+    }
+    // Timeout prevents the turn from hanging forever when the frontend card is
+    // missing or the window is closed mid-turn (F2 — deadlock guard).
+    const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+    match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
+        Ok(Ok(ApprovalDecision::Approved)) => Ok(()),
+        Ok(_) => Err(format!("{tool} was rejected by the user.")),
+        Err(_elapsed) => {
+            // Timeout: clean up and surface a recoverable error.
+            cancel_approvals_for_turn(turn_id);
+            Err(format!(
+                "{tool} approval timed out after {}s. If the approval card disappeared, retry the action.",
+                APPROVAL_TIMEOUT.as_secs()
+            ))
+        }
     }
 }
 

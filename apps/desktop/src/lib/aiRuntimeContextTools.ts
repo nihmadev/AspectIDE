@@ -264,8 +264,11 @@ export async function contextBudgeter(args: UnknownRecord, input: AiChatSendInpu
   const requestedTargetChars = clamp(numberArg(args, "targetChars", 16_000), 2_000, 22_000);
   const targetChars = Math.min(requestedTargetChars, maxToolOutputChars - 8_000);
   const maxItems = clamp(numberArg(args, "maxItems", 28), 4, 80);
-  const includeActiveText = booleanArg(args, "includeActiveText", true);
-  const includeOpenDocuments = booleanArg(args, "includeOpenDocuments", true);
+  // Default OFF to match the tool schema and avoid silently sending active-file
+  // text / unsaved open-tab excerpts into the packet (token cost + privacy). The
+  // model must opt in explicitly when it wants editor contents.
+  const includeActiveText = booleanArg(args, "includeActiveText", false);
+  const includeOpenDocuments = booleanArg(args, "includeOpenDocuments", false);
   const includeToolContext = booleanArg(args, "includeToolContext", true);
   const queryTokens = tokenizeRelatedQuery(query);
   const items: ContextBudgetItem[] = [];

@@ -13,6 +13,11 @@ const LOCAL_STT_COMMAND_ENV: &str = "LUX_STT_COMMAND";
 const LOCAL_STT_MODEL_ENV: &str = "LUX_STT_MODEL";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// Hard wall-clock cap for a single STT invocation. A misconfigured/hung STT binary
+/// must never wedge the worker (blocking path) or leak a child indefinitely.
+const STT_TIMEOUT_SECS: u64 = 120;
+/// Per-stream capture cap so a chatty STT tool can't balloon memory.
+const STT_MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -184,6 +189,16 @@ fn local_status(command: Option<String>, model_path: Option<PathBuf>) -> VoiceIn
     }
 }
 
+/// RAII guard that removes the scratch audio file on drop, so every early return /
+/// error / timeout path cleans it up (no leaked temp files).
+struct TempAudioGuard(PathBuf);
+
+impl Drop for TempAudioGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 async fn run_local_stt_command(
     command_template: &str,
     audio: &[u8],
@@ -192,6 +207,7 @@ async fn run_local_stt_command(
     model_path: Option<&Path>,
 ) -> Result<String, String> {
     let audio_path = write_temp_audio(audio, mime_type)?;
+    let _audio_guard = TempAudioGuard(audio_path.clone());
     let command_line = render_stt_command(
         command_template,
         &audio_path,
@@ -200,13 +216,93 @@ async fn run_local_stt_command(
         model_path,
     );
     let mut command = local_stt_shell_command(&command_line);
-    let output_result = tokio::time::timeout(Duration::from_mins(2), command.output())
-        .await
-        .map_err(|_| "Local STT command timed out after 120 seconds".to_string());
-    let _ = std::fs::remove_file(&audio_path);
-    let output =
-        output_result?.map_err(|error| format!("Local STT command failed to start: {error}"))?;
-    parse_stt_output(Ok(output))
+    // Capture pipes (drained concurrently) and keep the child handle so a timeout can
+    // actually kill the tree instead of detaching an orphaned STT process.
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    command.kill_on_drop(true);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Local STT command failed to start: {error}"))?;
+    let child_pid = child.id();
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let collect = async {
+        let (out, err) = tokio::join!(
+            read_stt_stream(stdout_pipe.as_mut()),
+            read_stt_stream(stderr_pipe.as_mut()),
+        );
+        let status = child.wait().await;
+        (status, out, err)
+    };
+
+    let Ok((status, out, err)) =
+        tokio::time::timeout(Duration::from_secs(STT_TIMEOUT_SECS), collect).await
+    else {
+        kill_stt_process_tree(child_pid).await;
+        return Err(format!(
+            "Local STT command timed out after {STT_TIMEOUT_SECS} seconds"
+        ));
+    };
+    let status = status.map_err(|error| format!("Local STT command failed: {error}"))?;
+    parse_stt_output(Ok(std::process::Output {
+        status,
+        stdout: out,
+        stderr: err,
+    }))
+}
+
+/// Drain one async child pipe to EOF, capping the buffer at [`STT_MAX_CAPTURE_BYTES`]
+/// (kept reading past the cap so the pipe never blocks the child).
+async fn read_stt_stream<R>(pipe: Option<&mut R>) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut captured = Vec::new();
+    let Some(pipe) = pipe else {
+        return captured;
+    };
+    // Heap-allocated so it isn't part of the awaited future's stack frame.
+    let mut scratch = vec![0u8; 16 * 1024];
+    loop {
+        match pipe.read(&mut scratch).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                if captured.len() < STT_MAX_CAPTURE_BYTES {
+                    let room = STT_MAX_CAPTURE_BYTES - captured.len();
+                    captured.extend_from_slice(&scratch[..read.min(room)]);
+                }
+            }
+        }
+    }
+    captured
+}
+
+/// Kill the timed-out STT process and everything it spawned (the shell plus the STT
+/// binary it launched), so nothing survives the call.
+async fn kill_stt_process_tree(pid: Option<u32>) {
+    let Some(pid) = pid else {
+        return;
+    };
+    #[cfg(windows)]
+    {
+        let mut command = tokio::process::Command::new("taskkill");
+        command
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .creation_flags(CREATE_NO_WINDOW);
+        let _ = command.output().await;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = tokio::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid}"))
+            .output()
+            .await;
+    }
 }
 
 fn run_local_stt_command_blocking(
@@ -217,6 +313,7 @@ fn run_local_stt_command_blocking(
     model_path: Option<&Path>,
 ) -> Result<String, String> {
     let audio_path = write_temp_audio(audio, mime_type)?;
+    let _audio_guard = TempAudioGuard(audio_path.clone());
     let command_line = render_stt_command(
         command_template,
         &audio_path,
@@ -224,11 +321,89 @@ fn run_local_stt_command_blocking(
         language,
         model_path,
     );
-    let output = local_stt_shell_command_blocking(&command_line)
-        .output()
+    let mut command = local_stt_shell_command_blocking(&command_line);
+    // Null stdin + captured pipes so the child can't block on input and a deadline can
+    // kill a hung tool — the blocking path previously had NO timeout at all.
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
         .map_err(|error| format!("Local STT command failed to start: {error}"))?;
-    let _ = std::fs::remove_file(&audio_path);
-    parse_stt_output(Ok(output))
+
+    // Drain pipes on threads so a chatty tool can't deadlock on a full pipe, while the
+    // main thread enforces the deadline via `try_wait` and kills the tree on timeout.
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_handle = std::thread::spawn(move || read_stt_stream_blocking(stdout_pipe));
+    let stderr_handle = std::thread::spawn(move || read_stt_stream_blocking(stderr_pipe));
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(STT_TIMEOUT_SECS);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    kill_stt_process_tree_blocking(child.id());
+                    return Err(format!(
+                        "Local STT command timed out after {STT_TIMEOUT_SECS} seconds"
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => return Err(format!("Local STT command failed: {error}")),
+        }
+    };
+    let stdout = stdout_handle.join().unwrap_or_default();
+    let stderr = stderr_handle.join().unwrap_or_default();
+    parse_stt_output(Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    }))
+}
+
+/// Blocking-pipe drainer mirroring [`read_stt_stream`] for the synchronous path.
+fn read_stt_stream_blocking<R: std::io::Read>(pipe: Option<R>) -> Vec<u8> {
+    let mut captured = Vec::new();
+    let Some(mut pipe) = pipe else {
+        return captured;
+    };
+    let mut scratch = [0u8; 16 * 1024];
+    loop {
+        match pipe.read(&mut scratch) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                if captured.len() < STT_MAX_CAPTURE_BYTES {
+                    let room = STT_MAX_CAPTURE_BYTES - captured.len();
+                    captured.extend_from_slice(&scratch[..read.min(room)]);
+                }
+            }
+        }
+    }
+    captured
+}
+
+// `std::process::Child::id` returns a bare `u32` (unlike tokio's `Option<u32>`).
+#[cfg(windows)]
+fn kill_stt_process_tree_blocking(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    let _ = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+
+#[cfg(not(windows))]
+fn kill_stt_process_tree_blocking(pid: u32) {
+    // Negative pid targets the whole process group (the shell leads it via
+    // `process_group(0)`), so the STT binary it spawned dies too.
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{pid}"))
+        .output();
 }
 
 fn parse_stt_output(output: Result<std::process::Output, String>) -> Result<String, String> {
@@ -259,8 +434,11 @@ fn local_stt_shell_command_blocking(command_line: &str) -> Command {
     }
     #[cfg(not(windows))]
     {
+        use std::os::unix::process::CommandExt;
         let mut command = Command::new("sh");
         command.arg("-lc").arg(command_line);
+        // Own process group so a timeout can group-kill the shell + STT binary.
+        command.process_group(0);
         command
     }
 }
@@ -326,6 +504,8 @@ fn local_stt_shell_command(command_line: &str) -> tokio::process::Command {
     {
         let mut command = tokio::process::Command::new("sh");
         command.arg("-c").arg(command_line);
+        // Own process group so a timeout can group-kill the shell + STT binary.
+        command.process_group(0);
         command
     }
 }

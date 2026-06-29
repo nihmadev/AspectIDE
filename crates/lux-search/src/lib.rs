@@ -4,7 +4,10 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     time::Instant,
 };
 
@@ -19,6 +22,28 @@ const SEARCH_PREVIEW_CONTEXT_BEFORE_CHARS: usize = 80;
 // Skip files larger than this cap so a handful of multi-GB files can't be read
 // fully into memory at once across the worker pool (matches ripgrep's default).
 const MAX_SEARCH_FILE_BYTES: u64 = 8 * 1024 * 1024;
+// How many candidates beyond `max_results` to collect so ranking has room to
+// float the most relevant hits up before truncation. Bounds the global hit set
+// to a small multiple of what we return rather than `files × (max_results + 1)`.
+const RANK_OVERSCAN: usize = 20;
+// Absolute ceiling on collected hits regardless of `max_results`, so a broad
+// literal or common/zero-width regex over a large workspace can't keep search
+// and the AI search tool busy/memory-heavy collecting millions of hits.
+const MAX_GLOBAL_HITS: usize = 50_000;
+// Path fragments that mark generated/vendored output: real source ranks above
+// these so relevance-blind alphabetical order can't bury a true match.
+const LOW_VALUE_PATH_FRAGMENTS: &[&str] = &[
+    "node_modules",
+    "/target/",
+    "/dist/",
+    "/build/",
+    "/out/",
+    "/vendor/",
+    "/.next/",
+    ".min.",
+    ".lock",
+    "generated",
+];
 
 pub fn query(
     root: impl AsRef<Path>,
@@ -79,43 +104,21 @@ pub fn query(
         .and_then(|mutex| mutex.into_inner().ok())
         .unwrap_or_default();
 
-    // Content matching across a thread pool capped to the scan budget, so search
-    // honors the "reserve a core for the UI" policy instead of grabbing every
-    // core via rayon's default global pool.
-    let match_files = |files: &[PathBuf]| -> Vec<SearchHit> {
-        // Cap per-file hits so one pathological file (e.g. a broad regex over a huge
-        // file) can't allocate millions of SearchHit before the global truncate.
-        // `max_results + 1` preserves both the result ordering and the `truncated`
-        // flag computed after the sort below.
-        let per_file_limit = options.max_results.saturating_add(1);
-        files
-            .par_iter()
-            .flat_map_iter(|path| {
-                if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_SEARCH_FILE_BYTES) {
-                    return Vec::new();
-                }
-                std::fs::read_to_string(path).map_or_else(
-                    |_| Vec::new(),
-                    |text| collect_hits(path, &text, &matcher, per_file_limit),
-                )
-            })
-            .collect()
-    };
-    let mut hits: Vec<SearchHit> = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .map_or_else(
-            |_| match_files(&files),
-            |pool| pool.install(|| match_files(&files)),
-        );
+    let (mut hits, more_available) = match_files_bounded(&files, &matcher, options, threads);
 
-    hits.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
-            .then(left.line.cmp(&right.line))
-            .then(left.column.cmp(&right.column))
+    // Rank by relevance BEFORE truncation so alphabetically-early files can't
+    // displace exact filename/word matches or real source over generated paths.
+    // Path/line/column remain the stable tie-breakers.
+    let lower_query = search.to_lowercase();
+    hits.sort_by_cached_key(|hit| {
+        (
+            std::cmp::Reverse(relevance_score(hit, &lower_query)),
+            hit.path.clone(),
+            hit.line,
+            hit.column,
+        )
     });
-    let truncated = hits.len() > options.max_results;
+    let truncated = more_available || hits.len() > options.max_results;
     hits.truncate(options.max_results);
 
     Ok(SearchResponse {
@@ -124,6 +127,67 @@ pub fn query(
         truncated,
         elapsed_ms: started.elapsed().as_millis(),
     })
+}
+
+/// Match `files` in parallel under a global hit budget, returning the collected
+/// hits and whether more matches were dropped (so `truncated` stays accurate even
+/// when the returned set isn't itself over `max_results`).
+///
+/// The budget caps collection at a small multiple of `max_results` (hard-capped
+/// by [`MAX_GLOBAL_HITS`]) so a broad literal or zero-width/common regex can't
+/// collect roughly `files × (max_results + 1)` hits and stall a large workspace.
+/// The pool is sized to the scan budget to honor the "reserve a core for the UI"
+/// policy rather than grabbing every core via rayon's default global pool.
+fn match_files_bounded(
+    files: &[PathBuf],
+    matcher: &SearchMatcher,
+    options: &SearchOptions,
+    threads: usize,
+) -> (Vec<SearchHit>, bool) {
+    let global_budget = options
+        .max_results
+        .saturating_mul(RANK_OVERSCAN)
+        .clamp(options.max_results.max(1), MAX_GLOBAL_HITS);
+    let collected = Arc::new(AtomicUsize::new(0));
+    let more_available = Arc::new(AtomicBool::new(false));
+
+    let run = |files: &[PathBuf]| -> Vec<SearchHit> {
+        // Per-file cap (`max_results + 1`) bounds a single pathological file; the
+        // global budget bounds the workspace-wide total.
+        let per_file_limit = options.max_results.saturating_add(1);
+        files
+            .par_iter()
+            .flat_map_iter(|path| {
+                let already = collected.load(Ordering::Relaxed);
+                if already >= global_budget {
+                    // Budget met: at least this file's matches go uncollected.
+                    more_available.store(true, Ordering::Relaxed);
+                    return Vec::new();
+                }
+                if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_SEARCH_FILE_BYTES) {
+                    return Vec::new();
+                }
+                let file_limit = per_file_limit.min(global_budget - already);
+                let file_hits = std::fs::read_to_string(path).map_or_else(
+                    |_| Vec::new(),
+                    |text| collect_hits(path, &text, matcher, file_limit),
+                );
+                // A file that fills its cap signals there were more matches than we
+                // return, so the result is genuinely truncated.
+                if file_hits.len() >= per_file_limit {
+                    more_available.store(true, Ordering::Relaxed);
+                }
+                collected.fetch_add(file_hits.len(), Ordering::Relaxed);
+                file_hits
+            })
+            .collect()
+    };
+
+    let hits = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_or_else(|_| run(files), |pool| pool.install(|| run(files)));
+    (hits, more_available.load(Ordering::Relaxed))
 }
 
 enum SearchMatcher {
@@ -166,6 +230,10 @@ impl SearchMatcher {
         match self {
             Self::Regex(regex) => regex
                 .find_iter(line)
+                // Drop zero-width matches (`^`, `$`, lookarounds): they carry no
+                // highlightable text and a pattern like `^` would otherwise emit a
+                // hit on every line, exploding the global result set.
+                .filter(|hit| hit.end() > hit.start())
                 .map(|hit| SearchLineMatch {
                     start: hit.start(),
                     length: hit.end() - hit.start(),
@@ -285,6 +353,56 @@ fn literal_matches(line: &str, needle: &str) -> Vec<SearchLineMatch> {
         search_start = end.max(start + 1);
     }
     matches
+}
+
+/// Relevance score for ranking before truncation. Higher ranks earlier. Combines
+/// filename/path hits, exact word-boundary matches, source-over-generated bias,
+/// shorter paths, and a small line-position nudge. Path/line/column tie-break.
+fn relevance_score(hit: &SearchHit, lower_query: &str) -> i64 {
+    let mut score = 0_i64;
+    // Normalize separators to '/' so the (forward-slash) low-value fragments match
+    // on Windows back-slash paths too.
+    let path = hit.path.to_string_lossy().to_lowercase().replace('\\', "/");
+
+    // The query appears in the file name → very likely what the user wants.
+    if let Some(file_name) = hit.path.file_name().and_then(|name| name.to_str()) {
+        let file_name = file_name.to_lowercase();
+        if file_name == lower_query {
+            score += 1_000;
+        } else if file_name.contains(lower_query) {
+            score += 400;
+        }
+    }
+    // The query also appears elsewhere in the path.
+    if path.contains(lower_query) {
+        score += 80;
+    }
+    // Exact whole-word match in the line beats an in-word substring match.
+    if is_word_boundary_match(&hit.match_text.to_lowercase(), lower_query) {
+        score += 120;
+    }
+    // Real source ranks above generated/vendored output.
+    if is_low_value_path(&path) {
+        score -= 300;
+    }
+    // Prefer shorter paths (closer to the root) and earlier matches, lightly.
+    // These penalties are tiny and bounded, so a saturating cast is exact here.
+    score -= i64::try_from(path.len() / 16).unwrap_or(i64::MAX);
+    score -= i64::try_from(hit.line.min(10_000) / 200).unwrap_or(i64::MAX);
+    score
+}
+
+/// Whether `text` equals `query` on word boundaries (a real token match, not an
+/// in-word substring like `alpha` inside `alphabet`).
+fn is_word_boundary_match(text: &str, query: &str) -> bool {
+    text == query
+}
+
+/// Whether `path` looks generated/vendored and should rank below real source.
+fn is_low_value_path(path: &str) -> bool {
+    LOW_VALUE_PATH_FRAGMENTS
+        .iter()
+        .any(|fragment| path.contains(fragment))
 }
 
 fn compile_globs(patterns: &[String]) -> AppResult<Option<GlobSet>> {
@@ -421,6 +539,71 @@ mod tests {
         assert_eq!(unicode.hits[0].match_text, "мир");
 
         fs::remove_dir_all(root).expect("test root should be removed");
+    }
+
+    #[test]
+    fn ranks_filename_and_source_matches_above_generated() {
+        let root = test_root();
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        fs::create_dir_all(root.join("dist")).expect("dist dir");
+        // A file literally named after the query — should rank first.
+        fs::write(root.join("src/widget.rs"), "// widget impl\n").expect("widget");
+        // A generated/vendored hit — should rank last despite alphabetical order.
+        fs::write(root.join("dist/bundle.js"), "var widget = 1;\n").expect("bundle");
+        // A plain source mention.
+        fs::write(root.join("src/app.rs"), "let widget = make();\n").expect("app");
+
+        let result = query(
+            &root,
+            "widget".to_string(),
+            &SearchOptions {
+                max_results: 20,
+                ..SearchOptions::default()
+            },
+        )
+        .expect("search should work");
+
+        let first = &result.hits[0];
+        assert!(
+            first.path.ends_with("widget.rs"),
+            "filename match should rank first, got {:?}",
+            first.path
+        );
+        let last = result.hits.last().expect("at least one hit");
+        assert!(
+            last.path.to_string_lossy().contains("dist"),
+            "generated path should rank last, got {:?}",
+            last.path
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn zero_width_regex_matches_are_dropped() {
+        let root = test_root();
+        fs::create_dir_all(&root).ok();
+        fs::write(root.join("a.txt"), "one\ntwo\nthree\n").expect("write");
+
+        // `^` matches the start of every line (zero-width); it must yield no hits
+        // rather than one-per-line flooding the result set.
+        let result = query(
+            &root,
+            "^".to_string(),
+            &SearchOptions {
+                use_regex: true,
+                max_results: 100,
+                ..SearchOptions::default()
+            },
+        )
+        .expect("search should work");
+        assert!(
+            result.hits.is_empty(),
+            "zero-width matches must not produce hits, got {}",
+            result.hits.len()
+        );
+
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     fn test_root() -> PathBuf {

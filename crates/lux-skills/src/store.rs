@@ -53,18 +53,23 @@ pub fn read_skill(roots: &[(SkillScope, PathBuf)], slug: &str) -> AppResult<Opti
     Ok(None)
 }
 
-/// Write a skill's Markdown into `root`. Overwrites an existing single-file form
-/// if present, otherwise writes the directory form `<root>/<slug>/SKILL.md`.
+/// Write a skill's Markdown into `root` using the same canonical path resolution
+/// as `read_skill` and `set_skill_enabled`. The directory form
+/// `<root>/<slug>/SKILL.md` is always preferred; the single-file form
+/// `<root>/<slug>.md` is written only when it already exists *and* no directory
+/// form is present, to avoid creating a shadowed copy that agents will never read.
+///
+/// This prevents the previous split where `write_skill` could update a single-file
+/// copy while `read_skill`/`set_skill_enabled` kept loading the directory form.
 pub fn write_skill(root: &Path, slug: &str, content: &str) -> AppResult<PathBuf> {
     if !is_valid_slug(slug) {
         return Err(AppError::InvalidPath(format!("invalid skill slug: {slug}")));
     }
-    let single = root.join(format!("{slug}.md"));
-    let target = if single.is_file() {
-        single
-    } else {
-        root.join(slug).join(SKILL_FILE)
-    };
+    // Use `resolve_skill_path` so the write always targets the same file that
+    // `read_skill` / `set_skill_enabled` would open. Fall back to the directory
+    // form (preferred canonical) when no file exists yet.
+    let target = resolve_skill_path(root, slug)
+        .unwrap_or_else(|| root.join(slug).join(SKILL_FILE));
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -409,6 +414,34 @@ mod tests {
             "only the skill whose when_to_use mentions kubernetes should match"
         );
         assert_eq!(hits[0].skill.slug, "a");
+    }
+
+    #[test]
+    fn write_skill_targets_same_file_as_read_skill() {
+        // When both forms exist, write_skill must update the dir form (which
+        // resolve_skill_path prefers), not the single-file form.
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        // Create directory form first (canonical).
+        write(&root.join("dual/SKILL.md"), "---\nname: original\ndescription: dir\n---\nbody");
+        // Also plant a single-file copy (stale shadow).
+        write(&root.join("dual.md"), "---\nname: stale\ndescription: single\n---\nbody");
+
+        let new_content = "---\nname: updated\ndescription: updated desc\n---\nnew body";
+        let written_path = write_skill(root, "dual", new_content).unwrap();
+        // The written path must be the directory form.
+        assert!(
+            written_path.ends_with("dual/SKILL.md") || written_path.ends_with("dual\\SKILL.md"),
+            "write_skill must target the directory form, got: {}",
+            written_path.display()
+        );
+        // Reading back through the canonical resolver must see the updated content.
+        let roots = [(SkillScope::Global, root.to_path_buf())];
+        let skill = read_skill(&roots, "dual").unwrap().unwrap();
+        assert_eq!(skill.name, "updated", "read_skill must see the updated content");
+        // The single-file shadow must remain unmodified.
+        let shadow = fs::read_to_string(root.join("dual.md")).unwrap();
+        assert!(shadow.contains("stale"), "single-file shadow must not be overwritten");
     }
 
     #[test]

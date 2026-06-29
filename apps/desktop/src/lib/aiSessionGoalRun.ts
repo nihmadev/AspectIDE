@@ -61,7 +61,13 @@ export { isExploratoryGoalRun, resolveGoalRunMaxRounds } from "./aiGoalRunLimits
 const goalRuns = new Map<string, GoalRunState>();
 const listeners = new Set<() => void>();
 
+// Monotonic revision counter — incremented on every emit() so useSyncExternalStore
+// subscribers always see a fresh snapshot even when the Map size is unchanged (e.g.,
+// progress/phase/evaluator-reason mutations on an existing run).
+let goalRunsRevision = 0;
+
 function emit() {
+  goalRunsRevision += 1;
   for (const listener of listeners) listener();
 }
 
@@ -70,8 +76,9 @@ export function subscribeAiSessionGoalRuns(listener: () => void) {
   return () => listeners.delete(listener);
 }
 
+/** Returns the monotonic revision so useSyncExternalStore detects every mutation. */
 export function getAiSessionGoalRunsSnapshot() {
-  return goalRuns.size;
+  return goalRunsRevision;
 }
 
 export function getActiveGoalRun(sessionId: string): GoalRunState | null {
@@ -321,6 +328,20 @@ export function applyGoalToolProgress(
     run.progress = Math.min(100, Math.max(run.progress, Math.round(input.progress)));
   }
   if (input.status?.toLowerCase() === "completed") {
+    // Treat Goal(status="completed") as a completion *candidate*, not proof.
+    // If there are open todos, downgrade to 95% and require the evaluator to verify.
+    // This prevents the model from self-certifying without independent evidence (F5 fix).
+    const openTodos = listAiSessionTodos(sessionId).filter(
+      (todo) => todo.status !== "completed" && todo.status !== "cancelled",
+    );
+    if (openTodos.length > 0) {
+      // Cap at 95 so evaluateGoalCondition's `progress >= 100` guard stays meaningful.
+      run.progress = Math.min(95, Math.max(run.progress, 95));
+      run.lastEvaluatorReason = `Goal tool reported completed but ${openTodos.length} open task(s) remain — must resolve todos before finish.`;
+      goalRuns.set(sessionId, run);
+      emit();
+      return;
+    }
     run.progress = 100;
     const summary = input.summary?.trim();
     if (summary) run.completionSummary = summary;

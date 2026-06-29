@@ -2,7 +2,12 @@
 #![deny(clippy::nursery)]
 #![allow(clippy::missing_errors_doc)]
 
-use std::{path::Path, process::Command};
+use std::{
+    io::Read,
+    path::Path,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -10,86 +15,83 @@ use std::os::windows::process::CommandExt;
 use lux_core::{AppError, AppResult, GitDiff, GitDiffFile, GitFileStatus, GitStatus};
 
 const MAX_DIFF_PATCH_CHARS: usize = 120_000;
+/// Byte budget for the streamed patch. We stop reading the child's stdout once we
+/// have this many bytes so a huge generated/vendored diff cannot be fully allocated
+/// before the char cap is applied. It is sized comfortably above
+/// `MAX_DIFF_PATCH_CHARS` so multi-byte UTF-8 within the char budget still fits.
+const MAX_DIFF_PATCH_BYTES: usize = MAX_DIFF_PATCH_CHARS * 4;
+/// Wall-clock ceiling for a single git invocation. Credential/SSH prompts, hooks,
+/// or slow remotes would otherwise freeze an AI turn indefinitely; on timeout we
+/// kill the child and return a structured error instead of blocking forever.
+const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The empty-tree object hash (`git hash-object -t tree /dev/null`). Diffing against
+/// it yields "everything is an addition", which is exactly what we want in an unborn
+/// repository that has no `HEAD` commit yet.
+const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn status(root: impl AsRef<Path>) -> AppResult<GitStatus> {
-    let output = git_command(root.as_ref())
-        .args(["status", "--porcelain=v1", "--branch"])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(AppError::Service(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ));
-    }
-
-    Ok(parse_status(&String::from_utf8_lossy(&output.stdout)))
+    // `-z` makes status NUL-delimit records and emit verbatim (unquoted) paths, so
+    // filenames containing spaces, quotes, or newlines parse unambiguously.
+    let output = run_git_capture(
+        git_command(root.as_ref()).args(["status", "--porcelain=v1", "-z", "--branch"]),
+    )?;
+    Ok(parse_status(&String::from_utf8_lossy(&output)))
 }
 
 pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     let root = root.as_ref();
-    let stat_output = git_command(root)
-        .args(["diff", "--numstat", "--find-renames", "HEAD", "--"])
-        .output()?;
+    // In an unborn repo there is no `HEAD`, so `git diff HEAD` errors out and hides
+    // all staged/working changes. Diff against the empty tree instead so a brand-new
+    // AI-scaffolded project still shows every file as an addition.
+    let base = diff_base(root);
 
-    if !stat_output.status.success() {
-        return Err(AppError::Service(
-            String::from_utf8_lossy(&stat_output.stderr)
-                .trim()
-                .to_string(),
-        ));
-    }
+    // `-z` NUL-delimits records and disables path quoting, making rename/odd-name
+    // parsing robust (see `parse_diff_files`).
+    let stat_output = run_git_capture(
+        git_command(root).args(["diff", "--numstat", "-z", "--find-renames", &base, "--"]),
+    )?;
+    let name_status_output = run_git_capture(
+        git_command(root).args(["diff", "--name-status", "-z", "--find-renames", &base, "--"]),
+    )?;
 
-    let name_status_output = git_command(root)
-        .args(["diff", "--name-status", "--find-renames", "HEAD", "--"])
-        .output()?;
+    let mut files = parse_diff_files(
+        &String::from_utf8_lossy(&stat_output),
+        &String::from_utf8_lossy(&name_status_output),
+    );
 
-    if !name_status_output.status.success() {
-        return Err(AppError::Service(
-            String::from_utf8_lossy(&name_status_output.stderr)
-                .trim()
-                .to_string(),
-        ));
-    }
-
-    let patch_output = git_command(root)
-        .args([
+    // Stream the patch and stop at the byte budget so an enormous diff is never
+    // fully materialized just to truncate it afterwards.
+    let (raw_patch, patch_capped) = run_git_patch_streamed(
+        git_command(root).args([
             "diff",
             "--find-renames",
             "--patch",
             "--unified=3",
-            "HEAD",
+            &base,
             "--",
-        ])
-        .output()?;
+        ]),
+    )?;
 
-    if !patch_output.status.success() {
-        return Err(AppError::Service(
-            String::from_utf8_lossy(&patch_output.stderr)
-                .trim()
-                .to_string(),
-        ));
-    }
+    // Untracked files are invisible to `git diff`; merge them in as additions so AI
+    // review and working-tree context see newly created source files.
+    merge_untracked_files(root, &mut files);
 
-    let files = parse_diff_files(
-        &String::from_utf8_lossy(&stat_output.stdout),
-        &String::from_utf8_lossy(&name_status_output.stdout),
-    );
-    let raw_patch = String::from_utf8_lossy(&patch_output.stdout);
     let raw_patch_chars = raw_patch.chars().count();
-    let truncated = raw_patch_chars > MAX_DIFF_PATCH_CHARS;
-    let patch = if truncated {
-        format!(
-            "{}\n...[truncated {} chars]",
-            raw_patch
-                .chars()
-                .take(MAX_DIFF_PATCH_CHARS)
-                .collect::<String>(),
-            raw_patch_chars - MAX_DIFF_PATCH_CHARS
-        )
+    let truncated = patch_capped || raw_patch_chars > MAX_DIFF_PATCH_CHARS;
+    let patch = if raw_patch_chars > MAX_DIFF_PATCH_CHARS {
+        let kept: String = raw_patch.chars().take(MAX_DIFF_PATCH_CHARS).collect();
+        let suffix = if patch_capped {
+            format!("\n...[truncated at {MAX_DIFF_PATCH_CHARS} chars; diff exceeds the streamed limit]")
+        } else {
+            format!("\n...[truncated {} chars]", raw_patch_chars - MAX_DIFF_PATCH_CHARS)
+        };
+        format!("{kept}{suffix}")
+    } else if patch_capped {
+        format!("{raw_patch}\n...[truncated at the streamed diff limit]")
     } else {
-        raw_patch.to_string()
+        raw_patch
     };
 
     Ok(GitDiff {
@@ -101,15 +103,99 @@ pub fn diff(root: impl AsRef<Path>) -> AppResult<GitDiff> {
     })
 }
 
+/// The diff base: `HEAD` for a normal repo, or the empty-tree hash when `HEAD` is
+/// unborn (no commits yet) so staged/working changes are still reported.
+fn diff_base(root: &Path) -> String {
+    let has_head = git_command(root)
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if has_head {
+        "HEAD".to_string()
+    } else {
+        EMPTY_TREE_HASH.to_string()
+    }
+}
+
+/// Add untracked working-tree files (status `??`) to `files` as additions, unless
+/// already present. Their line counts come from a follow-up numstat against the
+/// empty blob; unreadable/binary files are marked accordingly.
+fn merge_untracked_files(root: &Path, files: &mut Vec<GitDiffFile>) {
+    let Ok(output) = run_git_capture(
+        git_command(root).args(["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
+    ) else {
+        return;
+    };
+    let text = String::from_utf8_lossy(&output);
+    for record in text.split('\0') {
+        // Untracked records are exactly `?? <path>` with no rename second field.
+        let Some(path) = record.strip_prefix("?? ") else {
+            continue;
+        };
+        let path = path.trim();
+        if path.is_empty() || files.iter().any(|file| file.path == Path::new(path)) {
+            continue;
+        }
+        let (additions, binary) = untracked_line_stats(root, path);
+        files.push(GitDiffFile {
+            path: Path::new(path).to_path_buf(),
+            old_path: None,
+            status: "A".to_string(),
+            additions,
+            deletions: 0,
+            binary,
+        });
+    }
+}
+
+/// Largest untracked file we read to count lines. Beyond this we report it as a
+/// present addition without a (misleading) huge line count, mirroring how git caps
+/// effort on large/binary blobs and keeping a single AI turn from reading a giant
+/// generated file into memory.
+const MAX_UNTRACKED_SCAN_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Added-line count for an untracked file, read directly from disk (cheaper and more
+/// portable than spawning another git process per file). Returns `(additions,
+/// binary)`. A NUL byte marks the file binary; an unreadable or oversized file is
+/// reported as a binary addition with no line count so it still appears in totals
+/// without guessing.
+fn untracked_line_stats(root: &Path, path: &str) -> (u32, bool) {
+    let absolute = root.join(path);
+    let Ok(metadata) = std::fs::metadata(&absolute) else {
+        return (0, true);
+    };
+    if !metadata.is_file() || metadata.len() > MAX_UNTRACKED_SCAN_BYTES {
+        return (0, true);
+    }
+    let Ok(bytes) = std::fs::read(&absolute) else {
+        return (0, true);
+    };
+    if bytes.contains(&0) {
+        return (0, true); // NUL byte ⇒ treat as binary.
+    }
+    // Count added lines the way git's numstat does: the number of newline-terminated
+    // lines, plus one for a trailing line with no final newline. The file is already
+    // capped at `MAX_UNTRACKED_SCAN_BYTES`, so a manual newline count is cheap enough
+    // that pulling in a SIMD `bytecount` dependency would not pay for itself.
+    #[allow(
+        clippy::naive_bytecount,
+        reason = "Bounded (<=5 MiB) scan; avoids a new dependency for a one-shot count."
+    )]
+    let newlines = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    let has_unterminated_tail = bytes.last().is_some_and(|&byte| byte != b'\n');
+    let additions = u32::try_from(newlines + usize::from(has_unterminated_tail)).unwrap_or(u32::MAX);
+    (additions, false)
+}
+
 // ── Mutations (stage / unstage / discard / commit / sync / branches) ──
 // Every mutation returns the freshly recomputed `GitStatus` so a single IPC call
 // both performs the action and gives the UI the new state to render.
 
 /// Run a prepared git invocation, mapping a non-zero exit to a Service error that
 /// carries git's own stderr (so the panel shows the real reason — failed hook,
-/// nothing staged, rejected push, …).
+/// nothing staged, rejected push, …). Bounded by [`GIT_TIMEOUT`].
 fn run_git(command: &mut Command) -> AppResult<String> {
-    let output = command.output()?;
+    let output = run_git_output(command)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -121,6 +207,94 @@ fn run_git(command: &mut Command) -> AppResult<String> {
         }));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Like [`run_git`] but returns raw stdout bytes (no trimming), used for `-z`
+/// NUL-delimited output where trailing bytes are significant.
+fn run_git_capture(command: &mut Command) -> AppResult<Vec<u8>> {
+    let output = run_git_output(command)?;
+    if !output.status.success() {
+        return Err(AppError::Service(
+            String::from_utf8_lossy(&output.stderr).trim().to_string(),
+        ));
+    }
+    Ok(output.stdout)
+}
+
+/// Spawn a git command and wait for it with a [`GIT_TIMEOUT`] ceiling. On timeout we
+/// kill the child and return a structured error so a credential/SSH prompt or a slow
+/// remote can never freeze the AI turn loop indefinitely.
+fn run_git_output(command: &mut Command) -> AppResult<std::process::Output> {
+    command.stdin(Stdio::null());
+    let mut child = command.spawn()?;
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    loop {
+        // The child has exited: collect its full output.
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
+        }
+        // Still running: kill it once the deadline passes so a credential/SSH prompt
+        // or a slow remote can never freeze the AI turn loop indefinitely.
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AppError::Service(format!(
+                "git command timed out after {GIT_TIMEOUT:?} (a prompt or slow remote may be blocking)"
+            )));
+        }
+        std::thread::sleep(GIT_POLL_INTERVAL);
+    }
+}
+
+/// How often [`run_git_output`] polls a running child while waiting for the deadline.
+const GIT_POLL_INTERVAL: Duration = Duration::from_millis(15);
+
+/// Run a patch-producing git command, streaming stdout and stopping after
+/// [`MAX_DIFF_PATCH_BYTES`]. Returns `(patch, capped)` where `capped` is true when we
+/// stopped early — so the byte cap is enforced *before* the whole patch is allocated,
+/// not after. Bounded by [`GIT_TIMEOUT`].
+fn run_git_patch_streamed(command: &mut Command) -> AppResult<(String, bool)> {
+    command.stdin(Stdio::null());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Service("failed to capture git stdout".to_string()))?;
+
+    let mut buffer = Vec::with_capacity(8 * 1024);
+    let mut chunk = [0_u8; 16 * 1024];
+    let mut capped = false;
+    let deadline = Instant::now() + GIT_TIMEOUT;
+    loop {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AppError::Service(format!(
+                "git diff timed out after {GIT_TIMEOUT:?}"
+            )));
+        }
+        let read = stdout.read(&mut chunk)?;
+        if read == 0 {
+            break; // EOF
+        }
+        let remaining = MAX_DIFF_PATCH_BYTES.saturating_sub(buffer.len());
+        buffer.extend_from_slice(&chunk[..read.min(remaining)]);
+        if buffer.len() >= MAX_DIFF_PATCH_BYTES {
+            // Budget hit: stop draining and terminate the child so a giant diff is
+            // never fully produced or held in memory.
+            capped = true;
+            let _ = child.kill();
+            break;
+        }
+    }
+    let _ = child.wait();
+
+    // `from_utf8_lossy` keeps the result valid even if the byte cap split a multi-byte
+    // sequence; the trailing replacement char is harmless in a display patch.
+    Ok((String::from_utf8_lossy(&buffer).into_owned(), capped))
 }
 
 /// Append literal pathspecs after a `--` separator so leading dashes or odd names
@@ -369,53 +543,71 @@ fn hide_process_window(command: &mut Command) {
 #[cfg(not(windows))]
 const fn hide_process_window(_command: &mut Command) {}
 
+/// Byte offset of the path within a porcelain v1 status record: a two-char `XY`
+/// code plus one separator space (`XY <path>`).
+const STATUS_PATH_OFFSET: usize = 3;
+
+/// Whether a single porcelain status code denotes a rename or copy, whose record
+/// is followed by a separate original-path field under `-z`.
+fn is_rename_or_copy(status: &str) -> bool {
+    status == "R" || status == "C"
+}
+
+/// Parse the digit run following `marker` (e.g. `"ahead "`) inside a branch
+/// tracking suffix like `[ahead 1, behind 2]`. A missing marker yields `0`.
+fn parse_tracking_count(tracking: &str, marker: &str) -> u32 {
+    tracking
+        .find(marker)
+        .and_then(|index| {
+            tracking[index + marker.len()..]
+                .split(|character: char| !character.is_ascii_digit())
+                .next()
+                .and_then(|value| value.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
 fn parse_status(raw: &str) -> GitStatus {
     let mut branch = None;
     let mut ahead = 0;
     let mut behind = 0;
     let mut files = Vec::new();
 
-    for line in raw.lines() {
-        if let Some(rest) = line.strip_prefix("## ") {
-            let (branch_name, tracking) = rest.split_once("...").unwrap_or((rest, ""));
-            branch = Some(branch_name.to_string());
-            if let Some(index) = tracking.find("ahead ") {
-                ahead = tracking[index + 6..]
-                    .split(|character: char| !character.is_ascii_digit())
-                    .next()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(0);
-            }
-            if let Some(index) = tracking.find("behind ") {
-                behind = tracking[index + 7..]
-                    .split(|character: char| !character.is_ascii_digit())
-                    .next()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(0);
-            }
+    // `-z` makes records NUL-delimited with verbatim (unquoted) paths, so a name
+    // containing spaces, quotes, or newlines stays a single intact record. A
+    // rename/copy is two records: `XY <new>` immediately followed by a bare
+    // `<old>` record we must consume so it is not misread as its own file. We
+    // therefore drive the iterator manually instead of `for line in raw.lines()`.
+    let mut records = raw.split('\0');
+    while let Some(record) = records.next() {
+        if record.is_empty() {
             continue;
         }
-
-        if line.len() >= 4 {
-            let index_status = &line[0..1];
-            let worktree_status = &line[1..2];
-            let remainder = line[3..].trim();
-            // Porcelain v1 emits renames/copies as `ORIG -> NEW`; keep the new path.
-            let path = if index_status == "R"
-                || index_status == "C"
-                || worktree_status == "R"
-                || worktree_status == "C"
-            {
-                remainder.rsplit(" -> ").next().unwrap_or(remainder)
-            } else {
-                remainder
-            };
-            files.push(GitFileStatus {
-                index_status: index_status.to_string(),
-                worktree_status: worktree_status.to_string(),
-                path: Path::new(path).to_path_buf(),
-            });
+        if let Some(rest) = record.strip_prefix("## ") {
+            let (branch_name, tracking) = rest.split_once("...").unwrap_or((rest, ""));
+            branch = Some(branch_name.to_string());
+            ahead = parse_tracking_count(tracking, "ahead ");
+            behind = parse_tracking_count(tracking, "behind ");
+            continue;
         }
+        if record.len() < STATUS_PATH_OFFSET + 1 {
+            continue;
+        }
+        let index_status = &record[0..1];
+        let worktree_status = &record[1..2];
+        // Verbatim path: never trim — under `-z` a filename may legitimately have
+        // leading/trailing spaces, and quoting is disabled.
+        let path = &record[STATUS_PATH_OFFSET..];
+        if is_rename_or_copy(index_status) || is_rename_or_copy(worktree_status) {
+            // Consume (and discard) the original-path field that always trails a
+            // rename/copy record in `-z` output.
+            let _ = records.next();
+        }
+        files.push(GitFileStatus {
+            index_status: index_status.to_string(),
+            worktree_status: worktree_status.to_string(),
+            path: Path::new(path).to_path_buf(),
+        });
     }
 
     GitStatus {
@@ -428,69 +620,68 @@ fn parse_status(raw: &str) -> GitStatus {
 
 fn parse_diff_files(numstat: &str, name_status: &str) -> Vec<GitDiffFile> {
     let statuses = parse_name_status(name_status);
-    numstat
-        .lines()
-        .filter_map(|line| {
-            let mut parts = line.split('\t');
-            let additions = parts.next()?;
-            let deletions = parts.next()?;
-            let path = parts.next()?.trim();
-            let path = normalize_rename_path(path);
-            let (status, old_path) = statuses
-                .get(&path)
-                .cloned()
-                .unwrap_or_else(|| ("M".to_string(), None));
-            let binary = additions == "-" || deletions == "-";
-            Some(GitDiffFile {
-                path: Path::new(&path).to_path_buf(),
-                old_path: old_path.map(|value| Path::new(&value).to_path_buf()),
-                status,
-                additions: additions.parse().unwrap_or(0),
-                deletions: deletions.parse().unwrap_or(0),
-                binary,
-            })
-        })
-        .collect()
+    let mut files = Vec::new();
+    // `--numstat -z` is NUL-delimited; a normal record is `adds\tdels\tpath`, but a
+    // rename/copy record ends with an *empty* path field and is followed by two
+    // separate NUL records (old path, then new path). Drive the iterator manually so
+    // those trailing path records are consumed with their owning entry rather than
+    // misread as standalone files. The legacy `{old => new}` brace form never occurs
+    // under `-z`, so no path rewriting is needed.
+    let mut records = numstat.split('\0').filter(|record| !record.is_empty());
+    while let Some(record) = records.next() {
+        let mut parts = record.split('\t');
+        let (Some(additions), Some(deletions)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let inline_path = parts.next().unwrap_or("");
+        let path = if inline_path.is_empty() {
+            // Rename/copy: the next two records are the old and new paths.
+            let (Some(_old_path), Some(new_path)) = (records.next(), records.next()) else {
+                break;
+            };
+            new_path.to_string()
+        } else {
+            inline_path.to_string()
+        };
+        let (status, old_path) = statuses
+            .get(&path)
+            .cloned()
+            .unwrap_or_else(|| ("M".to_string(), None));
+        // Git reports a binary file's line counts as `-`/`-` rather than numbers.
+        let binary = additions == "-" || deletions == "-";
+        files.push(GitDiffFile {
+            path: Path::new(&path).to_path_buf(),
+            old_path: old_path.map(|value| Path::new(&value).to_path_buf()),
+            status,
+            additions: additions.parse().unwrap_or(0),
+            deletions: deletions.parse().unwrap_or(0),
+            binary,
+        });
+    }
+    files
 }
 
 fn parse_name_status(raw: &str) -> std::collections::BTreeMap<String, (String, Option<String>)> {
     let mut statuses = std::collections::BTreeMap::new();
-    for line in raw.lines() {
-        let mut parts = line.split('\t');
-        let Some(status) = parts.next() else { continue };
-        let normalized_status = status.chars().next().unwrap_or('M').to_string();
-        if normalized_status == "R" || normalized_status == "C" {
-            let Some(old_path) = parts.next() else {
-                continue;
-            };
-            let Some(new_path) = parts.next() else {
-                continue;
+    // `--name-status -z` emits the status code and each path as separate NUL records.
+    // A rename/copy (`R<score>`/`C<score>`) is `status\0old\0new`; everything else is
+    // `status\0path`. Drive the iterator manually so paired records stay together.
+    let mut records = raw.split('\0').filter(|record| !record.is_empty());
+    while let Some(status_field) = records.next() {
+        let normalized_status = status_field.chars().next().unwrap_or('M').to_string();
+        if is_rename_or_copy(&normalized_status) {
+            let (Some(old_path), Some(new_path)) = (records.next(), records.next()) else {
+                break;
             };
             statuses.insert(
                 new_path.to_string(),
                 (normalized_status, Some(old_path.to_string())),
             );
-        } else if let Some(path) = parts.next() {
+        } else if let Some(path) = records.next() {
             statuses.insert(path.to_string(), (normalized_status, None));
         }
     }
     statuses
-}
-
-fn normalize_rename_path(path: &str) -> String {
-    if let Some(open) = path.find('{') {
-        if let Some(close_offset) = path[open + 1..].find('}') {
-            let close = open + 1 + close_offset;
-            let inside = &path[open + 1..close];
-            if let Some((_, new_name)) = inside.split_once(" => ") {
-                return format!("{}{}{}", &path[..open], new_name, &path[close + 1..]);
-            }
-        }
-    }
-    if let Some((_, new_path)) = path.split_once(" => ") {
-        return new_path.to_string();
-    }
-    path.to_string()
 }
 
 #[cfg(test)]
@@ -499,20 +690,43 @@ mod tests {
 
     #[test]
     fn parses_branch_and_files() {
+        // `-z`: records are NUL-delimited (no trailing newlines), paths verbatim.
         let status = parse_status(
-            "## main...origin/main [ahead 1, behind 2]\n M src/main.rs\nA  README.md\n",
+            "## main...origin/main [ahead 1, behind 2]\0 M src/main.rs\0A  README.md\0",
         );
         assert_eq!(status.branch.as_deref(), Some("main"));
         assert_eq!(status.ahead, 1);
         assert_eq!(status.behind, 2);
         assert_eq!(status.files.len(), 2);
+        assert_eq!(status.files[0].path, Path::new("src/main.rs"));
+        assert_eq!(status.files[1].path, Path::new("README.md"));
+    }
+
+    #[test]
+    fn parses_status_rename_and_paths_with_spaces() {
+        // A rename is `XY <new>` followed by a bare `<old>` record that must be
+        // consumed, and `-z` keeps spaced names intact as a single record.
+        let status = parse_status(
+            "## master\0R  renamed.txt\0a.txt\0M  weird name.txt\0?? b.txt\0",
+        );
+        assert_eq!(status.branch.as_deref(), Some("master"));
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.behind, 0);
+        // The trailing old-path record must NOT become its own file entry.
+        assert_eq!(status.files.len(), 3);
+        assert_eq!(status.files[0].index_status, "R");
+        assert_eq!(status.files[0].path, Path::new("renamed.txt"));
+        assert_eq!(status.files[1].path, Path::new("weird name.txt"));
+        assert_eq!(status.files[2].path, Path::new("b.txt"));
     }
 
     #[test]
     fn parses_diff_numstat_and_status() {
+        // `-z`: numstat records are NUL-delimited, name-status splits status and path
+        // into separate NUL records.
         let files = parse_diff_files(
-            "4\t2\tsrc/main.rs\n-\t-\tassets/logo.png\n1\t0\tnew.rs\n",
-            "M\tsrc/main.rs\nD\tassets/logo.png\nA\tnew.rs\n",
+            "4\t2\tsrc/main.rs\0-\t-\tassets/logo.png\01\t0\tnew.rs\0",
+            "M\0src/main.rs\0D\0assets/logo.png\0A\0new.rs\0",
         );
 
         assert_eq!(files.len(), 3);
@@ -532,14 +746,18 @@ mod tests {
 
     #[test]
     fn parses_renamed_diff_file() {
+        // `-z` rename: the numstat record ends with an empty path, then `old`,`new`
+        // follow as separate NUL records; name-status is `R<score>\0old\0new`.
         let files = parse_diff_files(
-            "5\t1\tsrc/{old.rs => new.rs}\n",
-            "R100\tsrc/old.rs\tsrc/new.rs\n",
+            "5\t1\t\0src/old.rs\0src/new.rs\0",
+            "R100\0src/old.rs\0src/new.rs\0",
         );
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].status, "R");
         assert_eq!(files[0].old_path.as_deref(), Some(Path::new("src/old.rs")));
         assert_eq!(files[0].path, Path::new("src/new.rs"));
+        assert_eq!(files[0].additions, 5);
+        assert_eq!(files[0].deletions, 1);
     }
 }

@@ -5,10 +5,20 @@ import { luxCommands, MCP_SERVERS_KEY, type McpServerConfig, type McpServerStatu
 
 const EMPTY_DRAFT = { name: "", command: "", args: "" };
 
+const errorMessage = (cause: unknown) => (cause instanceof Error ? cause.message : String(cause));
+
 /**
  * Settings for real-time MCP (Model Context Protocol) servers. Configure stdio
  * servers (command + args), connect them live, and the agent gets their tools
  * (namespaced `mcp__<server>__<tool>`) in Agent/Automatic mode automatically.
+ *
+ * Single source of truth: every mutation goes through the backend `mcpAdd` /
+ * `mcpRemove` / `mcpEnable` commands, which atomically persist the config AND
+ * update the live connection (the same path the agent's `McpManage` tool uses).
+ * The UI never writes `ai.mcp.servers` directly — that bypass let config and live
+ * tooling drift apart and swallowed failures. After each op we reload both the
+ * persisted config and live status from the backend so the panel always mirrors
+ * what the turn loop can actually call.
  */
 export function McpSection({ t }: { t: TranslateFn }) {
   const [servers, setServers] = useState<McpServerConfig[]>([]);
@@ -16,6 +26,24 @@ export function McpSection({ t }: { t: TranslateFn }) {
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState(EMPTY_DRAFT);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reload the persisted config + live status together so the list and the
+  // connection state can never diverge after a mutation. Config still comes from
+  // settings (the backend's store of record); we only ever *read* it here.
+  const reload = useCallback(async () => {
+    const [configResult, statusResult] = await Promise.allSettled([
+      luxCommands.settingsGet("user", MCP_SERVERS_KEY),
+      luxCommands.mcpStatus(),
+    ]);
+    if (configResult.status === "fulfilled") {
+      const value = configResult.value;
+      setServers(Array.isArray(value?.value) ? (value.value as McpServerConfig[]) : []);
+    }
+    if (statusResult.status === "fulfilled") {
+      setStatuses(Object.fromEntries(statusResult.value.map((status) => [status.id, status])));
+    }
+  }, []);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -28,25 +56,11 @@ export function McpSection({ t }: { t: TranslateFn }) {
 
   useEffect(() => {
     let active = true;
-    void luxCommands
-      .settingsGet("user", MCP_SERVERS_KEY)
-      .then((value) => {
-        if (!active) return;
-        const stored = Array.isArray(value?.value) ? (value.value as McpServerConfig[]) : [];
-        setServers(stored);
-      })
-      .catch(() => undefined)
-      .finally(() => active && setLoaded(true));
-    void refreshStatus();
+    void reload().finally(() => active && setLoaded(true));
     return () => {
       active = false;
     };
-  }, [refreshStatus]);
-
-  const persist = useCallback(async (next: McpServerConfig[]) => {
-    setServers(next);
-    await luxCommands.settingsSet("user", MCP_SERVERS_KEY, next).catch(() => undefined);
-  }, []);
+  }, [reload]);
 
   const addServer = useCallback(async () => {
     const name = draft.name.trim();
@@ -55,59 +69,64 @@ export function McpSection({ t }: { t: TranslateFn }) {
     const id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "mcp"}-${Math.random().toString(36).slice(2, 6)}`;
     const args = draft.args.trim() ? draft.args.trim().split(/\s+/) : [];
     const config: McpServerConfig = { id, name, command, args, env: {}, enabled: true };
-    await persist([...servers, config]);
-    setDraft(EMPTY_DRAFT);
     setBusy(id);
+    setError(null);
     try {
-      const status = await luxCommands.mcpConnect(config);
-      setStatuses((prev) => ({ ...prev, [id]: status }));
-    } catch {
-      /* surfaced via status */
+      // mcpAdd persists then connects atomically; a handshake failure comes back as
+      // an error-state status (not a throw), so reload() surfaces it on the row.
+      await luxCommands.mcpAdd(config);
+      setDraft(EMPTY_DRAFT);
+      await reload();
+    } catch (cause) {
+      setError(errorMessage(cause));
     } finally {
       setBusy(null);
     }
-  }, [draft, persist, servers]);
+  }, [draft, reload]);
 
   const toggleEnabled = useCallback(async (config: McpServerConfig) => {
-    const next = servers.map((server) => (server.id === config.id ? { ...server, enabled: !server.enabled } : server));
-    await persist(next);
     setBusy(config.id);
+    setError(null);
     try {
-      if (config.enabled) {
-        await luxCommands.mcpDisconnect(config.id);
-        setStatuses((prev) => {
-          const copy = { ...prev };
-          delete copy[config.id];
-          return copy;
-        });
-      } else {
-        const status = await luxCommands.mcpConnect({ ...config, enabled: true });
-        setStatuses((prev) => ({ ...prev, [config.id]: status }));
-      }
+      // mcpEnable persists the flag AND connects/disconnects in one backend step,
+      // so the persisted config can't say "enabled" while the server is dead.
+      await luxCommands.mcpEnable(config.id, !config.enabled);
+      await reload();
+    } catch (cause) {
+      setError(errorMessage(cause));
     } finally {
       setBusy(null);
     }
-  }, [persist, servers]);
+  }, [reload]);
 
   const reconnect = useCallback(async (config: McpServerConfig) => {
+    // Reconnect is a live-only action (no config change), so mcpConnect is the right
+    // call; we still reload status afterwards to reflect the result.
     setBusy(config.id);
+    setError(null);
     try {
-      const status = await luxCommands.mcpConnect({ ...config, enabled: true });
-      setStatuses((prev) => ({ ...prev, [config.id]: status }));
+      await luxCommands.mcpConnect({ ...config, enabled: true });
+      await refreshStatus();
+    } catch (cause) {
+      setError(errorMessage(cause));
     } finally {
       setBusy(null);
     }
-  }, []);
+  }, [refreshStatus]);
 
   const removeServer = useCallback(async (config: McpServerConfig) => {
-    await luxCommands.mcpDisconnect(config.id).catch(() => undefined);
-    await persist(servers.filter((server) => server.id !== config.id));
-    setStatuses((prev) => {
-      const copy = { ...prev };
-      delete copy[config.id];
-      return copy;
-    });
-  }, [persist, servers]);
+    setBusy(config.id);
+    setError(null);
+    try {
+      // mcpRemove disconnects + deletes the persisted config in one backend step.
+      await luxCommands.mcpRemove(config.id);
+      await reload();
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setBusy(null);
+    }
+  }, [reload]);
 
   const totalTools = useMemo(
     () => Object.values(statuses).reduce((sum, status) => sum + (status.tools?.length ?? 0), 0),
@@ -123,6 +142,8 @@ export function McpSection({ t }: { t: TranslateFn }) {
           <RefreshCw size={13} />
         </button>
       </div>
+
+      {error && <p className="lux-mcp-error" role="alert">{error}</p>}
 
       {loaded && servers.length > 0 && (
         <ul className="lux-mcp-list">

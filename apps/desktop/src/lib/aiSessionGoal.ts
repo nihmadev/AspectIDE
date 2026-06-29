@@ -3,13 +3,19 @@ import { isPollutedSessionGoal, sanitizeSessionGoal } from "./aiSessionOrchestra
 const goalBySession = new Map<string, string>();
 const listeners = new Set<() => void>();
 
+// Monotonic revision counter — incremented on every mutation so useSyncExternalStore
+// subscribers re-render even when the Map size stays the same (e.g., goal text change
+// within the same session, or a sanitize/replace cycle that keeps size == 1).
+let goalsRevision = 0;
+
 export function subscribeAiSessionGoals(listener: () => void) {
   listeners.add(listener);
   return () => listeners.delete(listener);
 }
 
+/** Returns the monotonic revision so useSyncExternalStore detects every mutation. */
 export function getAiSessionGoalsSnapshot() {
-  return goalBySession.size;
+  return goalsRevision;
 }
 
 export function getAiSessionGoal(sessionId: string) {
@@ -21,8 +27,13 @@ export function getAiSessionGoal(sessionId: string) {
     return sanitized.value;
   }
   goalBySession.delete(sessionId);
-  listeners.forEach((listener) => listener());
+  emitGoals();
   return "";
+}
+
+function emitGoals() {
+  goalsRevision += 1;
+  listeners.forEach((listener) => listener());
 }
 
 export function setAiSessionGoal(sessionId: string, goal: string) {
@@ -32,12 +43,12 @@ export function setAiSessionGoal(sessionId: string, goal: string) {
   } else {
     goalBySession.set(sessionId, trimmed);
   }
-  listeners.forEach((listener) => listener());
+  emitGoals();
 }
 
 export function clearAiSessionGoal(sessionId: string) {
   goalBySession.delete(sessionId);
-  listeners.forEach((listener) => listener());
+  emitGoals();
 }
 
 export function hydrateAiSessionGoal(sessionId: string, goal: string | undefined) {
@@ -50,5 +61,5 @@ export function hydrateAllAiSessionGoals(sessions: Array<{ id: string; sessionGo
   for (const session of sessions) {
     hydrateAiSessionGoal(session.id, session.sessionGoal);
   }
-  listeners.forEach((listener) => listener());
+  emitGoals();
 }

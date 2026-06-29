@@ -1,7 +1,7 @@
 import type { AiChatSendInput, AiChatMessage } from "./aiChatTypes";
 import { sendAiChatMessage } from "./aiChatRuntime";
 import { truncateText } from "./aiRuntimeShared";
-import { appendSubagentTranscript, completeSubagentRun, registerSubagentRun } from "./aiSubagentRuns";
+import { appendSubagentTranscript, completeSubagentRun, registerSubagentRun, updateLastSubagentTranscript } from "./aiSubagentRuns";
 import { countRunningSubagents } from "./aiSubagentRuns";
 import { setAiTurnActivity } from "./aiTurnActivity";
 
@@ -72,12 +72,28 @@ export async function spawnSubagent(input: SubagentSpawnInput): Promise<Subagent
 
   const profile = subagentCatalog.find((entry) => entry.id === input.subagentType) ?? subagentCatalog[0];
   const agentId = `subagent-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+  // Resolve the optional model override: if the caller specified a model string that matches
+  // a model id in the active provider, use it for the child turn. Otherwise fall back to the
+  // parent's selection so the no-override case is silent and never produces a wrong model.
+  const resolveChildModelId = (): string => {
+    const requested = input.model?.trim();
+    if (!requested) return input.parentInput.preferences.selectedModelId;
+    const activeProvider = input.parentInput.preferences.providers.find(
+      (provider) => provider.id === input.parentInput.preferences.selectedProviderId,
+    );
+    if (activeProvider?.models.some((model) => model.id === requested)) return requested;
+    // Model id not found — fall back silently (don't throw; a wrong id breaks the child turn).
+    return input.parentInput.preferences.selectedModelId;
+  };
+
   const childPreferences = {
     ...input.parentInput.preferences,
     agentMode: profile.readonlyTools ? "ask" as const : input.parentInput.preferences.agentMode,
     toolRoundLimit: input.parentInput.preferences.toolRoundLimit === null
       ? null
       : Math.min(input.parentInput.preferences.toolRoundLimit, 24),
+    // Apply explicit model override so subagents run on the requested model (F3 fix).
+    selectedModelId: resolveChildModelId(),
   };
 
   const instructions = [
@@ -134,8 +150,11 @@ export async function spawnSubagent(input: SubagentSpawnInput): Promise<Subagent
       },
       onAssistantMessageUpdate: (_id, patch) => {
         if (resultMessage) resultMessage = { ...resultMessage, ...patch };
+        // Update the last transcript entry in-place rather than appending the full
+        // accumulated content as a new entry on every streaming chunk — prevents
+        // O(n²) allocation and duplicate/growing-prefix entries in the panel (F2 fix).
         if (typeof patch.content === "string" && patch.content.trim()) {
-          appendSubagentTranscript(agentId, patch.content);
+          updateLastSubagentTranscript(agentId, patch.content);
         }
       },
       onToolApproval: input.parentInput.onToolApproval,

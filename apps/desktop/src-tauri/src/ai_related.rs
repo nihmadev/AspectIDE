@@ -256,9 +256,18 @@ fn score_related(
             relations.insert("nearby-name".to_string());
             score += 12;
         }
-        if same_family || same_dir || dir_dist <= 2 {
+
+        // Only award strong kind-relation boosts (test/style/type/route/story counterparts)
+        // when the stem relationship is established.  `same_dir` alone is too broad:
+        // it caused src/bar.test.ts, styles, routes, etc. to rank as companions of any
+        // same-directory file even when they share nothing in common.  We keep same-dir
+        // as a small proximity signal (the +16 above) but gate the larger boosts on a
+        // real family/stem/source-extension relationship.
+        let stem_related = same_family || sibling_family || is_source_counterpart(desc, tgt);
+        if stem_related {
             score += add_kind_relations(desc, &mut relations);
         }
+
         if same_family && is_source_counterpart(desc, tgt) {
             relations.insert("nearby-name".to_string());
             score += 18;
@@ -543,5 +552,39 @@ mod tests {
         let unrelated = Desc::new("/root/docs/changelog.md", "/root");
         let (score, _, _) = score_related(&unrelated, Some(&target), &[]);
         assert_eq!(score, 0, "unrelated file with no hits should be 0");
+    }
+
+    #[test]
+    fn same_dir_unrelated_test_file_no_kind_boost() {
+        // A test file in the same directory as `app.ts` should NOT receive the
+        // strong "test" kind-relation boost unless it shares the family stem.
+        // Before the fix, `src/bar.test.ts` alongside `src/app.ts` would get +35
+        // from add_kind_relations even though the stems are unrelated.
+        let target = Desc::new("/root/src/app.ts", "/root");
+        let unrelated_test = Desc::new("/root/src/bar.test.ts", "/root");
+        let (score, relations, _) = score_related(&unrelated_test, Some(&target), &[]);
+        assert!(
+            !relations.contains("test"),
+            "unrelated same-dir test should not carry 'test' relation, got {relations:?}"
+        );
+        // The file is still in the same dir so it gets the small proximity signal,
+        // but not the large kind-relation boost.
+        assert!(
+            score < 50,
+            "unrelated same-dir test companion score should be modest, got {score}"
+        );
+    }
+
+    #[test]
+    fn same_family_test_file_keeps_kind_boost() {
+        // Companion test with the same family stem must still get the full boost.
+        let target = Desc::new("/root/src/userProfile.tsx", "/root");
+        let companion_test = Desc::new("/root/src/userProfile.test.tsx", "/root");
+        let (score, relations, _) = score_related(&companion_test, Some(&target), &[]);
+        assert!(
+            relations.contains("test"),
+            "'test' relation must be present for family companion"
+        );
+        assert!(score > 50, "family test companion must score high: {score}");
     }
 }

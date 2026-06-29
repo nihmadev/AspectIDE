@@ -17,6 +17,7 @@ import {
   clamp,
   isRecord,
   maxToolOutputChars,
+  normalizePathSlashes,
   numberArg,
   optionalPositiveNumberArg,
   stringArg,
@@ -33,17 +34,80 @@ export async function globFiles(pattern: string, maxResults: number): Promise<To
   const cap = clamp(maxResults, 1, 500);
   const limit = Math.max(cap * 4, 200);
   const files = await luxCommands.fsListFiles(limit);
-  const needle = pattern.trim().toLowerCase();
+  const rawPattern = normalizePathSlashes(pattern.trim());
+  // Real glob matching when the pattern uses glob metacharacters (`*`/`?`), e.g.
+  // `**/*.ts`, `src/**/*.tsx`, `*.test.ts`. Plain fragments and bare extensions
+  // (`components/app`, `.tsx`) fall back to a case-insensitive substring match, so
+  // the tool stays a superset of its previous substring-only behavior.
+  const matcher = buildGlobMatcher(rawPattern);
   const allMatched = files
     .filter((entry) => entry.kind === "file")
-    .filter((entry) => !needle || entry.path.toLowerCase().includes(needle));
+    .filter((entry) => matcher(normalizePathSlashes(entry.path)));
   const matched = allMatched.slice(0, cap);
   return toolJson("Glob", {
     pattern,
+    mode: globPatternHasMagic(rawPattern) ? "glob" : "substring",
     count: matched.length,
     truncated: allMatched.length > cap || files.length >= limit,
     files: matched.map((entry) => ({ path: entry.path, size: entry.size })),
   });
+}
+
+function globPatternHasMagic(pattern: string) {
+  return /[*?]/.test(pattern);
+}
+
+/**
+ * Build a path matcher for a Glob pattern. Glob patterns (`*`, `?`, `**`) compile
+ * to a regex matched at a `/`-segment boundary (start) and end-anchored, so a
+ * workspace-relative-looking pattern matches the tail of the absolute paths the FS
+ * scan returns; a slash-free pattern (e.g. `*.ts`) also matches basenames at any
+ * depth. Non-glob patterns use the original substring contains-match.
+ */
+function buildGlobMatcher(pattern: string): (path: string) => boolean {
+  if (!pattern) return () => true;
+  if (!globPatternHasMagic(pattern)) {
+    const needle = pattern.toLowerCase();
+    return (path) => path.toLowerCase().includes(needle);
+  }
+  const body = globBodyToRegExpSource(pattern);
+  const regex = new RegExp(`(^|/)${body}$`, "i");
+  const slashFree = !pattern.includes("/");
+  return (path) => {
+    if (regex.test(path)) return true;
+    if (!slashFree) return false;
+    const basename = path.slice(path.lastIndexOf("/") + 1);
+    return regex.test(basename);
+  };
+}
+
+/** Translate a glob body into a regex source: `**`/`*`/`?` semantics, everything else literal. */
+function globBodyToRegExpSource(pattern: string) {
+  let source = "";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "*") {
+      if (pattern[index + 1] === "*") {
+        // `**/` spans zero or more directory segments; bare `**` spans anything.
+        if (pattern[index + 2] === "/") {
+          source += "(?:.*/)?";
+          index += 2;
+        } else {
+          source += ".*";
+          index += 1;
+        }
+      } else {
+        source += "[^/]*";
+      }
+    } else if (char === "?") {
+      source += "[^/]";
+    } else if ("\\^$.|+()[]{}".includes(char)) {
+      source += `\\${char}`;
+    } else {
+      source += char;
+    }
+  }
+  return source;
 }
 
 export async function readFileTool(path: string, maxBytes: number): Promise<ToolResult> {

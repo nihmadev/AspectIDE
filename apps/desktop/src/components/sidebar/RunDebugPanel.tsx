@@ -182,20 +182,45 @@ export function RunDebugPanel() {
   const resolvedBreakpoints = Object.values(debugResolvedBreakpointsByPath).flat();
   const watchExpressionSignature = watchExpressions.map((item) => `${item.id}:${item.expression}`).join("|");
 
+  // Per-path breakpoint content signatures: JSON-stable hash of lines+conditions
+  // used to detect which paths actually changed so we skip no-op re-syncs.
+  const breakpointSignaturesRef = useRef<Map<string, string>>(new Map());
+
   useEffect(() => {
     const liveSessions = sessions.filter((session) => session.status !== "stopped" && session.status !== "error");
     const currentPaths = new Set(Object.keys(debugSourceBreakpointsByPath));
-    const paths = new Set([...currentPaths, ...syncedBreakpointPathsRef.current]);
+
     if (liveSessions.length === 0) {
+      // No live sessions — update our tracking state and bail early.
       syncedBreakpointPathsRef.current = currentPaths;
+      breakpointSignaturesRef.current = new Map();
       return;
     }
+
+    // Compute the set of paths whose breakpoint content changed or that were
+    // removed since last sync. Only these paths need to be sent to adapters.
+    const removedPaths = [...syncedBreakpointPathsRef.current].filter((p) => !currentPaths.has(p));
+    const changedPaths = [...currentPaths].filter((path) => {
+      const bps = debugSourceBreakpointsByPath[path] ?? [];
+      const sig = JSON.stringify(bps.map((bp) => `${bp.line}:${bp.column ?? ""}:${bp.condition ?? ""}:${bp.log_message ?? ""}`).sort());
+      if (breakpointSignaturesRef.current.get(path) === sig) return false;
+      breakpointSignaturesRef.current.set(path, sig);
+      return true;
+    });
+
+    const pathsToSync = new Set([...changedPaths, ...removedPaths]);
+    if (pathsToSync.size === 0) return;
+
     for (const session of liveSessions) {
-      for (const path of paths) {
+      for (const path of pathsToSync) {
         setBreakpointsMutation.mutate({ sessionId: session.id, path, breakpoints: debugSourceBreakpointsByPath[path] ?? [] });
       }
     }
+
+    // Clean up signatures for removed paths
+    for (const path of removedPaths) breakpointSignaturesRef.current.delete(path);
     syncedBreakpointPathsRef.current = currentPaths;
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- session status is intentionally inlined into the dep
   }, [debugSourceBreakpointsByPath, sessions.map((session) => `${session.id}:${session.status}`).join("|")]);
 
   useEffect(() => {

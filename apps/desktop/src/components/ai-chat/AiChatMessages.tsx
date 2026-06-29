@@ -29,6 +29,13 @@ const trimChatMessageEnd =
   chatDisplayText.trimChatMessageEnd
   ?? ((text: string) => text.replace(/\s+$/, ""));
 
+// Threads at/above this length switch from "render everything" to windowed
+// virtualization. Below it the transcript is small enough that virtual layout
+// overhead outweighs the savings.
+const VIRTUALIZE_THRESHOLD = 40;
+const ESTIMATED_ROW_HEIGHT = 180;
+const VIRTUAL_OVERSCAN = 5;
+
 type AiChatMessagesProps = {
   canMutateHistory: boolean;
   canRestoreUserMessage: (userMessageId: string) => boolean;
@@ -64,12 +71,25 @@ export function AiChatMessages({
   t,
   onReviewAction,
 }: AiChatMessagesProps) {
+  // Streaming only ever lands on the last message. We render that single row in
+  // normal document flow (below the virtual window) instead of as an absolutely
+  // positioned virtual row: its token-by-token growth then feeds the scroll
+  // container's real height immediately, keeping sticky-bottom pixel-accurate with
+  // no ResizeObserver measurement lag — while every other row stays virtualized.
+  const streamingIndex = useMemo(
+    () => (streamingMessageId ? messages.findIndex((message) => message.id === streamingMessageId) : -1),
+    [messages, streamingMessageId],
+  );
+  const streamingTail =
+    streamingIndex >= 0 && streamingIndex === messages.length - 1 ? messages[streamingIndex] : null;
+  const virtualCount = streamingTail ? messages.length - 1 : messages.length;
+
   const virtualizer = useVirtualizer({
-    count: messages.length,
+    count: virtualCount,
     getScrollElement: () => parentRef.current,
     getItemKey: (index) => messages[index]?.id ?? index,
-    estimateSize: () => 180,
-    overscan: 5,
+    estimateSize: () => ESTIMATED_ROW_HEIGHT,
+    overscan: VIRTUAL_OVERSCAN,
   });
   const virtualItems = virtualizer.getVirtualItems();
 
@@ -83,61 +103,55 @@ export function AiChatMessages({
   const getOnReviewFor = (id: string) =>
     onReviewAction && id === lastAssistantId ? () => onReviewAction(id) : undefined;
 
-  if (messages.length < 40 || streamingMessageId) {
-    return messages.map((chatMessage) => (
-      <AiChatMessageView
-        key={chatMessage.id}
-        message={chatMessage}
-        streaming={chatMessage.id === streamingMessageId}
-        showResponseDuration={showResponseDuration}
-        contextCompaction={contextCompaction}
-        workspaceRoot={workspaceRoot}
-        canMutateHistory={canMutateHistory}
-        canRestoreUserMessage={canRestoreUserMessage}
-        onApprovalDecision={onApprovalDecision}
-        onEditUserMessage={onEditUserMessage}
-        onStopAfterTool={onStopAfterTool}
-        canStopAfterTool={canStopAfterTool}
-        sessionStatus={sessionStatus}
-        t={t}
-        onReview={getOnReviewFor(chatMessage.id)}
-      />
-    ));
+  const renderRow = (chatMessage: AiChatMessage) => (
+    <AiChatMessageView
+      key={chatMessage.id}
+      message={chatMessage}
+      streaming={chatMessage.id === streamingMessageId}
+      showResponseDuration={showResponseDuration}
+      contextCompaction={contextCompaction}
+      workspaceRoot={workspaceRoot}
+      canMutateHistory={canMutateHistory}
+      canRestoreUserMessage={canRestoreUserMessage}
+      onApprovalDecision={onApprovalDecision}
+      onEditUserMessage={onEditUserMessage}
+      onStopAfterTool={onStopAfterTool}
+      canStopAfterTool={canStopAfterTool}
+      sessionStatus={sessionStatus}
+      t={t}
+      onReview={getOnReviewFor(chatMessage.id)}
+    />
+  );
+
+  // Small threads: render the whole transcript (no virtual layout overhead).
+  if (messages.length < VIRTUALIZE_THRESHOLD) {
+    return <>{messages.map(renderRow)}</>;
   }
 
+  // Long threads stay virtualized even mid-stream: a token update reconciles only
+  // the windowed rows (and, via the row memo, only the streaming row) instead of
+  // mounting the entire transcript.
   return (
-    <div className="ai-chat-virtual-list" style={{ height: virtualizer.getTotalSize() }}>
-      {virtualItems.map((item) => {
-        const chatMessage = messages[item.index];
-        if (!chatMessage) return null;
-        return (
-          <div
-            key={chatMessage.id}
-            className="ai-chat-virtual-row"
-            data-index={item.index}
-            ref={virtualizer.measureElement}
-            style={{ transform: `translateY(${item.start}px)` }}
-          >
-            <AiChatMessageView
-              canMutateHistory={canMutateHistory}
-              canRestoreUserMessage={canRestoreUserMessage}
-              message={chatMessage}
-              streaming={chatMessage.id === streamingMessageId}
-              showResponseDuration={showResponseDuration}
-              contextCompaction={contextCompaction}
-              workspaceRoot={workspaceRoot}
-              onApprovalDecision={onApprovalDecision}
-              onEditUserMessage={onEditUserMessage}
-              onStopAfterTool={onStopAfterTool}
-              canStopAfterTool={canStopAfterTool}
-              sessionStatus={sessionStatus}
-              t={t}
-              onReview={getOnReviewFor(chatMessage.id)}
-            />
-          </div>
-        );
-      })}
-    </div>
+    <>
+      <div className="ai-chat-virtual-list" style={{ height: virtualizer.getTotalSize() }}>
+        {virtualItems.map((item) => {
+          const chatMessage = messages[item.index];
+          if (!chatMessage) return null;
+          return (
+            <div
+              key={chatMessage.id}
+              className="ai-chat-virtual-row"
+              data-index={item.index}
+              ref={virtualizer.measureElement}
+              style={{ transform: `translateY(${item.start}px)` }}
+            >
+              {renderRow(chatMessage)}
+            </div>
+          );
+        })}
+      </div>
+      {streamingTail && renderRow(streamingTail)}
+    </>
   );
 }
 

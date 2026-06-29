@@ -7,6 +7,7 @@ import type { MessageKey } from "../lib/i18n";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { useLuxStore, type BottomPanelTab } from "../lib/store";
 import { isTauriRuntime, luxCommands } from "../lib/tauri";
+import { isTerminalSpawnInFlight, spawnTerminalSession } from "../lib/terminalSpawn";
 import type { TerminalSessionInfo, WorkspaceDiagnostic } from "../lib/types";
 import { XtermTerminal } from "./XtermTerminal";
 
@@ -33,8 +34,9 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
   const terminal = useLuxStore((state) => state.terminal);
   const terminalSessions = useLuxStore((state) => state.terminalSessions);
   const activeTerminalId = useLuxStore((state) => state.activeTerminalId);
-  const terminalOutputBuffers = useLuxStore((state) => state.terminalOutputBuffers);
-  const upsertTerminalSession = useLuxStore((state) => state.upsertTerminalSession);
+  // NOTE: we intentionally do NOT subscribe to terminalOutputBuffers here. Each
+  // XtermTerminal selects its own session's buffer slice, so high-volume PTY output on
+  // one terminal no longer re-renders the whole bottom panel.
   const setActiveTerminal = useLuxStore((state) => state.setActiveTerminal);
   const closeTerminalSession = useLuxStore((state) => state.closeTerminalSession);
   const clearTerminalOutput = useLuxStore((state) => state.clearTerminalOutput);
@@ -68,15 +70,13 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
   }, [terminalSessions]);
 
   const terminalMutation = useMutation({
-    mutationFn: async () => {
-      if (!isTauriRuntime()) return null;
-      const created = await luxCommands.terminalCreate(undefined, undefined, undefined, undefined);
-      return created;
-    },
+    // Route through the shared guarded spawner so the palette "terminal.new" command and
+    // this panel (manual button + auto-spawn) can never race into two shells. The spawner
+    // already upserts the session into the store; we only mark it mounted here.
+    mutationFn: () => spawnTerminalSession(),
     onSuccess: (session) => {
       setTerminalError(null);
       if (session) {
-        upsertTerminalSession(session, true);
         setMountedSessionIds((prev) => new Set(prev).add(session.id));
       }
     },
@@ -93,7 +93,9 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
   useEffect(() => {
     if (activeTab !== "terminal") return;
     if (terminalSessions.length > 0) { autoSpawnedRef.current = false; return; }
-    if (autoSpawnedRef.current || spawnPending) return;
+    // Also skip if an external create (e.g. palette "terminal.new") is already in flight,
+    // otherwise both paths would each open a shell before the first lands in the store.
+    if (autoSpawnedRef.current || spawnPending || isTerminalSpawnInFlight()) return;
     if (!isTauriRuntime()) return;
     autoSpawnedRef.current = true;
     spawnTerminal();
@@ -207,7 +209,6 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
         activeTerminalId={activeTerminalId}
         mountedSessionIds={mountedSessionIds}
         terminalSessions={terminalSessions}
-        terminalOutputBuffers={terminalOutputBuffers}
         terminalClearTokens={terminalClearTokens}
         terminalError={terminalError}
         t={t}
@@ -277,7 +278,6 @@ function PanelContent({
   activeTerminalId,
   mountedSessionIds,
   terminalSessions,
-  terminalOutputBuffers,
   terminalClearTokens,
   terminalError,
   t,
@@ -291,7 +291,6 @@ function PanelContent({
   activeTerminalId: string | null;
   mountedSessionIds: Set<string>;
   terminalSessions: TerminalSessionInfo[];
-  terminalOutputBuffers: Record<string, { text: string }>;
   terminalClearTokens: Record<string, number>;
   terminalError: string | null;
   t: TranslateFn;
@@ -317,7 +316,6 @@ function PanelContent({
             activeTerminalId={activeTerminalId}
             mountedSessionIds={mountedSessionIds}
             terminalSessions={terminalSessions}
-            terminalOutputBuffers={terminalOutputBuffers}
             terminalClearTokens={terminalClearTokens}
             terminalError={terminalError}
             t={t}
@@ -332,7 +330,6 @@ function TerminalPanel({
   activeTerminalId,
   mountedSessionIds,
   terminalSessions,
-  terminalOutputBuffers,
   terminalClearTokens,
   terminalError,
   t,
@@ -340,7 +337,6 @@ function TerminalPanel({
   activeTerminalId: string | null;
   mountedSessionIds: Set<string>;
   terminalSessions: TerminalSessionInfo[];
-  terminalOutputBuffers: Record<string, { text: string }>;
   terminalClearTokens: Record<string, number>;
   terminalError: string | null;
   t: TranslateFn;
@@ -373,7 +369,6 @@ function TerminalPanel({
             >
               {mounted ? (
                 <XtermTerminal
-                  bufferText={terminalOutputBuffers[session.id]?.text ?? ""}
                   clearToken={terminalClearTokens[session.id] ?? 0}
                   session={session}
                 />

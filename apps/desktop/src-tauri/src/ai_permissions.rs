@@ -7,13 +7,18 @@
 //! refused.
 //!
 //! Rule format (one per entry): `[allow|deny|ask:]Tool(glob)`
-//!   - `allow:Bash(git *)`      → auto-run any git command
+//!   - `allow:Shell(git *)`     → auto-run any git command   (also matches `Bash`)
 //!   - `deny:Write(*.env)`      → never write .env files
-//!   - `ask:Bash(rm *)`         → always prompt for rm
+//!   - `ask:Shell(rm *)`        → always prompt for rm
 //!   - `Read`                   → bare tool name (no glob) matches every input
 //!
 //! A missing prefix defaults to `allow`. `*` is a wildcard in the glob.
 //! Precedence: deny > ask > allow; first matching rule of the winning tier wins.
+//!
+//! SECURITY (finding #8): the Tauri command `ai_permission_decide` loads the
+//! permission rules from the trusted `SettingsStore` (Rust-side app state) rather
+//! than accepting them from the renderer. This prevents a compromised UI path
+//! from injecting broad allow-rules or omitting deny-rules to bypass enforcement.
 
 use serde::{Deserialize, Serialize};
 
@@ -91,15 +96,36 @@ fn parse_rule(raw: &str) -> Option<ParsedRule> {
     })
 }
 
+/// Canonical shell tool name. SECURITY (finding #7): users write both `Bash`
+/// and `Shell` in their rule lists (the docs show `Bash`, the native turn uses
+/// `Shell`). Normalizing here ensures rules never silently fall through because
+/// of the alias mismatch.
+fn canonical_tool(name: &str) -> &str {
+    match name.to_ascii_lowercase().as_str() {
+        "bash" => "Shell",
+        _ => name,
+    }
+}
+
 impl ParsedRule {
     fn matches(&self, tool: &str, input: &str) -> bool {
-        if !self.tool.eq_ignore_ascii_case(tool) {
+        // SECURITY (finding #7): canonicalize both the rule's tool name and the
+        // incoming tool name so `Bash` rules match the `Shell` tool (and vice-versa).
+        let rule_tool = canonical_tool(&self.tool);
+        let query_tool = canonical_tool(tool);
+        if !rule_tool.eq_ignore_ascii_case(query_tool) {
             return false;
         }
         match &self.pattern {
             None => true,
             Some(pattern) if pattern.is_empty() || pattern == "*" => true,
-            Some(pattern) => glob_match(&pattern.to_lowercase(), &input.trim().to_lowercase()),
+            Some(pattern) => {
+                // SECURITY (finding #7): normalize whitespace in the command input
+                // (collapse tabs/newlines to a single space) so rules cannot be
+                // bypassed by embedding a tab or newline where a space is expected.
+                let normalized_input = input.split_whitespace().collect::<Vec<_>>().join(" ");
+                glob_match(&pattern.to_lowercase(), &normalized_input.to_lowercase())
+            }
         }
     }
 }
@@ -162,13 +188,62 @@ pub fn evaluate(tool: &str, input: &str, rules: &[String]) -> PermissionEvaluati
     }
 }
 
+/// Key in `settings.json` where AI preferences (including `toolPermissionRules`)
+/// are stored. Must match the TypeScript `AI_PREFERENCES_KEY` constant.
+const AI_PREFERENCES_SETTINGS_KEY: &str = "ai.preferences";
+
+/// Extract `toolPermissionRules: string[]` from the stored AI preferences blob,
+/// or return an empty list if the key/field is absent.
+fn load_permission_rules_from_settings(
+    state: &tauri::State<'_, crate::SharedState>,
+) -> Vec<String> {
+    let settings = match state.settings.lock() {
+        Ok(guard) => guard,
+        Err(_) => return Vec::new(),
+    };
+    let store = match settings.as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let setting = match store.get(lux_core::SettingsScope::User, AI_PREFERENCES_SETTINGS_KEY) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    // The value is the full `AiPreferences` JSON object; we only need the rules array.
+    let rules = setting
+        .value
+        .get("toolPermissionRules")
+        .and_then(|v| v.as_array());
+    match rules {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.trim().to_string())
+            .take(100) // match the TS-side limit
+            .collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Tauri command: decide a tool call against the configured permission rules.
+///
+/// SECURITY (finding #8): rules are loaded from the trusted Rust-side
+/// `SettingsStore` rather than being accepted from the command caller. A
+/// compromised renderer path cannot inject broad allow-rules or omit denies
+/// to bypass safety enforcement. The `_rules` parameter is accepted but
+/// intentionally **ignored** — it exists only to avoid a breaking API change
+/// while the TypeScript side still passes the rules it built; the Rust side
+/// always uses the authoritative persisted copy.
 #[tauri::command]
 pub fn ai_permission_decide(
+    state: tauri::State<'_, crate::SharedState>,
     tool: String,
     input: String,
-    rules: Vec<String>,
+    // Intentionally ignored — loaded from SettingsStore instead (see above).
+    _rules: Vec<String>,
 ) -> PermissionEvaluation {
+    let rules = load_permission_rules_from_settings(&state);
     evaluate(&tool, &input, &rules)
 }
 
@@ -259,6 +334,43 @@ mod tests {
         assert_eq!(
             decide("Shell", "curl http://x", &["deny:Shell(curl http://*)"]),
             PermissionDecision::Deny,
+        );
+    }
+
+    #[test]
+    fn bash_and_shell_are_aliases() {
+        // Finding #7: a rule written as `Bash(…)` must match the `Shell` tool
+        // (which is what the native turn uses) and vice-versa.
+        assert_eq!(
+            decide("Shell", "git status", &["allow:Bash(git *)"]),
+            PermissionDecision::Allow,
+            "Bash rule should match Shell tool"
+        );
+        assert_eq!(
+            decide("Bash", "git status", &["allow:Shell(git *)"]),
+            PermissionDecision::Allow,
+            "Shell rule should match Bash tool"
+        );
+        assert_eq!(
+            decide("Shell", "rm -rf /", &["deny:Bash(rm *)"]),
+            PermissionDecision::Deny,
+            "Bash deny rule should match Shell tool"
+        );
+    }
+
+    #[test]
+    fn whitespace_normalization_in_input() {
+        // Finding #7: tabs or newlines embedded in the command must not bypass
+        // a glob rule that uses spaces.
+        assert_eq!(
+            decide("Shell", "git\tstatus", &["allow:Shell(git *)"]),
+            PermissionDecision::Allow,
+            "tab in input should match space-based pattern"
+        );
+        assert_eq!(
+            decide("Shell", "rm\n-rf /", &["deny:Shell(rm *)"]),
+            PermissionDecision::Deny,
+            "newline in input should still match deny pattern"
         );
     }
 }

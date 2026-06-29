@@ -14,6 +14,6 @@ mod rerank;
 pub use model::{FocusMode, RankedSource, ResearchOptions, ResearchResponse, SearchHit};
 pub use provider::{
     duckduckgo_lite_search_url, duckduckgo_search_url, parse_duckduckgo_html, parse_searxng_json,
-    searxng_search_url,
+    searxng_search_url, validate_source_url,
 };
 pub use rerank::rerank;

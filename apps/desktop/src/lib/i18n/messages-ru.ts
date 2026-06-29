@@ -1100,6 +1100,8 @@ export const messagesRu: Messages = {
   "aiTools.readyCount": "готово: {count}",
   "aiTools.totalCount": "всего: {count}",
   "aiTools.status.ready": "Готов",
+  "aiTools.status.needsSetup": "Требует настройки",
+  "aiTools.needsSetupCount": "требует настройки: {count}",
   "aiTools.footerNote": "Готовые tools доступны AI runtime",
   "aiTools.duration.ms": "{duration} мс",
   "aiTools.duration.s": "{duration} с",

@@ -113,14 +113,26 @@ pub fn to_anthropic_request(openai: &Value) -> Value {
         out.insert("temperature".to_string(), temperature.clone());
     }
 
-    if let Some(tools) = openai.get("tools").and_then(Value::as_array) {
-        let converted: Vec<Value> = tools.iter().filter_map(convert_tool).collect();
-        if !converted.is_empty() {
-            out.insert("tools".to_string(), Value::Array(converted));
-            out.insert(
-                "tool_choice".to_string(),
-                convert_tool_choice(openai.get("tool_choice")),
-            );
+    // Tools + tool choice. Anthropic has no `"none"` tool-choice type, so when the
+    // OpenAI caller disables tools (`tool_choice: "none"`) we omit both `tools` and
+    // `tool_choice` entirely: sending the tools array with an unsupported choice
+    // makes the Messages API reject the request instead of simply preventing tool
+    // use. The caller's sequencing constraint (`parallel_tool_calls: false`) is
+    // carried into Anthropic's `disable_parallel_tool_use` flag on the choice.
+    let tool_choice = openai.get("tool_choice");
+    let tools_disabled = matches!(tool_choice, Some(Value::String(value)) if value == "none");
+    if !tools_disabled {
+        if let Some(tools) = openai.get("tools").and_then(Value::as_array) {
+            let converted: Vec<Value> = tools.iter().filter_map(convert_tool).collect();
+            if !converted.is_empty() {
+                out.insert("tools".to_string(), Value::Array(converted));
+                let disable_parallel =
+                    openai.get("parallel_tool_calls").and_then(Value::as_bool) == Some(false);
+                out.insert(
+                    "tool_choice".to_string(),
+                    convert_tool_choice(tool_choice, disable_parallel),
+                );
+            }
         }
     }
 
@@ -264,10 +276,24 @@ fn convert_user(msg: &Value) -> Value {
 /// it is dropped instead of producing an invalid empty-content block.
 fn convert_assistant(msg: &Value) -> Option<Value> {
     let mut blocks: Vec<Value> = Vec::new();
-    if let Some(text) = msg.get("content").and_then(Value::as_str) {
-        if !text.is_empty() {
+    match msg.get("content") {
+        // Plain string content → a single text block (the common case).
+        Some(Value::String(text)) if !text.is_empty() => {
             blocks.push(json!({ "type": "text", "text": text }));
         }
+        // OpenAI content-part array (e.g. replayed transcript history): preserve text
+        // blocks via the same conversion path as user messages instead of dropping
+        // the whole message when there are no tool_calls.
+        Some(Value::Array(parts)) => {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        blocks.push(json!({ "type": "text", "text": text }));
+                    }
+                }
+            }
+        }
+        _ => {}
     }
     if let Some(calls) = msg.get("tool_calls").and_then(Value::as_array) {
         for call in calls {
@@ -387,9 +413,12 @@ fn convert_tool(tool: &Value) -> Option<Value> {
     Some(out)
 }
 
-fn convert_tool_choice(choice: Option<&Value>) -> Value {
-    match choice {
-        Some(Value::String(value)) if value == "none" => json!({ "type": "none" }),
+/// Map an `OpenAI` `tool_choice` onto an Anthropic one. `"none"` never reaches here —
+/// the caller omits tools for it. `disable_parallel` (from `parallel_tool_calls:
+/// false`) adds `disable_parallel_tool_use: true` so the caller's one-tool-per-turn
+/// constraint survives the protocol hop.
+fn convert_tool_choice(choice: Option<&Value>, disable_parallel: bool) -> Value {
+    let mut out = match choice {
         Some(Value::String(value)) if value == "required" || value == "any" => {
             json!({ "type": "any" })
         }
@@ -402,7 +431,11 @@ fn convert_tool_choice(choice: Option<&Value>) -> Value {
                 |name| json!({ "type": "tool", "name": name }),
             ),
         _ => json!({ "type": "auto" }),
+    };
+    if disable_parallel {
+        out["disable_parallel_tool_use"] = Value::Bool(true);
     }
+    out
 }
 
 #[cfg(test)]
@@ -498,7 +531,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_choice_none_is_mapped_and_keeps_tools() {
+    fn tool_choice_none_omits_tools_and_choice() {
+        // Anthropic has no "none" tool-choice type. Disabling tools must drop both
+        // `tools` and `tool_choice` so the request isn't rejected by the API.
         let openai = json!({
             "model": "claude-sonnet-4-5",
             "messages": [{ "role": "user", "content": "go" }],
@@ -506,8 +541,71 @@ mod tests {
             "tool_choice": "none",
         });
         let out = to_anthropic_request(&openai);
-        assert_eq!(out["tool_choice"]["type"], "none");
-        assert!(out["tools"].is_array());
+        assert!(out.get("tools").is_none(), "tools must be omitted for none");
+        assert!(
+            out.get("tool_choice").is_none(),
+            "tool_choice must be omitted for none"
+        );
+    }
+
+    #[test]
+    fn parallel_tool_calls_false_disables_parallel_use() {
+        // `parallel_tool_calls: false` enforces one tool per turn; that constraint
+        // must survive as Anthropic's `disable_parallel_tool_use`.
+        let base = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+            "tools": [{ "type": "function", "function": { "name": "Read", "parameters": {} } }],
+            "parallel_tool_calls": false,
+        });
+
+        // auto (default) choice
+        let out = to_anthropic_request(&base);
+        assert_eq!(out["tool_choice"]["type"], "auto");
+        assert_eq!(out["tool_choice"]["disable_parallel_tool_use"], json!(true));
+
+        // required → any
+        let mut required = base.clone();
+        required["tool_choice"] = json!("required");
+        let out = to_anthropic_request(&required);
+        assert_eq!(out["tool_choice"]["type"], "any");
+        assert_eq!(out["tool_choice"]["disable_parallel_tool_use"], json!(true));
+
+        // named tool choice
+        let mut named = base.clone();
+        named["tool_choice"] = json!({ "type": "function", "function": { "name": "Read" } });
+        let out = to_anthropic_request(&named);
+        assert_eq!(out["tool_choice"]["type"], "tool");
+        assert_eq!(out["tool_choice"]["name"], "Read");
+        assert_eq!(out["tool_choice"]["disable_parallel_tool_use"], json!(true));
+
+        // parallel_tool_calls: true (or absent) leaves the flag off.
+        let mut parallel = base.clone();
+        parallel["parallel_tool_calls"] = json!(true);
+        let out = to_anthropic_request(&parallel);
+        assert!(out["tool_choice"].get("disable_parallel_tool_use").is_none());
+    }
+
+    #[test]
+    fn assistant_content_array_is_preserved_without_tool_calls() {
+        // Replayed transcript history can arrive as an OpenAI content-part array on
+        // an assistant turn; its text must survive instead of the message dropping.
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": [
+                    { "type": "text", "text": "previous answer" },
+                ]},
+                { "role": "user", "content": "continue" },
+            ],
+        });
+        let out = to_anthropic_request(&openai);
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"][0]["type"], "text");
+        assert_eq!(messages[1]["content"][0]["text"], "previous answer");
     }
 
     #[test]

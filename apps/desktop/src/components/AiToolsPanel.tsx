@@ -33,7 +33,14 @@ import { AnimatePresence, motion } from "motion/react";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import type { MessageKey } from "../lib/i18n";
 
-type ToolStatus = "ready";
+/**
+ * "ready"       — always available in this runtime.
+ * "needs-setup" — tool is registered but requires external config (SSH host,
+ *                 browser install, etc.) before the agent can invoke it
+ *                 successfully. The UI surfaces this so users know why a
+ *                 workflow failed, rather than discovering it mid-run.
+ */
+type ToolStatus = "ready" | "needs-setup";
 
 type ToolDef = {
   id: string;
@@ -77,30 +84,34 @@ const categories: ToolCategory[] = [
   {
     id: "ssh",
     accent: "#f4a259",
+    // SSH tools require an active SSH connection profile to be configured.
+    // They are registered in the runtime but not usable without setup.
     tools: [
-      { id: "ssh-connect", name: "SshConnect", status: "ready", icon: Server },
-      { id: "ssh-exec", name: "SshExec", status: "ready", icon: Server },
-      { id: "ssh-transfer", name: "SshTransfer", status: "ready", icon: Server },
-      { id: "ssh-list", name: "SshList", status: "ready", icon: Server },
-      { id: "ssh-disconnect", name: "SshDisconnect", status: "ready", icon: Server },
+      { id: "ssh-connect", name: "SshConnect", status: "needs-setup", icon: Server },
+      { id: "ssh-exec", name: "SshExec", status: "needs-setup", icon: Server },
+      { id: "ssh-transfer", name: "SshTransfer", status: "needs-setup", icon: Server },
+      { id: "ssh-list", name: "SshList", status: "needs-setup", icon: Server },
+      { id: "ssh-disconnect", name: "SshDisconnect", status: "needs-setup", icon: Server },
     ],
   },
   {
     id: "browser",
     accent: "#c77dff",
+    // Browser tools require a supported browser to be installed and the
+    // Lux browser extension or headless driver to be available.
     tools: [
-      { id: "browser-status", name: "BrowserStatus", status: "ready", icon: Globe },
-      { id: "browser-open", name: "BrowserOpen", status: "ready", icon: Globe },
-      { id: "browser-snapshot", name: "BrowserSnapshot", status: "ready", icon: Eye },
-      { id: "browser-act", name: "BrowserAct", status: "ready", icon: Globe },
-      { id: "browser-invoke", name: "BrowserInvoke", status: "ready", icon: Terminal },
-      { id: "browser-screenshot", name: "BrowserScreenshot", status: "ready", icon: Eye },
-      { id: "browser-close", name: "BrowserClose", status: "ready", icon: Globe },
-      { id: "browser-chat", name: "BrowserChat", status: "ready", icon: Globe },
-      { id: "browser-dashboard", name: "BrowserDashboard", status: "ready", icon: Network },
-      { id: "browser-install", name: "BrowserInstall", status: "ready", icon: Wrench },
-      { id: "browser-help", name: "BrowserHelp", status: "ready", icon: BookOpen },
-      { id: "browser-doctor", name: "BrowserDoctor", status: "ready", icon: AlertTriangle },
+      { id: "browser-status", name: "BrowserStatus", status: "needs-setup", icon: Globe },
+      { id: "browser-open", name: "BrowserOpen", status: "needs-setup", icon: Globe },
+      { id: "browser-snapshot", name: "BrowserSnapshot", status: "needs-setup", icon: Eye },
+      { id: "browser-act", name: "BrowserAct", status: "needs-setup", icon: Globe },
+      { id: "browser-invoke", name: "BrowserInvoke", status: "needs-setup", icon: Terminal },
+      { id: "browser-screenshot", name: "BrowserScreenshot", status: "needs-setup", icon: Eye },
+      { id: "browser-close", name: "BrowserClose", status: "needs-setup", icon: Globe },
+      { id: "browser-chat", name: "BrowserChat", status: "needs-setup", icon: Globe },
+      { id: "browser-dashboard", name: "BrowserDashboard", status: "needs-setup", icon: Network },
+      { id: "browser-install", name: "BrowserInstall", status: "needs-setup", icon: Wrench },
+      { id: "browser-help", name: "BrowserHelp", status: "needs-setup", icon: BookOpen },
+      { id: "browser-doctor", name: "BrowserDoctor", status: "needs-setup", icon: AlertTriangle },
     ],
   },
   {
@@ -139,6 +150,8 @@ const categories: ToolCategory[] = [
 
 const statusConfig: Record<ToolStatus, { label: string; color: string }> = {
   ready: { label: "Ready", color: "#4ec98a" },
+  // Amber — tool exists in the registry but requires additional setup by the user.
+  "needs-setup": { label: "Needs setup", color: "#f4a259" },
 };
 
 export function AiToolsPanel() {
@@ -147,7 +160,8 @@ export function AiToolsPanel() {
   const [hoveredTool, setHoveredTool] = useState<string | null>(null);
 
   const totalTools = categories.reduce((sum, cat) => sum + cat.tools.length, 0);
-  const readyTools = categories.reduce((sum, cat) => sum + cat.tools.filter((t) => t.status === "ready").length, 0);
+  const readyTools = categories.reduce((sum, cat) => sum + cat.tools.filter((tool) => tool.status === "ready").length, 0);
+  const needsSetupTools = categories.reduce((sum, cat) => sum + cat.tools.filter((tool) => tool.status === "needs-setup").length, 0);
 
   const filteredCategories = activeCategory
     ? categories.filter((cat) => cat.id === activeCategory)
@@ -163,6 +177,9 @@ export function AiToolsPanel() {
           </div>
           <div className="ai-tools-stats">
             <span className="ai-tools-stat" data-status="ready">{t("aiTools.readyCount", { count: readyTools })}</span>
+            {needsSetupTools > 0 && (
+              <span className="ai-tools-stat" data-status="needs-setup">{t("aiTools.needsSetupCount", { count: needsSetupTools })}</span>
+            )}
             <span className="ai-tools-stat" data-status="total">{t("aiTools.totalCount", { count: totalTools })}</span>
           </div>
         </div>
@@ -234,7 +251,7 @@ export function AiToolsPanel() {
                       <div className="ai-tool-card-content">
                         <div className="ai-tool-card-name">
                           <span>{tool.name}</span>
-                          <span className="ai-tool-status-dot" style={{ background: status.color }} title={t("aiTools.status.ready")} />
+                          <span className="ai-tool-status-dot" style={{ background: status.color }} title={status.label} />
                         </div>
                         <p className="ai-tool-card-desc">{toolDescription(tool, t)}</p>
                       </div>
@@ -262,6 +279,7 @@ export function AiToolsPanel() {
         <div className="ai-tools-footer-bar">
           <span className="ai-tools-footer-legend">
             <span className="ai-tools-legend-item"><span style={{ background: statusConfig.ready.color }} />{t("aiTools.status.ready")}</span>
+            <span className="ai-tools-legend-item"><span style={{ background: statusConfig["needs-setup"].color }} />{t("aiTools.status.needsSetup")}</span>
           </span>
           <span className="ai-tools-footer-note">{t("aiTools.footerNote")}</span>
         </div>

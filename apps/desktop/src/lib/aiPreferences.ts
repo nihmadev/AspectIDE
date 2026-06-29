@@ -464,7 +464,10 @@ export const defaultAiPreferences: AiPreferences = {
   maxParallelSubagents: defaultMaxParallelSubagents,
   goalRunMaxTokens: null,
   goalRunMaxRounds: null,
-  automaticModeHardStopMinutes: null,
+  // Ship 60-minute hard stop by default — unlimited execution is an explicit opt-in
+  // (set to null via Settings). Prevents runaway autonomous runs from burning tokens
+  // indefinitely when a task is stuck or the user walks away (F6 fix).
+  automaticModeHardStopMinutes: 60,
   hiddenModelIds: [],
   seenTelegramNotice: false,
   showResponseDuration: true,

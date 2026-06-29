@@ -42,9 +42,13 @@ pub async fn lsp_servers(
     .map_err(String::from)?;
     tracing::info!("lsp_servers: discovered {} server(s)", servers.len());
 
-    // Publish missing-server warnings right away.
+    // Publish missing-server warnings right away — through the MERGE path, not a
+    // wholesale replace. A wholesale replace here erased real compile/type
+    // diagnostics a server had already published whenever the UI refreshed the
+    // server list; merging swaps only the synthetic status entries (keyed by
+    // STATUS_DIAGNOSTIC_SOURCE) and preserves real diagnostics.
     let missing_diagnostics = lux_lsp::language_server_diagnostics(&servers);
-    replace_diagnostics(&app, &state, missing_diagnostics)?;
+    replace_status_diagnostics_owned(&app, state.inner(), missing_diagnostics)?;
 
     // Actually starting servers means running each `initialize` handshake (up to
     // a 10s timeout apiece). Do it OFF the command path so the frontend never
@@ -434,45 +438,6 @@ pub async fn lsp_signature_help(
         .map_err(String::from)
 }
 
-pub fn replace_diagnostics(
-    app: &AppHandle,
-    state: &State<'_, SharedState>,
-    diagnostics: Vec<WorkspaceDiagnostic>,
-) -> Result<(), String> {
-    let mut by_path: BTreeMap<_, Vec<WorkspaceDiagnostic>> = BTreeMap::new();
-    for diagnostic in &diagnostics {
-        by_path
-            .entry(diagnostic.path.clone())
-            .or_default()
-            .push(diagnostic.clone());
-    }
-    let previous_paths = {
-        let mut current = state.diagnostics.lock().map_err(lock_error)?;
-        let paths = current
-            .iter()
-            .map(|diagnostic| diagnostic.path.clone())
-            .collect::<Vec<_>>();
-        *current = diagnostics;
-        paths
-    };
-
-    for path in previous_paths {
-        by_path.entry(path).or_default();
-    }
-
-    for (path, path_diagnostics) in by_path {
-        emit_event(
-            app,
-            LuxEvent::EditorDiagnosticsChanged {
-                path,
-                diagnostics: path_diagnostics,
-            },
-        )?;
-    }
-
-    Ok(())
-}
-
 /// Synthetic server-status entries (missing-server warnings + startup failures)
 /// all carry this source; real `publishDiagnostics` from a language server never
 /// do (they use the server's own source, falling back to `"lsp"`). Used to merge
@@ -504,33 +469,7 @@ fn replace_status_diagnostics_owned(
     // single lock, then emit after releasing it.
     let affected = {
         let mut current = state.diagnostics.lock().map_err(lock_error)?;
-
-        // Paths that previously carried status entries must be re-emitted so any
-        // now-resolved status (e.g. a server that started successfully) is cleared.
-        let mut affected_paths = current
-            .iter()
-            .filter(|diagnostic| diagnostic.source == STATUS_DIAGNOSTIC_SOURCE)
-            .map(|diagnostic| diagnostic.path.clone())
-            .collect::<BTreeSet<_>>();
-
-        // Replace only the status entries; preserve real diagnostics.
-        current.retain(|diagnostic| diagnostic.source != STATUS_DIAGNOSTIC_SOURCE);
-        for diagnostic in &status_diagnostics {
-            affected_paths.insert(diagnostic.path.clone());
-        }
-        current.extend(status_diagnostics);
-
-        // Snapshot the full (real + status) list for each affected path.
-        let mut by_path: BTreeMap<_, Vec<WorkspaceDiagnostic>> = BTreeMap::new();
-        for path in affected_paths {
-            by_path.insert(path, Vec::new());
-        }
-        for diagnostic in current.iter() {
-            if let Some(entry) = by_path.get_mut(&diagnostic.path) {
-                entry.push(diagnostic.clone());
-            }
-        }
-        by_path
+        merge_status_diagnostics(&mut current, status_diagnostics)
     };
 
     for (path, path_diagnostics) in affected {
@@ -544,6 +483,43 @@ fn replace_status_diagnostics_owned(
     }
 
     Ok(())
+}
+
+/// Pure merge: swap only the synthetic status entries (`source ==
+/// STATUS_DIAGNOSTIC_SOURCE`) in `current`, preserving every real per-path
+/// diagnostic, and return the full (real + status) list for each affected path.
+/// Extracted from [`replace_status_diagnostics_owned`] so the no-clobber invariant
+/// is unit-testable without a `SharedState`/`AppHandle`.
+fn merge_status_diagnostics(
+    current: &mut Vec<WorkspaceDiagnostic>,
+    status_diagnostics: Vec<WorkspaceDiagnostic>,
+) -> BTreeMap<std::path::PathBuf, Vec<WorkspaceDiagnostic>> {
+    // Paths that previously carried status entries must be re-emitted so any
+    // now-resolved status (e.g. a server that started successfully) is cleared.
+    let mut affected_paths = current
+        .iter()
+        .filter(|diagnostic| diagnostic.source == STATUS_DIAGNOSTIC_SOURCE)
+        .map(|diagnostic| diagnostic.path.clone())
+        .collect::<BTreeSet<_>>();
+
+    // Replace only the status entries; preserve real diagnostics.
+    current.retain(|diagnostic| diagnostic.source != STATUS_DIAGNOSTIC_SOURCE);
+    for diagnostic in &status_diagnostics {
+        affected_paths.insert(diagnostic.path.clone());
+    }
+    current.extend(status_diagnostics);
+
+    // Snapshot the full (real + status) list for each affected path.
+    let mut by_path: BTreeMap<_, Vec<WorkspaceDiagnostic>> = BTreeMap::new();
+    for path in affected_paths {
+        by_path.insert(path, Vec::new());
+    }
+    for diagnostic in current.iter() {
+        if let Some(entry) = by_path.get_mut(&diagnostic.path) {
+            entry.push(diagnostic.clone());
+        }
+    }
+    by_path
 }
 
 pub fn clear_diagnostics(app: &AppHandle, state: &State<'_, SharedState>) -> Result<(), String> {
@@ -745,4 +721,62 @@ fn publish_forwarding_error(
             }],
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn diagnostic(path: &str, source: &str, message: &str) -> WorkspaceDiagnostic {
+        WorkspaceDiagnostic {
+            path: PathBuf::from(path),
+            line: 1,
+            column: 1,
+            severity: lux_core::DiagnosticSeverity::Error,
+            source: source.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    #[test]
+    fn status_refresh_preserves_real_diagnostics() {
+        // A real compile error already published by a language server.
+        let mut current = vec![diagnostic("src/main.rs", "rustc", "mismatched types")];
+
+        // A server-status refresh (missing-server warning on another path) must NOT
+        // erase the real diagnostic — this is the regression the merge path fixes.
+        let status = vec![diagnostic(
+            "go.mod",
+            STATUS_DIAGNOSTIC_SOURCE,
+            "gopls is not installed",
+        )];
+        merge_status_diagnostics(&mut current, status);
+
+        assert!(
+            current
+                .iter()
+                .any(|d| d.source == "rustc" && d.message == "mismatched types"),
+            "real diagnostic survives a server-status refresh"
+        );
+        assert!(current.iter().any(|d| d.source == STATUS_DIAGNOSTIC_SOURCE));
+    }
+
+    #[test]
+    fn status_refresh_swaps_only_status_entries() {
+        let mut current = vec![
+            diagnostic("src/main.rs", "rustc", "error one"),
+            diagnostic("go.mod", STATUS_DIAGNOSTIC_SOURCE, "old status"),
+        ];
+        // An empty refresh clears prior status entries but keeps real diagnostics.
+        let affected = merge_status_diagnostics(&mut current, Vec::new());
+
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].source, "rustc");
+        // The path that lost its status entry is re-emitted (now empty).
+        assert_eq!(
+            affected.get(&PathBuf::from("go.mod")).map(Vec::len),
+            Some(0)
+        );
+    }
 }

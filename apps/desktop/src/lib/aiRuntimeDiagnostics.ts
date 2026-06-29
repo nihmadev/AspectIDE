@@ -14,6 +14,9 @@ type FailureFinding = {
   evidence: string;
 };
 
+/** Upper bound on diagnostics folded into FailureAnalyzer ranking (after severity sort). */
+const maxFailureAnalyzerDiagnostics = 80;
+
 export async function readLints(args: UnknownRecord, input: AiChatSendInput): Promise<ToolResult> {
   const pathFilter = normalizePathSlashes(stringArg(args, "path", input.activeDocument?.path ?? "")).toLowerCase();
   const severity = stringArg(args, "severity", "").trim().toLowerCase();
@@ -50,9 +53,19 @@ export async function readLints(args: UnknownRecord, input: AiChatSendInput): Pr
 
 export async function diagnosticsContext(maxResults: number): Promise<ToolResult> {
   const diagnostics = await luxCommands.diagnosticsSnapshot();
+  // Sort by severity (errors → warnings → info → hint) BEFORE capping so a snapshot
+  // that happens to start with hints can't push real compiler/type errors out of the
+  // returned window — the agent must see blockers first. Report what was dropped.
+  const sorted = [...diagnostics].sort(compareDiagnostics);
+  const cap = clamp(maxResults, 1, 500);
+  const selected = sorted.slice(0, cap);
+  const omitted = sorted.slice(cap);
   return toolJson("DiagnosticsContext", {
     count: diagnostics.length,
-    diagnostics: diagnostics.slice(0, clamp(maxResults, 1, 500)).map((diagnostic) => ({
+    returned: selected.length,
+    omitted: omitted.length,
+    omittedBySeverity: omitted.length > 0 ? topCounts(omitted.map((diagnostic) => diagnostic.severity), 8) : undefined,
+    diagnostics: selected.map((diagnostic) => ({
       path: diagnostic.path,
       line: diagnostic.line,
       column: diagnostic.column,
@@ -119,8 +132,11 @@ export async function failureAnalyzer(args: UnknownRecord): Promise<ToolResult> 
   const health = healthResult.status === "fulfilled" ? healthResult.value : null;
   const diagnostics = diagnosticsResult.status === "fulfilled" ? diagnosticsResult.value : [];
   const sections = collectFailureSections(rawLog, health);
+  // Severity-sort before the cap: feeding an unsorted snapshot into ranking could
+  // drop the actual errors (kept behind leading hints) below the slice window.
+  const rankedDiagnostics = [...diagnostics].sort(compareDiagnostics).slice(0, maxFailureAnalyzerDiagnostics);
   const findings = rankFailureFindings([
-    ...diagnostics.slice(0, 80).map((diagnostic): FailureFinding => ({
+    ...rankedDiagnostics.map((diagnostic): FailureFinding => ({
       source: "diagnostics",
       kind: diagnostic.severity || "diagnostic",
       message: diagnostic.message,

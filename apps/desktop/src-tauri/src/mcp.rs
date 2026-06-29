@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 use tokio::time::timeout;
@@ -32,6 +32,14 @@ const REQUEST_TIMEOUT_SECS: u64 = 30;
 const CONNECT_TIMEOUT_SECS: u64 = 20;
 /// Hard cap on a tool result body so a misbehaving server can't flood the turn.
 const MAX_RESULT_CHARS: usize = 60_000;
+/// Hard cap on a single JSON-RPC line read from a server's stdout. A hostile or
+/// buggy server can emit a multi-megabyte line; without a bound the reader buffers
+/// it whole before any post-parse clamp, spiking memory or stalling parsing. On
+/// overflow the connection is failed rather than parsed.
+const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+/// Provider function-name limit (OpenAI/Anthropic both cap at 64) applied to the
+/// full namespaced `mcp__<id>__<tool>` name before it reaches a model request.
+const MAX_TOOL_NAME_LEN: usize = 64;
 
 /// One configured MCP server (persisted in settings).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,24 +181,37 @@ pub async fn connect_server(config: McpServerConfig) -> Result<McpServerStatus, 
     let reader_alive = alive.clone();
     let reader_id = config.id.clone();
     tokio::spawn(async move {
-        let mut lines = BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            let Ok(message) = serde_json::from_str::<Value>(trimmed) else {
-                continue;
-            };
-            let Some(id) = message.get("id").and_then(Value::as_u64) else {
-                continue; // notification or malformed — ignore.
-            };
-            if let Some(sender) = reader_pending
-                .lock()
-                .ok()
-                .and_then(|mut map| map.remove(&id))
-            {
-                let _ = sender.send(message);
+        let mut reader = BufReader::new(stdout);
+        // Why this is the connection's terminal status once the loop ends: a clean
+        // EOF means the server exited; an oversized line means a hostile/buggy server
+        // flooded us and we fail the connection rather than buffer it whole.
+        let mut exit_error = "MCP server process exited".to_string();
+        loop {
+            match read_capped_line(&mut reader).await {
+                Ok(Some(line)) => {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let Ok(message) = serde_json::from_str::<Value>(trimmed) else {
+                        continue;
+                    };
+                    let Some(id) = message.get("id").and_then(Value::as_u64) else {
+                        continue; // notification or malformed — ignore.
+                    };
+                    if let Some(sender) = reader_pending
+                        .lock()
+                        .ok()
+                        .and_then(|mut map| map.remove(&id))
+                    {
+                        let _ = sender.send(message);
+                    }
+                }
+                Ok(None) => break, // clean EOF
+                Err(error) => {
+                    exit_error = format!("MCP server stream error: {error}");
+                    break;
+                }
             }
         }
         // Stream ended: the server will never answer any in-flight request. Drop
@@ -204,7 +225,7 @@ pub async fn connect_server(config: McpServerConfig) -> Result<McpServerStatus, 
             if let Some(connection) = registry().lock().await.get_mut(&reader_id) {
                 if connection.alive.load(Ordering::SeqCst) {
                     connection.state = "error".to_string();
-                    connection.error = Some("MCP server process exited".to_string());
+                    connection.error = Some(exit_error);
                 }
             }
         }
@@ -249,19 +270,34 @@ pub async fn connect_server(config: McpServerConfig) -> Result<McpServerStatus, 
         Ok::<Vec<McpToolInfo>, String>(parse_tools(&tools_result))
     };
 
-    match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), handshake).await {
+    let handshake_error = match timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS), handshake).await {
         Ok(Ok(tools)) => {
             connection.tools = tools;
             connection.state = "connected".to_string();
+            None
         }
-        Ok(Err(error)) => {
-            connection.state = "error".to_string();
-            connection.error = Some(error);
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some("MCP handshake timed out".to_string()),
+    };
+
+    // On a failed/timed-out handshake, don't keep a half-open server around: a hung
+    // child plus its reader task would otherwise persist (consuming a process + a
+    // pipe) until an explicit disconnect/reconnect. Mark dead, kill+reap the child,
+    // drop the stdin/pending handles, and store an error-only status. Marking
+    // `alive=false` first stops the reader's EOF handler from clobbering this status.
+    if let Some(error) = handshake_error {
+        connection.alive.store(false, Ordering::SeqCst);
+        if let Some(mut child) = connection.child.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
         }
-        Err(_) => {
-            connection.state = "error".to_string();
-            connection.error = Some("MCP handshake timed out".to_string());
+        connection.stdin = None;
+        if let Ok(mut map) = connection.pending.lock() {
+            map.clear();
         }
+        connection.tools.clear();
+        connection.state = "error".to_string();
+        connection.error = Some(error);
     }
 
     let status = connection.status();
@@ -383,6 +419,40 @@ async fn send_notification(
     write_line(stdin, &payload).await
 }
 
+/// Read one newline-delimited line, failing if it exceeds [`MAX_LINE_BYTES`]
+/// before a newline arrives. Unlike `lines()`, which buffers an unbounded line into
+/// memory, this caps the read so a server emitting a giant single line can't spike
+/// memory — the connection is failed instead. Returns `Ok(None)` on clean EOF.
+async fn read_capped_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+) -> Result<Option<String>, String> {
+    let mut buffer = Vec::new();
+    loop {
+        let available = reader.fill_buf().await.map_err(|error| error.to_string())?;
+        if available.is_empty() {
+            // EOF: surface any trailing unterminated bytes, else signal end-of-stream.
+            return if buffer.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(String::from_utf8_lossy(&buffer).into_owned()))
+            };
+        }
+        if let Some(newline) = available.iter().position(|&byte| byte == b'\n') {
+            buffer.extend_from_slice(&available[..newline]);
+            reader.consume(newline + 1);
+            return Ok(Some(String::from_utf8_lossy(&buffer).into_owned()));
+        }
+        let chunk = available.len();
+        buffer.extend_from_slice(available);
+        reader.consume(chunk);
+        if buffer.len() > MAX_LINE_BYTES {
+            return Err(format!(
+                "JSON-RPC line exceeded {MAX_LINE_BYTES} bytes without a newline"
+            ));
+        }
+    }
+}
+
 async fn write_line(stdin: &Arc<AsyncMutex<ChildStdin>>, payload: &Value) -> Result<(), String> {
     let mut line = serde_json::to_string(payload).map_err(|error| error.to_string())?;
     line.push('\n');
@@ -466,6 +536,21 @@ pub async fn agent_tool_definitions() -> Vec<Value> {
             continue;
         }
         for tool in &connection.tools {
+            // One malformed tool name (spaces, dots, Unicode, or an over-long total)
+            // would otherwise violate provider function-name rules and invalidate the
+            // ENTIRE turn request. Skip such tools instead — the rest stay usable.
+            // The dispatcher splits `mcp__<id>__<tool>` on the first `__`, and the id
+            // is already `__`-free (see `is_valid_id`), so a `__`-free tool name keeps
+            // routing reversible back to the original tool.
+            let namespaced = format!("mcp__{}__{}", connection.config.id, tool.name);
+            if !is_provider_safe_tool_name(&namespaced) {
+                tracing::warn!(
+                    server = %connection.config.id,
+                    tool = %tool.name,
+                    "skipping MCP tool with a provider-unsafe name"
+                );
+                continue;
+            }
             let description = if tool.description.is_empty() {
                 format!(
                     "MCP tool '{}' from server '{}'.",
@@ -477,7 +562,7 @@ pub async fn agent_tool_definitions() -> Vec<Value> {
             defs.push(json!({
                 "type": "function",
                 "function": {
-                    "name": format!("mcp__{}__{}", connection.config.id, tool.name),
+                    "name": namespaced,
                     "description": description,
                     "parameters": tool.input_schema,
                 },
@@ -485,6 +570,18 @@ pub async fn agent_tool_definitions() -> Vec<Value> {
         }
     }
     defs
+}
+
+/// Whether a fully-namespaced tool name satisfies the providers' function-name
+/// contract: non-empty, within [`MAX_TOOL_NAME_LEN`], and limited to the
+/// `[A-Za-z0-9_-]` set both `OpenAI` and Anthropic accept. Keeps one bad MCP tool
+/// from poisoning the whole tool-definitions array.
+fn is_provider_safe_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_TOOL_NAME_LEN
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 // ── Tauri command surface ──
@@ -586,24 +683,37 @@ pub async fn mcp_remove(
     save_mcp_config(&state, &configs)
 }
 
-/// Enable or disable a server. Disabling also disconnects the live session.
+/// Enable or disable a server. Enabling connects it; disabling disconnects the
+/// live session. Returns the server's live status so the UI reflects the result.
 #[tauri::command]
 pub async fn mcp_enable(
     state: tauri::State<'_, crate::SharedState>,
     id: String,
     enabled: bool,
-) -> Result<(), String> {
+) -> Result<McpServerStatus, String> {
     let mut configs = read_mcp_config(&state);
     let config = configs
         .iter_mut()
         .find(|c| c.id == id)
         .ok_or_else(|| format!("MCP server '{id}' not found"))?;
     config.enabled = enabled;
+    let config = config.clone();
     save_mcp_config(&state, &configs)?;
-    if !enabled {
+    if enabled {
+        // Previously this only persisted the flag, leaving an "enabled" server
+        // disconnected until a separate reconnect/restart. Connect it now so the
+        // tool is actually available; a connect failure surfaces as error status.
+        connect_server(config).await
+    } else {
         disconnect_server(&id).await;
+        Ok(McpServerStatus {
+            id: config.id,
+            name: config.name,
+            state: "disabled".to_string(),
+            error: None,
+            tools: Vec::new(),
+        })
     }
-    Ok(())
 }
 
 /// Persist MCP server configs back to user settings. Internal helper.
@@ -658,5 +768,39 @@ mod tests {
         assert!(!is_valid_id(""));
         assert!(!is_valid_id("has space"));
         assert!(is_valid_id("ctx7-server_1"));
+    }
+
+    #[test]
+    fn rejects_provider_unsafe_tool_names() {
+        assert!(is_provider_safe_tool_name("mcp__ctx7__search"));
+        assert!(!is_provider_safe_tool_name("mcp__ctx7__has space"));
+        assert!(!is_provider_safe_tool_name("mcp__ctx7__dot.name"));
+        assert!(!is_provider_safe_tool_name("mcp__ctx7__naïve")); // non-ASCII
+        assert!(!is_provider_safe_tool_name(&format!("mcp__ctx7__{}", "x".repeat(64))));
+        assert!(!is_provider_safe_tool_name(""));
+    }
+
+    #[tokio::test]
+    async fn capped_line_reads_until_newline_and_eof() {
+        let data = b"first line\nsecond".to_vec();
+        let mut reader = BufReader::new(&data[..]);
+        assert_eq!(
+            read_capped_line(&mut reader).await.unwrap().as_deref(),
+            Some("first line")
+        );
+        // Trailing unterminated bytes are surfaced, then clean EOF.
+        assert_eq!(
+            read_capped_line(&mut reader).await.unwrap().as_deref(),
+            Some("second")
+        );
+        assert_eq!(read_capped_line(&mut reader).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn capped_line_fails_on_oversized_line() {
+        // A line longer than the cap with no newline must error, not buffer forever.
+        let data = vec![b'a'; MAX_LINE_BYTES + 16];
+        let mut reader = BufReader::new(&data[..]);
+        assert!(read_capped_line(&mut reader).await.is_err());
     }
 }

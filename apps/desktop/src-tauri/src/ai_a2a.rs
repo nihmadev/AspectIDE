@@ -21,6 +21,16 @@ const MAX_SESSIONS: usize = 128;
 const MAX_CONTENT_CHARS: usize = 8_000;
 const MAX_TOPIC_CHARS: usize = 120;
 const MAX_AUTHOR_CHARS: usize = 120;
+/// Maximum byte length for a caller-supplied session ID string. Long IDs waste
+/// memory in the hash map key and can indicate abuse; truncate silently.
+const MAX_SESSION_ID_BYTES: usize = 256;
+/// Per-session resident byte budget (approximate, based on content + topic +
+/// author UTF-8 byte lengths). Prevents runaway agent loops from consuming
+/// hundreds of MiB with 8 k-char entries × 500 entries × many sessions.
+/// At MAX_CONTENT_CHARS=8000 + overhead ≈ 8400 bytes/entry × 500 = ~4 MiB/session.
+const MAX_SESSION_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
+/// Global byte budget across all sessions. Evict by LRU when exceeded.
+const MAX_GLOBAL_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -48,6 +58,51 @@ fn clamp_chars(value: &str, max: usize) -> String {
     format!("{truncated}…")
 }
 
+/// Approximate resident byte weight for a single entry (author + topic + content
+/// UTF-8 byte lengths plus a fixed per-entry struct overhead).
+fn entry_bytes(entry: &BlackboardEntry) -> usize {
+    const STRUCT_OVERHEAD: usize = 64; // id (uuid str) + timestamp i64 + misc
+    entry.author.len() + entry.topic.len() + entry.content.len() + STRUCT_OVERHEAD
+}
+
+/// Total byte weight for all entries in one session's list.
+fn session_bytes(entries: &[BlackboardEntry]) -> usize {
+    entries.iter().map(entry_bytes).sum()
+}
+
+/// Total byte weight across all sessions.
+fn global_bytes(board: &Board) -> usize {
+    board.values().map(|entries| session_bytes(entries)).sum()
+}
+
+/// Evict the LRU (oldest last-write timestamp) session from the board.
+fn evict_oldest(guard: &mut Board) {
+    if let Some(victim) = oldest_session(guard) {
+        guard.remove(&victim);
+    }
+}
+
+/// Clamp a caller-supplied session ID to a safe length to prevent hash-map key
+/// bloat and abuse. Truncation snaps down to the nearest UTF-8 char boundary so
+/// multi-byte characters (CJK, emoji) straddling the byte cap never panic the
+/// `str` slice below (UUIDs and typical ASCII IDs are well under the limit).
+fn sanitize_session_id(session_id: &str) -> String {
+    let trimmed = session_id.trim();
+    if trimmed.len() <= MAX_SESSION_ID_BYTES {
+        return trimmed.to_string();
+    }
+    // `str` slicing panics on a non-char-boundary index. Use char_indices() to
+    // find the start byte of the last char that begins at or before the cap and
+    // cut there, guaranteeing a valid boundary and intact UTF-8.
+    let end = trimmed
+        .char_indices()
+        .map(|(idx, _)| idx)
+        .take_while(|&idx| idx <= MAX_SESSION_ID_BYTES)
+        .last()
+        .unwrap_or(0);
+    trimmed[..end].to_string()
+}
+
 /// Post a message to a session's blackboard. Returns the stored entry.
 #[tauri::command]
 pub fn ai_blackboard_post(
@@ -56,7 +111,8 @@ pub fn ai_blackboard_post(
     topic: String,
     content: String,
 ) -> Result<BlackboardEntry, String> {
-    let session_id = session_id.trim().to_string();
+    // Clamp session_id to prevent hash-map key bloat from arbitrarily long strings.
+    let session_id = sanitize_session_id(&session_id);
     if session_id.is_empty() {
         return Err("blackboard post requires a session id".to_string());
     }
@@ -90,19 +146,29 @@ pub fn ai_blackboard_post(
         .lock()
         .map_err(|_| "blackboard lock poisoned".to_string())?;
 
-    // Evict the least-recently-touched session if we hit the session cap.
+    // Evict LRU sessions when we hit either the session count cap or the global
+    // byte budget. Per-session byte caps are enforced after insert below.
     if !guard.contains_key(&session_id) && guard.len() >= MAX_SESSIONS {
-        if let Some(victim) = oldest_session(&guard) {
-            guard.remove(&victim);
-        }
+        evict_oldest(&mut guard);
+    }
+    while global_bytes(&guard) + entry_bytes(&entry) > MAX_GLOBAL_BYTES && !guard.is_empty() {
+        evict_oldest(&mut guard);
     }
 
     let entries = guard.entry(session_id).or_default();
     entries.push(entry.clone());
+
+    // Enforce per-session entry count cap (oldest entries dropped first).
     if entries.len() > MAX_ENTRIES_PER_SESSION {
         let overflow = entries.len() - MAX_ENTRIES_PER_SESSION;
         entries.drain(0..overflow);
     }
+    // Enforce per-session byte budget: drop oldest entries until within budget.
+    // This handles the case where a few very large entries consume the allowance.
+    while session_bytes(entries) > MAX_SESSION_BYTES && entries.len() > 1 {
+        entries.remove(0);
+    }
+
     Ok(entry)
 }
 
@@ -115,7 +181,7 @@ pub fn ai_blackboard_read(
     topic: Option<String>,
     limit: Option<usize>,
 ) -> Result<Vec<BlackboardEntry>, String> {
-    let session_id = session_id.trim().to_string();
+    let session_id = sanitize_session_id(&session_id);
     if session_id.is_empty() {
         return Ok(Vec::new());
     }
@@ -148,7 +214,7 @@ pub fn ai_blackboard_read(
 /// Clear a session's blackboard (chat clear / lifecycle reset).
 #[tauri::command]
 pub fn ai_blackboard_clear(session_id: String) -> Result<(), String> {
-    let session_id = session_id.trim().to_string();
+    let session_id = sanitize_session_id(&session_id);
     if session_id.is_empty() {
         return Ok(());
     }
@@ -204,6 +270,18 @@ mod tests {
 
         ai_blackboard_clear(session.clone()).unwrap();
         assert!(ai_blackboard_read(session, None, None).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sanitizes_multibyte_session_id_without_panic() {
+        // Each 'あ' is 3 UTF-8 bytes, so a char boundary straddles the byte cap.
+        // The buggy byte-level slice at MAX_SESSION_ID_BYTES would panic here.
+        let long_id = "あ".repeat(MAX_SESSION_ID_BYTES); // 3 bytes each, well over cap
+        let sanitized = sanitize_session_id(&long_id);
+        assert!(sanitized.len() <= MAX_SESSION_ID_BYTES);
+        // Truncation must land on a char boundary, leaving only whole 'あ' chars.
+        assert!(!sanitized.is_empty());
+        assert!(sanitized.chars().all(|c| c == 'あ'));
     }
 
     #[test]

@@ -193,10 +193,18 @@ impl Path {
 ///
 /// Walks the graph as **undirected** for connectivity (unweighted BFS), then
 /// recovers each edge's stored direction for display. Returns `None` if
-/// unreachable or beyond `max_hops`. Mirrors graphify's `shortest_path`:
-/// undirected reachability, directional rendering.
+/// unreachable, beyond `max_hops`, or if either endpoint is out of range (e.g.
+/// stale [`NodeId`]s from a prior graph build). Mirrors graphify's
+/// `shortest_path`: undirected reachability, directional rendering.
 #[must_use]
 pub fn shortest_path(graph: &CodeGraph, from: NodeId, to: NodeId, max_hops: usize) -> Option<Path> {
+    let n = graph.node_count();
+    // Guard against stale or out-of-range NodeIds (AI/tool callers can hold ids
+    // across graph rebuilds; indexing with a bad id would panic).
+    if from.index() >= n || to.index() >= n {
+        return None;
+    }
+
     if from == to {
         return NodeRef::of(graph, from).map(|start| Path {
             start,
@@ -205,7 +213,6 @@ pub fn shortest_path(graph: &CodeGraph, from: NodeId, to: NodeId, max_hops: usiz
     }
 
     // BFS over the undirected view, tracking each node's predecessor.
-    let n = graph.node_count();
     let mut predecessor: Vec<Option<NodeId>> = vec![None; n];
     let mut visited = vec![false; n];
     visited[from.index()] = true;

@@ -76,60 +76,84 @@ pub async fn ai_semantic_search(
     let tokens = tokenize(&query);
     let root_str = normalize_slashes(&root.to_string_lossy());
 
+    // Run all three independent sources concurrently so total latency equals the
+    // slowest backend instead of their sum.
+
     // 1. LSP workspace symbols (best-effort: empty if the server is not ready).
-    let mut symbols: Vec<LspWorkspaceSymbol> = Vec::new();
-    {
+    let symbols_future = async {
         let mut lsp = state.lsp.lock().await;
         if let Some(manager) = lsp.as_mut() {
             if let Ok(mut found) = manager.workspace_symbols(query.clone()).await {
                 found.truncate(max_results.max(40));
-                symbols = found;
+                return found;
             }
         }
-    }
-
-    // 2. Indexed text search.
-    let options = SearchOptions {
-        case_sensitive: false,
-        whole_word: false,
-        use_regex: false,
-        include_hidden: false,
-        include_globs: Vec::new(),
-        exclude_globs: Vec::new(),
-        max_results: search_max,
+        Vec::<LspWorkspaceSymbol>::new()
     };
-    let search_hits = {
+
+    // 2. Indexed text search — exclude dependency/build artifacts via exclude_globs.
+    let search_future = {
         let root = root.clone();
         let query = query.clone();
+        let options = SearchOptions {
+            case_sensitive: false,
+            whole_word: false,
+            use_regex: false,
+            include_hidden: false,
+            include_globs: Vec::new(),
+            // Explicitly exclude generated/dependency trees so hits never come from them.
+            exclude_globs: vec![
+                "node_modules/**".to_string(),
+                "target/**".to_string(),
+                "dist/**".to_string(),
+                "build/**".to_string(),
+                ".git/**".to_string(),
+                "vendor/**".to_string(),
+                "venv/**".to_string(),
+                ".venv/**".to_string(),
+                "coverage/**".to_string(),
+            ],
+            max_results: search_max,
+        };
         tokio::task::spawn_blocking(move || lux_search::query(root, query, &options))
-            .await
-            .map_err(|error| error.to_string())?
-            .map_or_else(
-                |error| {
-                    tracing::warn!(%error, "ai_semantic_search: indexed search backend failed");
-                    Vec::default()
-                },
-                |response| response.hits,
-            )
     };
 
     // 3. Workspace file candidates.
-    let files = {
+    let files_future = {
         let root = root.clone();
         tokio::task::spawn_blocking(move || lux_fs::list_files(root, file_cap))
-            .await
-            .map_err(|error| error.to_string())?
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "ai_semantic_search: file listing backend failed");
-                Vec::default()
-            })
     };
+
+    // Await all three concurrently.
+    let (symbols, search_result, files_result) =
+        tokio::join!(symbols_future, search_future, files_future);
+
+    let search_hits = search_result
+        .map_err(|error| error.to_string())?
+        .map_or_else(
+            |error| {
+                tracing::warn!(%error, "ai_semantic_search: indexed search backend failed");
+                Vec::default()
+            },
+            |response| response.hits,
+        );
+
+    let files = files_result
+        .map_err(|error| error.to_string())?
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "ai_semantic_search: file listing backend failed");
+            Vec::default()
+        });
 
     let mut results: BTreeMap<String, AiSemanticResult> = BTreeMap::new();
     let normalized_query = query.to_lowercase();
 
     for symbol in &symbols {
         let path = normalize_slashes(&symbol.location.path.to_string_lossy());
+        // Guard: never surface symbols from dependency/build artifact paths.
+        if is_low_signal_path(&path) {
+            continue;
+        }
         if !passes_path_filter(&path, path_filter.as_deref()) {
             continue;
         }
@@ -163,6 +187,11 @@ pub async fn ai_semantic_search(
 
     for hit in &search_hits {
         let path = normalize_slashes(&hit.path.to_string_lossy());
+        // Guard: even with exclude_globs, search backends can have stale/cached
+        // index entries for paths that are now ignored — double-check here.
+        if is_low_signal_path(&path) {
+            continue;
+        }
         if !passes_path_filter(&path, path_filter.as_deref()) {
             continue;
         }
@@ -544,13 +573,28 @@ fn score_path(path: &str) -> i64 {
     {
         score += 100;
     }
-    if lower.contains("/src/") {
+    // Segment-aware src check: handles both relative paths ("src/lib.rs", "src/auth/login.ts")
+    // and absolute paths ("/home/user/proj/src/..."). Previously only "/src/" matched,
+    // causing root-level source files to miss the +25 boost.
+    let in_src = lower == "src"
+        || lower.starts_with("src/")
+        || lower.contains("/src/")
+        || lower.contains("/src-tauri/src/");
+    if in_src {
         score += 25;
     }
-    if lower.contains("/components/") {
+    if lower.contains("/components/") || lower.starts_with("components/") {
         score += 10;
     }
-    if lower.contains("/node_modules/") || lower.contains("/target/") || lower.contains("/dist/") {
+    // Penalize dependency/build artifact paths. Check both leading-slash and relative forms
+    // (e.g. "node_modules/x" as well as "/node_modules/x").
+    let is_artifact = lower.contains("/node_modules/")
+        || lower.starts_with("node_modules/")
+        || lower.contains("/target/")
+        || lower.starts_with("target/")
+        || lower.contains("/dist/")
+        || lower.starts_with("dist/");
+    if is_artifact {
         score -= 200;
     }
     score
@@ -871,6 +915,20 @@ mod tests {
         assert!(score_path("apps/desktop/src/lib/store.ts") >= 25);
         assert!(score_path("package.json") >= 100);
         assert!(score_path("/root/node_modules/x/index.js") <= -100);
+        // Regression: relative root-level src paths must get the +25 source boost.
+        assert!(
+            score_path("src/lib.rs") >= 25,
+            "root-level src/lib.rs should get src boost"
+        );
+        assert!(
+            score_path("src/auth/login.ts") >= 25,
+            "root-level src/auth/login.ts should get src boost"
+        );
+        // Relative node_modules must also be penalised.
+        assert!(
+            score_path("node_modules/x/index.js") <= -100,
+            "relative node_modules must be penalised"
+        );
     }
 
     #[test]

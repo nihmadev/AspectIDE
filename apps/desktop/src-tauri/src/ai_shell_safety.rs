@@ -99,6 +99,14 @@ pub fn classify_shell_command(command: &str) -> ShellSafetyReport {
 }
 
 /// Split a command line into independently-executed segments.
+///
+/// SECURITY: The splitter tracks escape characters (`\`) inside double-quoted
+/// strings so an escaped quote cannot close the current quote context and
+/// expose a subsequent separator as a boundary. Without this, `"foo\" ; rm -rf /"
+/// would see the `\` "escape" the `"` and then the `;` would split a second
+/// segment containing the destructive command. On escape ambiguity we fail
+/// **closed**: the whole command is returned as a single opaque segment so the
+/// catastrophic/risky classifiers still see it (and `read_only` stays false).
 fn split_segments(command: &str) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
@@ -106,10 +114,29 @@ fn split_segments(command: &str) -> Vec<String> {
     let mut index = 0;
     let mut in_single = false;
     let mut in_double = false;
+    // Track escape state inside double-quoted strings. A backslash inside
+    // double quotes escapes the next character (including `"`), so we must
+    // consume it before toggling the quote flag.
+    let mut escaped = false;
 
     while index < bytes.len() {
         let ch = bytes[index] as char;
+
+        if escaped {
+            // The previous character was `\` inside a double-quoted string;
+            // this byte is consumed literally regardless of what it is.
+            escaped = false;
+            current.push(ch);
+            index += 1;
+            continue;
+        }
+
         match ch {
+            // A backslash inside a double-quoted string escapes the next char.
+            '\\' if in_double => {
+                escaped = true;
+                current.push(ch);
+            }
             '\'' if !in_double => {
                 in_single = !in_single;
                 current.push(ch);
@@ -138,6 +165,14 @@ fn split_segments(command: &str) -> Vec<String> {
         }
         index += 1;
     }
+
+    // Unclosed quotes: fail closed — return the whole command as one segment so
+    // classifiers still see it. `escaped` staying true at EOF is similarly
+    // ambiguous (truncated escape sequence).
+    if in_single || in_double || escaped {
+        return vec![command.trim().to_string()];
+    }
+
     if !current.trim().is_empty() {
         segments.push(current);
     }
@@ -230,12 +265,85 @@ fn squeezed(normalized: &str) -> String {
     normalized.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
+/// Return the effective command token after stripping known launcher prefixes.
+///
+/// SECURITY: Destructive commands wrapped in launchers such as
+/// `sudo -n rm -rf /`, `env rm -rf /`, `command rm -rf /`, or
+/// `doas -n rm -rf /` must not bypass first-token classification.
+/// We recursively unwrap known launchers (with any flags between the launcher
+/// and the payload command) so the returned token is the innermost executable.
 fn first_token(normalized: &str) -> &str {
-    let stripped = normalized
-        .strip_prefix("sudo ")
-        .or_else(|| normalized.strip_prefix("doas "))
-        .unwrap_or(normalized);
-    stripped.split(' ').next().unwrap_or("")
+    let mut rest = normalized.trim();
+
+    // Up to 4 wrapper layers (e.g. `sudo env command rm …`).
+    for _ in 0..4 {
+        let mut tokens = rest.splitn(2, ' ');
+        let head = tokens.next().unwrap_or("").trim_end_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+        let tail = tokens.next().unwrap_or("").trim_start();
+
+        match head {
+            // Pure launchers that unconditionally forward to the next token.
+            "sudo" | "doas" | "command" | "exec" => {
+                // Skip any flag arguments (e.g. `sudo -n`, `sudo -u root`).
+                rest = skip_flags(tail);
+            }
+            // `env` forwards to the next non-assignment token.
+            "env" => {
+                rest = skip_env_assignments(tail);
+            }
+            // `time` is a shell built-in that runs its argument.
+            "time" => {
+                rest = tail;
+            }
+            _ => break,
+        }
+        if rest.is_empty() {
+            break;
+        }
+    }
+
+    rest.split(' ').next().unwrap_or("")
+}
+
+/// Skip leading flag tokens (`-n`, `--flag`, `-u root`) from a command tail,
+/// returning the first non-flag token onward. Used to unwrap `sudo -n cmd`.
+fn skip_flags(s: &str) -> &str {
+    let mut rest = s.trim_start();
+    while let Some(token_end) = rest.find(' ') {
+        let token = &rest[..token_end];
+        if token.starts_with('-') {
+            // A flag may consume the next token as its argument (e.g. `-u root`).
+            // We conservatively skip one extra token for single-char flags with args.
+            rest = rest[token_end + 1..].trim_start();
+            // If this was a value-consuming flag like `-u`, skip one more token.
+            if token.len() == 2 && token.starts_with('-') && token.as_bytes()[1].is_ascii_alphabetic() {
+                if let Some(next_end) = rest.find(' ') {
+                    let next = &rest[..next_end];
+                    if !next.starts_with('-') {
+                        rest = rest[next_end + 1..].trim_start();
+                    }
+                }
+            }
+        } else {
+            break;
+        }
+    }
+    rest
+}
+
+/// Skip `KEY=VALUE` environment variable assignments that prefix `env` payloads,
+/// returning the remainder starting with the actual command name.
+fn skip_env_assignments(s: &str) -> &str {
+    let mut rest = s.trim_start();
+    // Also skip any leading flags to `env` itself (e.g. `env -i`).
+    rest = skip_flags(rest);
+    loop {
+        match rest.split_once(' ') {
+            Some((token, tail)) if token.contains('=') => rest = tail.trim_start(),
+            _ => break,
+        }
+    }
+    rest
 }
 
 /// Returns a reason when the command is catastrophic and must be refused.
@@ -243,6 +351,41 @@ fn catastrophic_reason(normalized: &str) -> Option<String> {
     // Disabling the rm root guard is never legitimate from an agent.
     if normalized.contains("--no-preserve-root") {
         return Some("rm --no-preserve-root targets the entire filesystem".to_string());
+    }
+
+    // SECURITY: interpreter wrappers (`bash -c '…'`, `sh -c '…'`, `python -c '…'`,
+    // `powershell -Command '…'`) can hide an inner `rm -rf /` from the first-token
+    // check. Classify the inner payload as an additional segment — the caller's
+    // `inner_segments` path already handles `$(…)` substitutions, but `-c` payloads
+    // are plain string arguments, not substitutions, so we handle them here.
+    // We match normalized (lowercased, whitespace-collapsed) to keep it tight.
+    let ft = first_token(normalized);
+    if matches!(ft, "bash" | "sh" | "zsh" | "fish" | "dash" | "ksh" | "csh" | "tcsh") {
+        if let Some(inner) = extract_interpreter_payload(normalized) {
+            let inner_norm = normalize(&inner);
+            if let Some(reason) = catastrophic_reason(&inner_norm) {
+                return Some(reason);
+            }
+        }
+    }
+    if matches!(ft, "python" | "python3" | "ruby" | "perl" | "node")
+        && normalized.contains(" -c ")
+    {
+        if let Some(inner) = extract_interpreter_payload(normalized) {
+            let inner_norm = normalize(&inner);
+            if let Some(reason) = catastrophic_reason(&inner_norm) {
+                return Some(reason);
+            }
+        }
+    }
+    // PowerShell `-Command` or `-EncodedCommand` can similarly hide payloads.
+    if matches!(ft, "powershell" | "pwsh") {
+        if let Some(inner) = extract_interpreter_payload(normalized) {
+            let inner_norm = normalize(&inner);
+            if let Some(reason) = catastrophic_reason(&inner_norm) {
+                return Some(reason);
+            }
+        }
     }
 
     // rm -rf against filesystem root / home / a protected system directory.
@@ -346,10 +489,25 @@ fn rm_targets(normalized: &str) -> Vec<String> {
 #[allow(clippy::literal_string_with_formatting_args)]
 fn normalize_path_operand(token: &str) -> String {
     let mut path = token.trim_matches(|c| c == '"' || c == '\'').to_string();
-    // Fold home-directory references to a single canonical form.
+    // Fold home-directory references to a single canonical form (`~` or `~/*`).
+    // SECURITY (finding #4): also fold `$HOME/*` / `${HOME}/*` / `%USERPROFILE%/*`
+    // glob forms so they are caught by `is_dangerous_root_target`.
     for home in ["$home", "${home}", "%userprofile%", "$env:userprofile"] {
         if path == home {
             path = "~".to_string();
+            break;
+        }
+        // Glob wipe: `$HOME/*` → `~/*`
+        let glob = format!("{home}/*");
+        if path == glob {
+            path = "~/*".to_string();
+            break;
+        }
+        // Backslash variant for Windows: `%USERPROFILE%\*` → `~/*`
+        let bslash_glob = format!("{home}\\*");
+        if path == bslash_glob {
+            path = "~/*".to_string();
+            break;
         }
     }
     // Drop a single trailing slash (but keep "/" itself intact).
@@ -380,9 +538,15 @@ fn is_dangerous_root_target(target: &str) -> bool {
         target,
         "/" | "/*"
             | "~"
+            // SECURITY (finding #4): `~/*` wipes home contents after shell glob expansion.
             | "~/*"
             | "$home"
             | "${home}"
+            // Raw un-normalized glob forms (double-safety for any quoting variant).
+            | "$home/*"
+            | "${home}/*"
+            | "%userprofile%/*"
+            | "$env:userprofile/*"
             | "/."
             | "/.*"
             // Protected top-level system directories (and their glob form).
@@ -403,6 +567,26 @@ fn is_dangerous_root_target(target: &str) -> bool {
             | "/srv" | "/srv/*"
             | "/run" | "/run/*"
     )
+}
+
+/// Extract the inner shell payload from `-c '…'` or `-Command '…'` style
+/// interpreter invocations. Returns `None` if no recognizable `-c`/`-command`
+/// argument is found. The returned string is unquoted one level.
+fn extract_interpreter_payload(normalized: &str) -> Option<String> {
+    // Look for `-c` or `-command` flag followed by the payload token.
+    let tokens: Vec<&str> = normalized.split(' ').collect();
+    for (i, &token) in tokens.iter().enumerate() {
+        if matches!(token, "-c" | "-command" | "/c" | "/command") {
+            if let Some(&payload) = tokens.get(i + 1) {
+                // Strip surrounding quotes from the payload.
+                let unquoted = payload.trim_matches(|c| c == '\'' || c == '"');
+                if !unquoted.is_empty() {
+                    return Some(unquoted.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 fn writes_to_block_device(normalized: &str) -> bool {
@@ -492,11 +676,22 @@ fn risky_warnings(normalized: &str) -> Vec<String> {
     warnings
 }
 
+/// Commands unconditionally safe to auto-approve (no write, no exec, no delete).
+/// SECURITY (finding #5): `find` is intentionally excluded — `find . -delete`,
+/// `find . -exec rm …`, `-fprint`, `-ok`, `-execdir` are destructive or exec-capable.
+/// `fd` is similarly excluded because it supports `--exec`. Both are handled by
+/// the `find`/`fd` branch in `is_read_only_segment` instead.
 const READ_ONLY_COMMANDS: &[&str] = &[
-    "ls", "dir", "pwd", "cat", "type", "echo", "env", "printenv", "whoami", "hostname", "id",
-    "date", "uname", "which", "where", "head", "tail", "wc", "grep", "rg", "find", "fd", "tree",
+    "ls", "dir", "pwd", "cat", "type", "echo", "printenv", "whoami", "hostname", "id",
+    "date", "uname", "which", "where", "head", "tail", "wc", "grep", "rg", "tree",
     "stat", "file", "du", "df", "ps", "less", "more", "sort", "uniq", "cut", "jq", "yq", "diff",
     "basename", "dirname", "realpath", "readlink", "sleep", "true", "test",
+];
+
+/// Flags in `find` that make it destructive or capable of arbitrary execution.
+const FIND_DANGEROUS_FLAGS: &[&str] = &[
+    "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0",
+    "-fprintf", "-ls",
 ];
 
 /// True when the segment cannot write or mutate state.
@@ -511,26 +706,28 @@ fn is_read_only_segment(normalized: &str) -> bool {
     }
     // Read-only subcommands of common VCS/toolchains.
     match ft {
-        "git" => {
-            let rest = normalized.strip_prefix("git ").unwrap_or("");
-            let sub = rest.split(' ').find(|t| !t.starts_with('-')).unwrap_or("");
-            match sub {
-                "status" | "log" | "diff" | "show" | "branch" | "remote" | "describe"
-                | "rev-parse" | "blame" | "tag" | "ls-files" | "shortlog" => true,
-                // `git config` is NOT read-only by default: a write persists a hook
-                // (`core.pager`, `core.sshCommand`, `core.hooksPath`, `alias.*=!cmd`)
-                // that runs on the next git op — auto-approving that is RCE. Only the
-                // explicit read forms (`--get*`, `--list`/`-l`) stay read-only.
-                "config" => {
-                    (rest.contains("--get") || rest.contains("--list") || rest.contains(" -l"))
-                        && !rest.contains("--unset")
-                        && !rest.contains("--replace-all")
-                        && !rest.contains("--add")
-                        && !rest.contains("--edit")
-                }
-                _ => false,
-            }
+        "git" => is_git_read_only(normalized),
+
+        // SECURITY (finding #5): `find` is only read-only when it uses no
+        // destructive or execution predicates. Fail closed: unknown = not read-only.
+        "find" => {
+            !FIND_DANGEROUS_FLAGS
+                .iter()
+                .any(|flag| normalized.contains(flag))
         }
+
+        // `fd` with `--exec` / `--exec-batch` executes commands — not read-only.
+        "fd" => {
+            !normalized.contains(" --exec")
+                && !normalized.contains(" -x ")
+                && !normalized.contains(" --exec-batch")
+                && !normalized.contains(" -X ")
+        }
+
+        // `env` alone (with or without `-i`) can print environment (read-only);
+        // but `env COMMAND …` executes — handled by the first_token unwrap already.
+        "env" => normalized.trim() == "env" || normalized.starts_with("env -"),
+
         "node" | "npm" | "pnpm" | "yarn" | "cargo" | "python" | "python3" | "rustc" | "go"
         | "deno" | "bun" => {
             normalized.contains("--version")
@@ -544,6 +741,90 @@ fn is_read_only_segment(normalized: &str) -> bool {
                 || normalized.contains(" metadata")
         }
         "sed" => normalized.contains("-n") && !normalized.contains("-i"),
+        _ => false,
+    }
+}
+
+/// Classify a `git …` command as read-only.
+///
+/// SECURITY (finding #6): The previous implementation whitelisted entire
+/// subcommands like `branch`, `remote`, and `tag` without checking flags.
+/// `git branch -D feature`, `git tag -d v1`, and `git remote set-url origin …`
+/// all mutate state. We now only allow the pure read forms of each subcommand.
+fn is_git_read_only(normalized: &str) -> bool {
+    let rest = normalized.strip_prefix("git ").unwrap_or("");
+    let sub = rest.split(' ').find(|t| !t.starts_with('-')).unwrap_or("");
+    match sub {
+        // Unconditionally read-only subcommands.
+        "status" | "log" | "diff" | "show" | "describe" | "rev-parse" | "blame"
+        | "ls-files" | "shortlog" | "cat-file" | "ls-tree" | "for-each-ref"
+        | "count-objects" | "fsck" | "verify-pack" | "stash" => {
+            // `git stash list/show` are reads; `git stash apply/pop/drop` are writes.
+            if sub == "stash" {
+                rest.contains("list") || rest.contains("show")
+            } else {
+                true
+            }
+        }
+
+        // `git branch`: only list/show forms are read-only.
+        // `-D`, `-d`, `-m`, `-M`, `-c`, `-C`, `--delete`, `--move`, `--copy`,
+        // `--set-upstream-to` all mutate state.
+        "branch" => {
+            !rest.contains(" -d")
+                && !rest.contains(" -D")
+                && !rest.contains(" -m")
+                && !rest.contains(" -M")
+                && !rest.contains(" -c")
+                && !rest.contains(" -C")
+                && !rest.contains("--delete")
+                && !rest.contains("--move")
+                && !rest.contains("--copy")
+                && !rest.contains("--set-upstream")
+                && !rest.contains("--unset-upstream")
+                && !rest.contains("--edit-description")
+        }
+
+        // `git remote`: only list/show/get-url are read-only.
+        // `add`, `remove`, `set-url`, `rename`, `set-head`, `set-branches`,
+        // `set-branches`, `prune` all mutate state.
+        "remote" => {
+            let sub2 = rest
+                .split_whitespace()
+                .nth(1) // the word after "remote"
+                .unwrap_or("");
+            matches!(sub2, "" | "-v" | "--verbose" | "show" | "get-url")
+        }
+
+        // `git tag`: only list/verify forms are read-only.
+        // `-d`/`--delete`, `-m` (annotated create), creating a new tag, `-f`,
+        // `--sign`, `--local-user` all mutate state.
+        "tag" => {
+            !rest.contains(" -d")
+                && !rest.contains(" -D")
+                && !rest.contains("--delete")
+                && !rest.contains(" -m ")
+                && !rest.contains(" -a ")
+                && !rest.contains("--annotate")
+                && !rest.contains(" -s")
+                && !rest.contains(" -f")
+                && !rest.contains("--force")
+                // A bare `git tag NAME` without `-l`/`--list` creates a tag.
+                // Only allow the explicit list form.
+                && (rest.contains(" -l")
+                    || rest.contains("--list")
+                    || rest.split_whitespace().count() <= 1)
+        }
+
+        // `git config` is NOT read-only by default: a write persists a hook.
+        "config" => {
+            (rest.contains("--get") || rest.contains("--list") || rest.contains(" -l"))
+                && !rest.contains("--unset")
+                && !rest.contains("--replace-all")
+                && !rest.contains("--add")
+                && !rest.contains("--edit")
+        }
+
         _ => false,
     }
 }
@@ -663,5 +944,79 @@ mod tests {
         // Scoped deletes still allowed.
         assert!(!blocked("rm -rf ./build"));
         assert!(!blocked("rm -rf target/debug"));
+    }
+
+    // --- Regression tests for security findings ---
+
+    #[test]
+    fn escaped_quote_does_not_hide_segment() {
+        // Finding #2: an escaped `"` inside double-quotes must not close the
+        // quoting context, exposing the subsequent `;` as a real separator.
+        // The whole command has an unclosed outer quote so we fail-closed
+        // (return one segment), meaning the catastrophic rm is still visible.
+        assert!(blocked("echo \"foo\\\" ; rm -rf /"));
+    }
+
+    #[test]
+    fn blocks_rm_via_wrapper_launchers() {
+        // Finding #3: common launcher wrappers must not bypass first_token.
+        assert!(blocked("env rm -rf /"));
+        assert!(blocked("command rm -rf /"));
+        assert!(blocked("sudo -n rm -rf /"));
+        assert!(blocked("doas -n rm -rf /"));
+        assert!(blocked("sudo -u root rm -rf /"));
+        assert!(blocked("sudo env rm -rf /"));
+    }
+
+    #[test]
+    fn blocks_rm_via_interpreter_wrapper() {
+        // Finding #3 extension: `bash -c 'rm -rf /'` must be blocked.
+        assert!(blocked("bash -c 'rm -rf /'"));
+        assert!(blocked("sh -c 'rm -rf /'"));
+        assert!(blocked("zsh -c 'rm -rf /'"));
+        // Scoped inner payload is still allowed.
+        assert!(!blocked("bash -c 'ls -la'"));
+    }
+
+    #[test]
+    fn blocks_home_glob_wipe() {
+        // Finding #4: `rm -rf $HOME/*` wipes home contents after expansion.
+        assert!(blocked("rm -rf $HOME/*"));
+        assert!(blocked("rm -rf ${HOME}/*"));
+        assert!(blocked("rm -rf $home/*"));
+        assert!(blocked("rm -rf \"$HOME/*\""));
+        // Scoped paths under home sub-dirs are still allowed.
+        assert!(!blocked("rm -rf $HOME/project/dist"));
+    }
+
+    #[test]
+    fn find_with_destructive_flags_is_not_read_only() {
+        // Finding #5: `find` with delete/exec predicates must not be auto-approved.
+        assert!(!classify_shell_command("find . -delete").read_only);
+        assert!(!classify_shell_command("find . -exec rm -rf {} +").read_only);
+        assert!(!classify_shell_command("find . -execdir sh -c 'rm {}' \\;").read_only);
+        assert!(!classify_shell_command("find . -ok rm {} \\;").read_only);
+        assert!(!classify_shell_command("find . -fprint /tmp/out").read_only);
+        // Safe predicates stay read-only.
+        assert!(classify_shell_command("find . -name '*.rs' -type f").read_only);
+        assert!(classify_shell_command("find /src -maxdepth 2").read_only);
+    }
+
+    #[test]
+    fn git_branch_destructive_is_not_read_only() {
+        // Finding #6: mutating git branch/tag/remote must require approval.
+        assert!(!classify_shell_command("git branch -D feature").read_only);
+        assert!(!classify_shell_command("git branch -d old").read_only);
+        assert!(!classify_shell_command("git branch -m old new").read_only);
+        assert!(!classify_shell_command("git tag -d v1.0").read_only);
+        assert!(!classify_shell_command("git remote set-url origin https://evil.com").read_only);
+        assert!(!classify_shell_command("git remote add upstream https://foo.com").read_only);
+        assert!(!classify_shell_command("git remote remove upstream").read_only);
+        // Read-only forms stay approved.
+        assert!(classify_shell_command("git branch").read_only);
+        assert!(classify_shell_command("git branch --show-current").read_only);
+        assert!(classify_shell_command("git tag -l").read_only);
+        assert!(classify_shell_command("git remote -v").read_only);
+        assert!(classify_shell_command("git remote show origin").read_only);
     }
 }

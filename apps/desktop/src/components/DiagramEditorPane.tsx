@@ -1,10 +1,16 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
+import type { editor } from "monaco-editor";
 import { useTranslation } from "../lib/i18n/useTranslation";
 import { renderDiagramPreview } from "../lib/diagramPreview";
+import { useDebouncedValue } from "../lib/useDebouncedValue";
 import type { DocumentSnapshot } from "../lib/types";
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
+
+// Mermaid rendering is heavy; only re-run it after typing settles. Document state still
+// updates synchronously through incremental edits, so saves/LSP remain accurate.
+const PREVIEW_DEBOUNCE_MS = 220;
 
 type DiagramEditorPaneProps = {
   document: DocumentSnapshot;
@@ -13,7 +19,7 @@ type DiagramEditorPaneProps = {
   fontSize: number;
   lineHeight: number;
   minimap: boolean;
-  onChange: (value: string) => void;
+  onChange: (value: string | undefined, event: editor.IModelContentChangedEvent) => void;
   readOnly: boolean;
   renderWhitespace: "none" | "boundary" | "selection" | "trailing" | "all";
   smoothScrolling: boolean;
@@ -38,10 +44,11 @@ export function DiagramEditorPane({
   const { t } = useTranslation();
   const [previewHtml, setPreviewHtml] = useState("<p class=\"diagram-preview-empty\">…</p>");
   const [previewError, setPreviewError] = useState<string | null>(null);
+  const debouncedText = useDebouncedValue(document.text, PREVIEW_DEBOUNCE_MS);
 
   useEffect(() => {
     let cancelled = false;
-    void renderDiagramPreview(document.text || "", document.path).then((result) => {
+    void renderDiagramPreview(debouncedText || "", document.path).then((result) => {
       if (cancelled) return;
       setPreviewHtml(result.html);
       setPreviewError(result.error);
@@ -49,7 +56,7 @@ export function DiagramEditorPane({
     return () => {
       cancelled = true;
     };
-  }, [document.path, document.text]);
+  }, [document.path, debouncedText]);
 
   return (
     <div className="markdown-editor-pane diagram-editor-pane">
@@ -62,7 +69,7 @@ export function DiagramEditorPane({
               path={`diagram-source:${document.id}`}
               language={document.language_id}
               value={document.text}
-              onChange={(value) => onChange(value ?? "")}
+              onChange={onChange}
               options={{
                 automaticLayout: true,
                 fontFamily,

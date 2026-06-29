@@ -244,7 +244,11 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
     };
   }
 
-  if (!force && !input.autoCompactEnabled && tokensBefore < triggerTokens) {
+  // Auto-compaction disabled: a non-forced run must never summarize, even when the
+  // transcript is over the trigger threshold. The previous `&& tokensBefore < triggerTokens`
+  // condition let an over-threshold disabled session fall straight through and compact
+  // anyway. Cheap tool-output pruning still applies; only model summarization is gated.
+  if (!force && !input.autoCompactEnabled) {
     const onlyPruned = prunedMessages !== input.messages;
     return {
       messages: onlyPruned ? prunedMessages : input.messages,

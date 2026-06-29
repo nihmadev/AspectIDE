@@ -42,6 +42,15 @@ const OFFICE_ENTRY_BYTE_CEILING: u64 = 8 * 1024 * 1024;
 /// Maximum on-disk size of a notebook we will read+JSON-parse for preview.
 const NOTEBOOK_BYTE_CEILING: u64 = 32 * 1024 * 1024;
 
+/// Maximum on-disk size for a PDF we will pass to pdf_extract. The extractor
+/// is synchronous and materialises the full text, so we gate on file size to
+/// avoid stalling the turn loop on huge or adversarial PDFs.
+const PDF_BYTE_CEILING: u64 = 64 * 1024 * 1024;
+
+/// Per-cell source/output character cap for notebook preview to prevent a
+/// single cell with huge embedded outputs from monopolising the context budget.
+const NOTEBOOK_CELL_CHAR_CAP: usize = 8_000;
+
 #[must_use]
 pub fn supported_formats() -> Vec<FileFormatSupport> {
     supported_file_formats()
@@ -237,10 +246,13 @@ fn table_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<File
         })
         .unwrap_or_default();
     let mut rows = Vec::new();
-    let mut row_count = 0;
+    let mut truncated = false;
+    // Stop iterating once we have one more record than max_rows so we can
+    // detect truncation without scanning multi-GB files end-to-end.  Exact
+    // total row count is not required for the preview; callers that need it
+    // should use a dedicated background task.
     for record in reader.records() {
         let record = record.map_err(|error| AppError::Service(error.to_string()))?;
-        row_count += 1;
         if rows.len() < options.max_rows {
             rows.push(
                 record
@@ -249,14 +261,21 @@ fn table_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<File
                     .map(ToOwned::to_owned)
                     .collect(),
             );
+        } else {
+            // One extra record confirms there is more data beyond max_rows.
+            truncated = true;
+            break;
         }
     }
+    // When `truncated`, this is a lower bound: the flag signals the real row
+    // count exceeds what we collected. Either way the value is `rows.len()`.
+    let row_count = rows.len();
     Ok(FilePreview::Table {
         delimiter: char::from(delimiter).to_string(),
         headers,
         rows,
         row_count,
-        truncated: row_count > options.max_rows,
+        truncated,
     })
 }
 
@@ -333,6 +352,22 @@ fn database_preview(path: &Path, options: &FileInspectionOptions) -> FilePreview
 }
 
 fn pdf_preview(path: &Path) -> AppResult<FilePreview> {
+    // Reject oversized PDFs before we hand them to pdf-extract, which is
+    // synchronous and materialises the full decoded text. A large or adversarial
+    // PDF can otherwise stall the turn loop for seconds or exhaust memory.
+    let file_size = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if file_size > PDF_BYTE_CEILING {
+        return Ok(FilePreview::Pdf {
+            text: format!(
+                "[PDF too large to preview inline ({:.1} MiB). Open externally or use a \
+                 dedicated PDF reader.]",
+                file_size as f64 / (1024.0 * 1024.0)
+            ),
+            page_count: None,
+            truncated: true,
+        });
+    }
+
     // pdf-extract 0.10 panics (not just `Err`s) on some malformed PDFs. The
     // extraction is synchronous, so catch the unwind here and turn it into a
     // clean error rather than tearing down the caller. `&Path` is unwind-safe,
@@ -342,6 +377,11 @@ fn pdf_preview(path: &Path) -> AppResult<FilePreview> {
         .unwrap_or_default();
     let truncated = extracted.len() > PDF_TEXT_LIMIT;
     let text = truncate_chars(&extracted, PDF_TEXT_LIMIT);
+    // Page count is derived from the full extracted text (form-feed `\x0C`
+    // delimits pages), so it reports the document's true page count regardless
+    // of text truncation. The `truncated` flag above already signals that the
+    // previewed `text` is a partial slice; page_count intentionally describes
+    // the whole document, not just the displayed content.
     let page_count = if extracted.is_empty() {
         None
     } else {
@@ -501,40 +541,49 @@ fn notebook_preview(path: &Path, options: &FileInspectionOptions) -> AppResult<F
     }
     let text = fs::read_to_string(path)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
-    let cells_value = value
+    // Borrow the cells array directly to avoid cloning the entire notebook value
+    // (which can be large when cells contain embedded image outputs).
+    let cells_array = value
         .get("cells")
         .and_then(serde_json::Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
-    let cell_count = cells_value.len();
-    let cells = cells_value
+    let cell_count = cells_array.len();
+    let cells = cells_array
         .iter()
         .take(options.max_rows)
         .enumerate()
-        .map(|(index, cell)| NotebookCellPreview {
-            index,
-            cell_type: cell
-                .get("cell_type")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown")
-                .to_string(),
-            text: json_text_array(cell.get("source")),
-            output_text: cell
-                .get("outputs")
-                .and_then(serde_json::Value::as_array)
-                .map(|outputs| {
-                    outputs
-                        .iter()
-                        .map(|output| {
-                            json_text_array(output.get("text"))
-                                + &json_text_array(
-                                    output.get("data").and_then(|data| data.get("text/plain")),
-                                )
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default(),
+        .map(|(index, cell)| {
+            let source = truncate_chars(&json_text_array(cell.get("source")), NOTEBOOK_CELL_CHAR_CAP);
+            let output_text = truncate_chars(
+                &cell
+                    .get("outputs")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|outputs| {
+                        outputs
+                            .iter()
+                            .map(|output| {
+                                json_text_array(output.get("text"))
+                                    + &json_text_array(
+                                        output.get("data").and_then(|data| data.get("text/plain")),
+                                    )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default(),
+                NOTEBOOK_CELL_CHAR_CAP,
+            );
+            NotebookCellPreview {
+                index,
+                cell_type: cell
+                    .get("cell_type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown")
+                    .to_string(),
+                text: source,
+                output_text,
+            }
         })
         .collect::<Vec<_>>();
     Ok(FilePreview::Notebook {

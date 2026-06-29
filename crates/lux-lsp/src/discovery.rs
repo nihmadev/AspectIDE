@@ -98,6 +98,25 @@ pub const BUILTIN_SERVERS: &[BuiltinServer] = &[
     },
 ];
 
+/// Well-known manifest files that definitively imply a language, mapped to a
+/// representative extension one of its builtin servers handles. Probed at the
+/// workspace root BEFORE the capped walk so a language whose source files happen
+/// to sort after the entry cap (in a large monorepo) is still detected and its
+/// server started — the walk-truncation blind spot. Each extension here must
+/// appear in some [`BUILTIN_SERVERS`] entry.
+const MANIFEST_EXTENSION_HINTS: &[(&str, &str)] = &[
+    ("Cargo.toml", "rs"),
+    ("rust-toolchain.toml", "rs"),
+    ("tsconfig.json", "ts"),
+    ("jsconfig.json", "js"),
+    ("package.json", "js"),
+    ("pyproject.toml", "py"),
+    ("setup.py", "py"),
+    ("requirements.txt", "py"),
+    ("Pipfile", "py"),
+    ("go.mod", "go"),
+];
+
 pub fn workspace_language_servers(root: impl AsRef<Path>) -> AppResult<Vec<LanguageServerInfo>> {
     workspace_language_servers_with_dirs(root, &[])
 }
@@ -112,7 +131,17 @@ pub fn workspace_language_servers_with_dirs(
     extra_dirs: &[std::path::PathBuf],
 ) -> AppResult<Vec<LanguageServerInfo>> {
     let root = root.as_ref().canonicalize()?;
-    let detected_extensions = detect_extensions(&root);
+    let (detected_extensions, truncated) = detect_extensions_bounded(&root);
+    if truncated {
+        // Not silent: a too-large tree means an extension-only language past the
+        // entry cap could be missed. Manifest-backed languages are still detected.
+        eprintln!(
+            "lux-lsp: workspace language discovery hit its entry cap in {} — \
+             languages without a root manifest may be undetected; \
+             configure servers in Settings → Language Servers if one is missing.",
+            root.display()
+        );
+    }
     let mut servers = Vec::new();
 
     for server in BUILTIN_SERVERS {
@@ -247,12 +276,33 @@ fn is_ignored_dir(name: &str) -> bool {
 /// can never stall language-service startup. This is the dominant fix for the
 /// "language service hangs on load" symptom on large repos.
 fn detect_extensions(root: &Path) -> BTreeSet<String> {
+    detect_extensions_bounded(root).0
+}
+
+/// Detect extensions, returning `(found, truncated)` where `truncated` is true if
+/// the entry cap was hit before the tree was fully walked. Manifest-backed
+/// languages are seeded first so they survive truncation; the flag lets callers
+/// warn that extension-only languages past the cap may have been missed.
+fn detect_extensions_bounded(root: &Path) -> (BTreeSet<String>, bool) {
     // Cap on directory entries visited — generous for real projects, but a hard
     // ceiling so discovery returns promptly no matter the repo size.
     const MAX_ENTRIES: usize = 20_000;
 
     let wanted = relevant_extensions();
     let mut found: BTreeSet<String> = BTreeSet::new();
+
+    // Manifest-first: a root manifest is authoritative and cheap, so detect those
+    // languages up front. This closes the gap where a language's source files sort
+    // after MAX_ENTRIES in a huge repo and would otherwise be reported as absent.
+    for (manifest, extension) in MANIFEST_EXTENSION_HINTS {
+        if root.join(manifest).is_file() && wanted.contains(extension) {
+            found.insert((*extension).to_string());
+        }
+    }
+    if found.len() == wanted.len() {
+        return (found, false);
+    }
+
     let mut stack = vec![root.to_path_buf()];
     let mut visited = 0_usize;
 
@@ -264,7 +314,8 @@ fn detect_extensions(root: &Path) -> BTreeSet<String> {
         for child in children.flatten() {
             visited += 1;
             if visited > MAX_ENTRIES {
-                return found;
+                // Walk truncated: anything not already seeded above may be missing.
+                return (found, true);
             }
 
             let file_name = child.file_name();
@@ -285,7 +336,7 @@ fn detect_extensions(root: &Path) -> BTreeSet<String> {
                         found.insert(extension);
                         // Every server we could start is accounted for — stop early.
                         if found.len() == wanted.len() {
-                            return found;
+                            return (found, false);
                         }
                     }
                 }
@@ -293,7 +344,7 @@ fn detect_extensions(root: &Path) -> BTreeSet<String> {
         }
     }
 
-    found
+    (found, false)
 }
 
 /// Whether `path` points at a file we could actually execute. On Unix this
@@ -449,6 +500,36 @@ mod tests {
             !found.contains("rs"),
             "hidden-dir files must not be detected"
         );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn detect_extensions_seeds_languages_from_root_manifests() {
+        // A root manifest implies the language even when NO matching source file
+        // is present in the (small) tree — covering the large-repo case where
+        // source would sort after the entry cap.
+        let root = temp_dir("manifest");
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"").unwrap();
+        std::fs::write(root.join("go.mod"), "module x").unwrap();
+        std::fs::write(root.join("pyproject.toml"), "[project]\nname = \"x\"").unwrap();
+
+        let found = detect_extensions(&root);
+        assert!(found.contains("rs"), "Cargo.toml should imply rust");
+        assert!(found.contains("go"), "go.mod should imply go");
+        assert!(found.contains("py"), "pyproject.toml should imply python");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn detect_extensions_bounded_reports_no_truncation_for_small_tree() {
+        let root = temp_dir("untruncated");
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+
+        let (found, truncated) = detect_extensions_bounded(&root);
+        assert!(found.contains("rs"));
+        assert!(!truncated, "a tiny tree must not report truncation");
 
         std::fs::remove_dir_all(&root).ok();
     }

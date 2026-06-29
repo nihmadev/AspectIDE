@@ -8,3 +8,4 @@ authors.workspace = true
 [dependencies]
 chrono.workspace = true
 lux-core = { path = "../lux-core" }
+uuid.workspace = true

@@ -10,7 +10,12 @@ use super::{
     resolve_workspace_path, SharedState,
 };
 
-const FILE_ASSET_MAX_BYTES: u64 = 80 * 1024 * 1024;
+/// Inline data-URL cap for IPC asset previews. Kept deliberately low: the bytes are
+/// base64-encoded (≈ +33%) into a string and shipped over Tauri IPC, so an 80 MiB
+/// file ballooned to ~107 MiB on the wire and could freeze both ends and starve AI
+/// tooling memory. Larger assets should stream through a file/custom protocol rather
+/// than be inlined; this cap bounds the inline path. See followups for streaming.
+const FILE_ASSET_MAX_BYTES: u64 = 12 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

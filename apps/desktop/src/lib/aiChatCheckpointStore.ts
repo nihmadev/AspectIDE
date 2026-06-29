@@ -99,6 +99,21 @@ export function upsertFileCheckpoint(workspaceRoot: string, checkpoint: Persiste
   return checkpoint;
 }
 
+/** Persist the removal of a file checkpoint so a delete survives reload (the
+ *  in-memory runtime store alone would let deleted checkpoints reappear). Returns
+ *  true when a checkpoint was actually removed. */
+export function removeFileCheckpoint(workspaceRoot: string, id: string) {
+  loadChatCheckpointStore();
+  const key = workspaceCheckpointKey(workspaceRoot);
+  const store = memory.fileByWorkspace[key];
+  if (!store) return false;
+  const next = store.filter((entry) => entry.id !== id);
+  if (next.length === store.length) return false;
+  memory.fileByWorkspace[key] = next;
+  saveChatCheckpointStore();
+  return true;
+}
+
 export function listTurnCheckpoints(sessionId: string) {
   loadChatCheckpointStore();
   return [...(memory.turnBySession[sessionId] ?? [])];

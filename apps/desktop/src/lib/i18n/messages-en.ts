@@ -1100,6 +1100,8 @@ export const messagesEn = {
   "aiTools.readyCount": "{count} ready",
   "aiTools.totalCount": "{count} total",
   "aiTools.status.ready": "Ready",
+  "aiTools.status.needsSetup": "Needs setup",
+  "aiTools.needsSetupCount": "{count} need setup",
   "aiTools.footerNote": "Ready tools are callable by the AI runtime",
   "aiTools.duration.ms": "{duration} ms",
   "aiTools.duration.s": "{duration} s",

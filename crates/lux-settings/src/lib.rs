@@ -23,43 +23,69 @@ use serde_json::Value;
 const RECENT_WORKSPACES_FILE: &str = "recent-workspaces.json";
 const MAX_RECENT_WORKSPACES: usize = 12;
 const KEYBINDINGS_KEY: &str = "workbench.keybindings";
+/// Sub-directory name used for workspace-scoped settings inside the workspace root.
+const WORKSPACE_SETTINGS_DIR: &str = ".lux";
+const WORKSPACE_SETTINGS_FILE: &str = "settings.json";
 
 pub struct SettingsStore {
+    /// Path to the *user* settings file; always authoritative for user-scoped calls.
     path: PathBuf,
     values: BTreeMap<String, SettingValue>,
+    /// When the original file was corrupt *and* quarantine failed (rename refused),
+    /// we must not overwrite the still-present corrupt bytes. All `set()` calls on
+    /// a read-only store write to a fresh sibling path instead, leaving the original
+    /// intact until the user can inspect and recover it manually.
+    read_only_corrupt: bool,
 }
 
 impl SettingsStore {
     pub fn load(path: PathBuf) -> AppResult<Self> {
-        let values = if path.exists() {
+        let (values, read_only_corrupt) = if path.exists() {
             let raw = fs::read_to_string(&path)?;
             match serde_json::from_str(&raw) {
-                Ok(values) => values,
+                Ok(values) => (values, false),
                 // A corrupt `settings.json` must never silently collapse to an empty
                 // map: the next `set()` would persist that emptiness and erase every
                 // saved setting for good. Move the bad file aside (preserving it as a
-                // recoverable backup) before starting from defaults, so the original
-                // is never overwritten blind.
+                // recoverable backup) before starting from defaults.
+                //
+                // If the rename itself fails (permissions, collision) we mark the store
+                // read-only so `set()` writes to a fresh sibling instead of overwriting
+                // the still-present corrupt bytes.
                 Err(error) => {
-                    quarantine_corrupt(&path, &error);
-                    BTreeMap::new()
+                    let quarantined = quarantine_corrupt(&path, &error);
+                    (BTreeMap::new(), !quarantined)
                 }
             }
         } else {
-            BTreeMap::new()
+            (BTreeMap::new(), false)
         };
 
-        Ok(Self { path, values })
+        Ok(Self { path, values, read_only_corrupt })
     }
 
     #[must_use]
-    pub fn get(&self, _scope: SettingsScope, key: &str) -> Option<SettingValue> {
-        self.values.get(key).cloned()
+    pub fn get(&self, scope: SettingsScope, key: &str) -> Option<SettingValue> {
+        match scope {
+            SettingsScope::User => self.values.get(key).cloned(),
+            SettingsScope::Workspace(root) => {
+                // Load the workspace-local store on demand (read-only merge: workspace
+                // value wins over user value when present).
+                let ws_path = workspace_settings_path(&root);
+                if let Ok(ws_store) = Self::load(ws_path) {
+                    if let Some(val) = ws_store.values.get(key).cloned() {
+                        return Some(val);
+                    }
+                }
+                // Fall through to user-scope for keys not set at workspace level.
+                self.values.get(key).cloned()
+            }
+        }
     }
 
     pub fn set(
         &mut self,
-        _scope: SettingsScope,
+        scope: SettingsScope,
         key: String,
         value: Value,
     ) -> AppResult<SettingValue> {
@@ -68,15 +94,52 @@ impl SettingsStore {
             value,
             updated_at: Utc::now(),
         };
-        self.values.insert(key, setting.clone());
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
+        match scope {
+            SettingsScope::User => {
+                self.values.insert(key, setting.clone());
+                // Resolve the effective write path. When the original settings file is
+                // corrupt and could not be quarantined (renamed aside), we must NOT
+                // overwrite it — instead write to a fresh recovery sibling so the bad
+                // bytes are never clobbered before the user can inspect them.
+                let write_path = if self.read_only_corrupt {
+                    recovery_path(&self.path)
+                } else {
+                    self.path.clone()
+                };
+                if let Some(parent) = write_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                write_atomic(
+                    &write_path,
+                    serde_json::to_string_pretty(&self.values)?.as_bytes(),
+                )?;
+            }
+            SettingsScope::Workspace(root) => {
+                // Write into the workspace-local settings file; never mutate the
+                // user-level `self.values` map so workspace prefs stay isolated.
+                let ws_path = workspace_settings_path(&root);
+                let mut ws_store = Self::load(ws_path.clone()).unwrap_or_else(|_| Self {
+                    path: ws_path.clone(),
+                    values: BTreeMap::new(),
+                    read_only_corrupt: false,
+                });
+                ws_store.values.insert(key, setting.clone());
+                if let Some(parent) = ws_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                write_atomic(
+                    &ws_path,
+                    serde_json::to_string_pretty(&ws_store.values)?.as_bytes(),
+                )?;
+            }
         }
-        write_atomic(
-            &self.path,
-            serde_json::to_string_pretty(&self.values)?.as_bytes(),
-        )?;
         Ok(setting)
+    }
+
+    /// Returns the filesystem path for workspace-scoped settings inside `root`.
+    #[must_use]
+    pub fn workspace_settings_path(root: &Path) -> PathBuf {
+        workspace_settings_path(root)
     }
 
     pub fn keybinding_profile(&self) -> KeybindingProfile {
@@ -167,6 +230,11 @@ impl SettingsStore {
     }
 }
 
+/// Returns the path for workspace-scoped settings: `<root>/.lux/settings.json`.
+fn workspace_settings_path(root: &Path) -> PathBuf {
+    root.join(WORKSPACE_SETTINGS_DIR).join(WORKSPACE_SETTINGS_FILE)
+}
+
 /// Per-process sequence making each temporary file name unique (see [`write_atomic`]).
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -197,33 +265,57 @@ fn write_atomic(path: &Path, contents: &[u8]) -> AppResult<()> {
     Ok(())
 }
 
-/// Moves a corrupt JSON file aside to `<path>.corrupt-<unix_ts>` so a parse
-/// failure can never trigger silent, permanent data loss: the original bytes are
-/// preserved for recovery, and the caller starts from a clean default that will
-/// be written to the now-vacant original path. Best-effort by design — if the
-/// rename itself fails we still log, and on the next `set()` the original is left
-/// in place rather than overwritten blind.
-fn quarantine_corrupt(path: &Path, error: &serde_json::Error) {
-    let suffix = SystemTime::now()
+/// Moves a corrupt JSON file aside to `<path>.corrupt-<unix_ts>-<pid>-<seq>` so
+/// a parse failure can never trigger silent, permanent data loss: the original
+/// bytes are preserved for recovery, and the caller starts from a clean default
+/// that will be written to the now-vacant original path.
+///
+/// Returns `true` if the rename succeeded (caller may write new data to `path`),
+/// `false` if it failed (caller must treat the file as read-only to avoid clobbering
+/// the still-present corrupt bytes).
+fn quarantine_corrupt(path: &Path, error: &serde_json::Error) -> bool {
+    let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
+    // Include PID + sequence to avoid collisions (same-second crashes, parallel
+    // processes, or a previous rename that also failed at the same timestamp).
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
 
     let mut backup = path.as_os_str().to_owned();
-    backup.push(OsString::from(format!(".corrupt-{suffix}")));
+    backup.push(OsString::from(format!(".corrupt-{ts}-{pid}-{seq}")));
     let backup = PathBuf::from(backup);
 
     match fs::rename(path, &backup) {
-        Ok(()) => eprintln!(
-            "lux-settings: {} is corrupt ({error}); backed up to {} and reset to defaults",
-            path.display(),
-            backup.display()
-        ),
-        Err(rename_error) => eprintln!(
-            "lux-settings: {} is corrupt ({error}) and could not be backed up ({rename_error}); \
-             leaving it untouched and using defaults this session",
-            path.display()
-        ),
+        Ok(()) => {
+            eprintln!(
+                "lux-settings: {} is corrupt ({error}); backed up to {} and reset to defaults",
+                path.display(),
+                backup.display()
+            );
+            true
+        }
+        Err(rename_error) => {
+            eprintln!(
+                "lux-settings: {} is corrupt ({error}) and could not be backed up ({rename_error}); \
+                 leaving it untouched — writes this session will go to a recovery sibling",
+                path.display()
+            );
+            false
+        }
     }
+}
+
+/// Fresh sibling path used when the original settings file is corrupt and
+/// could not be quarantined. Writes land here rather than clobbering the bad file.
+fn recovery_path(path: &Path) -> PathBuf {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut name = path.as_os_str().to_owned();
+    name.push(OsString::from(format!(".recovery-{ts}-{seq}")));
+    PathBuf::from(name)
 }
 
 #[must_use]

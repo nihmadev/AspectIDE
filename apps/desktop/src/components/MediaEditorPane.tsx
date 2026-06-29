@@ -17,7 +17,9 @@ export function MediaEditorPane({ document }: MediaEditorPaneProps) {
   const isVideo = document.view.strategy === "videoPreview";
   const kind = isVideo ? "video" : "audio";
   const [reloadToken, setReloadToken] = useState(0);
-  const { error, loading, mimeType, size } = useFileAssetUrl(path, reloadToken);
+  // Fetch the asset exactly once here and hand the resolved URL to MediaAssetView so it
+  // does not re-fetch the same file (which previously doubled the full-file transfer).
+  const { error, loading, mimeType, size, url } = useFileAssetUrl(path, reloadToken);
 
   if (!path) {
     return <div className="media-editor-empty">{t("mediaEditor.empty.noPath")}</div>;
@@ -47,7 +49,7 @@ export function MediaEditorPane({ document }: MediaEditorPaneProps) {
       {error && <div className="media-editor-error">{error}</div>}
       <div className="media-editor-viewport">
         {loading && !error ? <div className="media-editor-loading">{t("mediaEditor.status.loading")}</div> : null}
-        <MediaAssetView alt={documentDisplayPath(document)} kind={kind} path={path} reloadKey={reloadToken} />
+        <MediaAssetView alt={documentDisplayPath(document)} kind={kind} path={path} reloadKey={reloadToken} asset={{ error, loading, url }} />
       </div>
     </div>
   );
