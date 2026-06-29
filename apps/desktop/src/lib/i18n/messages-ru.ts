@@ -1003,6 +1003,7 @@ export const messagesRu: Messages = {
   "aiChat.turnCheckpoint.editHint": "Откатывает файлы к снимку до хода, удаляет это сообщение и всё после, затем автоматически отправляет отредактированный текст.",
   "aiChat.turnCheckpoint.editConfirm": "Изменить сообщение? История после него будет удалена, файлы workspace откатятся к снимку перед ходом.",
   "aiChat.turnCheckpoint.restored": "Восстановлено файлов: {files}. Удалено checkpoint'ов: {turns}.",
+  "aiChat.turnCheckpoint.dismiss": "Скрыть",
   "aiChat.turnCheckpoint.agentNeedProject": "Откройте проект, чтобы включить checkpoint'ы чата и файлов с отменой.",
   "aiChat.compact.failed": "Не удалось сжать контекст: {detail}",
   "aiChat.compact.skippedFewMessages": "Пока мало сообщений для сжатия.",

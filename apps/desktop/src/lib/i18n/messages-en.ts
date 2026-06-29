@@ -1003,6 +1003,7 @@ export const messagesEn = {
   "aiChat.turnCheckpoint.editHint": "Rolls files back to the pre-turn snapshot, removes this message and everything after it, then resends your edited text.",
   "aiChat.turnCheckpoint.editConfirm": "Edit this message? Chat history after it will be removed and workspace files will roll back to the snapshot taken before the turn.",
   "aiChat.turnCheckpoint.restored": "Restored {files, plural, one {# file} other {# files}}. Removed {turns, plural, one {# later checkpoint} other {# later checkpoints}}.",
+  "aiChat.turnCheckpoint.dismiss": "Dismiss",
   "aiChat.turnCheckpoint.agentNeedProject": "Open a project to enable chat and file checkpoints with undo.",
   "aiChat.compact.failed": "Context compaction failed: {detail}",
   "aiChat.compact.skippedFewMessages": "Not enough messages to compact yet.",

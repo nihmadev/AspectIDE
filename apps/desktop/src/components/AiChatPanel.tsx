@@ -1,5 +1,5 @@
 import { ArrowDown, ArrowUpRight, Brain, Bug, Code2, FlaskConical, Globe, PanelRightClose, Plus, Sparkles, X } from "lucide-react";
-import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent } from "react";
+import type { ChangeEvent, ClipboardEvent, CSSProperties, DragEvent, KeyboardEvent } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { mapComposerAttachments } from "./ai-chat/AiComposerAttachments";
 import { AiChatComposer } from "./ai-chat/AiChatComposer";
@@ -152,6 +152,10 @@ type AiChatPanelProps = {
   showCloseButton?: boolean;
 };
 
+// How long a transient restore/status notice stays before auto-dismissing,
+// shown as a live countdown ring so the banner never lingers forever.
+const RESTORE_NOTICE_SECONDS = 10;
+
 export function AiChatPanel({ embedded = false, presentation = "panel", showCloseButton = true }: AiChatPanelProps) {
   const activeDocumentId = useLuxStore((state) => state.activeDocumentId);
   const aiIndex = useLuxStore((state) => state.aiIndex);
@@ -208,6 +212,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const [mentionCandidates, setMentionCandidates] = useState<AiMentionCandidate[]>([]);
   const [compacting, setCompacting] = useState(false);
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
+  // Seconds left before the transient restore/status notice auto-dismisses.
+  // null when no notice is showing. Reset to RESTORE_NOTICE_SECONDS whenever
+  // a new notice appears (the effect keyed on `restoreNotice` drives it).
+  const [restoreNoticeSeconds, setRestoreNoticeSeconds] = useState<number | null>(null);
   const slashMenuRef = useRef<HTMLDivElement | null>(null);
   const mentionMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -501,6 +509,25 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     setSendError(null);
     setRestoreNotice(null);
   }, [activeAiChatSessionId]);
+
+  // Auto-dismiss the transient notice with a visible per-second countdown.
+  // Re-runs whenever a new notice appears (resetting to RESTORE_NOTICE_SECONDS);
+  // tears down its timers on change/unmount so no leak or stale tick remains.
+  useEffect(() => {
+    if (!restoreNotice) {
+      setRestoreNoticeSeconds(null);
+      return;
+    }
+    setRestoreNoticeSeconds(RESTORE_NOTICE_SECONDS);
+    const interval = setInterval(() => {
+      setRestoreNoticeSeconds((prev) => (prev === null ? null : Math.max(0, prev - 1)));
+    }, 1000);
+    const timeout = setTimeout(() => setRestoreNotice(null), RESTORE_NOTICE_SECONDS * 1000);
+    return () => {
+      clearInterval(interval);
+      clearTimeout(timeout);
+    };
+  }, [restoreNotice]);
 
   useEffect(() => () => {
     const timers = goalContinuationTimersRef.current;
@@ -1967,7 +1994,26 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                   </button>
                 </div>
               )}
-              {restoreNotice && <div className="ai-chat-restore-notice" role="status">{restoreNotice}</div>}
+              {restoreNotice && (
+                <div className="ai-chat-restore-notice" role="status">
+                  <span className="ai-chat-restore-notice__text">{restoreNotice}</span>
+                  <button
+                    type="button"
+                    className="ai-chat-restore-notice__dismiss"
+                    onClick={() => setRestoreNotice(null)}
+                    aria-label={t("aiChat.turnCheckpoint.dismiss")}
+                    title={t("aiChat.turnCheckpoint.dismiss")}
+                    style={{
+                      "--notice-pct": `${((restoreNoticeSeconds ?? RESTORE_NOTICE_SECONDS) / RESTORE_NOTICE_SECONDS) * 100}%`,
+                    } as CSSProperties}
+                  >
+                    <span className="ai-chat-restore-notice__count" aria-hidden="true">
+                      {restoreNoticeSeconds ?? RESTORE_NOTICE_SECONDS}
+                    </span>
+                    <span className="ai-chat-restore-notice__x" aria-hidden="true">×</span>
+                  </button>
+                </div>
+              )}
               {activeChatSession && <AiRetryBanner sessionId={activeChatSession.id} t={t} />}
               {showStandaloneThinking && <AiThinkingIndicator status={activeStatus} t={t} />}
               {activeSessionClosed && <AiChatClosedNotice onRestore={() => restoreAiChatSession(activeAiChatSessionId)} t={t} />}
