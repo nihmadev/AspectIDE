@@ -294,14 +294,14 @@ impl Index {
         if !root.is_dir() {
             return Err(IndexError::NotADirectory(root.to_path_buf()));
         }
-        // Canonicalize the root so the stored key matches whatever the OS
-        // returns from watcher events, then strip any Windows verbatim prefix so
-        // build-walk paths (root-joined) and `normalize_path`'d watcher paths share
-        // one key form. Falls back to lexical normalization (which is still correct
-        // for non-symlink paths and already verbatim-free).
-        let root = root
-            .canonicalize()
-            .map_or_else(|_| normalize_path(root), |c| strip_verbatim(&c));
+        // Normalize the root the SAME way per-file paths are normalized in the
+        // incremental path (`update_file`/`remove_file`/`stage_file`): lexical,
+        // verbatim-stripped, NOT symlink-resolved. `canonicalize` here would
+        // resolve symlinks (e.g. macOS `/var` → `/private/var`) while the
+        // incremental path does not — diverging the stored keys and breaking
+        // `is_ignored`'s `strip_prefix(root)` on symlinked roots. Staying lexical
+        // keeps the build walk and incremental updates in one key form.
+        let root = normalize_path(root);
         let root = root.as_path();
         let paths = collect_source_files(root);
         let (files, cache_dirty) = assemble_files(&paths, prior)?;
