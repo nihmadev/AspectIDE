@@ -156,10 +156,12 @@ pub async fn ai_checkpoint(
                         "Checkpoint not created: none of the {explicit_count} requested path(s) resolved inside the workspace. Pass workspace-relative or in-root absolute file paths."
                     ));
                 }
-                return Ok(serde_json::json!({
-                    "status": "skipped",
-                    "reason": "No file paths were available to snapshot (no paths given and no open editor files). Pass an explicit `paths` array.",
-                }));
+                // E39: the requested snapshot did not happen for a problem reason
+                // (nothing to capture). Surface as an error so a model watching the
+                // tool-error channel does not read this as a successful checkpoint.
+                return Err(
+                    "Checkpoint not created: no file paths were available to snapshot (no paths given and no open editor files). Pass an explicit `paths` array.".to_string(),
+                );
             }
             let mut files = Vec::with_capacity(target_paths.len());
             for path in &target_paths {
@@ -229,21 +231,57 @@ pub async fn ai_checkpoint(
             let cp = select_checkpoint(&root_str, session_id.as_deref(), id.as_ref())?;
             let save = save_to_disk.unwrap_or(true);
             let dry = dry_run.unwrap_or(false);
-            if cp.files.iter().any(|f| f.truncated || f.error.is_some()) {
-                return Ok(serde_json::json!({
-                    "status": "blocked",
-                    "checkpoint": summarize(&cp),
-                    "reason": "Restore refused because snapshot files were truncated or unreadable.",
-                }));
+            // E35 (data loss): a snapshot that was itself capped at capture time does
+            // not hold the file's full content. Writing such a snapshot back would
+            // silently shorten the live file. Refuse and surface an explicit error
+            // (not an Ok "blocked") so a model on the tool-error channel sees failure.
+            let capped_snapshots: Vec<&str> = cp
+                .files
+                .iter()
+                .filter(|f| f.truncated)
+                .map(|f| f.relative_path.as_str())
+                .collect();
+            if !capped_snapshots.is_empty() {
+                return Err(format!(
+                    "Restore refused to avoid data loss: {} snapshot file(s) were capped at {} bytes during capture and do not hold full content: {}. Re-create the checkpoint with a larger maxBytesPerFile before restoring.",
+                    capped_snapshots.len(),
+                    cp.max_bytes_per_file,
+                    capped_snapshots.join(", "),
+                ));
+            }
+            let unreadable_snapshots: Vec<String> = cp
+                .files
+                .iter()
+                .filter_map(|f| {
+                    f.error
+                        .as_ref()
+                        .map(|e| format!("{}: {e}", f.relative_path))
+                })
+                .collect();
+            if !unreadable_snapshots.is_empty() {
+                return Err(format!(
+                    "Restore refused: {} snapshot file(s) were unreadable at capture time and cannot be safely restored: {}.",
+                    unreadable_snapshots.len(),
+                    unreadable_snapshots.join("; "),
+                ));
             }
             // Build restore operations by diffing each file against current state.
             let mut operations: Vec<crate::ai_tools::AiFilePatchOperation> = Vec::new();
             let mut current_read_errors: Vec<String> = Vec::new();
+            // E35: if the live file grew past the byte cap after capture, read_current
+            // only sees a truncated prefix. Comparing the full snapshot against that
+            // prefix can misjudge "changed" and, if judged unchanged, would silently
+            // leave a diverged file in place. Refuse rather than decide on partial data.
+            let mut current_truncated: Vec<String> = Vec::new();
             for file in &cp.files {
                 let current =
                     read_current(&state, &root_str, &file.path, cp.max_bytes_per_file).await;
                 if let Some(err) = &current.error {
                     current_read_errors.push(format!("{}: {}", file.path, err));
+                    continue;
+                }
+                if current.truncated {
+                    current_truncated.push(file.relative_path.clone());
                     continue;
                 }
                 let changed = match (file.existed, current.existed) {
@@ -255,6 +293,8 @@ pub async fn ai_checkpoint(
                     continue;
                 }
                 if file.existed {
+                    // rewrite writes the FULL snapshot text (already verified un-capped
+                    // above), so the restored file is never silently shortened.
                     operations.push(serde_json::from_value(serde_json::json!({
                         "action": if current.disk_exists { "rewrite" } else { "create" },
                         "path": file.path,
@@ -270,20 +310,27 @@ pub async fn ai_checkpoint(
                     );
                 }
             }
+            if !current_truncated.is_empty() {
+                return Err(format!(
+                    "Restore refused to avoid data loss: {} live file(s) now exceed the {}-byte comparison cap, so their current content cannot be fully compared against the snapshot: {}. Re-create the checkpoint with a larger maxBytesPerFile, or restore manually.",
+                    current_truncated.len(),
+                    cp.max_bytes_per_file,
+                    current_truncated.join(", "),
+                ));
+            }
             if !current_read_errors.is_empty() {
-                return Ok(serde_json::json!({
-                    "status": "blocked",
-                    "checkpoint": summarize(&cp),
-                    "reason": format!(
-                        "Restore blocked: cannot read current file(s): {}",
-                        current_read_errors.join("; ")
-                    ),
-                }));
+                return Err(format!(
+                    "Restore blocked: cannot read current file(s): {}",
+                    current_read_errors.join("; ")
+                ));
             }
             if operations.is_empty() {
-                return Ok(
-                    serde_json::json!({ "status": "unchanged", "checkpoint": summarize(&cp) }),
-                );
+                return Ok(serde_json::json!({
+                    "status": "unchanged",
+                    "changed": false,
+                    "checkpoint": summarize(&cp),
+                    "message": "All snapshotted files already match the checkpoint; nothing to restore.",
+                }));
             }
             let op_count = operations.len();
             let result = crate::ai_tools::ai_file_patch(
@@ -295,7 +342,7 @@ pub async fn ai_checkpoint(
             )
             .await?;
             Ok(
-                serde_json::json!({ "status": if dry { "preview" } else { "restored" }, "operations": op_count, "result": result }),
+                serde_json::json!({ "status": if dry { "preview" } else { "restored" }, "changed": true, "operations": op_count, "result": result }),
             )
         }
         "augment" => {
@@ -801,7 +848,99 @@ async fn diff_file(
     if let Some(err) = &current.error {
         diff["currentError"] = serde_json::json!(err);
     }
+    // E38: surface the actual change so a model can decide whether to restore,
+    // instead of seeing only status metadata. Compute a bounded line-level diff
+    // between the snapshot ("from") and current ("to") text. Only meaningful when
+    // neither side was truncated for the comparison — otherwise the diff would be
+    // computed against a partial view and could mislead.
+    if status == "modified" && !file.truncated && !current.truncated {
+        diff["change"] = line_change_summary(&file.text, &current.text);
+    }
     diff
+}
+
+/// Longest-common-subsequence line count between two slices, used to derive
+/// added/removed counts without pulling in an external diff crate.
+fn lcs_line_count(from: &[&str], to: &[&str]) -> usize {
+    if from.is_empty() || to.is_empty() {
+        return 0;
+    }
+    // Rolling two-row DP over the LCS table to keep memory at O(min(len)).
+    let mut prev = vec![0usize; to.len() + 1];
+    let mut curr = vec![0usize; to.len() + 1];
+    for &f in from {
+        for (j, &t) in to.iter().enumerate() {
+            curr[j + 1] = if f == t {
+                prev[j] + 1
+            } else {
+                curr[j].max(prev[j + 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+        curr.fill(0);
+    }
+    prev[to.len()]
+}
+
+/// Bounded added/removed line summary plus a capped preview of changed lines,
+/// so the diff payload shows the model the actual change without being unbounded.
+fn line_change_summary(from_text: &str, to_text: &str) -> serde_json::Value {
+    const MAX_PREVIEW_LINES: usize = 40;
+    const MAX_LINE_LEN: usize = 400;
+
+    let from_lines: Vec<&str> = from_text.lines().collect();
+    let to_lines: Vec<&str> = to_text.lines().collect();
+    let common = lcs_line_count(&from_lines, &to_lines);
+    let removed = from_lines.len().saturating_sub(common);
+    let added = to_lines.len().saturating_sub(common);
+
+    let clip = |line: &str| -> String {
+        let bound = line
+            .char_indices()
+            .take_while(|(i, _)| *i < MAX_LINE_LEN)
+            .last()
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        if bound < line.len() {
+            format!("{}…", &line[..bound])
+        } else {
+            line.to_string()
+        }
+    };
+
+    // Preview: removed lines present in the snapshot but absent from current,
+    // then added lines present in current but absent from the snapshot. This is
+    // a set-style preview (not positional), enough for the model to judge intent.
+    let to_set: std::collections::HashSet<&str> = to_lines.iter().copied().collect();
+    let from_set: std::collections::HashSet<&str> = from_lines.iter().copied().collect();
+    let mut preview: Vec<String> = Vec::new();
+    let mut truncated_preview = false;
+    for line in &from_lines {
+        if !to_set.contains(line) {
+            if preview.len() >= MAX_PREVIEW_LINES {
+                truncated_preview = true;
+                break;
+            }
+            preview.push(format!("- {}", clip(line)));
+        }
+    }
+    if !truncated_preview {
+        for line in &to_lines {
+            if !from_set.contains(line) {
+                if preview.len() >= MAX_PREVIEW_LINES {
+                    truncated_preview = true;
+                    break;
+                }
+                preview.push(format!("+ {}", clip(line)));
+            }
+        }
+    }
+
+    serde_json::json!({
+        "addedLines": added,
+        "removedLines": removed,
+        "preview": preview,
+        "previewTruncated": truncated_preview,
+    })
 }
 
 fn diff_summary(diffs: &[serde_json::Value]) -> serde_json::Value {
@@ -811,6 +950,18 @@ fn diff_summary(diffs: &[serde_json::Value]) -> serde_json::Value {
             .filter(|d| d.get("status").and_then(|v| v.as_str()) == Some(s))
             .count()
     };
+    // E38: roll up the per-file added/removed line counts so the summary conveys
+    // the magnitude of the change, not just how many files differ.
+    let sum_field = |field: &str| -> u64 {
+        diffs
+            .iter()
+            .filter_map(|d| {
+                d.get("change")
+                    .and_then(|c| c.get(field))
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .sum()
+    };
     serde_json::json!({
         "total": diffs.len(),
         "unchanged": count("unchanged"),
@@ -819,6 +970,8 @@ fn diff_summary(diffs: &[serde_json::Value]) -> serde_json::Value {
         "created": count("created"),
         "truncated": count("truncated"),
         "errored": count("error") + count("readError"),
+        "addedLines": sum_field("addedLines"),
+        "removedLines": sum_field("removedLines"),
     })
 }
 
@@ -909,6 +1062,101 @@ mod tests {
         let multi = "héllo";
         let result = decode_utf8_bounded(multi.as_bytes(), 3);
         assert_eq!(result, "hé");
+    }
+
+    #[test]
+    fn lcs_line_count_basic() {
+        assert_eq!(lcs_line_count(&["a", "b", "c"], &["a", "b", "c"]), 3);
+        assert_eq!(lcs_line_count(&["a", "b", "c"], &["a", "x", "c"]), 2);
+        assert_eq!(lcs_line_count(&["a", "b"], &[]), 0);
+        assert_eq!(lcs_line_count(&[], &["a"]), 0);
+        // Insertion in the middle keeps all original lines common.
+        assert_eq!(lcs_line_count(&["a", "c"], &["a", "b", "c"]), 2);
+    }
+
+    #[test]
+    fn line_change_summary_reports_added_removed() {
+        // E38: diff must convey the actual change, not just a status string.
+        let from = "one\ntwo\nthree";
+        let to = "one\ntwo-changed\nthree\nfour";
+        let change = line_change_summary(from, to);
+        // "two" removed; "two-changed" and "four" added.
+        assert_eq!(change["removedLines"].as_u64(), Some(1));
+        assert_eq!(change["addedLines"].as_u64(), Some(2));
+        let preview = change["preview"].as_array().expect("preview array");
+        assert!(preview.iter().any(|l| l.as_str() == Some("- two")));
+        assert!(preview.iter().any(|l| l.as_str() == Some("+ two-changed")));
+        assert!(preview.iter().any(|l| l.as_str() == Some("+ four")));
+        assert_eq!(change["previewTruncated"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn line_change_summary_caps_preview() {
+        // A huge change must produce a bounded, flagged preview.
+        let from = String::new();
+        let to: String = {
+            use std::fmt::Write as _;
+            let mut buf = String::new();
+            for i in 0..500 {
+                let _ = writeln!(buf, "line-{i}");
+            }
+            buf
+        };
+        let change = line_change_summary(&from, &to);
+        assert_eq!(change["addedLines"].as_u64(), Some(500));
+        let preview = change["preview"].as_array().expect("preview array");
+        assert!(preview.len() <= 40, "preview must be capped");
+        assert_eq!(change["previewTruncated"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn diff_summary_rolls_up_line_counts() {
+        // E38: the aggregate summary reflects total added/removed lines.
+        let diffs = vec![
+            serde_json::json!({
+                "status": "modified",
+                "change": { "addedLines": 3, "removedLines": 1 },
+            }),
+            serde_json::json!({
+                "status": "modified",
+                "change": { "addedLines": 2, "removedLines": 4 },
+            }),
+            serde_json::json!({ "status": "unchanged" }),
+        ];
+        let summary = diff_summary(&diffs);
+        assert_eq!(summary["modified"].as_u64(), Some(2));
+        assert_eq!(summary["unchanged"].as_u64(), Some(1));
+        assert_eq!(summary["addedLines"].as_u64(), Some(5));
+        assert_eq!(summary["removedLines"].as_u64(), Some(5));
+    }
+
+    #[tokio::test]
+    async fn capped_snapshot_marks_truncated_for_restore_guard() {
+        // E35 (data loss): a snapshot captured with a byte cap smaller than the
+        // file must be flagged truncated, which the restore path uses to refuse
+        // rather than writing a shortened file back.
+        let dir =
+            std::env::temp_dir().join(format!("lux-ckpt-cap-{}", uuid::Uuid::new_v4().simple()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("big.txt");
+        let file_str = ai_semantic::normalize_slashes_pub(&file_path.to_string_lossy());
+        // Write more bytes than the cap we will snapshot with.
+        tokio::fs::write(&file_str, "X".repeat(5_000))
+            .await
+            .unwrap();
+
+        let snap = snapshot_file_disk(&file_str, "big.txt".into(), 1_024).await;
+        assert!(
+            snap.truncated,
+            "snapshot exceeding the byte cap must be flagged truncated so restore refuses it"
+        );
+        assert!(
+            u64::try_from(snap.text.len()).unwrap_or(u64::MAX) <= 1_024,
+            "captured text must not exceed the cap"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[tokio::test]

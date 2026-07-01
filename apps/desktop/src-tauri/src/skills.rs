@@ -72,6 +72,25 @@ pub fn skills_get(
     lux_skills::read_skill(&roots, &slug).map_err(String::from)
 }
 
+/// Load a skill for the agent-facing `UseSkill` tool, honouring the `enabled`
+/// flag — unlike [`skills_get`], which the Settings UI relies on to load *any*
+/// skill (disabled included) so the user can still edit it.
+///
+/// A disabled skill is deliberately inert: it is hidden from relevance matching
+/// (`skills_match` / `lux_skills::match_skills` filter on `enabled`) and from
+/// automatic injection, so a user who turned it off expects it to stay off.
+/// Resolving one by slug for use must be equally inert — otherwise the model
+/// could resurrect turned-off instructions from a slug it happened to see
+/// earlier in the session. Returns `Ok(None)` when the skill is missing *or*
+/// disabled so the caller reports it unavailable instead of running its body.
+pub fn skill_for_use(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    slug: String,
+) -> Result<Option<Skill>, String> {
+    Ok(skills_get(app, state, slug)?.filter(|skill| skill.enabled))
+}
+
 #[tauri::command]
 pub fn skills_match(
     app: AppHandle,

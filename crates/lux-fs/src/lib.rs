@@ -269,10 +269,38 @@ fn offer_to_bounded_heap(heap: &mut BinaryHeap<PathOrdered>, record: FsEntry, ma
     }
 }
 
+/// Result of a bounded file listing.
+///
+/// Carries the deterministic lexicographically-smallest `entries` plus whether the
+/// workspace held *more* matching files than the cap (`truncated`). Surfacing
+/// truncation lets callers that build aggregates (language mix, directory counts,
+/// "largest" files) avoid silently presenting a lexicographically-biased sample as
+/// if it were the whole project.
+#[derive(Debug, Default)]
+pub struct FileListing {
+    pub entries: Vec<FsEntry>,
+    pub truncated: bool,
+}
+
 pub fn list_files(root: impl AsRef<Path>, max_results: usize) -> AppResult<Vec<FsEntry>> {
+    // The legacy entry point keeps its `Vec<FsEntry>` contract; truncation metadata
+    // is available via [`list_files_scanned`] for callers that want to surface it.
+    Ok(list_files_scanned(root, max_results).entries)
+}
+
+/// Like [`list_files`] but reports whether the listing was truncated by `max_results`.
+///
+/// Returns the deterministic lexicographically-smallest `max_results` file paths
+/// (identical to [`list_files`]) together with a `truncated` flag that is set when the
+/// workspace contains strictly more than `max_results` matching files. A shared
+/// [`AtomicUsize`] counts every matching file the parallel walk encounters — including
+/// the ones the bounded heap evicts — so the flag is exact regardless of which paths
+/// survive to the output. Lexicographic ordering of `entries` is preserved exactly.
+#[must_use]
+pub fn list_files_scanned(root: impl AsRef<Path>, max_results: usize) -> FileListing {
     let root = root.as_ref().to_path_buf();
     if max_results == 0 {
-        return Ok(Vec::new());
+        return FileListing::default();
     }
     let workers = reserve_walk_workers();
     let mut builder = WalkBuilder::new(&root);
@@ -287,12 +315,15 @@ pub fn list_files(root: impl AsRef<Path>, max_results: usize) -> AppResult<Vec<F
     // max-heap, so the many `metadata` syscalls fan out across cores while memory
     // stays capped at `max_results` instead of holding every path in a giant `Vec`
     // before truncating. The result is the deterministic lexicographically-smallest
-    // `max_results` paths.
+    // `max_results` paths. A separate atomic counts *every* matching file seen so we
+    // can tell whether the heap dropped any (i.e. the listing is truncated).
     let heap: Arc<Mutex<BinaryHeap<PathOrdered>>> = Arc::new(Mutex::new(
         BinaryHeap::with_capacity(max_results.min(MAX_LIST_HEAP_RESERVE)),
     ));
+    let seen = Arc::new(AtomicUsize::new(0));
     builder.build_parallel().run(|| {
         let heap = Arc::clone(&heap);
+        let seen = Arc::clone(&seen);
         let root = root.clone();
         Box::new(move |result| {
             let Ok(entry) = result else {
@@ -314,6 +345,7 @@ pub fn list_files(root: impl AsRef<Path>, max_results: usize) -> AppResult<Vec<F
             else {
                 return WalkState::Continue;
             };
+            seen.fetch_add(1, Ordering::Relaxed);
             let record = FsEntry {
                 is_hidden: is_hidden_path(&path, &root),
                 name,
@@ -338,7 +370,8 @@ pub fn list_files(root: impl AsRef<Path>, max_results: usize) -> AppResult<Vec<F
         .unwrap_or_default();
     let mut entries: Vec<FsEntry> = heap.into_iter().map(|ordered| ordered.0).collect();
     entries.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(entries)
+    let truncated = seen.load(Ordering::Relaxed) > max_results;
+    FileListing { entries, truncated }
 }
 
 /// Like [`list_files`] but applies `predicate` to each file path during the walk,
@@ -736,7 +769,7 @@ mod tests {
 
     use lux_core::FsEntryKind;
 
-    use super::{list_files, read_tree, read_tree_bounded, WorkspaceFs};
+    use super::{list_files, list_files_scanned, read_tree, read_tree_bounded, WorkspaceFs};
 
     fn test_root(tag: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -816,6 +849,25 @@ mod tests {
             limited.iter().map(|entry| &entry.path).collect::<Vec<_>>(),
             all.iter().map(|entry| &entry.path).collect::<Vec<_>>(),
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn list_files_scanned_reports_truncation() {
+        let root = test_root("scanned");
+        build_fixture(&root);
+        // The fixture has more than two non-ignored files; a cap of 2 must yield
+        // exactly two entries and flag the listing as truncated.
+        let capped = list_files_scanned(&root, 2);
+        assert_eq!(capped.entries.len(), 2, "cap must hold the entry count");
+        assert!(
+            capped.truncated,
+            "more matching files than the cap must set truncated"
+        );
+        // A generous cap returns everything and is not flagged truncated.
+        let full = list_files_scanned(&root, 100_000);
+        assert!(!full.truncated, "a generous cap must not be truncated");
+        assert!(full.entries.len() > 2);
         std::fs::remove_dir_all(&root).ok();
     }
 

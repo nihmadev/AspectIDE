@@ -1898,10 +1898,21 @@ async fn execute_tool(
         "Read" => {
             let path = json_str(&args, "path");
             let max_bytes = args.get("maxBytes").and_then(serde_json::Value::as_u64);
+            // Optional 1-based line window so the model can page a large file.
+            let start_line = args
+                .get("startLine")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok());
+            let max_lines = args
+                .get("maxLines")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| u32::try_from(v).ok());
             let result = crate::ai_tools::ai_read_file(
                 state.clone(),
                 std::path::PathBuf::from(path),
                 max_bytes,
+                start_line,
+                max_lines,
             )
             .await?;
             // Record the resolved path so a later edit tool can confirm this turn
@@ -2111,39 +2122,101 @@ async fn execute_tool(
             let status = crate::git::git_status(state.clone()).await?;
             serde_json::to_string(&status).map_err(|e| e.to_string())
         }
-        "DiagnosticsContext" | "ReadLints" => {
+        "DiagnosticsContext" => {
             let max = json_usize(&args, "maxResults", 80);
             let diagnostics = crate::lsp::diagnostics_snapshot(state.clone())?;
             let count = diagnostics.len();
             let truncated: Vec<_> = diagnostics.into_iter().take(max).collect();
             Ok(serde_json::json!({ "count": count, "diagnostics": truncated }).to_string())
         }
+        "ReadLints" => {
+            // Honor the advertised path/severity/source filters instead of returning
+            // the whole snapshot. Filtering happens BEFORE the maxResults truncation,
+            // and `count` reports the pre-truncation *filtered* length.
+            let max = json_usize(&args, "maxResults", 80);
+            // Optional path prefix: resolve the requested spelling to the canonical
+            // workspace path so the prefix match works regardless of how the model
+            // referenced it (./x, mixed separators, absolute vs relative).
+            let path_prefix = json_str_opt(&args, "path").map(|raw| {
+                crate::resolve_workspace_path(state, std::path::Path::new(&raw)).map_or_else(
+                    |_| raw.replace('\\', "/"),
+                    |p| p.to_string_lossy().replace('\\', "/"),
+                )
+            });
+            let severity_filter =
+                json_str_opt(&args, "severity").map(|s| s.trim().to_ascii_lowercase());
+            let source_filter =
+                json_str_opt(&args, "source").map(|s| s.trim().to_ascii_lowercase());
+
+            let diagnostics = crate::lsp::diagnostics_snapshot(state.clone())?;
+            let filtered: Vec<_> = diagnostics
+                .into_iter()
+                .filter(|d| {
+                    // Path: prefix match on the canonical diagnostic path.
+                    if let Some(prefix) = &path_prefix {
+                        let diag_path = d.path.to_string_lossy().replace('\\', "/");
+                        if !diag_path.starts_with(prefix.as_str()) {
+                            return false;
+                        }
+                    }
+                    // Severity: case-insensitive match against the enum name
+                    // (Error/Warning/Information/Hint → error/warning/…).
+                    if let Some(want) = &severity_filter {
+                        let sev = format!("{:?}", d.severity).to_ascii_lowercase();
+                        if &sev != want {
+                            return false;
+                        }
+                    }
+                    // Source: case-insensitive match against the diagnostic source.
+                    if let Some(want) = &source_filter {
+                        if d.source.to_ascii_lowercase() != *want {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .collect();
+            let count = filtered.len();
+            let truncated: Vec<_> = filtered.into_iter().take(max).collect();
+            Ok(serde_json::json!({ "count": count, "diagnostics": truncated }).to_string())
+        }
         "AgentMessage" => {
-            let action = json_str(&args, "action");
-            if action == "read" {
-                let topic = json_str_opt(&args, "topic");
-                let limit = args
-                    .get("limit")
-                    .and_then(serde_json::Value::as_u64)
-                    .and_then(|v| usize::try_from(v).ok());
-                let entries =
-                    crate::ai_a2a::ai_blackboard_read(input.session_id.clone(), topic, limit)?;
-                serde_json::to_string(&serde_json::json!({ "action": "read", "messages": entries }))
+            // Normalize the action and route EXPLICITLY: read is the default, an
+            // empty/omitted action reads (never writes), and an unrecognized action
+            // is rejected rather than silently falling through to the write branch.
+            let action = json_str(&args, "action").trim().to_ascii_lowercase();
+            match action.as_str() {
+                "read" | "get" | "" => {
+                    let topic = json_str_opt(&args, "topic");
+                    let limit = args
+                        .get("limit")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|v| usize::try_from(v).ok());
+                    let entries =
+                        crate::ai_a2a::ai_blackboard_read(input.session_id.clone(), topic, limit)?;
+                    serde_json::to_string(
+                        &serde_json::json!({ "action": "read", "messages": entries }),
+                    )
                     .map_err(|e| e.to_string())
-            } else {
-                let content = json_str(&args, "content");
-                let topic = json_str(&args, "topic");
-                if topic.is_empty() || content.is_empty() {
-                    return Err("AgentMessage post requires topic and content.".to_string());
                 }
-                let entry = crate::ai_a2a::ai_blackboard_post(
-                    input.session_id.clone(),
-                    input.agent_mode.clone(),
-                    topic,
-                    content,
-                )?;
-                serde_json::to_string(&serde_json::json!({ "action": "post", "posted": entry }))
-                    .map_err(|e| e.to_string())
+                "post" | "write" | "send" => {
+                    let content = json_str(&args, "content");
+                    let topic = json_str(&args, "topic");
+                    if topic.is_empty() || content.is_empty() {
+                        return Err("AgentMessage post requires topic and content.".to_string());
+                    }
+                    let entry = crate::ai_a2a::ai_blackboard_post(
+                        input.session_id.clone(),
+                        input.agent_mode.clone(),
+                        topic,
+                        content,
+                    )?;
+                    serde_json::to_string(&serde_json::json!({ "action": "post", "posted": entry }))
+                        .map_err(|e| e.to_string())
+                }
+                other => Err(format!(
+                    "AgentMessage: unknown action '{other}' (use 'read' or 'post')."
+                )),
             }
         }
         "PatchEngine" => {
@@ -2200,9 +2273,22 @@ async fn execute_tool(
                     }
                 }
             }
-            let operations: Vec<crate::ai_tools::AiFilePatchOperation> =
-                serde_json::from_value(operations_raw)
-                    .map_err(|e| format!("Invalid patch operations: {e}"))?;
+            // Deserialize op-by-op so a malformed entry names WHICH one (and why)
+            // instead of a bare top-level "missing field `path`" that gives the model
+            // no way to tell which operation to fix.
+            let serde_json::Value::Array(raw_ops) = operations_raw else {
+                return Err("PatchEngine `operations` must be an array.".to_string());
+            };
+            let mut operations: Vec<crate::ai_tools::AiFilePatchOperation> =
+                Vec::with_capacity(raw_ops.len());
+            for (index, raw) in raw_ops.into_iter().enumerate() {
+                let op = serde_json::from_value(raw).map_err(|e| {
+                    format!(
+                        "PatchEngine operation[{index}] is invalid: {e}. Every operation needs at least `action` and `path`."
+                    )
+                })?;
+                operations.push(op);
+            }
             // Automatic mode always persists to disk: staging an edit off-disk would leave
             // work the autonomous agent can never come back to apply. Honor the model arg otherwise.
             let save = if is_automatic {
@@ -2285,18 +2371,37 @@ async fn execute_tool(
             if let Some(v) = args.get("maxRows").and_then(serde_json::Value::as_u64) {
                 options.max_rows = usize::try_from(v).unwrap_or(options.max_rows);
             }
+            // `max_columns` bounds column previews for tabular/spreadsheet/notebook
+            // files only; plain text and source files ignore it (text_preview clips
+            // by bytes, not width). Track whether the model actually asked for it so
+            // we can surface — rather than silently drop — the request below.
+            let max_columns_requested = args
+                .get("maxColumns")
+                .and_then(serde_json::Value::as_u64)
+                .is_some();
             if let Some(v) = args.get("maxColumns").and_then(serde_json::Value::as_u64) {
                 options.max_columns = usize::try_from(v).unwrap_or(options.max_columns);
             }
             if let Some(v) = args.get("maxBytes").and_then(serde_json::Value::as_u64) {
                 options.max_text_bytes = v;
             }
-            let result = crate::file_intel::file_inspect(
+            let mut result = crate::file_intel::file_inspect(
                 state.clone(),
                 std::path::PathBuf::from(path),
                 Some(options),
             )
             .await?;
+            // Honesty: if maxColumns was requested but this resolved to a plain-text/
+            // source preview, tell the model it had no effect here instead of letting
+            // it assume the output was width-bounded.
+            if max_columns_requested && matches!(result.preview, lux_core::FilePreview::Text { .. })
+            {
+                result.warnings.push(
+                    "maxColumns applies only to tabular/spreadsheet/notebook previews; \
+                     it was ignored for this plain-text/source file."
+                        .to_string(),
+                );
+            }
             // InspectFile is a valid "read" for the read-before-edit guard.
             crate::ai_session::mark_file_read(&input.session_id, &result.path);
             serde_json::to_string(&result).map_err(|e| e.to_string())
@@ -2317,16 +2422,23 @@ async fn execute_tool(
             if query.trim().is_empty() {
                 return Err("WebResearch requires a query.".to_string());
             }
-            let focus = match json_str_opt(&args, "focus")
-                .map(|value| value.trim().to_ascii_lowercase())
-                .as_deref()
-            {
-                Some("academic") => lux_research::FocusMode::Academic,
-                Some("news") => lux_research::FocusMode::News,
-                Some("social") => lux_research::FocusMode::Social,
-                Some("video") => lux_research::FocusMode::Video,
-                Some("code") => lux_research::FocusMode::Code,
-                _ => lux_research::FocusMode::Web,
+            // An unrecognized focus previously fell through to Web silently, so the
+            // model believed it ran an academic/code search when it did not. Compute
+            // the focus and a note together and surface the note in the response.
+            let focus_raw = json_str_opt(&args, "focus").map(|v| v.trim().to_ascii_lowercase());
+            let (focus, focus_note) = match focus_raw.as_deref() {
+                None | Some("web" | "") => (lux_research::FocusMode::Web, None),
+                Some("academic") => (lux_research::FocusMode::Academic, None),
+                Some("news") => (lux_research::FocusMode::News, None),
+                Some("social") => (lux_research::FocusMode::Social, None),
+                Some("video") => (lux_research::FocusMode::Video, None),
+                Some("code") => (lux_research::FocusMode::Code, None),
+                Some(other) => (
+                    lux_research::FocusMode::Web,
+                    Some(format!(
+                        "Unrecognized focus '{other}'; used 'web'. Valid: web|academic|news|social|video|code."
+                    )),
+                ),
             };
             let max_sources = args
                 .get("maxSources")
@@ -2340,7 +2452,11 @@ async fn execute_tool(
                 max_sources: max_sources.unwrap_or(options.max_sources),
                 ..options
             };
-            let result = crate::research::web_research(state.clone(), query, Some(options)).await?;
+            let mut result =
+                crate::research::web_research(state.clone(), query, Some(options)).await?;
+            if let Some(note) = focus_note {
+                result.notes.insert(0, note);
+            }
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
 
@@ -2576,30 +2692,40 @@ async fn execute_tool(
                     proxy: None,
                 })
                 .await?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())
+            // Parity with the TS runtime (aiRuntimeBrowser.ts), which throws on
+            // `!result.success`: a failed CLI run (non-zero exit with stdout, or a
+            // `success:false` JSON envelope) must reach the model as an Err — not as
+            // a "successful" tool result whose failure is buried in a JSON field.
+            if result.success {
+                serde_json::to_string(&result).map_err(|e| e.to_string())
+            } else {
+                let detail = result.text.trim();
+                Err(if detail.is_empty() {
+                    format!("{} failed (exit {:?}).", tc.name, result.exit_code)
+                } else {
+                    format!("{} failed (exit {:?}): {detail}", tc.name, result.exit_code)
+                })
+            }
         }
 
         // ── Orchestration tools (session state in Rust) ──
         "Goal" => {
-            let goal = json_str_opt(&args, "goal");
-            // Value is clamped to [0.0, 100.0] before the cast, so the conversion is lossless and non-negative.
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let progress = args
-                .get("progress")
-                .and_then(serde_json::Value::as_f64)
-                .map(|v| v.clamp(0.0, 100.0) as u32);
-            let status = json_str_opt(&args, "status");
-            let summary = json_str_opt(&args, "summary");
-            if let Some(ref g) = goal {
-                crate::ai_session::set_goal(&input.session_id, g);
+            // Only `goal` is persisted (ai_session has no progress/status/summary
+            // state). Previously the arm parsed progress/status/summary and echoed
+            // them straight back, so the model believed they were recorded when
+            // nothing stored them. Surface only what actually persists.
+            if let Some(g) = json_str_opt(&args, "goal") {
+                crate::ai_session::set_goal(&input.session_id, &g);
             }
             let current = crate::ai_session::get_goal(&input.session_id);
             Ok(serde_json::json!({
-                "goal": if current.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(current) },
-                "progress": progress,
-                "status": status,
-                "summary": summary,
-            }).to_string())
+                "goal": if current.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(current)
+                },
+            })
+            .to_string())
         }
         "TodoWrite" => {
             let raw_todos = args.get("todos").and_then(|v| v.as_array());
@@ -2783,7 +2909,7 @@ async fn execute_tool(
         "PresentPlan" => {
             let title = json_str_opt(&args, "title").unwrap_or_else(|| "Plan".to_string());
             let summary = json_str_opt(&args, "summary").unwrap_or_default();
-            let steps: Vec<PlanStep> = args
+            let mut steps: Vec<PlanStep> = args
                 .get("steps")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -2820,17 +2946,24 @@ async fn execute_tool(
                                     .to_string(),
                             })
                         })
-                        .take(40)
                         .collect()
                 })
                 .unwrap_or_default();
             if steps.is_empty() {
                 return Err("PresentPlan requires at least one step (array of strings or { title, detail, file }).".to_string());
             }
+            // Inputs are capped, but the caller was never told when items were
+            // dropped (stepCount reported the post-truncation length). Capture the
+            // submitted count + a truncated flag, then truncate, so the response can
+            // signal the loss instead of silently shrinking the pinned task list.
+            const STEP_CAP: usize = 40;
+            let steps_submitted = steps.len();
+            let steps_truncated = steps_submitted > STEP_CAP;
+            steps.truncate(STEP_CAP);
             // Structured reasoning phases (think-mcp parity): the key decision(s),
             // the failure modes, and the verification checks. Each accepts strings
             // or objects and is optional — the gate only expects them on risky work.
-            let alternatives: Vec<PlanDecision> = args
+            let mut alternatives: Vec<PlanDecision> = args
                 .get("alternatives")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -2860,12 +2993,23 @@ async fn execute_tool(
                                     .to_string(),
                             })
                         })
-                        .take(8)
                         .collect()
                 })
                 .unwrap_or_default();
-            let risks: Vec<String> = json_str_array(&args, "risks", 12);
-            let verification: Vec<String> = json_str_array(&args, "verification", 12);
+            const ALTERNATIVE_CAP: usize = 8;
+            let alternatives_submitted = alternatives.len();
+            let alternatives_truncated = alternatives_submitted > ALTERNATIVE_CAP;
+            alternatives.truncate(ALTERNATIVE_CAP);
+            const RISK_CAP: usize = 12;
+            const VERIFICATION_CAP: usize = 12;
+            let mut risks: Vec<String> = json_str_array(&args, "risks", usize::MAX);
+            let risks_submitted = risks.len();
+            let risks_truncated = risks_submitted > RISK_CAP;
+            risks.truncate(RISK_CAP);
+            let mut verification: Vec<String> = json_str_array(&args, "verification", usize::MAX);
+            let verification_submitted = verification.len();
+            let verification_truncated = verification_submitted > VERIFICATION_CAP;
+            verification.truncate(VERIFICATION_CAP);
             // Pin the plan as the session goal + task list so the rail reflects it
             // immediately, regardless of mode.
             if summary.trim().is_empty() {
@@ -2929,7 +3073,7 @@ async fn execute_tool(
             };
             // Prepend coaching so the model addresses gaps — on the next step in
             // Automatic, or by revising the plan before the user starts it otherwise.
-            let guidance = if coaching.is_empty() {
+            let mut guidance = if coaching.is_empty() {
                 base_guidance.to_string()
             } else {
                 format!(
@@ -2938,8 +3082,29 @@ async fn execute_tool(
                     coaching.join(" ")
                 )
             };
+            // Tell the model when its plan was clipped so it can re-submit tighter or
+            // split it — the pinned task list only holds the kept steps.
+            if steps_truncated
+                || alternatives_truncated
+                || risks_truncated
+                || verification_truncated
+            {
+                guidance.push_str(
+                    "\nNote: some inputs exceeded their caps and were truncated (the pinned \
+                     task list holds only the kept items). Re-submit a tighter plan, or split \
+                     it, if the dropped items matter.",
+                );
+            }
             Ok(serde_json::json!({
                 "stepCount": steps.len(),
+                "stepsSubmitted": steps_submitted,
+                "stepsTruncated": steps_truncated,
+                "alternativesSubmitted": alternatives_submitted,
+                "alternativesTruncated": alternatives_truncated,
+                "risksSubmitted": risks_submitted,
+                "risksTruncated": risks_truncated,
+                "verificationSubmitted": verification_submitted,
+                "verificationTruncated": verification_truncated,
                 "autoStart": auto_start,
                 "quality": quality,
                 "coaching": coaching,
@@ -2950,11 +3115,39 @@ async fn execute_tool(
 
         "ActiveContext" => {
             let workspace = crate::workspace_root(state).ok();
+            let include_active_text = args
+                .get("includeActiveText")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let documents = state.documents.lock().map_err(|e| e.to_string())?;
             // Capture the true open-document count BEFORE truncating to the cap,
             // so the model is told the real total (mirrors DiagnosticsContext).
             let snaps = documents.snapshots();
             let open_document_count = snaps.len();
+            let active_path = input.active_document_path.clone();
+            // Honor the advertised `includeActiveText`: surface a bounded copy of the
+            // active buffer's LIVE text (editor state, so unsaved edits are reflected —
+            // which a disk read via ReadFile would miss). The borrow ends once the
+            // owned (String, bool) is produced, before `snaps.into_iter()` below.
+            let active_text = if include_active_text {
+                active_path
+                    .as_deref()
+                    .and_then(|active| {
+                        snaps.iter().find(|doc| {
+                            doc.path
+                                .as_ref()
+                                .is_some_and(|p| p.to_string_lossy() == active)
+                        })
+                    })
+                    .map(|doc| {
+                        const ACTIVE_TEXT_CHAR_LIMIT: usize = 20_000;
+                        let text: String = doc.text.chars().take(ACTIVE_TEXT_CHAR_LIMIT).collect();
+                        let truncated = text.len() < doc.text.len();
+                        (text, truncated)
+                    })
+            } else {
+                None
+            };
             let open_docs: Vec<serde_json::Value> = snaps
                 .into_iter()
                 .take(json_usize(&args, "maxOpenDocuments", 24))
@@ -2965,10 +3158,11 @@ async fn execute_tool(
                     "size": doc.text.len(),
                 }))
                 .collect();
-            let active_path = input.active_document_path.clone();
             Ok(serde_json::json!({
                 "workspace": workspace.map(|w| serde_json::json!({ "root": w.to_string_lossy() })),
                 "activeDocument": active_path,
+                "activeDocumentText": active_text.as_ref().map(|(text, _)| text.as_str()),
+                "activeDocumentTextTruncated": active_text.as_ref().map(|(_, truncated)| *truncated),
                 "openDocumentCount": open_document_count,
                 "openDocuments": open_docs,
                 "aiRuntime": {
@@ -2981,16 +3175,35 @@ async fn execute_tool(
         }
         "SecretGuard" => {
             let text = json_str(&args, "text");
-            if text.is_empty() {
-                Ok(serde_json::json!({ "status": "clean", "findingCount": 0 }).to_string())
+            let max_findings = json_usize(&args, "maxFindings", 50);
+            let return_redacted = args
+                .get("returnRedactedText")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let (findings, redacted) = scan_secrets(&text, max_findings, return_redacted);
+            let status = if findings.is_empty() {
+                "clean"
             } else {
-                Ok(serde_json::json!({
-                    "status": "scanned",
-                    "scannedBytes": text.len(),
-                    "notes": ["Secret scanning runs inline — check the text before sharing."],
-                })
-                .to_string())
+                "findings"
+            };
+            // `redactedText` is present only when redaction was requested AND at
+            // least one token matched; otherwise the field is omitted entirely.
+            let redacted_value =
+                redacted.map_or(serde_json::Value::Null, serde_json::Value::String);
+            let mut result = serde_json::Map::new();
+            result.insert("status".to_string(), serde_json::Value::from(status));
+            result.insert(
+                "findingCount".to_string(),
+                serde_json::Value::from(findings.len()),
+            );
+            result.insert(
+                "findings".to_string(),
+                serde_json::to_value(&findings).map_err(|e| e.to_string())?,
+            );
+            if !redacted_value.is_null() {
+                result.insert("redactedText".to_string(), redacted_value);
             }
+            Ok(serde_json::Value::Object(result).to_string())
         }
 
         "RulesContext" => {
@@ -3036,13 +3249,37 @@ async fn execute_tool(
                 .and_then(|v| usize::try_from(v).ok())
                 .unwrap_or(8);
             let options = lux_memory::SearchOptions {
-                category,
+                category: category.clone(),
                 limit,
                 ..Default::default()
             };
             let hits =
                 crate::memory::memory_search(app.clone(), state.clone(), query, Some(options))
                     .await?;
+            // `category` is forwarded as an exact-match SQL filter, so a typo or an
+            // empty label returns [] that is indistinguishable from "nothing stored".
+            // When the result is empty AND a category was supplied AND it is absent
+            // from the store's actual categories, surface the real categories so the
+            // model can fix its filter instead of concluding no memory is relevant.
+            if hits.is_empty() {
+                if let Some(requested) = &category {
+                    let existing: Vec<String> =
+                        crate::memory::memory_stats(app.clone(), state.clone())
+                            .await
+                            .map(|s| s.by_category.into_iter().map(|c| c.category).collect())
+                            .unwrap_or_default();
+                    if !existing.is_empty() && !existing.iter().any(|c| c == requested) {
+                        return serde_json::to_string(&serde_json::json!({
+                            "memories": hits,
+                            "note": format!(
+                                "no memories in category '{requested}'; existing categories: {}",
+                                existing.join(", ")
+                            ),
+                        }))
+                        .map_err(|e| e.to_string());
+                    }
+                }
+            }
             serde_json::to_string(&serde_json::json!({ "memories": hits }))
                 .map_err(|e| e.to_string())
         }
@@ -3053,6 +3290,38 @@ async fn execute_tool(
             }
             let category =
                 json_str_opt(&args, "category").unwrap_or_else(|| "semantic".to_string());
+            // Dedup: the store mints a fresh uuid on every call, so re-remembering
+            // the same fact silently piles up duplicate rows that later pollute
+            // recall. Probe for a byte-identical (after trim) memory in the same
+            // category and short-circuit with a `duplicate` signal so the model gets
+            // the feedback loop it needs to stop re-saving known facts. Only exact
+            // trimmed-content matches dedup; every genuinely new fact still inserts.
+            let probe = lux_memory::SearchOptions {
+                category: Some(category.clone()),
+                limit: 1,
+                touch: false,
+                ..Default::default()
+            };
+            if let Ok(existing) = crate::memory::memory_search(
+                app.clone(),
+                state.clone(),
+                content.clone(),
+                Some(probe),
+            )
+            .await
+            {
+                if let Some(hit) = existing.into_iter().next() {
+                    if hit.lexical >= 0.999 && hit.memory.content.trim() == content.trim() {
+                        return serde_json::to_string(&serde_json::json!({
+                            "status": "duplicate",
+                            "existingId": hit.memory.id,
+                            "category": hit.memory.category,
+                            "importance": hit.memory.importance,
+                        }))
+                        .map_err(|e| e.to_string());
+                    }
+                }
+            }
             let input = lux_memory::NewMemory {
                 category,
                 content,
@@ -3066,6 +3335,9 @@ async fn execute_tool(
                 "status": "remembered",
                 "id": memory.id,
                 "category": memory.category,
+                // Echo the effective (store-clamped to [0,1]) importance so the model
+                // sees the applied weight rather than assuming its raw value stuck.
+                "importance": memory.importance,
             }))
             .map_err(|e| e.to_string())
         }
@@ -3095,7 +3367,19 @@ async fn execute_tool(
         }
         "UseSkill" => {
             let slug = json_str(&args, "slug");
-            match crate::skills::skills_get(app.clone(), state.clone(), slug.clone())? {
+            // Distinguish "no slug passed" from "unknown slug": an empty/whitespace
+            // slug otherwise produced `no skill named ` (blank name), which reads like
+            // a formatting bug rather than actionable guidance.
+            if slug.trim().is_empty() {
+                return Ok(serde_json::json!({
+                    "error": "slug is required; call ListSkills to get a valid slug"
+                })
+                .to_string());
+            }
+            // A11: use the enabled-aware loader so a DISABLED skill is not returned as
+            // authoritative instructions — it resolves to None here (reported as "no
+            // skill named …"), while the Settings UI keeps using skills_get.
+            match crate::skills::skill_for_use(app.clone(), state.clone(), slug.clone())? {
                 Some(skill) => serde_json::to_string(&serde_json::json!({
                     "slug": skill.slug,
                     "name": skill.name,
@@ -3284,6 +3568,15 @@ async fn execute_tool(
                 .get("includeTestHealth")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(true);
+            // Honor the advertised params the arm previously dropped: `log` (the raw
+            // failing output the model pasted to be analyzed), `includeDiagnostics`
+            // (noise suppression), and `maxFindings` (wider/narrower view).
+            let provided_log = json_str_opt(&args, "log");
+            let include_diagnostics = args
+                .get("includeDiagnostics")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let max_findings = json_usize(&args, "maxFindings", 40).clamp(1, 500);
             let root = crate::workspace_root(state).ok();
             let test_result = if include_test_health {
                 if let Some(ref root) = root {
@@ -3307,11 +3600,21 @@ async fn execute_tool(
                     {
                         // If approval is denied / rejected, skip the test-health step
                         // but still return diagnostics — partial analysis is useful.
+                        let denied_diag_count = if include_diagnostics {
+                            crate::lsp::diagnostics_snapshot(state.clone())
+                                .unwrap_or_default()
+                                .len()
+                        } else {
+                            0
+                        };
+                        // This branch diverges (returns), so moving `provided_log`
+                        // here does not conflict with the final return's move.
                         return Ok(serde_json::json!({
                             "testHealth": serde_json::Value::Null,
                             "testHealthSkipped": true,
                             "testHealthSkipReason": e,
-                            "diagnosticCount": crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default().len(),
+                            "providedLog": provided_log,
+                            "diagnosticCount": denied_diag_count,
                             "notes": ["TestHealth step was not approved; diagnostics only."],
                         })
                         .to_string());
@@ -3323,12 +3626,20 @@ async fn execute_tool(
             } else {
                 None
             };
-            let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
+            let diagnostics = if include_diagnostics {
+                crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let diagnostic_count = diagnostics.len();
             Ok(serde_json::json!({
                 "testHealth": test_result,
-                "diagnosticCount": diagnostics.len(),
-                "diagnostics": diagnostics.into_iter().take(40).collect::<Vec<_>>(),
-                "notes": ["Analyze failing tests and diagnostics above to identify root causes."],
+                // Surface the pasted failing output back in the payload so `log` is
+                // an analyzed input instead of being silently discarded.
+                "providedLog": provided_log,
+                "diagnosticCount": diagnostic_count,
+                "diagnostics": diagnostics.into_iter().take(max_findings).collect::<Vec<_>>(),
+                "notes": ["Analyze the provided failing output (providedLog), tests, and diagnostics above to identify root causes."],
             })
             .to_string())
         }
@@ -3336,9 +3647,23 @@ async fn execute_tool(
         "ImpactAnalysis" => {
             let query = json_str_opt(&args, "query").unwrap_or_default();
             let path = json_str_opt(&args, "path").or_else(|| input.active_document_path.clone());
-            let max_results = json_usize(&args, "maxResults", 32);
-            // Compose: RelatedFiles + diagnostics + symbols.
-            let related = crate::ai_related::ai_related_files(
+            // ai_related_files clamps maxResults to 1..=120; surface the clip so a
+            // model requesting 500 isn't misled that a small result set is the true
+            // blast radius rather than a clipped one.
+            const MAX_AFFECTED_FILES: usize = 120;
+            let requested_max = json_usize(&args, "maxResults", 32);
+            let max_results = requested_max.clamp(1, MAX_AFFECTED_FILES);
+            let mut notes: Vec<String> = Vec::new();
+            if requested_max > MAX_AFFECTED_FILES {
+                notes.push(format!(
+                    "maxResults {requested_max} exceeds the affected-files ceiling; capped at {MAX_AFFECTED_FILES} (governs affectedFiles only; symbol coverage is fixed)."
+                ));
+            }
+            // Compose: RelatedFiles + diagnostics + symbols. Surface backend errors
+            // instead of collapsing them into null — for a risk tool, "the analysis
+            // failed" must be distinguishable from "nothing is affected".
+            let mut had_error = false;
+            let related = match crate::ai_related::ai_related_files(
                 state.clone(),
                 path.clone(),
                 Some(query.clone()),
@@ -3346,12 +3671,19 @@ async fn execute_tool(
                 Some(5000),
             )
             .await
-            .ok();
+            {
+                Ok(r) => Some(r),
+                Err(e) => {
+                    had_error = true;
+                    notes.push(format!("related-files analysis failed: {e}"));
+                    None
+                }
+            };
             let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
             let symbols = if query.is_empty() {
                 None
             } else {
-                crate::ai_tools::ai_symbol_context(
+                match crate::ai_tools::ai_symbol_context(
                     state.clone(),
                     Some(query.clone()),
                     path.clone().map(std::path::PathBuf::from),
@@ -3360,7 +3692,14 @@ async fn execute_tool(
                     Some(40),
                 )
                 .await
-                .ok()
+                {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        had_error = true;
+                        notes.push(format!("symbol-context analysis failed: {e}"));
+                        None
+                    }
+                }
             };
             let diag_count = diagnostics.len();
             let risk = if diag_count > 10 {
@@ -3370,6 +3709,12 @@ async fn execute_tool(
             } else {
                 "low"
             };
+            if had_error {
+                notes.insert(
+                    0,
+                    "Some analyses errored; null affectedFiles/symbols mean the computation failed, not an empty blast radius.".to_string(),
+                );
+            }
             Ok(serde_json::json!({
                 "target": path,
                 "query": query,
@@ -3378,23 +3723,113 @@ async fn execute_tool(
                 "symbols": symbols,
                 "diagnosticCount": diag_count,
                 "diagnostics": diagnostics.into_iter().take(24).collect::<Vec<_>>(),
+                "notes": notes,
             })
             .to_string())
         }
 
         "TerminalContext" => {
-            // Terminal session + output state is buffered in React; passed through TurnInput.
-            Ok(input.terminal_context.as_ref().map_or_else(
-                || {
-                    serde_json::json!({
-                        "sessionCount": 0,
-                        "sessions": [],
-                        "notes": ["No terminal context was provided for this turn."],
+            // Terminal session + output state is buffered in React; passed through
+            // TurnInput. Honor the advertised sessionId (scope to one session) and
+            // maxChars (clip each output buffer's tail) instead of echoing the whole
+            // unbounded blob.
+            let Some(ctx) = input.terminal_context.as_ref() else {
+                return Ok(serde_json::json!({
+                    "sessionCount": 0,
+                    "sessions": [],
+                    "notes": ["No terminal context was provided for this turn."],
+                })
+                .to_string());
+            };
+            let session_filter = json_str_opt(&args, "sessionId");
+            // Default 12k, clamped to a sane window so a huge value can't defeat the clip.
+            let max_chars = json_usize(&args, "maxChars", 12_000).clamp(1, 100_000);
+
+            let active_terminal_id = ctx
+                .get("activeTerminalId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let output_buffers = ctx.get("outputBuffers").and_then(|v| v.as_object());
+            let raw_sessions = ctx
+                .get("sessions")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            // Clip a buffer's text to the tail (most recent output) up to max_chars.
+            let clip_tail = |text: &str| -> String {
+                let count = text.chars().count();
+                if count <= max_chars {
+                    text.to_string()
+                } else {
+                    text.chars().skip(count - max_chars).collect()
+                }
+            };
+
+            // Determine which session ids to report. When a filter is given, keep only
+            // that one; otherwise keep every session present in the context.
+            let session_ids: Vec<String> = {
+                let mut ids: Vec<String> = raw_sessions
+                    .iter()
+                    .filter_map(|s| {
+                        s.get("id")
+                            .or_else(|| s.get("sessionId"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
                     })
-                    .to_string()
-                },
-                std::string::ToString::to_string,
-            ))
+                    .collect();
+                // Fall back to buffer keys if the sessions array carried no ids.
+                if ids.is_empty() {
+                    if let Some(buffers) = output_buffers {
+                        ids = buffers.keys().cloned().collect();
+                    }
+                }
+                match &session_filter {
+                    Some(want) => ids.into_iter().filter(|id| id == want).collect(),
+                    None => ids,
+                }
+            };
+
+            let sessions: Vec<serde_json::Value> = session_ids
+                .iter()
+                .map(|id| {
+                    let meta = raw_sessions.iter().find(|s| {
+                        s.get("id")
+                            .or_else(|| s.get("sessionId"))
+                            .and_then(|v| v.as_str())
+                            == Some(id.as_str())
+                    });
+                    let text = output_buffers
+                        .and_then(|b| b.get(id.as_str()))
+                        .and_then(|buf| buf.get("text"))
+                        .and_then(|v| v.as_str())
+                        .map(clip_tail)
+                        .unwrap_or_default();
+                    serde_json::json!({
+                        "id": id,
+                        "active": active_terminal_id.as_deref() == Some(id.as_str()),
+                        "title": meta.and_then(|m| m.get("title")).and_then(|v| v.as_str()),
+                        "cwd": meta.and_then(|m| m.get("cwd")).and_then(|v| v.as_str()),
+                        "output": text,
+                    })
+                })
+                .collect();
+
+            // A sessionId filter that matched nothing is worth flagging to the model.
+            let mut notes: Vec<String> = Vec::new();
+            if let Some(want) = &session_filter {
+                if sessions.is_empty() {
+                    notes.push(format!("No terminal session matched sessionId '{want}'."));
+                }
+            }
+            Ok(serde_json::json!({
+                "sessionCount": sessions.len(),
+                "activeTerminalId": active_terminal_id,
+                "maxChars": max_chars,
+                "sessions": sessions,
+                "notes": notes,
+            })
+            .to_string())
         }
         "TerminalWrite" => {
             let data = json_str(&args, "data");
@@ -3435,8 +3870,20 @@ async fn execute_tool(
             if description.is_empty() || prompt.is_empty() {
                 return Err("Task requires description and prompt.".to_string());
             }
+            // `resume` is advertised but not implemented — do NOT silently drop it.
+            // Reject any non-empty value so the model knows to start fresh instead
+            // of assuming a prior subagent context was reattached.
+            if json_str_opt(&args, "resume").is_some() {
+                return Err(
+                    "Task resume is not yet supported; omit `resume` to start a fresh subagent."
+                        .to_string(),
+                );
+            }
             let subagent_type = json_str_opt(&args, "subagent_type")
                 .unwrap_or_else(|| "generalPurpose".to_string());
+            // Optional per-subagent model override; falls back to the parent/session
+            // model inside run_subagent when absent.
+            let model_override = json_str_opt(&args, "model");
             let agent_id = format!("subagent-{}", uuid::Uuid::new_v4().simple());
             // `turn_id` here is the real parent turn id: subagents cannot spawn
             // Task (blocked inline below), so run_subagent is only reached on the
@@ -3452,6 +3899,7 @@ async fn execute_tool(
                 &description,
                 &prompt,
                 &subagent_type,
+                model_override.as_deref(),
             )
             .await?;
             Ok(serde_json::json!({
@@ -3468,64 +3916,121 @@ async fn execute_tool(
                 return Err("ContextBudgeter requires a non-empty query.".to_string());
             }
             let target_chars = json_usize(&args, "targetChars", 16_000).clamp(2_000, 22_000);
+            // Honor the advertised knobs the arm previously ignored. Defaults
+            // reproduce today's behavior (tool context on, no editor text).
+            let include_active = args
+                .get("includeActiveText")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let include_open = args
+                .get("includeOpenDocuments")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let include_tools = args
+                .get("includeToolContext")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            let max_items = json_usize(&args, "maxItems", 28).clamp(4, 80);
             // Compose ranked context from native tools, then budget-select by score.
             let mut items: Vec<(String, String, i64)> = Vec::new(); // (kind, content, score)
-            if let Ok(rc) = crate::ai_context_sources::ai_rules_context(
-                state.clone(),
-                Some(query.clone()),
-                Some(6),
-                None,
-            )
-            .await
-            {
-                for f in rc.files {
-                    items.push((
-                        "rule".into(),
-                        format!("{}: {}", f.relative_path, f.text),
-                        60,
-                    ));
+                                                                    // Editor buffers (active/open) pulled first; the lock is scoped so the
+                                                                    // guard is dropped before any of the async context sources below (a
+                                                                    // MutexGuard must not be held across an await).
+            if include_active || include_open {
+                if let Ok(documents) = state.documents.lock() {
+                    let snaps = documents.snapshots();
+                    let active = input.active_document_path.as_deref();
+                    if include_active {
+                        if let Some(active_path) = active {
+                            if let Some(doc) = snaps.iter().find(|doc| {
+                                doc.path
+                                    .as_ref()
+                                    .is_some_and(|p| p.to_string_lossy() == active_path)
+                            }) {
+                                let text: String = doc.text.chars().take(4_000).collect();
+                                items.push((
+                                    "active-text".into(),
+                                    format!("{active_path}: {text}"),
+                                    90,
+                                ));
+                            }
+                        }
+                    }
+                    if include_open {
+                        for doc in &snaps {
+                            let path = doc
+                                .path
+                                .as_ref()
+                                .map_or_else(String::new, |p| p.to_string_lossy().to_string());
+                            // Skip the active buffer already added above.
+                            if include_active && active == Some(path.as_str()) {
+                                continue;
+                            }
+                            let excerpt: String = doc.text.chars().take(2_000).collect();
+                            items.push(("open-document".into(), format!("{path}: {excerpt}"), 70));
+                        }
+                    }
                 }
             }
-            if let Ok(mc) = crate::ai_context_sources::ai_memory_context(
-                state.clone(),
-                Some(query.clone()),
-                Some(6),
-                None,
-            )
-            .await
-            {
-                for f in mc.files {
-                    items.push((
-                        "memory".into(),
-                        format!("{}: {}", f.relative_path, f.text),
-                        55,
-                    ));
+            // Gate the ranked read-only tool sources behind `includeToolContext`.
+            if include_tools {
+                if let Ok(rc) = crate::ai_context_sources::ai_rules_context(
+                    state.clone(),
+                    Some(query.clone()),
+                    Some(6),
+                    None,
+                )
+                .await
+                {
+                    for f in rc.files {
+                        items.push((
+                            "rule".into(),
+                            format!("{}: {}", f.relative_path, f.text),
+                            60,
+                        ));
+                    }
                 }
-            }
-            if let Ok(rf) = crate::ai_related::ai_related_files(
-                state.clone(),
-                input.active_document_path.clone(),
-                Some(query.clone()),
-                Some(18),
-                Some(5000),
-            )
-            .await
-            {
-                for f in rf.files {
-                    items.push((
-                        "related-file".into(),
-                        format!("{} (score {})", f.relative_path, f.score),
-                        40 + f.score.min(40),
-                    ));
+                if let Ok(mc) = crate::ai_context_sources::ai_memory_context(
+                    state.clone(),
+                    Some(query.clone()),
+                    Some(6),
+                    None,
+                )
+                .await
+                {
+                    for f in mc.files {
+                        items.push((
+                            "memory".into(),
+                            format!("{}: {}", f.relative_path, f.text),
+                            55,
+                        ));
+                    }
                 }
-            }
-            if let Ok(diag) = crate::lsp::diagnostics_snapshot(state.clone()) {
-                for d in diag.into_iter().take(20) {
-                    items.push((
-                        "diagnostic".into(),
-                        serde_json::to_string(&d).unwrap_or_default(),
-                        50,
-                    ));
+                if let Ok(rf) = crate::ai_related::ai_related_files(
+                    state.clone(),
+                    input.active_document_path.clone(),
+                    Some(query.clone()),
+                    Some(18),
+                    Some(5000),
+                )
+                .await
+                {
+                    for f in rf.files {
+                        items.push((
+                            "related-file".into(),
+                            format!("{} (score {})", f.relative_path, f.score),
+                            40 + f.score.min(40),
+                        ));
+                    }
+                }
+                if let Ok(diag) = crate::lsp::diagnostics_snapshot(state.clone()) {
+                    for d in diag.into_iter().take(20) {
+                        items.push((
+                            "diagnostic".into(),
+                            serde_json::to_string(&d).unwrap_or_default(),
+                            50,
+                        ));
+                    }
                 }
             }
             // Rank by score desc, then budget-select.
@@ -3533,7 +4038,9 @@ async fn execute_tool(
             let mut selected = Vec::new();
             let mut used = 0usize;
             for (kind, content, score) in items {
-                if used >= target_chars {
+                // Honor `maxItems` as a hard cap on packet size alongside the
+                // character budget.
+                if used >= target_chars || selected.len() >= max_items {
                     break;
                 }
                 let clamped: String = content.chars().take(1800).collect();
@@ -3617,14 +4124,33 @@ async fn execute_tool(
             let symbol = json_str(&args, "symbol");
             let result = crate::code_graph::with_index(state.inner(), |index| {
                 let graph = index.graph();
-                match lux_codegraph::resolve_one(graph, &symbol) {
-                    Some(node) => Ok(serde_json::json!({
+                // resolve_symbol returns ALL matches (exact → prefix → substring);
+                // resolve_one only surfaced the first, hiding ambiguity from the
+                // model. Keep the first as the primary and surface the rest.
+                let matches = lux_codegraph::resolve_symbol(graph, &symbol);
+                if let Some(first) = matches.first() {
+                    let definitions: Vec<serde_json::Value> = matches
+                        .iter()
+                        .map(|n| serde_json::json!({"name": n.name, "file": n.file, "line": n.line}))
+                        .collect();
+                    let match_count = definitions.len();
+                    let mut out = serde_json::json!({
                         "found": true,
-                        "name": node.name,
-                        "file": node.file,
-                        "line": node.line,
-                    })),
-                    None => Ok(serde_json::json!({"found": false, "note": format!("No symbol matching '{symbol}' in the code graph.")})),
+                        "name": first.name,
+                        "file": first.file,
+                        "line": first.line,
+                        "matchCount": match_count,
+                        "definitions": definitions,
+                    });
+                    if match_count > 1 {
+                        out["ambiguous"] = serde_json::json!(true);
+                        out["note"] = serde_json::json!(format!(
+                            "'{symbol}' matched {match_count} definitions (exact/prefix/substring); \"name/file/line\" is the best (first) match. See \"definitions\" for the rest."
+                        ));
+                    }
+                    Ok(out)
+                } else {
+                    Ok(serde_json::json!({"found": false, "note": format!("No symbol matching '{symbol}' in the code graph.")}))
                 }
             }).await?;
             Ok(result.to_string())
@@ -3633,14 +4159,32 @@ async fn execute_tool(
             let symbol = json_str(&args, "symbol");
             let result = crate::code_graph::with_index(state.inner(), |index| {
                 let graph = index.graph();
-                let Some(nr) = lux_codegraph::resolve_one(graph, &symbol) else {
+                let matches = lux_codegraph::resolve_symbol(graph, &symbol);
+                let Some(nr) = matches.first().cloned() else {
                     return Ok(serde_json::json!({"found": false, "note": format!("Unknown symbol: {symbol}")}));
                 };
+                let match_count = matches.len();
                 let callers: Vec<serde_json::Value> = lux_codegraph::callers(graph, nr.node)
                     .into_iter()
                     .map(|r| serde_json::json!({"name": r.name, "file": r.file, "line": r.line}))
                     .collect();
-                Ok(serde_json::json!({"symbol": nr.name, "callers": callers}))
+                let mut out = serde_json::json!({
+                    "symbol": nr.name,
+                    "matchCount": match_count,
+                    "ambiguous": match_count > 1,
+                    "callers": callers,
+                });
+                if match_count > 1 {
+                    // Surface the alternates in-band so the model can pick the right
+                    // node (CodeGraphDefinition also collapses, so it cannot help).
+                    let alternates: Vec<serde_json::Value> = matches.iter().take(6)
+                        .map(|m| serde_json::json!({"name": m.name, "file": m.file, "line": m.line}))
+                        .collect();
+                    out["note"] = serde_json::json!(format!(
+                        "'{symbol}' fuzzily matched {match_count} symbols (exact->prefix->substring, case-insensitive); using the first ('{}'). Re-query with a fully-qualified/exact name if this is the wrong one.", nr.name));
+                    out["alternates"] = serde_json::json!(alternates);
+                }
+                Ok(out)
             }).await?;
             Ok(result.to_string())
         }
@@ -3648,14 +4192,30 @@ async fn execute_tool(
             let symbol = json_str(&args, "symbol");
             let result = crate::code_graph::with_index(state.inner(), |index| {
                 let graph = index.graph();
-                let Some(nr) = lux_codegraph::resolve_one(graph, &symbol) else {
+                let matches = lux_codegraph::resolve_symbol(graph, &symbol);
+                let Some(nr) = matches.first().cloned() else {
                     return Ok(serde_json::json!({"found": false, "note": format!("Unknown symbol: {symbol}")}));
                 };
+                let match_count = matches.len();
                 let callees: Vec<serde_json::Value> = lux_codegraph::callees(graph, nr.node)
                     .into_iter()
                     .map(|r| serde_json::json!({"name": r.name, "file": r.file, "line": r.line}))
                     .collect();
-                Ok(serde_json::json!({"symbol": nr.name, "callees": callees}))
+                let mut out = serde_json::json!({
+                    "symbol": nr.name,
+                    "matchCount": match_count,
+                    "ambiguous": match_count > 1,
+                    "callees": callees,
+                });
+                if match_count > 1 {
+                    let alternates: Vec<serde_json::Value> = matches.iter().take(6)
+                        .map(|m| serde_json::json!({"name": m.name, "file": m.file, "line": m.line}))
+                        .collect();
+                    out["note"] = serde_json::json!(format!(
+                        "'{symbol}' fuzzily matched {match_count} symbols (exact->prefix->substring, case-insensitive); using the first ('{}'). Re-query with a fully-qualified/exact name if this is the wrong one.", nr.name));
+                    out["alternates"] = serde_json::json!(alternates);
+                }
+                Ok(out)
             }).await?;
             Ok(result.to_string())
         }
@@ -3663,17 +4223,21 @@ async fn execute_tool(
             let symbol = json_str(&args, "symbol");
             let result = crate::code_graph::with_index(state.inner(), |index| {
                 let graph = index.graph();
-                let Some(nr) = lux_codegraph::resolve_one(graph, &symbol) else {
+                let matches = lux_codegraph::resolve_symbol(graph, &symbol);
+                let Some(nr) = matches.first().cloned() else {
                     return Ok(serde_json::json!({"found": false, "note": format!("Unknown symbol: {symbol}")}));
                 };
+                let match_count = matches.len();
                 let Some(expl) = lux_codegraph::explain(graph, nr.node) else {
                     return Ok(serde_json::json!({"found": false}));
                 };
-                Ok(serde_json::json!({
+                let mut out = serde_json::json!({
                     "name": expl.node.name,
                     "kind": format!("{:?}", expl.kind).to_lowercase(),
                     "degree": expl.degree,
                     "totalConnections": expl.total_connections,
+                    "matchCount": match_count,
+                    "ambiguous": match_count > 1,
                     "connections": expl.connections.into_iter().map(|n| serde_json::json!({
                         "name": n.node.name,
                         "file": n.node.file,
@@ -3681,7 +4245,16 @@ async fn execute_tool(
                         "relation": format!("{:?}", n.relation).to_lowercase(),
                         "direction": format!("{:?}", n.direction).to_lowercase(),
                     })).collect::<Vec<_>>(),
-                }))
+                });
+                if match_count > 1 {
+                    let alternates: Vec<serde_json::Value> = matches.iter().take(6)
+                        .map(|m| serde_json::json!({"name": m.name, "file": m.file, "line": m.line}))
+                        .collect();
+                    out["note"] = serde_json::json!(format!(
+                        "'{symbol}' fuzzily matched {match_count} symbols (exact->prefix->substring, case-insensitive); using the first ('{}'). Re-query with a fully-qualified/exact name if this is the wrong one.", nr.name));
+                    out["alternates"] = serde_json::json!(alternates);
+                }
+                Ok(out)
             }).await?;
             Ok(result.to_string())
         }
@@ -3696,10 +4269,24 @@ async fn execute_tool(
                     "nodes": nodes,
                     "edges": edges,
                     "communities": communities.len(),
-                    "godNodes": gods.into_iter().map(|g| serde_json::json!({
-                        "name": g.name,
-                        "degree": g.degree,
-                    })).collect::<Vec<_>>(),
+                    // Enrich god nodes with file+line (public accessors, mirroring
+                    // NodeRef::of) so they are locatable/round-trippable — a bare name
+                    // re-resolves to an arbitrary node for non-unique hub names.
+                    "godNodes": gods.into_iter().map(|g| {
+                        let (file, line) = graph.node(g.node).map_or_else(
+                            || (String::new(), 0u32),
+                            |data| (
+                                graph.file_path(data.file).map(|p| p.display().to_string()).unwrap_or_default(),
+                                data.name_span.start_row + 1,
+                            ),
+                        );
+                        serde_json::json!({
+                            "name": g.name,
+                            "degree": g.degree,
+                            "file": file,
+                            "line": line,
+                        })
+                    }).collect::<Vec<_>>(),
                 }))
             })
             .await?;
@@ -3723,9 +4310,17 @@ async fn run_subagent(
     description: &str,
     prompt: &str,
     subagent_type: &str,
+    // Optional per-subagent model override (Task `model` arg). Falls back to the
+    // parent/session model when absent.
+    model_override: Option<&str>,
 ) -> Result<String, String> {
     const MAX_SUBAGENT_ROUNDS: usize = 16;
     let read_only = matches!(subagent_type, "codeReviewer" | "explorer");
+    // Honor the Task `model` override; otherwise inherit the parent turn's model.
+    let subagent_model: &str = model_override
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(parent.model.as_str());
 
     // Subagent system prompt: focused, returns a summary.
     let instructions = format!(
@@ -3781,7 +4376,7 @@ async fn run_subagent(
             });
         }
         let mut payload = serde_json::json!({
-            "model": parent.model,
+            "model": subagent_model,
             "messages": messages,
             "stream": true,
             "stream_options": { "include_usage": true },
@@ -3903,9 +4498,16 @@ async fn require_tool_approval(
     // Permission rules are authoritative and evaluated BEFORE mode, so a deny
     // applies even in full-access / automatic mode and an explicit allow runs
     // without a prompt.
-    let force_ask = match crate::ai_permissions::evaluate(tool, permission_input, rules).decision {
+    let ev = crate::ai_permissions::evaluate(tool, permission_input, rules);
+    let force_ask = match ev.decision {
         crate::ai_permissions::PermissionDecision::Deny => {
-            return Err(format!("{tool} is blocked by a permission rule."));
+            // F28: name the exact rule that fired so the user (and the model) can see
+            // WHY the call was blocked instead of a generic message. Falls back to the
+            // generic text if the engine somehow reports a deny without a matched rule.
+            return Err(ev.matched_rule.map_or_else(
+                || format!("{tool} is blocked by a permission rule."),
+                |rule| format!("{tool} is blocked by permission rule `{rule}`."),
+            ));
         }
         crate::ai_permissions::PermissionDecision::Allow => return Ok(()),
         crate::ai_permissions::PermissionDecision::Ask => true,
@@ -4021,6 +4623,20 @@ fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
                 a.push("--depth".to_string());
                 a.push(d.to_string());
             }
+            // A41: `-s <sel>` and `--urls` are real agent-browser snapshot flags
+            // (verified against the CLI) — honor the advertised args instead of
+            // dropping them.
+            if let Some(sel) = json_str_opt(args, "selector") {
+                a.push("-s".to_string());
+                a.push(sel);
+            }
+            if args
+                .get("includeUrls")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--urls".to_string());
+            }
             a
         }
         "BrowserScreenshot" => {
@@ -4060,25 +4676,98 @@ fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
                 .get("instruction")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            vec!["chat".to_string(), instruction.to_string()]
+            // `quiet` (default true) hides intermediate tool calls; `-q` is a global
+            // flag the CLI parses before the subcommand (mirrors the TS runtime).
+            let quiet = args
+                .get("quiet")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            if quiet {
+                vec![
+                    "-q".to_string(),
+                    "chat".to_string(),
+                    instruction.to_string(),
+                ]
+            } else {
+                vec!["chat".to_string(), instruction.to_string()]
+            }
         }
         "BrowserDashboard" => {
             let action = args
                 .get("action")
                 .and_then(|v| v.as_str())
                 .unwrap_or("status");
-            vec!["dashboard".to_string(), action.to_string()]
-        }
-        "BrowserInstall" => vec!["install".to_string()],
-        "BrowserHelp" => {
-            let mut a = vec!["help".to_string()];
-            if let Some(t) = args.get("topic").and_then(|v| v.as_str()) {
-                a.push(t.to_string());
+            let mut a = vec!["dashboard".to_string(), action.to_string()];
+            // Honor the advertised `port` (the CLI accepts `dashboard <action>
+            // --port <n>`); previously it was dropped and the model silently got
+            // the default 4848.
+            if let Some(port) = args.get("port").and_then(serde_json::Value::as_u64) {
+                a.push("--port".to_string());
+                a.push(port.to_string());
             }
             a
         }
+        "BrowserInstall" => {
+            let mut a = vec!["install".to_string()];
+            // Honor `withDeps` (Linux: also install OS dependencies); previously the
+            // arm returned a bare ["install"] and dropped the flag.
+            if args
+                .get("withDeps")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--with-deps".to_string());
+            }
+            a
+        }
+        "BrowserHelp" => {
+            // Route the advertised skill/allSkills params to the CLI's `skills`
+            // subcommand (matching agent_browser::skills()); previously both were
+            // dropped and the model only ever got generic help.
+            let all_skills = args
+                .get("allSkills")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let skill = args
+                .get("skill")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if all_skills {
+                vec!["skills".to_string(), "get".to_string(), "--all".to_string()]
+            } else if let Some(name) = skill {
+                vec![
+                    "skills".to_string(),
+                    "get".to_string(),
+                    name.to_string(),
+                    "--full".to_string(),
+                ]
+            } else {
+                let mut a = vec!["help".to_string()];
+                if let Some(t) = args.get("topic").and_then(|v| v.as_str()) {
+                    a.push(t.to_string());
+                }
+                a
+            }
+        }
         "BrowserDoctor" => {
             let mut a = vec!["doctor".to_string()];
+            // Honor `offline`/`quick` (the doctor CLI supports both) in addition to
+            // `fix`; previously offline/quick were dropped.
+            if args
+                .get("offline")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--offline".to_string());
+            }
+            if args
+                .get("quick")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                a.push("--quick".to_string());
+            }
             if args
                 .get("fix")
                 .and_then(serde_json::Value::as_bool)
@@ -4099,6 +4788,131 @@ fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
             .unwrap_or_default(),
         _ => vec![],
     }
+}
+
+/// High-signal credential markers for the dependency-free `SecretGuard` scan.
+/// Each entry is `(marker, human description)`. The marker is matched as a
+/// case-sensitive substring — these prefixes are distinctive enough that a
+/// case-insensitive match would only add false positives.
+const SECRET_MARKERS: &[(&str, &str)] = &[
+    ("-----BEGIN OPENSSH", "OpenSSH private key"),
+    ("-----BEGIN", "PEM private key block"),
+    ("AKIA", "AWS access key id"),
+    ("aws_secret_access_key", "AWS secret access key"),
+    ("github_pat_", "GitHub fine-grained PAT"),
+    ("ghp_", "GitHub personal access token"),
+    ("xoxb-", "Slack bot token"),
+    ("xoxp-", "Slack user token"),
+    ("sk-", "OpenAI-style secret key"),
+    ("AIza", "Google API key"),
+];
+
+/// One `SecretGuard` finding: which marker fired, a human description, and the
+/// 1-based line it was found on.
+#[derive(Serialize)]
+struct SecretFinding {
+    marker: String,
+    description: String,
+    line: usize,
+}
+
+/// Dependency-free substring scan for leaked credentials. Returns the findings
+/// (capped at `max_findings`) and, when `return_redacted` is set, a copy of the
+/// text with every matched credential token region replaced by `***REDACTED***`.
+///
+/// A "token region" spans from the marker start through the contiguous run of
+/// credential-shaped characters that follows, so the whole secret is masked —
+/// not just the marker prefix. `-----BEGIN` blocks only mask the marker line
+/// itself (the surrounding key body is masked by masking its own `-----BEGIN`).
+fn scan_secrets(
+    text: &str,
+    max_findings: usize,
+    return_redacted: bool,
+) -> (Vec<SecretFinding>, Option<String>) {
+    /// Characters that continue a credential token past its marker.
+    const fn is_token_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '/' | '+' | '=' | '.')
+    }
+
+    // Collect (start_byte, end_byte) match spans, longest-marker-first so a more
+    // specific marker (e.g. `-----BEGIN OPENSSH`) is preferred over its prefix.
+    let mut spans: Vec<(usize, usize, &'static str, &'static str)> = Vec::new();
+    for (marker, description) in SECRET_MARKERS {
+        let mut search_from = 0usize;
+        while let Some(rel) = text.get(search_from..).and_then(|hay| hay.find(marker)) {
+            let start = search_from + rel;
+            // Extend past the marker over contiguous token characters to cover the
+            // full secret value (bounded by whitespace / end of string).
+            let mut end = start + marker.len();
+            for c in text[end..].chars() {
+                if is_token_char(c) {
+                    end += c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            spans.push((start, end, marker, description));
+            // Advance past this match; guaranteed progress since end > start.
+            search_from = end;
+        }
+    }
+    // Sort by start, then by longest span first so overlapping matches (a marker
+    // that is a prefix of another) collapse to the most specific one.
+    spans.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+
+    // Deduplicate overlaps: keep the first (most specific) span at each position.
+    let mut kept: Vec<(usize, usize, &'static str, &'static str)> = Vec::new();
+    let mut covered_to = 0usize;
+    for span in spans {
+        if span.0 >= covered_to {
+            covered_to = span.1;
+            kept.push(span);
+        }
+    }
+
+    // Precompute line-start byte offsets so a match byte can map to a 1-based line.
+    let mut line_starts: Vec<usize> = vec![0];
+    for (idx, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            line_starts.push(idx + 1);
+        }
+    }
+    let line_of = |byte_pos: usize| -> usize {
+        // partition_point → count of line starts at or before byte_pos == 1-based line.
+        line_starts
+            .partition_point(|&start| start <= byte_pos)
+            .max(1)
+    };
+
+    let findings: Vec<SecretFinding> = kept
+        .iter()
+        .take(max_findings)
+        .map(|(start, _end, marker, description)| SecretFinding {
+            marker: (*marker).to_string(),
+            description: (*description).to_string(),
+            line: line_of(*start),
+        })
+        .collect();
+
+    let redacted = if return_redacted && !kept.is_empty() {
+        // Rebuild the text, replacing each kept span with the redaction marker.
+        // Spans are already sorted by start and non-overlapping.
+        let mut out = String::with_capacity(text.len());
+        let mut cursor = 0usize;
+        for (start, end, _marker, _description) in &kept {
+            if *start >= cursor {
+                out.push_str(&text[cursor..*start]);
+                out.push_str("***REDACTED***");
+                cursor = *end;
+            }
+        }
+        out.push_str(&text[cursor..]);
+        Some(out)
+    } else {
+        None
+    };
+
+    (findings, redacted)
 }
 
 fn json_str(value: &serde_json::Value, key: &str) -> String {
@@ -4444,5 +5258,194 @@ mod tests {
                 "StrReplace expected in {mode} allowlist"
             );
         }
+    }
+
+    // ── E6: SecretGuard actually scans ──
+
+    #[test]
+    fn secret_guard_flags_known_markers() {
+        let text =
+            "config:\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nkey: AKIAIOSFODNN7EXAMPLE\ntoken: ghp_16CharsOfTokenHere0000\n";
+        let (findings, redacted) = scan_secrets(text, 50, false);
+        assert!(
+            !findings.is_empty(),
+            "known credential markers must be flagged"
+        );
+        // The AWS access-key id lives on line 3.
+        let located: Vec<(String, usize)> = findings
+            .iter()
+            .map(|f| (f.marker.clone(), f.line))
+            .collect();
+        assert!(
+            findings.iter().any(|f| f.marker == "AKIA" && f.line == 3),
+            "AKIA finding must report its line: {located:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.marker == "aws_secret_access_key"),
+            "AWS secret marker must be flagged"
+        );
+        assert!(findings.iter().any(|f| f.marker == "ghp_"), "GitHub PAT");
+        // No redaction requested → none returned.
+        assert!(redacted.is_none());
+    }
+
+    #[test]
+    fn secret_guard_passes_clean_text() {
+        let text = "This is a perfectly ordinary paragraph with no credentials.\nJust prose.";
+        let (findings, redacted) = scan_secrets(text, 50, true);
+        assert!(findings.is_empty(), "clean text must produce no findings");
+        // returnRedactedText=true but nothing matched → redacted stays None.
+        assert!(redacted.is_none());
+    }
+
+    #[test]
+    fn secret_guard_redacts_matched_tokens() {
+        let text = "leak sk-abc123def456ghi in the middle";
+        let (findings, redacted) = scan_secrets(text, 50, true);
+        assert_eq!(findings.len(), 1);
+        let out = redacted.expect("redacted text requested");
+        assert!(
+            out.contains("***REDACTED***"),
+            "matched token must be masked: {out}"
+        );
+        assert!(
+            !out.contains("sk-abc123def456ghi"),
+            "the raw secret must not survive redaction: {out}"
+        );
+    }
+
+    #[test]
+    fn secret_guard_caps_findings() {
+        let text = "AKIA1 AKIA2 AKIA3 AKIA4 AKIA5";
+        let (findings, _) = scan_secrets(text, 2, false);
+        assert_eq!(findings.len(), 2, "findings must be capped at maxFindings");
+    }
+
+    // ── E3: ReadLints severity match key ──
+
+    #[test]
+    fn diagnostic_severity_debug_name_is_lowercase_matchable() {
+        // ReadLints compares `format!("{:?}", severity).to_ascii_lowercase()` against
+        // the caller's severity filter, so the Debug name must match the words a
+        // model would pass ("error", "warning", …).
+        assert_eq!(
+            format!("{:?}", lux_core::DiagnosticSeverity::Error).to_ascii_lowercase(),
+            "error"
+        );
+        assert_eq!(
+            format!("{:?}", lux_core::DiagnosticSeverity::Warning).to_ascii_lowercase(),
+            "warning"
+        );
+        assert_eq!(
+            format!("{:?}", lux_core::DiagnosticSeverity::Information).to_ascii_lowercase(),
+            "information"
+        );
+        assert_eq!(
+            format!("{:?}", lux_core::DiagnosticSeverity::Hint).to_ascii_lowercase(),
+            "hint"
+        );
+    }
+
+    // ── Browser args: advertised knobs now reach the CLI ──
+
+    #[test]
+    fn browser_args_chat_prepends_quiet_flag() {
+        // A46: quiet defaults true → global `-q` before the subcommand.
+        let default =
+            build_browser_args("BrowserChat", &serde_json::json!({ "instruction": "hi" }));
+        assert_eq!(default, vec!["-q", "chat", "hi"]);
+        // Explicit quiet:false drops the flag.
+        let loud = build_browser_args(
+            "BrowserChat",
+            &serde_json::json!({ "instruction": "hi", "quiet": false }),
+        );
+        assert_eq!(loud, vec!["chat", "hi"]);
+    }
+
+    #[test]
+    fn browser_args_dashboard_appends_port() {
+        // A42: port must reach the CLI (`dashboard <action> --port <n>`).
+        let args = build_browser_args(
+            "BrowserDashboard",
+            &serde_json::json!({ "action": "start", "port": 5000 }),
+        );
+        assert_eq!(args, vec!["dashboard", "start", "--port", "5000"]);
+        // No port → unchanged from the legacy behavior.
+        let plain = build_browser_args(
+            "BrowserDashboard",
+            &serde_json::json!({ "action": "status" }),
+        );
+        assert_eq!(plain, vec!["dashboard", "status"]);
+    }
+
+    #[test]
+    fn browser_args_install_honors_with_deps() {
+        // A43: withDeps → `install --with-deps`; absent → bare `install`.
+        assert_eq!(
+            build_browser_args("BrowserInstall", &serde_json::json!({ "withDeps": true })),
+            vec!["install", "--with-deps"]
+        );
+        assert_eq!(
+            build_browser_args("BrowserInstall", &serde_json::json!({})),
+            vec!["install"]
+        );
+    }
+
+    #[test]
+    fn browser_args_doctor_offline_quick_fix() {
+        // A44: offline/quick/fix all appended in a stable order.
+        let args = build_browser_args(
+            "BrowserDoctor",
+            &serde_json::json!({ "offline": true, "quick": true, "fix": true }),
+        );
+        assert_eq!(args, vec!["doctor", "--offline", "--quick", "--fix"]);
+        // Default (no flags) is byte-identical to the old bare `doctor`.
+        assert_eq!(
+            build_browser_args("BrowserDoctor", &serde_json::json!({})),
+            vec!["doctor"]
+        );
+    }
+
+    #[test]
+    fn browser_args_help_routes_skills() {
+        // A45: allSkills / skill route to the `skills` subcommand; otherwise `help`.
+        assert_eq!(
+            build_browser_args("BrowserHelp", &serde_json::json!({ "allSkills": true })),
+            vec!["skills", "get", "--all"]
+        );
+        assert_eq!(
+            build_browser_args("BrowserHelp", &serde_json::json!({ "skill": "forms" })),
+            vec!["skills", "get", "forms", "--full"]
+        );
+        // A blank skill and no flags fall back to the existing help path.
+        assert_eq!(
+            build_browser_args("BrowserHelp", &serde_json::json!({ "skill": "  " })),
+            vec!["help"]
+        );
+        assert_eq!(
+            build_browser_args("BrowserHelp", &serde_json::json!({ "topic": "nav" })),
+            vec!["help", "nav"]
+        );
+    }
+
+    #[test]
+    fn context_budgeter_max_items_clamps_to_window() {
+        // A1: maxItems defaults to 28 and is clamped to 4..=80, exactly as the
+        // ContextBudgeter arm computes its packet cap.
+        let cap = |v: serde_json::Value| json_usize(&v, "maxItems", 28).clamp(4, 80);
+        assert_eq!(cap(serde_json::json!({})), 28);
+        assert_eq!(cap(serde_json::json!({ "maxItems": 1 })), 4);
+        assert_eq!(cap(serde_json::json!({ "maxItems": 200 })), 80);
+        assert_eq!(cap(serde_json::json!({ "maxItems": 50 })), 50);
+    }
+
+    #[test]
+    fn present_plan_str_array_keeps_all_then_caps() {
+        // A38: json_str_array(usize::MAX) keeps every valid item so the arm can
+        // measure the true submitted count before truncating to the cap.
+        let big: Vec<String> = (0..20).map(|i| format!("risk {i}")).collect();
+        let value = serde_json::json!({ "risks": big });
+        let collected = json_str_array(&value, "risks", usize::MAX);
+        assert_eq!(collected.len(), 20, "all submitted items are retained");
     }
 }

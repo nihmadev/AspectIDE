@@ -166,6 +166,7 @@ fn runtime_section(input: &SystemPromptInput, agent_name: &str) -> String {
     [
         "Runtime context",
         &workspace_line,
+        shell_environment_line(),
         &format!("Agent profile: {agent_name}"),
         &format!("Agent mode: {}", input.agent_mode),
         &format!(
@@ -303,6 +304,18 @@ const fn is_read_only(mode: ModeKind) -> bool {
 
 const fn is_full_execution(mode: ModeKind) -> bool {
     matches!(mode, ModeKind::FullExecution)
+}
+
+/// Disclose the host OS + the shell the Shell tool actually invokes, so the model
+/// emits correct command syntax instead of guessing. Uses the SAME `cfg!(windows)`
+/// selector as `ai_tools::shell_command` (cmd.exe /C on Windows, /bin/sh -c
+/// elsewhere) so this disclosure can never drift from the real executor.
+const fn shell_environment_line() -> &'static str {
+    if cfg!(windows) {
+        "Shell tool runs commands via cmd.exe /C on this Windows host, as ONE line — a newline does NOT chain commands (only the first runs); use & or && to chain. cmd syntax: dir/type, %VAR% env vars, backslash paths. POSIX forms (ls, quotes, rm -rf, $VAR) may fail; invoke bash/PowerShell explicitly."
+    } else {
+        "Shell tool runs commands via /bin/sh -c on this Unix host; use POSIX sh syntax."
+    }
 }
 
 /// Explicit instruction injected for an unrecognized mode so the model knows why it
@@ -542,6 +555,22 @@ mod tests {
         // Within budget → unchanged, no marker.
         let small = "hello";
         assert_eq!(budget_text(small, 100), "hello");
+    }
+
+    #[test]
+    fn runtime_section_discloses_host_shell() {
+        // The runtime context must tell the model which shell the Shell tool uses,
+        // selected by the SAME cfg!(windows) that ai_tools::shell_command uses, so
+        // command syntax guidance can never drift from the real executor.
+        let prompt = build_system_prompt(&test_input());
+        if cfg!(windows) {
+            assert!(prompt.contains("cmd.exe /C on this Windows host"));
+            assert!(prompt.contains("%VAR% env vars"));
+            assert!(!prompt.contains("/bin/sh -c on this Unix host"));
+        } else {
+            assert!(prompt.contains("/bin/sh -c on this Unix host"));
+            assert!(!prompt.contains("cmd.exe /C on this Windows host"));
+        }
     }
 
     #[test]

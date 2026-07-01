@@ -140,7 +140,15 @@ pub async fn run_json(
     .await
     .map_err(|_| format!("agent-browser timed out after {timeout_secs}s"))?;
 
-    let (stdout_bytes, stderr_bytes, status_result) = result;
+    let (stdout_read, stderr_read, status_result) = result;
+    // `clipped_at_pipe` means the child produced more bytes than the parent-side
+    // budget, so raw stdout was cut before parsing/formatting. This is distinct
+    // from the character-level `truncate_text` cap below: a pipe clip can leave
+    // the visible text *shorter* than `max_output`, which would otherwise be
+    // indistinguishable from a genuinely short answer. Surface it explicitly.
+    let stdout_bytes = stdout_read.bytes;
+    let stderr_bytes = stderr_read.bytes;
+    let clipped_at_pipe = stdout_read.clipped;
     let exit_code = status_result.map_or(None, |status| status.code());
 
     let stdout = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
@@ -166,12 +174,30 @@ pub async fn run_json(
             "data": { "stdout": stdout.as_str(), "stderr": stderr.as_str() },
         })
     });
-    let data = parsed
+    let mut data = parsed
         .get("data")
         .cloned()
         .unwrap_or_else(|| parsed.clone());
     let text = extract_text(&data, &parsed, &stderr);
-    let (text, truncated) = truncate_text(text, max_output);
+    let (mut text, char_truncated) = truncate_text(text, max_output);
+
+    // Output is truncated if either the char-level formatter clipped it or the
+    // parent-side pipe budget was hit while draining the child. Callers/model
+    // read `truncated`; carry a structured, machine-readable note so the reason
+    // (pipe clip vs. char cap) is not lost when only the flag is inspected.
+    let truncated = char_truncated || clipped_at_pipe;
+    if clipped_at_pipe {
+        // Only annotate when the pipe clip is the *sole* signal — if the char
+        // cap already appended its own `[truncated ...]` marker, don't stack a
+        // second, potentially contradictory note onto the visible text.
+        if !char_truncated {
+            text.push_str(
+                "\n\n[output clipped: agent-browser produced more data than the parent read \
+                 budget; result is incomplete]",
+            );
+        }
+        annotate_truncation(&mut data, max_output);
+    }
 
     Ok(ParsedCliResponse {
         success,
@@ -183,10 +209,47 @@ pub async fn run_json(
     })
 }
 
+/// Attach a machine-readable truncation note to the response `data` object so
+/// callers that inspect structured fields (not just the flag/text) can detect
+/// that the raw CLI output was clipped at the parent-side read budget. No-op if
+/// `data` is not a JSON object.
+fn annotate_truncation(data: &mut serde_json::Value, budget_chars: usize) {
+    if let Some(map) = data.as_object_mut() {
+        // Don't clobber a `truncated` field the CLI may itself have emitted.
+        map.entry("truncated")
+            .or_insert(serde_json::Value::Bool(true));
+        map.insert(
+            "truncationReason".to_string(),
+            serde_json::Value::String("parent-read-budget".to_string()),
+        );
+        map.insert(
+            "truncationNote".to_string(),
+            serde_json::Value::String(format!(
+                "agent-browser output exceeded the parent read budget (~{budget_chars} chars) \
+                 and was clipped; the result is incomplete."
+            )),
+        );
+    }
+}
+
+/// Result of a bounded pipe read: the collected bytes plus whether the reader
+/// stopped because the byte cap was hit (rather than reaching EOF). `clipped`
+/// lets the caller distinguish silently-clipped output from a genuinely short
+/// answer.
+struct BoundedRead {
+    bytes: Vec<u8>,
+    clipped: bool,
+}
+
 /// Read a pipe into a `Vec<u8>`, stopping after `max_bytes` have been collected.
-async fn read_pipe_bounded<R: AsyncReadExt + Unpin>(mut reader: R, max_bytes: usize) -> Vec<u8> {
+/// Reports whether the cap was reached before EOF via [`BoundedRead::clipped`].
+async fn read_pipe_bounded<R: AsyncReadExt + Unpin>(
+    mut reader: R,
+    max_bytes: usize,
+) -> BoundedRead {
     let mut buf = Vec::with_capacity(max_bytes.min(4096));
     let mut tmp = [0u8; 8192];
+    let mut clipped = false;
     loop {
         let n = match reader.read(&mut tmp).await {
             Ok(0) | Err(_) => break,
@@ -194,15 +257,21 @@ async fn read_pipe_bounded<R: AsyncReadExt + Unpin>(mut reader: R, max_bytes: us
         };
         let remaining = max_bytes.saturating_sub(buf.len());
         if remaining == 0 {
+            // Cap already full but the child still had bytes to give: clipped.
+            clipped = true;
             break;
         }
         let to_take = n.min(remaining);
         buf.extend_from_slice(&tmp[..to_take]);
         if to_take < n {
+            clipped = true;
             break; // truncated at cap
         }
     }
-    buf
+    BoundedRead {
+        bytes: buf,
+        clipped,
+    }
 }
 
 fn extract_text(data: &serde_json::Value, root: &serde_json::Value, stderr: &str) -> String {
@@ -308,4 +377,85 @@ pub async fn list_sessions(binary: &Path) -> Result<Vec<String>, String> {
         })
         .unwrap_or_default();
     Ok(sessions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{annotate_truncation, read_pipe_bounded};
+
+    // `&[u8]` implements tokio's `AsyncRead`, so it stands in for a child pipe.
+    #[tokio::test]
+    async fn read_pipe_bounded_flags_clip_when_over_budget() {
+        // Reader yields more bytes than the budget: `clipped` must be true and
+        // the collected bytes are capped at the budget.
+        let data = vec![b'a'; 100];
+        let result = read_pipe_bounded(data.as_slice(), 10).await;
+        assert!(result.clipped, "over-budget read should be flagged clipped");
+        assert_eq!(result.bytes.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn read_pipe_bounded_not_clipped_when_within_budget() {
+        // A genuinely short answer (fits under the budget) is NOT flagged, so it
+        // stays distinguishable from a clipped one.
+        let data = vec![b'a'; 8];
+        let result = read_pipe_bounded(data.as_slice(), 10).await;
+        assert!(
+            !result.clipped,
+            "within-budget read should not be flagged clipped"
+        );
+        assert_eq!(result.bytes.len(), 8);
+    }
+
+    #[tokio::test]
+    async fn read_pipe_bounded_not_clipped_at_exact_budget() {
+        // Exactly at the budget with EOF right after is not a clip.
+        let data = vec![b'a'; 10];
+        let result = read_pipe_bounded(data.as_slice(), 10).await;
+        assert!(!result.clipped);
+        assert_eq!(result.bytes.len(), 10);
+    }
+
+    #[test]
+    fn annotate_truncation_adds_machine_readable_note() {
+        let mut data = serde_json::json!({ "stdout": "partial" });
+        annotate_truncation(&mut data, 2000);
+        assert_eq!(
+            data.get("truncated").and_then(serde_json::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            data.get("truncationReason")
+                .and_then(serde_json::Value::as_str),
+            Some("parent-read-budget")
+        );
+        assert!(data
+            .get("truncationNote")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|note| note.contains("clipped")));
+    }
+
+    #[test]
+    fn annotate_truncation_preserves_existing_truncated_flag() {
+        // If the CLI already reported truncated=false for its own reasons we do
+        // not silently flip it; the parent signal rides on the reason/note.
+        let mut data = serde_json::json!({ "truncated": false });
+        annotate_truncation(&mut data, 2000);
+        assert_eq!(
+            data.get("truncated").and_then(serde_json::Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            data.get("truncationReason")
+                .and_then(serde_json::Value::as_str),
+            Some("parent-read-budget")
+        );
+    }
+
+    #[test]
+    fn annotate_truncation_noop_on_non_object() {
+        let mut data = serde_json::json!("just a string");
+        annotate_truncation(&mut data, 2000);
+        assert_eq!(data, serde_json::json!("just a string"));
+    }
 }

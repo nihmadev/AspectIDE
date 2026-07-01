@@ -477,7 +477,7 @@ pub async fn install(
     let detail = if success {
         "agent-browser installed successfully.".to_string()
     } else {
-        "agent-browser installation finished with errors. Review step output.".to_string()
+        install_failure_detail(&steps)
     };
 
     Ok(AgentBrowserInstallResponse {
@@ -486,6 +486,55 @@ pub async fn install(
         steps,
         detail,
     })
+}
+
+/// Maximum number of characters of a failing step's captured output to embed in
+/// the top-level `detail`. Full output is still available on the step itself;
+/// this keeps the summary actionable without dumping an unbounded log.
+const FAILURE_DETAIL_OUTPUT_CAP: usize = 800;
+
+/// Build an actionable failure summary: name the first failing step and quote a
+/// bounded slice of its captured output so the model/user gets a concrete next
+/// step instead of a generic "review step output". Falls back to a step-count
+/// summary when no output was captured.
+fn install_failure_detail(steps: &[AgentBrowserInstallStep]) -> String {
+    let Some(failed) = steps.iter().find(|step| !step.success) else {
+        // Unreachable in practice (only called when a step failed), but keep a
+        // sensible message rather than panicking.
+        return "agent-browser installation finished with errors. Review step output.".to_string();
+    };
+
+    let captured = failed.output.trim();
+    let output_hint = if captured.is_empty() {
+        // No captured output at all — tell the user how to get more, since the
+        // empty string is otherwise a dead end.
+        " No output was captured for this step; re-run the install from a terminal \
+         to see the underlying error."
+            .to_string()
+    } else {
+        let bounded = bounded_tail(captured, FAILURE_DETAIL_OUTPUT_CAP);
+        format!(" Output from '{}':\n{bounded}", failed.name)
+    };
+
+    format!(
+        "agent-browser installation failed at step '{}'.{output_hint}",
+        failed.name
+    )
+}
+
+/// Return the last `max_chars` characters of `text`, prefixed with a marker when
+/// the head was dropped. Tail (not head) because build/install errors — the
+/// actionable part — are almost always at the end of the log.
+fn bounded_tail(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_string();
+    }
+    let tail: String = text.chars().skip(count - max_chars).collect();
+    format!(
+        "[...{} earlier characters omitted...]\n{tail}",
+        count - max_chars
+    )
 }
 
 async fn run_install_step_in_dir(
@@ -540,4 +589,77 @@ async fn run_install_step(
     timeout_secs: u64,
 ) -> AgentBrowserInstallStep {
     run_install_step_in_dir(name, program, args, None, timeout_secs).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bounded_tail, install_failure_detail, FAILURE_DETAIL_OUTPUT_CAP};
+    use crate::agent_browser::types::AgentBrowserInstallStep;
+
+    fn step(name: &str, success: bool, output: &str) -> AgentBrowserInstallStep {
+        AgentBrowserInstallStep {
+            name: name.to_string(),
+            success,
+            output: output.to_string(),
+            elapsed_ms: 0,
+        }
+    }
+
+    #[test]
+    fn failure_detail_names_first_failing_step_and_quotes_output() {
+        let steps = vec![
+            step("package-install-latest", true, "ok"),
+            step(
+                "agent-browser-install-chrome",
+                false,
+                "Error: failed to download Chromium (network unreachable)",
+            ),
+        ];
+        let detail = install_failure_detail(&steps);
+        assert!(
+            detail.contains("agent-browser-install-chrome"),
+            "detail must name the failing step: {detail}"
+        );
+        assert!(
+            detail.contains("network unreachable"),
+            "detail must include the captured step output: {detail}"
+        );
+    }
+
+    #[test]
+    fn failure_detail_handles_empty_output_with_next_step() {
+        let steps = vec![step("package-install-latest", false, "   ")];
+        let detail = install_failure_detail(&steps);
+        assert!(detail.contains("package-install-latest"));
+        assert!(
+            detail.contains("No output was captured"),
+            "empty output should yield an actionable hint: {detail}"
+        );
+        assert!(detail.contains("terminal"));
+    }
+
+    #[test]
+    fn failure_detail_bounds_large_output() {
+        let big = "x".repeat(FAILURE_DETAIL_OUTPUT_CAP * 3);
+        let steps = vec![step("package-install-latest", false, &big)];
+        let detail = install_failure_detail(&steps);
+        // The whole 3x payload must not be embedded verbatim.
+        assert!(detail.len() < big.len());
+        assert!(detail.contains("earlier characters omitted"));
+    }
+
+    #[test]
+    fn bounded_tail_keeps_actionable_end() {
+        let text = "HEAD-noise\nMIDDLE\nERROR: the real problem is here";
+        // Cap is smaller than the input but large enough to keep the actionable tail.
+        let bounded = bounded_tail(text, 24);
+        assert!(bounded.ends_with("the real problem is here"));
+        assert!(bounded.contains("earlier characters omitted"));
+    }
+
+    #[test]
+    fn bounded_tail_passthrough_when_short() {
+        let text = "short output";
+        assert_eq!(bounded_tail(text, 800), "short output");
+    }
 }

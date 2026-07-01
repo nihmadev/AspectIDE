@@ -220,6 +220,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const goalContinuationTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  // Sessions with a send in its pre-turn async window (checkpoint + auto-compaction
+  // run BEFORE `startAiChatTurn` marks the session busy). A second Enter/click during
+  // that window would otherwise slip past the busy gate and double-send the message,
+  // so we reserve the session synchronously here and fold it into the busy check.
+  const pendingSendLockRef = useRef<Set<string>>(new Set());
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const runtimeSnapshot = useSyncExternalStore(subscribeAiChatTurnRuntime, getAiChatTurnRuntimeSnapshot, getAiChatTurnRuntimeSnapshot);
   const messages = activeChatSession?.messages ?? [];
@@ -770,7 +775,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     const targetSession = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === sessionId);
     const targetSessionClosed = Boolean(targetSession?.closedAt);
     const targetSessionBusy = getAiChatTurnRuntimeSnapshot().sendingSessionId === sessionId
-      || isAiChatSessionBusyStatus(targetSession?.status ?? "idle");
+      || isAiChatSessionBusyStatus(targetSession?.status ?? "idle")
+      // A send already committed for this session but hasn't reached startAiChatTurn
+      // yet (checkpoint/compaction awaits): treat it as busy so a rapid second send
+      // can't double-fire during that window.
+      || pendingSendLockRef.current.has(sessionId);
     const sendBlocked = options?.sessionId
       ? targetSessionClosed || targetSessionBusy
       : activeSessionClosed || activeSessionBusy;
@@ -944,6 +953,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
     if (sendBlocked && !options?.force && !options?.goalContinuation) return;
 
+    // We are committed to sending: reserve the session synchronously (before the
+    // checkpoint/compaction awaits below) so a second send bails at the busy gate.
+    // Released in the finally after the turn settles.
+    pendingSendLockRef.current.add(sessionId);
+
     // Automatic mode = full autonomy: a real task should keep working across turns
     // until the completion check passes, not stop after a single turn. Start a goal
     // run keyed on the user's message so the existing continuation loop drives it.
@@ -1009,6 +1023,15 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           replaceAiChatMessages(sessionId, compacted.messages, { contextCompaction: compacted.compactionState });
           workingHistory = compacted.messages;
         }
+      } catch (compactionError) {
+        // A failed auto-compaction must NOT drop the user's message: proceed with the
+        // uncompacted history. A user abort during compaction bails cleanly (releasing
+        // the send reservation) instead of sending.
+        if (isAbortError(compactionError)) {
+          pendingSendLockRef.current.delete(sessionId);
+          return;
+        }
+        console.warn("Auto-compaction failed; sending uncompacted:", compactionError);
       } finally {
         setCompacting(false);
       }
@@ -1241,6 +1264,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       setAiChatSessionStatus(sessionId, isAbortError(error) ? "idle" : "error", errorMessage);
       if (useLuxStore.getState().activeAiChatSessionId === sessionId) setSendError(errorPresentation);
     } finally {
+      pendingSendLockRef.current.delete(sessionId);
       finishAiChatTurn(sessionId, abortController);
       clearAiRetryNotice(sessionId);
       requestAnimationFrame(() => resizeComposerTextarea());

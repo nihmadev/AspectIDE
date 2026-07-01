@@ -31,6 +31,11 @@ pub struct AiRelatedFilesResponse {
     pub query: String,
     pub scanned: usize,
     pub count: usize,
+    /// True when the underlying workspace listing hit its file cap, so `files` is
+    /// drawn from a lexicographically-first sample of the project rather than the
+    /// whole tree — related-file ranking may therefore miss late-sorting matches.
+    #[serde(default)]
+    pub truncated: bool,
     pub files: Vec<RelatedFileResult>,
 }
 
@@ -123,13 +128,14 @@ pub async fn ai_related_files(
         .map(|p| resolve_workspace_path_simple(&p, &root_str));
     let target = target_path.as_deref().map(|p| Desc::new(p, &root_str));
 
-    let files = {
+    let listing = {
         let root = root.clone();
-        tokio::task::spawn_blocking(move || lux_fs::list_files(root, file_cap))
+        tokio::task::spawn_blocking(move || lux_fs::list_files_scanned(root, file_cap))
             .await
             .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?
     };
+    let files = listing.entries;
+    let truncated = listing.truncated;
 
     let file_count = files
         .iter()
@@ -194,6 +200,7 @@ pub async fn ai_related_files(
         query: query_str,
         scanned: file_count,
         count: ranked.len(),
+        truncated,
         files: ranked,
     })
 }

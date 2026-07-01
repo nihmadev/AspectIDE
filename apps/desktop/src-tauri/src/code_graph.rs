@@ -208,7 +208,16 @@ where
 {
     let guard = state.code_graph.lock().await;
     guard.as_ref().map_or_else(
-        || Err("Code graph is not built yet. Use code_graph_build first.".to_string()),
+        || {
+            // Model-actionable: the graph builds in the background on workspace open,
+            // so a caller can hit this window before it commits. Name tools the AI can
+            // actually invoke — never a Settings-only command it has no way to call.
+            Err(
+                "Code graph is not built yet (it builds in the background on workspace open). \
+                 Use SemanticSearch, SymbolContext, or Grep instead, or retry shortly."
+                    .to_string(),
+            )
+        },
         f,
     )
 }

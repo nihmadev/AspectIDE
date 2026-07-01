@@ -51,6 +51,23 @@ pub struct AiSemanticSearchResponse {
     pub query: String,
     pub path_filter: Option<String>,
     pub count: usize,
+    /// True when the workspace file listing hit its scan cap, so the file-candidate
+    /// portion of the ranking is drawn from a lexicographically-first sample rather
+    /// than the whole tree (symbol/text hits are unaffected).
+    #[serde(default)]
+    pub truncated: bool,
+    /// True when at least one search backend failed, so the ranking is drawn from a
+    /// subset of sources and may be missing relevant results. Distinct from
+    /// `truncated` (which is a full-but-sampled listing): `partial` means a dimension
+    /// of the search is entirely absent, so the model should treat the results as
+    /// incomplete and consider a follow-up (e.g. Grep) or retry.
+    #[serde(default)]
+    pub partial: bool,
+    /// Human-readable reasons the result set is partial (one per failed backend),
+    /// so the model can see *what* is missing rather than just *that* something is.
+    /// Empty when `partial` is false.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub partial_reasons: Vec<String>,
     pub results: Vec<AiSemanticResult>,
 }
 
@@ -68,9 +85,14 @@ pub async fn ai_semantic_search(
         return Err("SemanticSearch requires a non-empty query.".to_string());
     }
     let max_results = max_results.unwrap_or(24).clamp(1, 80);
+    // Keep the raw (normalized) filter for the response so the caller sees what it
+    // asked for, but match against a glob-tolerant fragment set (see `PathFilter`)
+    // so a glob-shaped filter like `src/**/*.ts` still narrows to the right paths
+    // instead of silently matching nothing.
     let path_filter = path
         .map(|p| normalize_slashes(p.trim()).to_lowercase())
         .filter(|p| !p.is_empty());
+    let path_matcher = path_filter.as_deref().map(PathFilter::new);
     let file_cap = max_files.unwrap_or(5_000).clamp(500, 20_000);
     let search_max = (max_results * 4).clamp(40, 120);
     let tokens = tokenize(&query);
@@ -121,29 +143,33 @@ pub async fn ai_semantic_search(
     // 3. Workspace file candidates.
     let files_future = {
         let root = root.clone();
-        tokio::task::spawn_blocking(move || lux_fs::list_files(root, file_cap))
+        tokio::task::spawn_blocking(move || lux_fs::list_files_scanned(root, file_cap))
     };
 
     // Await all three concurrently.
     let (symbols, search_result, files_result) =
         tokio::join!(symbols_future, search_future, files_future);
 
+    // A failed content-search backend must not be swallowed into a silently-shorter
+    // ranking: the symbol/file sources still produce results, so the call "succeeds",
+    // but the model would have no way to know the text-search dimension is missing and
+    // the ranking is partial. Track the failure and surface it on the response (see
+    // `partial`/`partial_reasons`) the same way `truncated` signals a capped listing.
+    let mut partial_reasons: Vec<&'static str> = Vec::new();
     let search_hits = search_result
         .map_err(|error| error.to_string())?
         .map_or_else(
             |error| {
                 tracing::warn!(%error, "ai_semantic_search: indexed search backend failed");
+                partial_reasons.push("content-search backend failed; results omit text matches");
                 Vec::default()
             },
             |response| response.hits,
         );
 
-    let files = files_result
-        .map_err(|error| error.to_string())?
-        .unwrap_or_else(|error| {
-            tracing::warn!(%error, "ai_semantic_search: file listing backend failed");
-            Vec::default()
-        });
+    let listing = files_result.map_err(|error| error.to_string())?;
+    let truncated = listing.truncated;
+    let files = listing.entries;
 
     let mut results: BTreeMap<String, AiSemanticResult> = BTreeMap::new();
     let normalized_query = query.to_lowercase();
@@ -154,7 +180,7 @@ pub async fn ai_semantic_search(
         if is_low_signal_path(&path) {
             continue;
         }
-        if !passes_path_filter(&path, path_filter.as_deref()) {
+        if !passes_path_filter(&path, path_matcher.as_ref()) {
             continue;
         }
         let descriptor = Descriptor::new(&path, &root_str);
@@ -192,7 +218,7 @@ pub async fn ai_semantic_search(
         if is_low_signal_path(&path) {
             continue;
         }
-        if !passes_path_filter(&path, path_filter.as_deref()) {
+        if !passes_path_filter(&path, path_matcher.as_ref()) {
             continue;
         }
         let descriptor = Descriptor::new(&path, &root_str);
@@ -223,7 +249,7 @@ pub async fn ai_semantic_search(
         .map(|entry| normalize_slashes(&entry.path.to_string_lossy()))
         .filter(|path| !is_low_signal_path(path))
         .map(|path| Descriptor::new(&path, &root_str))
-        .filter(|descriptor| passes_path_filter(&descriptor.path, path_filter.as_deref()))
+        .filter(|descriptor| passes_path_filter(&descriptor.path, path_matcher.as_ref()))
         .map(|descriptor| {
             let score = score_file(&descriptor, &tokens);
             (descriptor, score)
@@ -285,6 +311,9 @@ pub async fn ai_semantic_search(
         query,
         path_filter,
         count: ranked.len(),
+        truncated,
+        partial: !partial_reasons.is_empty(),
+        partial_reasons: partial_reasons.into_iter().map(str::to_string).collect(),
         results: ranked,
     })
 }
@@ -450,8 +479,53 @@ pub fn language_for_path_pub(basename_lower: &str) -> String {
     language_for_path(basename_lower)
 }
 
-fn passes_path_filter(path: &str, filter: Option<&str>) -> bool {
-    filter.is_none_or(|filter| normalize_slashes(path).to_lowercase().contains(filter))
+/// A glob-tolerant path filter.
+///
+/// The `path` argument the model passes is documented as a substring filter, but
+/// models routinely pass a glob shape (`src/**/*.ts`, `*.rs`, `components/*`).
+/// A raw substring match on such a string matches nothing, silently dropping every
+/// result. So we split the (already slash-normalized, lowercased) filter on glob
+/// metacharacters (`*`, `?`, `[`, `]`, `{`, `}`) into literal fragments and require
+/// each fragment to appear in the path, in order. A plain substring filter has a
+/// single fragment, so it behaves exactly as before; `src/**/*.ts` becomes the
+/// ordered fragments `["src/", "/", ".ts"]` → `["src/", ".ts"]` after collapsing,
+/// which still narrows to TypeScript files under `src`.
+struct PathFilter {
+    /// Ordered literal fragments that must all appear in the candidate path. Empty
+    /// when the filter was entirely glob metacharacters (e.g. `**`), in which case
+    /// it matches everything (a maximally forgiving no-op rather than nothing).
+    fragments: Vec<String>,
+}
+
+impl PathFilter {
+    /// Build from an already slash-normalized, lowercased filter string.
+    fn new(filter: &str) -> Self {
+        let fragments = filter
+            .split(['*', '?', '[', ']', '{', '}'])
+            .map(str::trim)
+            // A lone `/` fragment (left behind by `**` between separators) carries no
+            // signal — every path has separators — so drop it to avoid over-matching.
+            .filter(|fragment| !fragment.is_empty() && *fragment != "/")
+            .map(str::to_string)
+            .collect();
+        Self { fragments }
+    }
+
+    /// True when every fragment occurs in `path_lower`, in order.
+    fn matches(&self, path_lower: &str) -> bool {
+        let mut cursor = 0;
+        for fragment in &self.fragments {
+            let Some(found) = path_lower[cursor..].find(fragment.as_str()) else {
+                return false;
+            };
+            cursor += found + fragment.len();
+        }
+        true
+    }
+}
+
+fn passes_path_filter(path: &str, filter: Option<&PathFilter>) -> bool {
+    filter.is_none_or(|filter| filter.matches(&normalize_slashes(path).to_lowercase()))
 }
 
 fn score_symbol(
@@ -963,6 +1037,111 @@ mod tests {
         let d = Descriptor::new("/root/src/auth/login.ts", "/root");
         assert!(score_file(&d, &tokenize("login")) > 0);
         assert_eq!(score_file(&d, &tokenize("zzzzzz")), 0);
+    }
+
+    // ── E24: glob-tolerant path filter ──
+
+    #[test]
+    fn path_filter_plain_substring_unchanged() {
+        // A filter with no glob metacharacters behaves exactly like the old substring
+        // match: it matches paths that contain it and rejects those that don't.
+        let filter = PathFilter::new("src/auth");
+        assert!(passes_path_filter("/root/src/auth/login.ts", Some(&filter)));
+        assert!(!passes_path_filter("/root/src/db/pool.ts", Some(&filter)));
+        // No filter at all matches everything.
+        assert!(passes_path_filter("/root/anything.rs", None));
+    }
+
+    #[test]
+    fn path_filter_glob_shape_matches_intended_paths() {
+        // The core E24 regression: a glob-shaped filter must NOT silently match
+        // nothing. `src/**/*.ts` reduces to the ordered fragments ["src/", ".ts"] and
+        // still narrows to TypeScript files under src, in order.
+        let filter = PathFilter::new("src/**/*.ts");
+        assert!(passes_path_filter("/root/src/auth/login.ts", Some(&filter)));
+        assert!(passes_path_filter("/root/src/app.ts", Some(&filter)));
+        // A `.rs` file under src fails the trailing `.ts` fragment.
+        assert!(!passes_path_filter("/root/src/main.rs", Some(&filter)));
+        // A `.ts` file OUTSIDE src fails because `src/` must precede `.ts` in order.
+        assert!(!passes_path_filter("/root/lib/util.ts", Some(&filter)));
+    }
+
+    #[test]
+    fn path_filter_leading_star_and_question_mark() {
+        // `*.rs` → fragment [".rs"]; `comp?nents` → ["comp", "nents"].
+        let ext = PathFilter::new("*.rs");
+        assert!(passes_path_filter("/root/src/lib.rs", Some(&ext)));
+        assert!(!passes_path_filter("/root/src/lib.ts", Some(&ext)));
+
+        let q = PathFilter::new("comp?nents");
+        assert!(passes_path_filter("/root/src/components/x.tsx", Some(&q)));
+    }
+
+    #[test]
+    fn path_filter_all_glob_is_permissive_noop() {
+        // A filter that is entirely metacharacters/separators (`**`) has no literal
+        // signal, so it matches everything rather than nothing — the forgiving choice.
+        let filter = PathFilter::new("**");
+        assert!(filter.fragments.is_empty());
+        assert!(passes_path_filter("/root/src/whatever.py", Some(&filter)));
+    }
+
+    #[test]
+    fn path_filter_fragments_are_ordered() {
+        // Fragments must appear IN ORDER: a path with the right pieces in the wrong
+        // order does not match.
+        let filter = PathFilter::new("*.ts/src");
+        assert!(!passes_path_filter("/root/src/app.ts", Some(&filter)));
+    }
+
+    // ── E28: partial (backend-failure) signal on the response ──
+
+    fn empty_response() -> AiSemanticSearchResponse {
+        AiSemanticSearchResponse {
+            workspace_root: PathBuf::from("/root"),
+            query: "q".to_string(),
+            path_filter: None,
+            count: 0,
+            truncated: false,
+            partial: false,
+            partial_reasons: Vec::new(),
+            results: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn response_hides_partial_when_complete() {
+        // When no backend failed, the response must NOT advertise partial results:
+        // `partial` is false and the reasons array is omitted entirely from the JSON
+        // so a healthy call is not cluttered with an empty field.
+        let json = serde_json::to_string(&empty_response()).unwrap();
+        assert!(json.contains("\"partial\":false"), "json: {json}");
+        assert!(
+            !json.contains("partialReasons"),
+            "empty reasons must be skipped: {json}"
+        );
+    }
+
+    #[test]
+    fn response_surfaces_partial_on_backend_failure() {
+        // A failed backend must be visible to the model: `partial` is true and the
+        // human-readable reason is carried so the model knows the text-match dimension
+        // is missing and can follow up (Grep / retry) instead of trusting a short list.
+        let response = AiSemanticSearchResponse {
+            partial: true,
+            partial_reasons: vec![
+                "content-search backend failed; results omit text matches".to_string()
+            ],
+            ..empty_response()
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"partial\":true"), "json: {json}");
+        assert!(
+            json.contains("content-search backend failed"),
+            "reason must be present: {json}"
+        );
+        // Serialized under the camelCase alias the rest of the response uses.
+        assert!(json.contains("partialReasons"), "json: {json}");
     }
 
     // ── Structural graph boost ──

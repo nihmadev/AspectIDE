@@ -18,7 +18,8 @@ use crate::{workspace_root, SharedState};
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoMapFile {
-    pub path: PathBuf,
+    pub path: String,
+    pub relative_path: String,
     pub size: u64,
     pub modified_at: Option<String>,
 }
@@ -27,6 +28,11 @@ pub struct RepoMapFile {
 #[serde(rename_all = "camelCase")]
 pub struct AiRepoMapResponse {
     pub total_listed: usize,
+    pub truncated: bool,
+    /// Present only when the scan hit its cap: a human-readable caveat that the map
+    /// ranks the lexicographically-first scanned files and may omit whole subtrees
+    /// that sort after the cutoff.
+    pub note: Option<String>,
     pub files: Vec<RepoMapFile>,
 }
 
@@ -36,27 +42,63 @@ pub async fn ai_repo_map(
     max_files: Option<usize>,
 ) -> Result<AiRepoMapResponse, String> {
     let root = workspace_root(&state)?;
+    // A6: capture the normalized workspace root before `root` is moved into the
+    // blocking scan, so emitted paths can be presented forward-slashed +
+    // workspace-relative exactly like WorkspaceIndex / the other orient tools.
+    let root_str = ai_semantic::normalize_slashes_pub(&root.to_string_lossy());
     let max = max_files.unwrap_or(80).clamp(1, 500);
-    let entries = spawn_list_files(root, max.max(500)).await?;
+    // A5: use the scanned variant so we can tell the model when the map is a
+    // lexicographically-first sample rather than the whole project.
+    let scan_cap = max.max(500);
+    let listing = spawn_list_files_scanned(root, scan_cap).await?;
+    let entries = listing.entries;
     let mut files: Vec<_> = entries
         .iter()
         .filter(|e| matches!(e.kind, lux_core::FsEntryKind::File))
-        .map(|e| {
+        // F37: drop low-signal artifact paths (node_modules, dist/out, lockfiles, …)
+        // exactly as `ai_workspace_index` already does — otherwise the repo map's
+        // top-N is polluted by build output that `ai_workspace_index` filters out,
+        // an inconsistency between the two views of the same tree.
+        .filter_map(|e| {
             let path_str = ai_semantic::normalize_slashes_pub(&e.path.to_string_lossy());
+            if ai_semantic::is_low_signal_path_pub(&path_str) {
+                return None;
+            }
             let score = ai_semantic::score_path_pub(&path_str);
-            (e, score)
+            Some((e, score))
         })
         .collect();
     files.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.path.cmp(&b.0.path)));
     files.truncate(max);
+    // A5: mirror ai_workspace_index — when the scan hit its cap the ranking only saw
+    // the lexicographically-first slice of the tree, so signal that the map is partial.
+    let truncated = listing.truncated;
+    let note = truncated.then(|| {
+        format!(
+            "Workspace exceeds the {scan_cap}-file scan cap; the map ranks the \
+             lexicographically-first {} files and may omit whole subtrees that sort later.",
+            entries.len()
+        )
+    });
+    let root_prefix = format!("{}/", root_str.trim_end_matches('/'));
     Ok(AiRepoMapResponse {
         total_listed: entries.len(),
+        truncated,
+        note,
         files: files
             .into_iter()
-            .map(|(e, _)| RepoMapFile {
-                path: e.path.clone(),
-                size: e.size,
-                modified_at: e.modified_at.map(|dt| dt.to_rfc3339()),
+            .map(|(e, _)| {
+                // A6: forward-slash + workspace-relative, matching WorkspaceIndexFile.
+                let path = ai_semantic::normalize_slashes_pub(&e.path.to_string_lossy());
+                let relative_path = path
+                    .strip_prefix(&root_prefix)
+                    .map_or_else(|| path.clone(), str::to_string);
+                RepoMapFile {
+                    path,
+                    relative_path,
+                    size: e.size,
+                    modified_at: e.modified_at.map(|dt| dt.to_rfc3339()),
+                }
             })
             .collect(),
     })
@@ -80,6 +122,10 @@ pub struct AiWorkspaceIndexResponse {
     pub scanned: usize,
     pub indexed_files: usize,
     pub truncated: bool,
+    /// Present only when the scan was truncated: a human-readable caveat that the
+    /// `by_language`/`by_directory`/`largest` aggregates are computed over the
+    /// lexicographically-first scanned files and may not represent the full project.
+    pub aggregates_note: Option<String>,
     pub by_language: Vec<CountEntry>,
     pub by_directory: Vec<CountEntry>,
     pub important: Vec<WorkspaceIndexFile>,
@@ -315,11 +361,25 @@ pub async fn ai_workspace_index(
     });
     largest.truncate(max_files.min(20));
 
+    // F34: when the scan hit its cap the aggregates below are computed over the
+    // lexicographically-first slice of the tree, not the whole project. Surface that
+    // caveat instead of presenting a biased sample as authoritative.
+    let truncated = entries.len() >= max_scan;
+    let aggregates_note = truncated.then(|| {
+        format!(
+            "Workspace exceeds the {max_scan}-file scan cap; by_language, by_directory and \
+             largest are computed over the {} lexicographically-first files and may not \
+             represent the full project.",
+            entries.len()
+        )
+    });
+
     Ok(AiWorkspaceIndexResponse {
         workspace_root: root,
         scanned: entries.len(),
         indexed_files: descs.len(),
-        truncated: entries.len() >= max_scan,
+        truncated,
+        aggregates_note,
         by_language,
         by_directory,
         important: important.iter().map(|d| d.to_index_file()).collect(),
@@ -348,6 +408,19 @@ async fn spawn_list_files(root: PathBuf, max: usize) -> Result<Vec<lux_core::FsE
     tokio::task::spawn_blocking(move || lux_fs::list_files(root, max))
         .await
         .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// Like [`spawn_list_files`] but preserves the exact `truncated` flag so callers can
+/// tell the model when the listing is only the lexicographically-first slice of a
+/// larger workspace. `list_files_scanned` returns [`lux_fs::FileListing`] directly
+/// (never `Err`), so only the join error is mapped.
+async fn spawn_list_files_scanned(
+    root: PathBuf,
+    max: usize,
+) -> Result<lux_fs::FileListing, String> {
+    tokio::task::spawn_blocking(move || lux_fs::list_files_scanned(root, max))
+        .await
         .map_err(|e| e.to_string())
 }
 

@@ -10,7 +10,7 @@
 
 use lux_research::{
     duckduckgo_lite_search_url, duckduckgo_search_url, parse_duckduckgo_html, parse_searxng_json,
-    rerank, searxng_search_url, ResearchOptions, ResearchResponse, SearchHit,
+    rerank, searxng_search_url, FocusMode, ResearchOptions, ResearchResponse, SearchHit,
 };
 use tauri::State;
 
@@ -73,10 +73,23 @@ pub async fn web_research(
         ("duckduckgo", search_duckduckgo(&query).await?)
     };
 
+    // `focus` maps to SearxNG categories only; the DuckDuckGo fallback has no
+    // category knob, so a non-web focus is silently dropped there. Reflect the
+    // focus actually applied and tell the model when its focus was ignored.
+    let effective_focus = if provider == "duckduckgo" && options.focus != FocusMode::Web {
+        notes.push(format!(
+            "focus '{}' was ignored: the DuckDuckGo fallback does not support focus categories. Configure a SearxNG instance in Settings → AI → Web Research to use focus.",
+            options.focus.searxng_category(),
+        ));
+        FocusMode::Web
+    } else {
+        options.focus
+    };
+
     if hits.is_empty() {
         return Ok(ResearchResponse {
             query,
-            focus: options.focus,
+            focus: effective_focus,
             provider: provider.to_string(),
             source_count: 0,
             sources: Vec::new(),
@@ -139,9 +152,28 @@ pub async fn web_research(
         options.max_chars_per_source,
     );
 
+    // Signal when fewer sources came back than requested, distinguishing
+    // "fetched pages were dropped as off-topic" (rerank filtered them) from
+    // "there simply weren't that many candidates" — the model needs this to
+    // decide whether to broaden the query rather than assume results are exhausted.
+    let requested = options.max_sources.max(1);
+    let returned = sources.len();
+    if returned < requested {
+        let dropped = fetch_count.saturating_sub(returned);
+        if dropped > 0 {
+            notes.push(format!(
+                "Requested up to {requested} sources; returned {returned}. {dropped} fetched page(s) shared no query terms and were dropped as off-topic — consider broadening or rephrasing the query."
+            ));
+        } else {
+            notes.push(format!(
+                "Requested up to {requested} sources; only {fetch_count} candidate result(s) were available to fetch. Consider broadening the query."
+            ));
+        }
+    }
+
     Ok(ResearchResponse {
         query,
-        focus: options.focus,
+        focus: effective_focus,
         provider: provider.to_string(),
         source_count: sources.len(),
         sources,

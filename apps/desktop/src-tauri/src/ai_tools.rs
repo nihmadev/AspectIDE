@@ -27,7 +27,7 @@ const AI_SHELL_TRUNCATE_TAIL_CHARS: usize = 12_000;
 #[cfg(windows)]
 pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiFileOperationStats {
     lines_added: usize,
@@ -101,6 +101,13 @@ pub struct AiShellResponse {
     /// True when the command is a known read-only inspection command.
     #[serde(default)]
     read_only: bool,
+    /// True when stdout exceeded the output cap and was head+tail truncated, so the
+    /// model knows output was clipped without scraping the inline marker (E18).
+    #[serde(default)]
+    stdout_truncated: bool,
+    /// True when stderr exceeded the output cap and was head+tail truncated.
+    #[serde(default)]
+    stderr_truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,6 +132,49 @@ pub struct AiSymbolContextResponse {
 struct AiSymbolPosition {
     line: u32,
     column: u32,
+}
+
+/// F15: durable, crash-safe write for AI file operations — write a sibling temp
+/// file + fsync + atomic rename instead of truncating the target in place, so a
+/// disk-full error, crash, or AV lock can never leave the file empty or
+/// half-written. Delegates to `lux_editor::atomic_write` on a blocking thread
+/// (it does synchronous fs I/O). The `JoinError` from `spawn_blocking` and the
+/// inner `AppResult` are both flattened into the tool's `String` error channel.
+async fn ai_atomic_write(path: &Path, bytes: Vec<u8>) -> Result<(), String> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || lux_editor::atomic_write(&path, &bytes))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// The dominant end-of-line style of `text`, from the first terminator seen:
+/// `"\r\n"` (Windows), `"\r"` (classic Mac), or `"\n"` (Unix / no newline).
+fn detect_eol(text: &str) -> &'static str {
+    match text.find(['\n', '\r']) {
+        Some(idx) if text.as_bytes()[idx] == b'\r' => {
+            if text.as_bytes().get(idx + 1) == Some(&b'\n') {
+                "\r\n"
+            } else {
+                "\r"
+            }
+        }
+        _ => "\n",
+    }
+}
+
+/// Re-encode `text`'s line endings to `eol`, first collapsing any `\r\n`/lone `\r`
+/// to `\n` so the result is uniform. This lets StrReplace/PatchEngine match a file
+/// saved with `\r\n` (or a classic-Mac `\r`) even though the model emits `\n`-only
+/// search/replacement text — the recurring "replacement count mismatch: expected 1,
+/// found 0" trap on Windows-authored files. A no-op when `text` already uses `eol`.
+fn normalize_eol(text: &str, eol: &str) -> String {
+    let lf = text.replace("\r\n", "\n").replace('\r', "\n");
+    match eol {
+        "\r\n" => lf.replace('\n', "\r\n"),
+        "\r" => lf.replace('\n', "\r"),
+        _ => lf,
+    }
 }
 
 #[tauri::command]
@@ -159,9 +209,7 @@ pub async fn ai_file_write(
                 .await
                 .map_err(|error| error.to_string())?;
         }
-        tokio::fs::write(&path, &text)
-            .await
-            .map_err(|error| error.to_string())?;
+        ai_atomic_write(&path, text.clone().into_bytes()).await?;
         // Finding 2: disk is already committed, so a notification failure must be a
         // non-fatal warning — returning Err here would make a retry double-apply.
         if let Err(e) = emit_event(&app, LuxEvent::FsChanged { path: path.clone() }) {
@@ -281,11 +329,50 @@ pub async fn ai_file_str_replace(
     // Finding 1: use write-path resolution for mutating operations (same as Write/Create).
     let path = resolve_workspace_path_for_write(&state, &path)?;
     let before = current_text_for_path(&state, &path).await?;
+    // CRLF tolerance: re-encode the model's (usually `\n`-only) search + replacement
+    // text to the file's own EOL so a match isn't silently missed on a `\r\n` file.
+    let eol = detect_eol(&before);
+    let old_text = normalize_eol(&old_text, eol);
+    let new_text = normalize_eol(&new_text, eol);
     let replacement_count = before.matches(&old_text).count();
     let expected = expected_replacements.unwrap_or(1);
     if replacement_count != expected {
+        let new_already = before.matches(&new_text).count();
+        // Idempotency aid: a repeated "insert around" edit (newText contains oldText)
+        // that was already applied leaves 0 matches of oldText but the newText already
+        // present. Report a no-op success so re-issuing the same StrReplace can't
+        // compound duplicate insertions, rather than a confusing count mismatch.
+        if replacement_count == 0
+            && !new_text.is_empty()
+            && new_text.contains(&old_text)
+            && new_already >= expected
+        {
+            return Ok(AiFileOperationResult {
+                operation: "strReplace".to_string(),
+                path: path.clone(),
+                saved_to_disk: false,
+                changed_paths: Vec::new(),
+                edited_documents: Vec::new(),
+                stats: AiFileOperationStats::default(),
+                message: format!(
+                    "no change: newText already present {new_already} time(s) — edit appears already applied"
+                ),
+            });
+        }
+        // E10: give the model an in-band remedy instead of a bare count.
+        let remedy = if replacement_count > expected {
+            format!(" — oldText matched {replacement_count} places; pass expectedReplacements:{replacement_count} to replace all, or add surrounding lines to oldText to target one")
+        } else if replacement_count == 0 && new_already > 0 && !new_text.is_empty() {
+            format!(
+                " — newText is already present {new_already} time(s); it may already be applied"
+            )
+        } else if replacement_count == 0 {
+            " — oldText not found; check exact whitespace/indentation (matched literally, though CRLF/LF differences are tolerated)".to_string()
+        } else {
+            String::new()
+        };
         return Err(format!(
-            "replacement count mismatch for {}: expected {expected}, found {replacement_count}",
+            "replacement count mismatch for {}: expected {expected}, found {replacement_count}{remedy}",
             path.display()
         ));
     }
@@ -293,9 +380,7 @@ pub async fn ai_file_str_replace(
     let stats = diff_stats(&before, &after, false);
     let save_to_disk = save_to_disk.unwrap_or(true);
     if save_to_disk {
-        tokio::fs::write(&path, &after)
-            .await
-            .map_err(|error| error.to_string())?;
+        ai_atomic_write(&path, after.clone().into_bytes()).await?;
         // Finding 2: non-fatal on notification failure (disk is already committed).
         if let Err(e) = emit_event(&app, LuxEvent::FsChanged { path: path.clone() }) {
             tracing::warn!(%e, "ai_file_str_replace: emit_event failed (non-fatal)");
@@ -671,17 +756,18 @@ pub async fn ai_shell(
             let Some(pipe) = pipe else { return };
             let mut chunk = [0u8; 16 * 1024];
             loop {
+                // Finding 4: keep draining to EOF so the writer never blocks on a full
+                // pipe (which would stall a producer that out-runs the cap and make the
+                // command appear hung until the timeout fires). Only the APPEND is
+                // gated on `buffer.len() < cap`; reads continue and are discarded once
+                // the 8 MiB bound is reached.
                 match pipe.read(&mut chunk).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let mut buffer = sink.lock().await;
-                        if buffer.len() >= cap {
-                            break;
-                        }
-                        let room = cap - buffer.len();
-                        buffer.extend_from_slice(&chunk[..n.min(room)]);
-                        if buffer.len() >= cap {
-                            break;
+                        if buffer.len() < cap {
+                            let room = cap - buffer.len();
+                            buffer.extend_from_slice(&chunk[..n.min(room)]);
                         }
                     }
                 }
@@ -696,17 +782,16 @@ pub async fn ai_shell(
             };
             let mut chunk = [0u8; 16 * 1024];
             loop {
+                // Finding 4: drain to EOF; gate only the append on the cap (see
+                // `stream_into`). Reading past the cap keeps the pipe from filling and
+                // blocking the child's stderr writer.
                 match pipe.read(&mut chunk).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let mut buffer = collect_stderr.lock().await;
-                        if buffer.len() >= MAX_CAPTURE_BYTES {
-                            break;
-                        }
-                        let room = MAX_CAPTURE_BYTES - buffer.len();
-                        buffer.extend_from_slice(&chunk[..n.min(room)]);
-                        if buffer.len() >= MAX_CAPTURE_BYTES {
-                            break;
+                        if buffer.len() < MAX_CAPTURE_BYTES {
+                            let room = MAX_CAPTURE_BYTES - buffer.len();
+                            buffer.extend_from_slice(&chunk[..n.min(room)]);
                         }
                     }
                 }
@@ -737,17 +822,23 @@ pub async fn ai_shell(
             // resolves, so read the captured bytes back through the shared handles.
             let stdout_buf = shared_stdout.lock().await.clone();
             let stderr_buf = shared_stderr.lock().await.clone();
+            let (stdout, stdout_truncated) =
+                truncate_shell_output_flagged(&String::from_utf8_lossy(&stdout_buf));
+            let (stderr, stderr_truncated) =
+                truncate_shell_output_flagged(&String::from_utf8_lossy(&stderr_buf));
             Ok(AiShellResponse {
                 workspace_root: root,
                 cwd,
                 command,
                 exit_code: status.code(),
                 duration_ms,
-                stdout: truncate_shell_output(&String::from_utf8_lossy(&stdout_buf)),
-                stderr: truncate_shell_output(&String::from_utf8_lossy(&stderr_buf)),
+                stdout,
+                stderr,
                 timed_out: false,
                 warnings: safety.warnings,
                 read_only: safety.read_only,
+                stdout_truncated,
+                stderr_truncated,
             })
         }
         Ok(Err(error)) => Err(format!("Failed to run shell command: {error}")),
@@ -766,24 +857,27 @@ pub async fn ai_shell(
                 let buf = shared_stderr.lock().await;
                 String::from_utf8_lossy(&buf).to_string()
             };
+            let (stdout, stdout_truncated) = truncate_shell_output_flagged(&partial_stdout);
+            let (stderr_body, stderr_truncated) = truncate_shell_output_flagged(&partial_stderr);
             Ok(AiShellResponse {
                 workspace_root: root,
                 cwd,
                 command,
                 exit_code: None,
                 duration_ms,
-                stdout: truncate_shell_output(&partial_stdout),
+                stdout,
                 stderr: if partial_stderr.is_empty() {
                     format!("Shell command timed out after {timeout_secs} seconds")
                 } else {
                     format!(
-                        "{}\n---\nShell command timed out after {timeout_secs} seconds",
-                        truncate_shell_output(&partial_stderr)
+                        "{stderr_body}\n---\nShell command timed out after {timeout_secs} seconds"
                     )
                 },
                 timed_out: true,
                 warnings: safety.warnings,
                 read_only: safety.read_only,
+                stdout_truncated,
+                stderr_truncated,
             })
         }
     }
@@ -822,22 +916,85 @@ pub async fn ai_read_file(
     state: State<'_, SharedState>,
     path: PathBuf,
     max_bytes: Option<u64>,
+    start_line: Option<u32>,
+    max_lines: Option<u32>,
 ) -> Result<AiReadFileResult, String> {
     // Hard upper ceiling so a caller/model can't request an arbitrarily large
     // read (e.g. `maxBytes: 9_999_999_999`) and balloon memory; the default
     // stays small and the request is clamped into [1, 10 MiB].
     const MAX_READ_BYTES: u64 = 10 * 1024 * 1024;
-    let max_bytes = max_bytes.unwrap_or(120_000).clamp(1, MAX_READ_BYTES);
+    // A line-window read (startLine/maxLines) may need to reach deep into a big
+    // file, so give it a roomier default byte budget than a plain head read when
+    // the caller didn't pin `maxBytes` explicitly — lets the model page a 2000-line
+    // file instead of re-reading a truncated head over and over.
+    let windowed = start_line.is_some() || max_lines.is_some();
+    let default_bytes: u64 = if windowed { 2 * 1024 * 1024 } else { 120_000 };
+    let max_bytes = max_bytes.unwrap_or(default_bytes).clamp(1, MAX_READ_BYTES);
     let path = resolve_workspace_path(&state, &path)?;
     tokio::task::spawn_blocking(move || -> Result<AiReadFileResult, String> {
-        use std::io::Read;
+        use std::io::{BufRead, BufReader, Read};
         let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
         if !metadata.is_file() {
             return Err("path is not a file".to_string());
         }
         let size = metadata.len();
-        // Bound the read with Take + read_to_end so a short read() can't silently
-        // truncate the content; read_to_end loops until the capped EOF.
+
+        // Line-window read (startLine/maxLines): stream the file line-by-line so a
+        // deep startLine is reachable regardless of byte size, count EVERY line for
+        // an exact total_lines, and bound only the COLLECTED output so we never OOM.
+        // (A byte-capped slice would under-report total_lines and make lines past the
+        // cap unreachable — silently defeating the paging contract this promises.)
+        if windowed {
+            let start = start_line.map_or(1usize, |s| usize::try_from(s.max(1)).unwrap_or(1));
+            let take = max_lines.map_or(usize::MAX, |c| usize::try_from(c).unwrap_or(usize::MAX));
+            let out_cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+            let mut reader = BufReader::new(std::fs::File::open(&path).map_err(|e| e.to_string())?);
+            let mut line_buf: Vec<u8> = Vec::new();
+            let mut total_lines = 0usize;
+            let mut text = String::new();
+            let mut truncated = false;
+            loop {
+                line_buf.clear();
+                let read = reader
+                    .read_until(b'\n', &mut line_buf)
+                    .map_err(|e| e.to_string())?;
+                if read == 0 {
+                    break;
+                }
+                total_lines += 1;
+                if total_lines >= start && total_lines - start < take {
+                    // Trim the line terminator (`\n` + an optional preceding `\r`) to
+                    // match `str::lines()` semantics.
+                    let mut end = line_buf.len();
+                    if end > 0 && line_buf[end - 1] == b'\n' {
+                        end -= 1;
+                    }
+                    if end > 0 && line_buf[end - 1] == b'\r' {
+                        end -= 1;
+                    }
+                    let line = String::from_utf8_lossy(&line_buf[..end]);
+                    // Bound collected output; keep counting lines for an exact total.
+                    if text.len() + line.len() + 1 > out_cap {
+                        truncated = true;
+                    } else {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&line);
+                    }
+                }
+            }
+            return Ok(AiReadFileResult {
+                path,
+                text,
+                truncated,
+                size,
+                total_lines,
+                start_line: Some(start),
+            });
+        }
+
+        // Non-windowed head read: bounded byte read + UTF-8 boundary trim.
         let limit = max_bytes.min(size);
         let mut buffer = Vec::new();
         std::fs::File::open(&path)
@@ -845,12 +1002,51 @@ pub async fn ai_read_file(
             .take(limit)
             .read_to_end(&mut buffer)
             .map_err(|e| e.to_string())?;
+        // Finding 20: a byte cap can slice through the middle of a multi-byte UTF-8
+        // codepoint, which `from_utf8_lossy` would render as a spurious replacement
+        // char (U+FFFD) at the very end of an otherwise-valid file. Only when the read
+        // was actually truncated, drop a single trailing *incomplete* sequence
+        // (`error_len().is_none()` == "needs more bytes") so the visible content ends
+        // cleanly. A genuinely invalid byte (`error_len() == Some(_)`) is left in place
+        // and still falls through to the lossy conversion below.
+        if limit < size {
+            if let Err(error) = std::str::from_utf8(&buffer) {
+                if error.error_len().is_none() {
+                    let valid = error.valid_up_to();
+                    buffer.truncate(valid);
+                }
+            }
+        }
         let text = String::from_utf8_lossy(&buffer).into_owned();
+        // E8: when the head read was truncated, `text` holds only the first `limit`
+        // bytes, so counting its lines would UNDER-report the whole-file total the
+        // Read contract promises for paging. Stream the remainder counting lines so
+        // total_lines is exact (cheap `read_until` loop; no full in-memory load).
+        let total_lines = if limit < size {
+            let mut reader = BufReader::new(std::fs::File::open(&path).map_err(|e| e.to_string())?);
+            let mut scratch: Vec<u8> = Vec::new();
+            let mut count = 0usize;
+            loop {
+                scratch.clear();
+                let read = reader
+                    .read_until(b'\n', &mut scratch)
+                    .map_err(|e| e.to_string())?;
+                if read == 0 {
+                    break;
+                }
+                count += 1;
+            }
+            count
+        } else {
+            text.lines().count()
+        };
         Ok(AiReadFileResult {
             path,
             text,
             truncated: size > max_bytes,
             size,
+            total_lines,
+            start_line: None,
         })
     })
     .await
@@ -864,6 +1060,13 @@ pub struct AiReadFileResult {
     pub text: String,
     pub truncated: bool,
     pub size: u64,
+    /// Total line count of the file before any line-window slicing, so the caller
+    /// can page through it with `startLine`/`maxLines`.
+    pub total_lines: usize,
+    /// 1-based first line of the returned window, present only when a line range
+    /// was requested.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
 }
 
 /// List workspace files matching a pattern — public wrapper for the turn-loop.
@@ -880,6 +1083,7 @@ pub async fn ai_glob(
             pattern,
             count: 0,
             files: Vec::new(),
+            truncated: false,
         });
     }
 
@@ -947,6 +1151,7 @@ pub async fn ai_glob(
     .collect();
     Ok(AiGlobResult {
         count: files.len(),
+        truncated: files.len() >= max,
         files,
         pattern,
     })
@@ -958,6 +1163,10 @@ pub struct AiGlobResult {
     pub pattern: String,
     pub count: usize,
     pub files: Vec<PathBuf>,
+    /// True when the match count hit `maxResults`, so the listing may be clipped
+    /// and the model should narrow the pattern rather than assume it is complete.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[tauri::command]
@@ -1012,7 +1221,14 @@ pub async fn ai_symbol_context(
             .workspace_symbols(query.clone())
             .await
             .map_err(String::from)?;
+        let total = workspace_symbols.len();
         workspace_symbols.truncate(max_results);
+        if total > workspace_symbols.len() {
+            notes.push(format!(
+                "workspace symbols truncated to {} of {total}; raise maxResults to see more",
+                workspace_symbols.len()
+            ));
+        }
     }
 
     if let Some(path) = &resolved_path {
@@ -1025,7 +1241,14 @@ pub async fn ai_symbol_context(
             .document_symbols(&document)
             .await
             .map_err(String::from)?;
+        let total = count_document_symbols(&document_symbols);
         truncate_document_symbols(&mut document_symbols, max_results);
+        let shown = count_document_symbols(&document_symbols);
+        if total > shown {
+            notes.push(format!(
+                "document symbols truncated to {shown} of {total}; raise maxResults to see more"
+            ));
+        }
 
         if let Some(position) = &position {
             hover = manager
@@ -1044,8 +1267,22 @@ pub async fn ai_symbol_context(
                 .signature_help(&document, position.line, position.column)
                 .await
                 .map_err(String::from)?;
+            let definitions_total = definitions.len();
+            let references_total = references.len();
             definitions.truncate(max_results);
             references.truncate(max_results);
+            if definitions_total > definitions.len() {
+                notes.push(format!(
+                    "definitions truncated to {} of {definitions_total}; raise maxResults to see more",
+                    definitions.len()
+                ));
+            }
+            if references_total > references.len() {
+                notes.push(format!(
+                    "references truncated to {} of {references_total}; raise maxResults to see more",
+                    references.len()
+                ));
+            }
         } else if !query.is_empty() {
             document_symbols = filter_document_symbols(&document_symbols, &query, max_results);
         }
@@ -1176,12 +1413,29 @@ async fn prepare_ai_patch_operations(
                 if old_text.is_empty() {
                     return Err(format!("oldText must not be empty for {}", path.display()));
                 }
-                let new_text = operation.new_text.unwrap_or_default();
+                // F18: an omitted `newText` is a caller error, not a silent
+                // delete-to-empty. `ai_file_str_replace` takes `new_text: String`
+                // (non-optional), so the patch path must be equally strict; a
+                // deliberate deletion still works by passing an explicit empty string.
+                let new_text = operation
+                    .new_text
+                    .ok_or_else(|| format!("replace requires newText for {}", path.display()))?;
                 let expected = operation.expected_replacements.unwrap_or(1);
+                // CRLF tolerance (parity with `ai_file_str_replace`): match against the
+                // file's own EOL so a `\n`-only patch still applies to a `\r\n` file.
+                let eol = detect_eol(&before);
+                let old_text = normalize_eol(&old_text, eol);
+                let new_text = normalize_eol(&new_text, eol);
                 let replacement_count = before.matches(&old_text).count();
                 if replacement_count != expected {
+                    let new_already = before.matches(&new_text).count();
+                    let hint = if new_already > 0 && !new_text.is_empty() {
+                        format!(" (newText already present {new_already} time(s) — may already be applied)")
+                    } else {
+                        String::new()
+                    };
                     return Err(format!(
-                        "replacement count mismatch for {}: expected {expected}, found {replacement_count}",
+                        "replacement count mismatch for {}: expected {expected}, found {replacement_count}{hint}",
                         path.display()
                     ));
                 }
@@ -1263,9 +1517,7 @@ async fn apply_ai_patch_to_disk(
                         .await
                         .map_err(|error| error.to_string())?;
                 }
-                tokio::fs::write(&operation.path, text)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                ai_atomic_write(&operation.path, text.as_bytes().to_vec()).await?;
             }
             AiPreparedPatchKind::Delete => {
                 tokio::fs::remove_file(&operation.path)
@@ -1281,7 +1533,11 @@ async fn rollback_ai_patch(mut rollback: Vec<AiPatchRollbackEntry>) {
     while let Some(entry) = rollback.pop() {
         match entry.previous_bytes {
             Some(bytes) => {
-                let _ = tokio::fs::write(&entry.path, bytes).await;
+                // F15: restore previous content durably (sibling temp + atomic
+                // rename) just like the forward write, so a crash mid-rollback can't
+                // leave a half-written file. Best-effort: rollback is itself the
+                // error path, so a failure here is logged-by-absence, not propagated.
+                let _ = ai_atomic_write(&entry.path, bytes).await;
             }
             None => {
                 let _ = tokio::fs::remove_file(&entry.path).await;
@@ -1365,6 +1621,16 @@ async fn symbol_context_document_for_path(
 fn truncate_document_symbols(symbols: &mut Vec<LspDocumentSymbol>, max_results: usize) {
     let mut remaining = max_results;
     symbols.retain_mut(|symbol| retain_symbol_with_budget(symbol, &mut remaining));
+}
+
+/// Count document symbols the same way the budget is spent (one per node,
+/// recursing into children), so a truncation note's reported total matches the
+/// truncation accounting rather than only the top-level count (A22).
+fn count_document_symbols(symbols: &[LspDocumentSymbol]) -> usize {
+    symbols
+        .iter()
+        .map(|symbol| 1 + count_document_symbols(&symbol.children))
+        .sum()
 }
 
 fn retain_symbol_with_budget(symbol: &mut LspDocumentSymbol, remaining: &mut usize) -> bool {
@@ -1477,23 +1743,65 @@ async fn update_open_document_after_text_change(
     Ok(updated)
 }
 
+/// Added / removed / changed line counts between two file contents.
+///
+/// F23: counts via a longest-common-subsequence of lines rather than the net
+/// line-count delta. The old `after.lines().count() - before.lines().count()`
+/// reported 0 added / 0 removed for an N-for-N content replacement (same line
+/// count, different lines), so any in-place content edit looked like a no-op in
+/// the stats. LCS makes `lines_added` / `lines_removed` reflect the lines that
+/// actually changed. (A trailing-newline-only edit still shows only in
+/// `files_changed`, since `lines()` discards a trailing empty line.)
 fn diff_stats(before: &str, after: &str, created: bool) -> AiFileOperationStats {
-    let before_lines = before.lines().count();
-    let after_lines = after.lines().count();
+    let before_lines: Vec<&str> = before.lines().collect();
+    let after_lines: Vec<&str> = after.lines().collect();
+    let common = lcs_len(&before_lines, &after_lines);
     AiFileOperationStats {
-        lines_added: after_lines.saturating_sub(before_lines),
-        lines_removed: before_lines.saturating_sub(after_lines),
+        lines_added: after_lines.len() - common,
+        lines_removed: before_lines.len() - common,
         files_changed: usize::from(!created && before != after),
         files_created: usize::from(created),
         files_deleted: 0,
     }
 }
 
+/// Length of the longest common subsequence of two line slices, via a rolling
+/// two-row DP in O(min(m, n)) space (the shorter slice drives the inner row).
+/// Returns 0 when either slice is empty.
+fn lcs_len(a: &[&str], b: &[&str]) -> usize {
+    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    if short.is_empty() {
+        return 0;
+    }
+    let mut prev = vec![0usize; short.len() + 1];
+    let mut curr = vec![0usize; short.len() + 1];
+    for &long_line in long {
+        for (j, &short_line) in short.iter().enumerate() {
+            curr[j + 1] = if long_line == short_line {
+                prev[j] + 1
+            } else {
+                curr[j].max(prev[j + 1])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[short.len()]
+}
+
 fn shell_command(command_line: &str) -> tokio::process::Command {
     #[cfg(windows)]
     {
         let mut command = tokio::process::Command::new("cmd");
-        command.arg("/C").arg(command_line);
+        // BUG(F1): cmd /C parses the rest of the line with its own verbatim-quote
+        // rule — `cmd /C "<command_line>"` strips ONLY the outer wrapping quotes and
+        // passes everything between them through untouched. Building the line via two
+        // `.arg()` calls instead routed it through the MSVCRT argv quoter, which
+        // backslash-escapes inner quotes (`"` -> `\"`), so `python -c "print('x')"`
+        // reached the interpreter mangled. Emit the `/C "<line>"` form verbatim with
+        // raw_arg so inner quotes survive (empirically verified:
+        // `cmd /C "python -c "print(2+2)""` prints 4). raw_arg is tokio's inherent
+        // Windows method, same family as creation_flags below — no extra `use`.
+        command.raw_arg(format!("/C \"{command_line}\""));
         command.creation_flags(CREATE_NO_WINDOW);
         command
     }
@@ -1506,10 +1814,18 @@ fn shell_command(command_line: &str) -> tokio::process::Command {
 }
 
 pub fn truncate_shell_output(value: &str) -> String {
+    truncate_shell_output_flagged(value).0
+}
+
+/// Like [`truncate_shell_output`] but also reports whether truncation occurred, so
+/// callers can surface a machine-readable flag (parallel to `ai_read_file`'s
+/// `truncated`) instead of forcing the model to scrape the inline marker (E18).
+/// The returned string is byte-for-byte identical to `truncate_shell_output`.
+fn truncate_shell_output_flagged(value: &str) -> (String, bool) {
     let trimmed = value.trim();
     let total_chars = trimmed.chars().count();
     if total_chars <= AI_SHELL_MAX_OUTPUT_CHARS {
-        return trimmed.to_string();
+        return (trimmed.to_string(), false);
     }
     // Finding 6: head+tail truncation (first 12k + last 12k chars) with
     // omitted-character count, preserving both early context and final errors.
@@ -1527,7 +1843,10 @@ pub fn truncate_shell_output(value: &str) -> String {
     let omitted = total_chars - head_chars - tail_chars;
     let head: String = trimmed.chars().take(head_chars).collect();
     let tail: String = trimmed.chars().skip(total_chars - tail_chars).collect();
-    format!("{head}\n... [{omitted} characters omitted] ...\n{tail}")
+    (
+        format!("{head}\n... [{omitted} characters omitted] ...\n{tail}"),
+        true,
+    )
 }
 
 #[cfg(test)]
@@ -1727,6 +2046,37 @@ mod tests {
         assert_eq!(stats.lines_removed, 3);
         assert_eq!(stats.lines_added, 0);
         assert_eq!(stats.files_changed, 1);
+    }
+
+    #[test]
+    fn diff_stats_content_replacement_counts_changed_lines() {
+        // F23: N-for-N replacement (same line count, all lines differ) must report
+        // N added / N removed, not the net delta of 0/0.
+        let stats = diff_stats("a\nb\nc", "x\ny\nz", false);
+        assert_eq!(stats.lines_added, 3);
+        assert_eq!(stats.lines_removed, 3);
+        assert_eq!(stats.files_changed, 1);
+        // A 1-line edit inside an otherwise-identical file changes exactly 1 line.
+        let stats = diff_stats("a\nb\nc", "a\nB\nc", false);
+        assert_eq!(stats.lines_added, 1);
+        assert_eq!(stats.lines_removed, 1);
+    }
+
+    #[test]
+    fn eol_detection_and_normalization() {
+        assert_eq!(detect_eol("a\r\nb"), "\r\n");
+        assert_eq!(detect_eol("a\nb"), "\n");
+        assert_eq!(detect_eol("a\rb"), "\r");
+        assert_eq!(detect_eol("no newline"), "\n");
+        // LF-only model text is re-encoded to a CRLF file's ending so it matches.
+        assert_eq!(normalize_eol("x\ny", "\r\n"), "x\r\ny");
+        // Already-CRLF text is not doubled when targeting CRLF.
+        assert_eq!(normalize_eol("x\r\ny", "\r\n"), "x\r\ny");
+        // Targeting LF collapses CRLF and lone CR back to LF.
+        assert_eq!(normalize_eol("x\r\ny", "\n"), "x\ny");
+        assert_eq!(normalize_eol("x\ry", "\n"), "x\ny");
+        // Classic-Mac target re-encodes LF to lone CR.
+        assert_eq!(normalize_eol("x\ny", "\r"), "x\ry");
     }
 
     // ── Finding 4: tool def integer bounds (schema-level test) ──

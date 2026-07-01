@@ -66,6 +66,10 @@ pub struct SshConnectResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshExecResult {
+    /// The session id, echoed under the same `session` key the model was shown as
+    /// the INPUT parameter (E42), so re-passing the returned id under that name
+    /// works. `session_id` (below) is kept for the existing TS `SshExecResult`.
+    pub session: String,
     pub session_id: String,
     pub command: String,
     pub cwd: String,
@@ -80,6 +84,8 @@ pub struct SshExecResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SshTransferResult {
+    /// Echoed under the `session` input-param key (E42), alongside `session_id`.
+    pub session: String,
     pub session_id: String,
     pub direction: TransferDirection,
     pub local_path: String,
@@ -121,49 +127,72 @@ struct RawRun {
     timed_out: bool,
 }
 
-/// Read at most `cap` bytes from `reader`, reporting whether the stream had MORE
-/// than `cap` bytes (i.e. output was truncated).
-///
-/// A stream that ends exactly at `cap` is complete, not truncated — the flag is
-/// only set when at least one byte beyond `cap` exists. On truncation the excess
-/// is left unread in the pipe (the child blocks on a full pipe, then is killed by
-/// the caller).
-async fn read_capped<R>(reader: &mut R, cap: usize) -> (Vec<u8>, bool)
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt;
-    let mut buf = Vec::new();
-    let mut chunk = [0_u8; 16 * 1024];
-    loop {
-        match reader.read(&mut chunk).await {
-            // Clean EOF (`Ok(0)`) or a read error both end capture with whatever we
-            // already have — untruncated.
-            Ok(0) | Err(_) => return (buf, false),
-            Ok(n) => {
-                let room = cap - buf.len();
-                // Strictly greater than the remaining room means real overflow:
-                // keep exactly `cap` bytes and report truncation. Filling the cap
-                // exactly (`n == room`) is not yet truncation — loop once more so a
-                // following EOF stays untruncated while any extra byte trips it.
-                if n > room {
-                    buf.extend_from_slice(&chunk[..room]);
-                    return (buf, true);
-                }
-                buf.extend_from_slice(&chunk[..n]);
-            }
-        }
-    }
-}
-
 /// Append a clear, byte-accurate truncation marker to capped output.
 fn mark_truncated(text: String) -> String {
     format!("{text}\n[output truncated at {SSH_MAX_OUTPUT_BYTES} bytes]")
 }
 
+/// Read from `reader` in chunks, appending into the shared, mutex-guarded `sink`
+/// as bytes arrive so whatever was captured before a timeout is preserved.
+///
+/// The capture is bounded to `cap` bytes (the append is gated on the current
+/// length) while the read loop keeps draining to EOF, so a producer that
+/// out-runs the cap never blocks on a full pipe. Returns whether the stream had
+/// MORE than `cap` bytes (i.e. output was truncated); a stream that ends exactly
+/// at `cap` is complete, not truncated.
+async fn stream_capped_into<R>(
+    reader: &mut R,
+    sink: &std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    cap: usize,
+) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut chunk = [0_u8; 16 * 1024];
+    let mut capped = false;
+    loop {
+        match reader.read(&mut chunk).await {
+            // Clean EOF (`Ok(0)`) or a read error both end capture with whatever
+            // was already appended.
+            Ok(0) | Err(_) => return capped,
+            Ok(n) => {
+                let mut buffer = sink.lock().await;
+                let room = cap.saturating_sub(buffer.len());
+                // Strictly more than the remaining room means real overflow: keep
+                // exactly `cap` bytes and flag truncation. Filling the cap exactly
+                // (`n == room`) is not yet truncation — keep looping so a following
+                // EOF stays untruncated while any extra byte trips the flag.
+                if n > room {
+                    buffer.extend_from_slice(&chunk[..room]);
+                    capped = true;
+                } else {
+                    buffer.extend_from_slice(&chunk[..n]);
+                }
+            }
+        }
+    }
+}
+
+/// Render the captured bytes for one stream: truncate to the display ceiling and
+/// append the byte-accurate marker when the stream overflowed the hard cap.
+fn finish_stream(buf: &[u8], capped: bool) -> String {
+    let text = truncate_shell_output(&String::from_utf8_lossy(buf));
+    if capped {
+        mark_truncated(text)
+    } else {
+        text
+    }
+}
+
 /// Spawn `program` with `args`, drain both pipes concurrently, and enforce a hard
 /// timeout with a full process-tree kill — the same battle-tested shape as the
 /// `Shell` tool. `stdin` is null so OpenSSH can never block reading a prompt.
+///
+/// E40: partial output is preserved. Both pipes stream into shared, mutex-guarded
+/// buffers OUTSIDE the timed future, so on a timeout (or an output-cap kill) we
+/// return whatever stdout/stderr arrived before the deadline instead of dropping
+/// it, with `timed_out` set. This mirrors the `Shell` tool's timeout handling.
 async fn run_program(program: &str, args: &[String], timeout_secs: u64) -> Result<RawRun, String> {
     let started = Instant::now();
     let mut process = tokio::process::Command::new(program);
@@ -190,82 +219,110 @@ async fn run_program(program: &str, args: &[String], timeout_secs: u64) -> Resul
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
 
+    // E40: keep the capture buffers outside the timed future so partial output is
+    // returned on timeout instead of being discarded. The collect future fills
+    // them as bytes arrive; on timeout we read what landed so far via the Arc.
+    let shared_stdout: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let shared_stderr: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    // Report truncation back out of the collect future without needing the buffers.
+    let shared_capped: std::sync::Arc<tokio::sync::Mutex<(bool, bool)>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new((false, false)));
+
     // Drain both pipes concurrently (avoids a full-pipe deadlock), each bounded to
     // SSH_MAX_OUTPUT_BYTES so a runaway remote stream can't exhaust memory. If a
-    // cap is hit we stop reading and tree-kill the child below so it stops
+    // cap is hit we stop appending and tree-kill the child below so it stops
     // producing, then surface the truncated output with a marker.
+    let collect_stdout = std::sync::Arc::clone(&shared_stdout);
+    let collect_stderr = std::sync::Arc::clone(&shared_stderr);
+    let collect_capped = std::sync::Arc::clone(&shared_capped);
     let collect = async {
         let read_stdout = async {
-            match stdout_pipe.as_mut() {
-                Some(pipe) => Box::pin(read_capped(pipe, SSH_MAX_OUTPUT_BYTES)).await,
-                None => (Vec::new(), false),
+            if let Some(pipe) = stdout_pipe.as_mut() {
+                Box::pin(stream_capped_into(
+                    pipe,
+                    &collect_stdout,
+                    SSH_MAX_OUTPUT_BYTES,
+                ))
+                .await
+            } else {
+                false
             }
         };
         let read_stderr = async {
-            match stderr_pipe.as_mut() {
-                Some(pipe) => Box::pin(read_capped(pipe, SSH_MAX_OUTPUT_BYTES)).await,
-                None => (Vec::new(), false),
+            if let Some(pipe) = stderr_pipe.as_mut() {
+                Box::pin(stream_capped_into(
+                    pipe,
+                    &collect_stderr,
+                    SSH_MAX_OUTPUT_BYTES,
+                ))
+                .await
+            } else {
+                false
             }
         };
-        let ((stdout_buf, stdout_capped), (stderr_buf, stderr_capped)) =
-            tokio::join!(read_stdout, read_stderr);
+        let (stdout_capped, stderr_capped) = tokio::join!(read_stdout, read_stderr);
+        *collect_capped.lock().await = (stdout_capped, stderr_capped);
         let capped = stdout_capped || stderr_capped;
         // Only reap the child if neither stream overflowed; on a cap we skip the
         // potentially-unbounded wait and go straight to the tree-kill below.
-        let wait = if capped {
+        if capped {
             None
         } else {
             Some(child.wait().await)
-        };
-        let stdout = String::from_utf8_lossy(&stdout_buf).into_owned();
-        let stderr = String::from_utf8_lossy(&stderr_buf).into_owned();
-        (wait, stdout, stdout_capped, stderr, stderr_capped, capped)
+        }
     };
 
-    match Box::pin(timeout(Duration::from_secs(timeout_secs), collect)).await {
-        // A cap was hit: kill the still-running child so it stops producing, then
-        // return the truncated output (exit code is unknowable — the process was
-        // killed rather than allowed to finish). Each stream gets its own marker.
-        Ok((_, stdout, stdout_capped, stderr, stderr_capped, true)) => {
+    let outcome = Box::pin(timeout(Duration::from_secs(timeout_secs), collect)).await;
+    let duration_ms = started.elapsed().as_millis();
+    let (stdout_capped, stderr_capped) = *shared_capped.lock().await;
+    let stdout_buf = shared_stdout.lock().await.clone();
+    let stderr_buf = shared_stderr.lock().await.clone();
+
+    match outcome {
+        // Ran to completion (neither stream overflowed): report the real exit code.
+        Ok(Some(Ok(status))) => Ok(RawRun {
+            exit_code: status.code(),
+            stdout: finish_stream(&stdout_buf, stdout_capped),
+            stderr: finish_stream(&stderr_buf, stderr_capped),
+            duration_ms,
+            timed_out: false,
+        }),
+        // A cap was hit (`wait` is `None`): kill the still-running child so it stops
+        // producing, then return the truncated output. Exit code is unknowable —
+        // the process was killed rather than allowed to finish.
+        Ok(None) => {
             kill_process_tree(child_pid).await;
             let _ = child.start_kill();
-            let stdout = truncate_shell_output(&stdout);
-            let stderr = truncate_shell_output(&stderr);
             Ok(RawRun {
                 exit_code: None,
-                stdout: if stdout_capped {
-                    mark_truncated(stdout)
-                } else {
-                    stdout
-                },
-                stderr: if stderr_capped {
-                    mark_truncated(stderr)
-                } else {
-                    stderr
-                },
-                duration_ms: started.elapsed().as_millis(),
+                stdout: finish_stream(&stdout_buf, stdout_capped),
+                stderr: finish_stream(&stderr_buf, stderr_capped),
+                duration_ms,
                 timed_out: false,
             })
         }
-        Ok((Some(Ok(status)), stdout, _, stderr, _, false)) => Ok(RawRun {
-            exit_code: status.code(),
-            stdout: truncate_shell_output(&stdout),
-            stderr: truncate_shell_output(&stderr),
-            duration_ms: started.elapsed().as_millis(),
-            timed_out: false,
-        }),
-        Ok((Some(Err(error)), ..)) => Err(format!("Failed to run `{program}`: {error}")),
-        // `wait` is `None` only when `capped` is true (handled above); this arm is
-        // unreachable but keeps the match total without an explicit panic.
-        Ok((None, ..)) => Err(format!("`{program}` ended without an exit status")),
+        Ok(Some(Err(error))) => Err(format!("Failed to run `{program}`: {error}")),
+        // E40: timed out — `child` is still alive (only the collect future's borrow
+        // was dropped). Kill the whole tree, then return whatever partial stdout /
+        // stderr was captured before the deadline with `timed_out` set, appending a
+        // timeout notice to stderr rather than discarding the partial output.
         Err(_) => {
             kill_process_tree(child_pid).await;
             let _ = child.start_kill();
+            let partial_stdout = finish_stream(&stdout_buf, stdout_capped);
+            let partial_stderr = finish_stream(&stderr_buf, stderr_capped);
+            let timeout_note = format!("{program} timed out after {timeout_secs} seconds");
             Ok(RawRun {
                 exit_code: None,
-                stdout: String::new(),
-                stderr: format!("{program} timed out after {timeout_secs} seconds"),
-                duration_ms: started.elapsed().as_millis(),
+                stdout: partial_stdout,
+                stderr: if partial_stderr.is_empty() {
+                    timeout_note
+                } else {
+                    format!("{partial_stderr}\n---\n{timeout_note}")
+                },
+                duration_ms,
                 timed_out: true,
             })
         }
@@ -358,6 +415,69 @@ fn clean_stderr(stderr: &str) -> String {
         "(no error output)".to_string()
     } else {
         trimmed.chars().take(600).collect()
+    }
+}
+
+/// Neutralize the tokens that trip the shared classifier's LOCAL Windows/cmd
+/// catastrophic rules, WITHOUT disturbing any POSIX signal, so a re-classification
+/// yields a pure-POSIX verdict (E41).
+///
+/// The Windows drive-erase rules all require a Windows drive-root operand
+/// (`c:`, `c:\`, `c:/`, `%SystemDrive%` …); the two operand-free rules key on the
+/// verbs `diskpart` and `cipher /w`. Replacing exactly those tokens with an inert
+/// placeholder defuses every Windows rule while leaving POSIX targets (which are
+/// `/`-rooted paths, `/dev/*` devices, `~`, `$HOME`, etc.) and all warning
+/// signals untouched — so a masked POSIX catastrophe in a compound line
+/// (`format c: ; rm -rf /`) still surfaces and blocks.
+fn neutralize_windows_tokens(command: &str) -> Option<String> {
+    let mut changed = false;
+    let rewritten = command
+        .split_whitespace()
+        .map(|token| {
+            let bare = token
+                .trim_matches(|c| c == '"' || c == '\'')
+                .trim_end_matches(['\\', '/']);
+            let lower = bare.to_ascii_lowercase();
+            // cmd env-var drive roots, or the operand-free Windows disk verbs
+            // (`diskpart`, `cipher` for `cipher /w`).
+            let is_win_verb_or_env = matches!(
+                lower.as_str(),
+                "%systemdrive%" | "%systemroot%" | "%windir%" | "diskpart" | "cipher"
+            );
+            // `X:` / `X:\` / `X:/` drive-letter roots for any drive letter.
+            let bytes = bare.as_bytes();
+            let is_drive_root =
+                bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+            if is_win_verb_or_env || is_drive_root {
+                changed = true;
+                "__win__".to_string()
+            } else {
+                token.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    changed.then_some(rewritten)
+}
+
+/// Classify a command bound for a REMOTE POSIX host, scoping the shared
+/// classifier's catastrophic verdict to the POSIX surface (E41).
+///
+/// The shared classifier models the combined POSIX + cmd surface (it drives the
+/// local `cmd /C` `Shell` tool). Applied verbatim to a command that will run on a
+/// POSIX remote, its cmd-specific rules produce false-positive BLOCKS the model
+/// cannot explain (e.g. a valid POSIX command whose tokens trip a Windows
+/// drive-root rule). When such Windows-only tokens are present we classify a
+/// neutralized copy so only the POSIX guards can fire (fork bomb, `rm -rf /` /
+/// protected paths, `mkfs`, `dd`/redirect to a block device, recursive
+/// chmod/chown at root, `--no-preserve-root`); a masked POSIX catastrophe in the
+/// same line still surfaces because only the Windows tokens are replaced. When no
+/// Windows tokens are present the original command is classified verbatim, so
+/// nothing about the POSIX-only path changes.
+fn classify_remote_command(command: &str) -> crate::ai_shell_safety::ShellSafetyReport {
+    match neutralize_windows_tokens(command) {
+        Some(neutralized) => crate::ai_shell_safety::classify_shell_command(&neutralized),
+        None => crate::ai_shell_safety::classify_shell_command(command),
     }
 }
 
@@ -473,7 +593,7 @@ pub async fn ssh_exec(
     timeout_secs: Option<u64>,
 ) -> Result<SshExecResult, String> {
     let id = uuid::Uuid::parse_str(session_id.trim())
-        .map_err(|_| "SshExec requires a valid sessionId from SshConnect.".to_string())?;
+        .map_err(|_| "SshExec requires a valid session id from SshConnect.".to_string())?;
     let session = state.ssh.get(id).ok_or_else(|| {
         "No such SSH session. Call SshConnect first (or it was disconnected).".to_string()
     })?;
@@ -482,7 +602,10 @@ pub async fn ssh_exec(
     if command.is_empty() {
         return Err("SshExec requires a non-empty command.".to_string());
     }
-    let safety = crate::ai_shell_safety::classify_shell_command(&command);
+    // E41: classify against the POSIX surface only — the shared classifier's
+    // Windows/cmd-specific catastrophic rules don't apply to a remote POSIX host
+    // and would otherwise false-positive-block legitimate remote commands.
+    let safety = classify_remote_command(&command);
     if let Some(reason) = safety.blocked {
         return Err(format!(
             "Lux blocked this remote command for safety ({reason}). If it is genuinely intended, run it yourself."
@@ -513,8 +636,13 @@ pub async fn ssh_exec(
         .clamp(1, EXEC_MAX_TIMEOUT_SECS);
     let run = Box::pin(run_program("ssh", &args, exec_timeout)).await?;
 
+    let id_str = id.to_string();
     Ok(SshExecResult {
-        session_id: id.to_string(),
+        // E42: echo the id under BOTH keys so re-passing the returned id works
+        // whether the model reuses `session` (the input param it was shown) or
+        // `sessionId` (the TS `SshExecResult` field).
+        session: id_str.clone(),
+        session_id: id_str,
         command,
         cwd: effective_cwd,
         exit_code: run.exit_code,
@@ -538,7 +666,7 @@ pub async fn ssh_transfer(
     recursive: Option<bool>,
 ) -> Result<SshTransferResult, String> {
     let id = uuid::Uuid::parse_str(session_id.trim())
-        .map_err(|_| "SshTransfer requires a valid sessionId from SshConnect.".to_string())?;
+        .map_err(|_| "SshTransfer requires a valid session id from SshConnect.".to_string())?;
     let session = state.ssh.get(id).ok_or_else(|| {
         "No such SSH session. Call SshConnect first (or it was disconnected).".to_string()
     })?;
@@ -594,8 +722,11 @@ pub async fn ssh_transfer(
         }
     }
 
+    let id_str = id.to_string();
     Ok(SshTransferResult {
-        session_id: id.to_string(),
+        // E42: echo the id under both `session` and `sessionId` (see SshExecResult).
+        session: id_str.clone(),
+        session_id: id_str,
         direction,
         local_path: local_str,
         remote_path,
@@ -689,7 +820,7 @@ pub async fn ssh_list(state: State<'_, SharedState>) -> Result<SshOverview, Stri
     })
 }
 
-/// Close one session (`sessionId`) or every session (`all`).
+/// Close one session (by `session` id) or every session (`all`).
 #[tauri::command]
 pub fn ssh_disconnect(
     state: State<'_, SharedState>,
@@ -700,9 +831,9 @@ pub fn ssh_disconnect(
         state.ssh.clear()
     } else {
         let raw = session_id
-            .ok_or_else(|| "SshDisconnect requires a sessionId (or all=true).".to_string())?;
+            .ok_or_else(|| "SshDisconnect requires a session id (or all=true).".to_string())?;
         let id = uuid::Uuid::parse_str(raw.trim())
-            .map_err(|_| "SshDisconnect requires a valid sessionId.".to_string())?;
+            .map_err(|_| "SshDisconnect requires a valid session id.".to_string())?;
         usize::from(state.ssh.remove(id))
     };
     Ok(SshDisconnectResult {
@@ -742,34 +873,53 @@ mod tests {
         assert_eq!(clean_stderr(" boom "), "boom");
     }
 
+    fn new_sink() -> std::sync::Arc<tokio::sync::Mutex<Vec<u8>>> {
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()))
+    }
+
     #[tokio::test]
-    async fn read_capped_stops_at_cap_and_flags_truncation() {
-        // Input longer than the cap: we read exactly `cap` bytes and report it.
+    async fn stream_capped_into_stops_at_cap_and_flags_truncation() {
+        // Input longer than the cap: exactly `cap` bytes are captured and reported.
         let data = vec![b'x'; 100];
-        let (buf, capped) = Box::pin(read_capped(&mut data.as_slice(), 40)).await;
-        assert_eq!(buf.len(), 40);
+        let sink = new_sink();
+        let capped = Box::pin(stream_capped_into(&mut data.as_slice(), &sink, 40)).await;
+        assert_eq!(sink.lock().await.len(), 40);
         assert!(capped, "hitting the cap must be reported");
     }
 
     #[tokio::test]
-    async fn read_capped_returns_all_when_under_cap() {
+    async fn stream_capped_into_returns_all_when_under_cap() {
         let data = b"hello world".to_vec();
-        let (buf, capped) = Box::pin(read_capped(&mut data.as_slice(), 1024)).await;
-        assert_eq!(buf, data);
+        let sink = new_sink();
+        let capped = Box::pin(stream_capped_into(&mut data.as_slice(), &sink, 1024)).await;
+        assert_eq!(*sink.lock().await, data);
         assert!(!capped, "output below the cap is not truncated");
     }
 
     #[tokio::test]
-    async fn read_capped_handles_exact_cap_without_flagging() {
+    async fn stream_capped_into_handles_exact_cap_without_flagging() {
         let data = vec![b'a'; 64];
-        let (buf, capped) = Box::pin(read_capped(&mut data.as_slice(), 64)).await;
-        // Exactly `cap` bytes available: we consume them and the next read sees
+        let sink = new_sink();
+        let capped = Box::pin(stream_capped_into(&mut data.as_slice(), &sink, 64)).await;
+        // Exactly `cap` bytes available: they are consumed and the next read sees
         // EOF, so this is NOT a truncation.
-        assert_eq!(buf.len(), 64);
+        assert_eq!(sink.lock().await.len(), 64);
         assert!(
             !capped,
             "an input that exactly fills the cap is complete, not truncated"
         );
+    }
+
+    #[test]
+    fn finish_stream_marks_only_when_capped() {
+        // E40: the display renderer appends the truncation marker only when the
+        // hard cap overflowed; partial-but-complete output is returned verbatim.
+        let plain = finish_stream(b"partial output", false);
+        assert_eq!(plain, "partial output");
+        assert!(!plain.contains("output truncated"));
+        let capped = finish_stream(b"partial output", true);
+        assert!(capped.starts_with("partial output"));
+        assert!(capped.contains("output truncated"));
     }
 
     #[test]
@@ -812,5 +962,152 @@ mod tests {
         std::os::unix::fs::symlink(&outside, dest.join("escape")).unwrap();
         assert!(verify_download_confined(&dest).is_err());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── E41: remote classification is scoped to the POSIX surface ──
+
+    #[test]
+    fn windows_only_commands_block_locally_but_not_remotely() {
+        // Baseline: these DO block on the local combined POSIX+cmd surface (proving
+        // the false-positive exists), and must NOT block once scoped to POSIX.
+        for command in ["format c:", "rd /s /q c:\\", "diskpart", "cipher /w"] {
+            assert!(
+                crate::ai_shell_safety::classify_shell_command(command)
+                    .blocked
+                    .is_some(),
+                "{command:?} should block on the local combined surface"
+            );
+            assert!(
+                classify_remote_command(command).blocked.is_none(),
+                "{command:?} must NOT block on a POSIX remote"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_classification_drops_windows_only_blocks() {
+        // E41: commands that only endanger a Windows host must NOT block on a
+        // POSIX-bound remote exec (they are false positives there).
+        assert!(classify_remote_command("format c:").blocked.is_none());
+        assert!(classify_remote_command("rd /s /q c:\\").blocked.is_none());
+        assert!(classify_remote_command("diskpart").blocked.is_none());
+        assert!(classify_remote_command("cipher /w").blocked.is_none());
+        // A drive-root-shaped operand that trips the Windows net locally must also
+        // pass remotely (nothing on a POSIX host answers to `c:`).
+        assert!(classify_remote_command("del /f /s /q d:\\")
+            .blocked
+            .is_none());
+        // Env-var drive roots too.
+        assert!(classify_remote_command("format %SystemDrive%")
+            .blocked
+            .is_none());
+    }
+
+    #[test]
+    fn remote_classification_keeps_posix_catastrophes() {
+        // E41: the genuinely-catastrophic POSIX guards MUST still block remotely.
+        assert!(classify_remote_command("rm -rf /").blocked.is_some());
+        assert!(classify_remote_command("rm -rf /etc").blocked.is_some());
+        assert!(classify_remote_command("rm -rf ~").blocked.is_some());
+        assert!(classify_remote_command("rm --no-preserve-root /")
+            .blocked
+            .is_some());
+        assert!(classify_remote_command(":(){ :|:& };:").blocked.is_some());
+        assert!(classify_remote_command("mkfs.ext4 /dev/sda1")
+            .blocked
+            .is_some());
+        assert!(classify_remote_command("dd if=/dev/zero of=/dev/sda")
+            .blocked
+            .is_some());
+        assert!(classify_remote_command("echo x > /dev/sda")
+            .blocked
+            .is_some());
+        // Compound line with a hidden POSIX rm still blocks.
+        assert!(classify_remote_command("make && rm -rf /usr")
+            .blocked
+            .is_some());
+    }
+
+    #[test]
+    fn remote_neutralization_does_not_mask_posix_catastrophe() {
+        // The neutralizer must defuse ONLY the Windows triggers: a POSIX rm that
+        // follows a Windows-shaped token in the same line must still block (it is
+        // not hidden behind the dropped Windows verdict).
+        assert!(classify_remote_command("format c: ; rm -rf /")
+            .blocked
+            .is_some());
+        assert!(classify_remote_command("diskpart && rm -rf /etc")
+            .blocked
+            .is_some());
+    }
+
+    #[test]
+    fn remote_classification_allows_ordinary_posix_commands() {
+        // Legitimate remote commands stay unblocked and keep their warnings/reads.
+        assert!(classify_remote_command("ls -la /var/log").blocked.is_none());
+        assert!(classify_remote_command("systemctl status nginx")
+            .blocked
+            .is_none());
+        assert!(classify_remote_command("rm -rf ./build").blocked.is_none());
+        // Warnings survive the scoping (only the inapplicable block is dropped).
+        let report = classify_remote_command("git push --force origin main");
+        assert!(report.blocked.is_none());
+        assert!(!report.warnings.is_empty());
+    }
+
+    // ── E42: result echoes the id under both `session` and `sessionId` ──
+
+    #[test]
+    fn exec_result_serializes_both_session_keys() {
+        let result = SshExecResult {
+            session: "abc-123".to_string(),
+            session_id: "abc-123".to_string(),
+            command: "ls".to_string(),
+            cwd: String::new(),
+            exit_code: Some(0),
+            duration_ms: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+            warnings: Vec::new(),
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        // The model can reuse EITHER the `session` input-param key it was shown or
+        // the `sessionId` field the TS type exposes; both carry the id.
+        assert_eq!(
+            value.get("session").and_then(serde_json::Value::as_str),
+            Some("abc-123")
+        );
+        assert_eq!(
+            value.get("sessionId").and_then(serde_json::Value::as_str),
+            Some("abc-123")
+        );
+    }
+
+    #[test]
+    fn transfer_result_serializes_both_session_keys() {
+        let result = SshTransferResult {
+            session: "id-9".to_string(),
+            session_id: "id-9".to_string(),
+            direction: TransferDirection::Upload,
+            local_path: "/tmp/a".to_string(),
+            remote_path: "/tmp/b".to_string(),
+            recursive: false,
+            success: true,
+            exit_code: Some(0),
+            duration_ms: 1,
+            stdout: String::new(),
+            stderr: String::new(),
+            timed_out: false,
+        };
+        let value = serde_json::to_value(&result).unwrap();
+        assert_eq!(
+            value.get("session").and_then(serde_json::Value::as_str),
+            Some("id-9")
+        );
+        assert_eq!(
+            value.get("sessionId").and_then(serde_json::Value::as_str),
+            Some("id-9")
+        );
     }
 }

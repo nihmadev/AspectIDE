@@ -26,6 +26,10 @@ pub struct ShellSafetyReport {
 }
 
 /// Classify a full command line (may contain `;`, `&&`, `||`, `|`, newlines).
+///
+/// The AI `Shell` tool executes via `cmd /C` on Windows, so the classifier
+/// models the combined POSIX + cmd surface; the PowerShell terminal is reached
+/// only via `TerminalWrite` (generic approval), never through this classifier.
 #[must_use]
 pub fn classify_shell_command(command: &str) -> ShellSafetyReport {
     let full = normalize(command);
@@ -46,6 +50,17 @@ pub fn classify_shell_command(command: &str) -> ShellSafetyReport {
     // so escape `catastrophic_reason`. Scan the *whole normalized line* for a
     // recursive-force rm against a protected target, independent of position.
     if let Some(reason) = whole_command_catastrophic_rm(&full) {
+        report.blocked = Some(reason);
+        return report;
+    }
+
+    // SECURITY (finding #7): the cmd analogue of the rm safety net. When quote
+    // ambiguity collapses the line to one opaque segment, a Windows-destroying
+    // verb (`diskpart`, `format <drive>`, `del/rd/rmdir /s <drive>`) hiding
+    // after a leading command never becomes any segment's first token. Scan the
+    // whole normalized line for these, conservatively requiring a drive-root
+    // operand so scoped deletes (`rd /s ./localdir`) stay unblocked.
+    if let Some(reason) = whole_command_catastrophic_windows(&full) {
         report.blocked = Some(reason);
         return report;
     }
@@ -161,7 +176,10 @@ fn split_segments(command: &str) -> Vec<String> {
                 escaped = true;
                 current.push(ch);
             }
-            '\'' if !in_double => {
+            // cmd.exe treats `'` as a literal character, so `&|;` inside single
+            // quotes stay live separators there; only honour single-quote
+            // grouping on POSIX. `cfg!(windows)` is a compile-time bool.
+            '\'' if !in_double && !cfg!(windows) => {
                 in_single = !in_single;
                 current.push(ch);
             }
@@ -318,9 +336,32 @@ fn first_token(normalized: &str) -> &str {
             "env" => {
                 rest = skip_env_assignments(tail);
             }
-            // `time` is a shell built-in that runs its argument.
-            "time" => {
+            // `time` (POSIX shell built-in) and cmd's `call` both run their
+            // argument verbatim, so they unwrap to the same tail.
+            "time" | "call" => {
                 rest = tail;
+            }
+            // cmd launchers (Windows `cmd /C` exec shell). These don't collide
+            // with POSIX launchers, so resolving the wrapped command here lets
+            // the classifier see the real verb (`cmd /c format c:` → `format`).
+            // A *quoted* payload (`cmd /c "rm -rf /"`) is left for the cmd-aware
+            // interpreter dispatch in `catastrophic_reason`, which unquotes it
+            // properly; unwrapping here would surface a quote-prefixed token. So
+            // we stop unwrapping (keeping `cmd` as the token) when the resolved
+            // remainder begins with a quote.
+            "cmd" => {
+                let next = skip_cmd_switches(tail);
+                if next.starts_with(['"', '\'']) {
+                    break;
+                }
+                rest = next;
+            }
+            "start" => {
+                let next = skip_start_args(tail);
+                if next.starts_with(['"', '\'']) {
+                    break;
+                }
+                rest = next;
             }
             _ => break,
         }
@@ -392,6 +433,51 @@ fn skip_env_assignments(s: &str) -> &str {
     rest
 }
 
+/// Skip leading `/`-prefixed switch tokens of a `cmd` invocation (`/c`, `/k`,
+/// `/s`, `/q`, …), returning the remainder starting at the wrapped command.
+fn skip_cmd_switches(s: &str) -> &str {
+    let mut rest = s.trim_start();
+    while let Some(token_end) = rest.find(' ') {
+        let token = &rest[..token_end];
+        if !token.starts_with('/') {
+            break;
+        }
+        rest = rest[token_end + 1..].trim_start();
+    }
+    rest
+}
+
+/// Skip the optional leading (quoted) title and any `/`-prefixed switches of a
+/// `start` invocation, returning the remainder starting at the wrapped command.
+/// `/d` consumes the following non-switch token (the working directory).
+fn skip_start_args(s: &str) -> &str {
+    let mut rest = s.trim_start();
+    // An optional leading quoted title: `start "Title" /b cmd …`.
+    if rest.starts_with('"') {
+        if let Some(close) = rest[1..].find('"') {
+            rest = rest[1 + close + 1..].trim_start();
+        }
+    }
+    while let Some(token_end) = rest.find(' ') {
+        let token = &rest[..token_end];
+        if !token.starts_with('/') {
+            break;
+        }
+        let is_dir_flag = token.eq_ignore_ascii_case("/d");
+        rest = rest[token_end + 1..].trim_start();
+        // `/d <path>` consumes a following non-switch token as its value.
+        if is_dir_flag {
+            if let Some(next_end) = rest.find(' ') {
+                let next = &rest[..next_end];
+                if !next.starts_with('/') {
+                    rest = rest[next_end + 1..].trim_start();
+                }
+            }
+        }
+    }
+    rest
+}
+
 /// Returns a reason when the command is catastrophic and must be refused.
 fn catastrophic_reason(normalized: &str) -> Option<String> {
     // Disabling the rm root guard is never legitimate from an agent.
@@ -428,6 +514,17 @@ fn catastrophic_reason(normalized: &str) -> Option<String> {
     }
     // PowerShell `-Command` or `-EncodedCommand` can similarly hide payloads.
     if matches!(ft, "powershell" | "pwsh") {
+        if let Some(inner) = extract_interpreter_payload(normalized) {
+            let inner_norm = normalize(&inner);
+            if let Some(reason) = catastrophic_reason(&inner_norm) {
+                return Some(reason);
+            }
+        }
+    }
+    // cmd `/c` / `/k` can hide a payload that is itself catastrophic (POSIX or
+    // cmd). `first_token` already unwraps a bare `cmd /c <verb> …`; this arm
+    // covers the quoted-string form `cmd /c "rm -rf /"`.
+    if matches!(ft, "cmd" | "cmd.exe") {
         if let Some(inner) = extract_interpreter_payload(normalized) {
             let inner_norm = normalize(&inner);
             if let Some(reason) = catastrophic_reason(&inner_norm) {
@@ -542,6 +639,41 @@ fn whole_command_catastrophic_rm(normalized: &str) -> Option<String> {
             }
         }
     }
+    None
+}
+
+/// Position-independent catastrophic Windows-verb detector for the whole line.
+///
+/// SECURITY (finding #7): mirror of `whole_command_catastrophic_rm` for the cmd
+/// surface. Fires only when a Windows-destroying verb appears *after* a leading
+/// command (so the first-token path already handled the leading case) AND a
+/// real drive-root operand is present. Requiring both keeps `echo format
+/// something` and `rd /s ./localdir` flowing through unblocked.
+fn whole_command_catastrophic_windows(normalized: &str) -> Option<String> {
+    let tokens: Vec<&str> = normalized.split(' ').collect();
+    let first = tokens.first().copied().unwrap_or("");
+
+    // `diskpart` anywhere but the leading token is catastrophic on its own.
+    if first != "diskpart" && tokens.contains(&"diskpart") {
+        return Some("low-level disk operation".to_string());
+    }
+
+    // `format <drive-root>` when `format` is not the leading token.
+    if first != "format" && tokens.contains(&"format") && mentions_windows_drive_root(normalized) {
+        return Some("format would erase a Windows drive".to_string());
+    }
+
+    // `del`/`rd`/`rmdir` + `/s` + drive-root when the verb is not leading.
+    let has_recursive_verb = tokens.iter().any(|&t| matches!(t, "del" | "rd" | "rmdir"));
+    let verb_is_leading = matches!(first, "del" | "rd" | "rmdir");
+    if has_recursive_verb
+        && !verb_is_leading
+        && tokens.contains(&"/s")
+        && mentions_windows_drive_root(normalized)
+    {
+        return Some("recursive delete of a Windows drive root".to_string());
+    }
+
     None
 }
 
@@ -679,7 +811,7 @@ fn extract_interpreter_payload(normalized: &str) -> Option<String> {
     let mut cursor = 0usize;
     for token in normalized.split(' ') {
         let token_end = cursor + token.len();
-        if matches!(token, "-c" | "-command" | "/c" | "/command") {
+        if matches!(token, "-c" | "-command" | "/c" | "/k" | "/command") {
             // Argument starts at the first non-space byte after this flag token.
             let mut idx = token_end;
             let bytes = normalized.as_bytes();
@@ -762,9 +894,15 @@ fn segment_targets_root(normalized: &str) -> bool {
 }
 
 fn mentions_windows_drive_root(normalized: &str) -> bool {
-    // c:, c:\, c:/ for any drive letter.
+    // c:, c:\, c:/ for any drive letter — plus cmd env-var drive roots.
     normalized.split([' ', '"']).any(|token| {
         let token = token.trim();
+        // cmd env-var drive roots (`%SystemDrive%`, `%SystemRoot%`, `%windir%`)
+        // with an optional trailing slash/backslash, lowercased by `normalize`.
+        let bare = token.trim_end_matches(['\\', '/']).trim_matches('"');
+        if matches!(bare, "%systemdrive%" | "%systemroot%" | "%windir%") {
+            return true;
+        }
         let bytes = token.as_bytes();
         bytes.len() >= 2
             && bytes[0].is_ascii_alphabetic()
@@ -1143,6 +1281,52 @@ mod tests {
         assert!(!blocked("make && rm -rf target/debug"));
         // But a protected target after a leading command is still caught.
         assert!(blocked("echo hi && rm -rf /etc"));
+    }
+
+    #[test]
+    fn f2_env_var_drive_roots_blocked() {
+        // Finding #2: cmd env-var drive roots (`%SystemDrive%` etc.) with an
+        // optional trailing slash are recognized as Windows drive roots.
+        assert!(blocked("rd /s /q %SystemDrive%\\"));
+        assert!(blocked("del /f /s /q %SystemDrive%\\"));
+        assert!(blocked("format %SystemDrive%"));
+        // Scoped recursive delete of a local dir is still allowed.
+        assert!(!blocked("rd /s /q .\\build"));
+    }
+
+    #[test]
+    fn f7_whole_command_windows_safety_net() {
+        // Finding #7: a Windows-destroying verb hidden after a leading command
+        // (so it is never the first token of a segment) is still caught.
+        assert!(blocked("type \"C:\\x\\\" & format c:"));
+        assert!(blocked("type \"C:\\x\\\" & rd /s /q c:\\"));
+        assert!(blocked("echo \"C:\\y\\\" & diskpart"));
+        // Conservative: the verb without a drive-root operand stays unblocked,
+        // as do ordinary read-only commands.
+        assert!(!blocked("echo format something"));
+        assert!(!blocked("echo hello world"));
+        assert!(!blocked("git status"));
+    }
+
+    #[test]
+    fn f11_cmd_interpreter_wrapper_blocked() {
+        // Finding #11: `cmd /c` / `cmd.exe /c` payloads (POSIX or cmd verbs)
+        // must be classified, not judged on the outer `cmd`.
+        assert!(blocked("cmd /c rd /s /q c:\\"));
+        assert!(blocked("cmd /c \"rm -rf /\""));
+        assert!(blocked("cmd.exe /c format c:"));
+        // Benign / scoped inner payloads stay unblocked.
+        assert!(!blocked("cmd /c echo hi"));
+        assert!(!blocked("cmd /c rd /s /q .\\build"));
+    }
+
+    #[test]
+    fn f13_cmd_launchers_unwrap_to_inner_verb() {
+        // Finding #13: `cmd`, `start`, and `call` launchers resolve to the
+        // wrapped command so the real verb reaches classification.
+        assert_eq!(first_token("cmd /c format c:"), "format");
+        assert_eq!(first_token("start /b format c:"), "format");
+        assert_eq!(first_token("call format c:"), "format");
     }
 
     #[test]

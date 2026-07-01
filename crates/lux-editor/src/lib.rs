@@ -290,7 +290,7 @@ impl DocumentStore {
 /// page cache), then `rename` over the target. On any failure the temp file is
 /// removed and the original is left untouched. The sibling lives in the same
 /// directory so the rename stays on one filesystem (cross-device renames fail).
-fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> AppResult<()> {
     let temp_path = temp_sibling_path(path);
 
     let write_result = (|| -> std::io::Result<()> {

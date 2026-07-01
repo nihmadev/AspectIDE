@@ -40,7 +40,7 @@ use std::{
 use base64::{engine::general_purpose, Engine as _};
 use image::{
     codecs::{png::PngEncoder, webp::WebPEncoder},
-    DynamicImage, GenericImageView, ImageEncoder, ImageFormat,
+    DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat,
 };
 use serde::{Deserialize, Serialize};
 use tauri::State;
@@ -61,11 +61,30 @@ const MIN_MAX_DIMENSION: u32 = 256;
 /// sending oversized images that explode model vision tokens and encoder memory.
 /// 4096 covers all current provider limits; larger values must be allowlisted.
 const MAX_MAX_DIMENSION: u32 = 4096;
-/// Pixel-bomb guard: reject decoded images whose total pixel count exceeds this
-/// limit even if their compressed byte size passed `MAX_SOURCE_BYTES`. A hostile
-/// compressed PNG (e.g. 16k×16k solid colour) can decode to hundreds of MiB
-/// while easily fitting in a 16 MiB compressed file.
-const MAX_DECODED_PIXELS: u64 = 4096 * 4096; // ≈ 67 MP, well above any model vision cap
+/// HARD decode-bomb ceiling: reject decoded images whose total pixel count
+/// exceeds this limit even if their compressed byte size passed
+/// `MAX_SOURCE_BYTES`. A hostile compressed PNG (e.g. 16k×16k solid colour) can
+/// decode to hundreds of MiB while easily fitting in a 16 MiB compressed file.
+/// Set well above `MAX_FORWARDED_PIXELS` so legitimately large screenshots are
+/// decoded once and downscaled rather than rejected — only true decode bombs
+/// past this ceiling fail closed.
+const MAX_DECODED_PIXELS: u64 = 4 * 4096 * 4096; // ≈ 67 MP HARD decode-bomb ceiling
+/// Soft forwarding ceiling: an image at or below this pixel count whose longest
+/// edge already fits `MAX_MAX_DIMENSION` could in principle be forwarded as-is.
+/// Images between this and [`MAX_DECODED_PIXELS`] are decoded once and
+/// downscaled (by [`downscale_if_needed`]), never passed through full-resolution.
+// `u64::from` is not const-stable, so widen with `as` here; the u32→u64 cast is
+// lossless (that is exactly what `cast_lossless` would otherwise suggest).
+#[allow(clippy::cast_lossless)]
+const MAX_FORWARDED_PIXELS: u64 = (MAX_MAX_DIMENSION as u64) * (MAX_MAX_DIMENSION as u64);
+/// Compile-time invariant: the soft forwarding ceiling must stay strictly below
+/// the hard decode-bomb ceiling, so the middle band (FORWARDED..=DECODED) is
+/// always decoded-then-downscaled rather than rejected. Also anchors a reference
+/// to `MAX_FORWARDED_PIXELS` so the documented bound is not dead code.
+// Deliberate static assertion on two constants — the whole point is to fail the
+// build if the ceilings are ever reordered; not a redundant runtime check.
+#[allow(clippy::assertions_on_constants)]
+const _: () = assert!(MAX_FORWARDED_PIXELS < MAX_DECODED_PIXELS);
 /// Encoded base64 payload length limit applied *before* decoding a data URL
 /// (base64 expands ~33 %, so this matches `MAX_SOURCE_BYTES` after decode).
 /// Using ceiling division: `ceil(MAX_SOURCE_BYTES` * 4 / 3).
@@ -304,27 +323,47 @@ fn decode_data_url(data_url: &str) -> Result<(Vec<u8>, Option<String>), String> 
 /// formats `image` cannot read (HEIC/AVIF/SVG, …) so the caller can passthrough.
 /// Borrows `bytes` so the caller retains ownership for the passthrough path.
 ///
-/// Pixel-bomb guard: rejects images whose decoded pixel count exceeds
-/// `MAX_DECODED_PIXELS` even when their compressed size is within `MAX_SOURCE_BYTES`,
-/// preventing hostile compressed inputs (e.g. 16 k×16 k solid-colour PNG) from
-/// exhausting memory.
+/// Single-decoder path: the source is read exactly once through one
+/// [`image::ImageReader`]/[`ImageDecoder`]. Dimensions are taken from the decoder
+/// header before the full pixel buffer is allocated, so the pixel-bomb guard
+/// rejects hostile compressed inputs (e.g. 16 k×16 k solid-colour PNG) that slip
+/// under `MAX_SOURCE_BYTES` without ever expanding them.
+///
+/// Fail-closed: every fallible step (`with_guessed_format`, `into_decoder`,
+/// `from_decoder`) early-returns `None` on error, so a probe that cannot be fully
+/// established forwards the original bytes untouched rather than guessing.
+///
+/// EXIF orientation is read from the decoder and applied to the decoded image
+/// *before* any downscale/re-encode downstream, so re-encoded payloads are
+/// upright. `w * h` is orientation-invariant, so the bomb guard is unaffected by
+/// a 90°/270° rotation tag.
 fn decode_source(bytes: &[u8], hint_mime: Option<String>) -> Option<DecodedSource> {
     let format = image::guess_format(bytes).ok();
 
-    // Read just the image header to get dimensions before full decode.
-    // `ImageReader::into_dimensions` avoids allocating the full pixel buffer,
-    // so a 16 k×16 k PNG that sneaks under MAX_SOURCE_BYTES never expands.
-    if let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format() {
-        if let Ok((w, h)) = reader.into_dimensions() {
-            if u64::from(w) * u64::from(h) > MAX_DECODED_PIXELS {
-                // Treat as undecodable: forward bytes untouched; this mirrors
-                // the HEIC/AVIF passthrough path so the model still receives them.
-                return None;
-            }
-        }
+    // One reader, one decoder. `with_guessed_format`/`into_decoder` failing means
+    // we cannot reliably decode this source — fail closed to passthrough.
+    let mut decoder = image::ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()?
+        .into_decoder()
+        .ok()?;
+
+    // Reject decode bombs using the decoder's header dimensions, before the full
+    // pixel buffer is allocated by `from_decoder`. Mirrors the HEIC/AVIF
+    // passthrough so the model still receives the original bytes.
+    let (width, height) = decoder.dimensions();
+    if u64::from(width) * u64::from(height) > MAX_DECODED_PIXELS {
+        return None;
     }
 
-    let image = image::load_from_memory(bytes).ok()?;
+    // Read orientation off the decoder before it is consumed; tolerate failure
+    // (no EXIF / unsupported) by treating it as "no transform".
+    let orientation = decoder.orientation().ok();
+    let mut image = DynamicImage::from_decoder(decoder).ok()?;
+    if let Some(orientation) = orientation {
+        image.apply_orientation(orientation);
+    }
+
     // The source decoded successfully, so passthrough forwards the REAL bytes;
     // the content-sniffed `format` is therefore authoritative for the emitted
     // MIME. A mislabeled file (e.g. JPEG bytes saved as `.png`) must not be
@@ -512,6 +551,22 @@ mod tests {
         buffer
     }
 
+    /// Single-channel (L8) solid PNG. Only the pixel *count* matters for the
+    /// decode-bomb guard, so an 8-bit grayscale fixture lets large-dimension
+    /// tests allocate one byte per pixel instead of four.
+    fn solid_gray_png(width: u32, height: u32) -> Vec<u8> {
+        let image = DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            width,
+            height,
+            image::Luma([128]),
+        ));
+        let mut buffer = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut buffer), ImageFormat::Png)
+            .unwrap();
+        buffer
+    }
+
     #[test]
     fn webp_lossless_roundtrip_is_pixel_identical() {
         let png = solid_png(64, 48);
@@ -571,5 +626,62 @@ mod tests {
         let response = encode_vision_image(request, None).unwrap();
         assert!(response.passthrough);
         assert_eq!(response.mime_type, "image/heic");
+    }
+
+    /// A 5000x4000 (20 MP) source sits above `MAX_FORWARDED_PIXELS` (16.7 MP) but
+    /// well below the `MAX_DECODED_PIXELS` (~67 MP) hard ceiling, so it must be
+    /// decoded once and downscaled — never rejected and never forwarded full-res.
+    /// A solid-colour PNG of these dimensions compresses to a few KB, comfortably
+    /// under `MAX_SOURCE_BYTES`, exactly the decode-then-downscale band F30 targets.
+    #[test]
+    fn twenty_megapixel_source_is_downscaled_not_forwarded() {
+        let png = solid_png(5000, 4000);
+        assert!(
+            u64::try_from(png.len()).unwrap() <= MAX_SOURCE_BYTES,
+            "solid PNG must fit under the source-byte cap"
+        );
+        let request = VisionEncodeRequest {
+            path: None,
+            data_url: Some(to_data_url("image/png", &png)),
+            format: Some("png".to_string()),
+            max_dimension: None, // -> DEFAULT_MAX_DIMENSION (2000)
+        };
+        let response = encode_vision_image(request, None).unwrap();
+        assert!(!response.passthrough, "20 MP source must be re-encoded");
+        let width = response.width.expect("decoded width should be known");
+        assert!(
+            width <= DEFAULT_MAX_DIMENSION,
+            "output width {width} must be capped at {DEFAULT_MAX_DIMENSION}"
+        );
+    }
+
+    /// Images at or below the ~16.7 MP forwarding band are unaffected by the
+    /// raised decode ceiling: a normal small PNG still decodes and (here) gets
+    /// re-encoded without being rejected.
+    #[test]
+    fn sub_forwarded_image_decodes_normally() {
+        // 640 * 480 = 0.3 MP, far under MAX_FORWARDED_PIXELS — must decode normally.
+        let png = solid_png(640, 480);
+        let decoded = decode_source(&png, Some("image/png".to_string()));
+        assert!(decoded.is_some(), "a 0.3 MP PNG must decode");
+        assert_eq!(decoded.unwrap().image.dimensions(), (640, 480));
+    }
+
+    /// A source whose decoded pixel count exceeds `MAX_DECODED_PIXELS` (~67 MP)
+    /// must fail closed: `decode_source` returns `None` so the caller forwards the
+    /// original bytes rather than expanding a decode bomb. 9000x9000 = 81 MP, yet
+    /// the solid-colour PNG is only a few KB — under `MAX_SOURCE_BYTES`.
+    #[test]
+    fn decode_bomb_above_hard_ceiling_is_rejected() {
+        // 9000 * 9000 = 81 MP, above MAX_DECODED_PIXELS (~67 MP) hard ceiling.
+        let png = solid_gray_png(9000, 9000);
+        assert!(
+            u64::try_from(png.len()).unwrap() <= MAX_SOURCE_BYTES,
+            "solid 81 MP PNG still fits under the source-byte cap"
+        );
+        assert!(
+            decode_source(&png, Some("image/png".to_string())).is_none(),
+            "an 81 MP decode bomb must be rejected (fail closed)"
+        );
     }
 }

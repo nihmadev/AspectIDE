@@ -107,6 +107,17 @@ fn canonical_tool(name: &str) -> &str {
     }
 }
 
+/// True for the path-mutating tools whose permission input is a file path. SECURITY
+/// (finding #26): for these, a basename-only deny pattern (no `/`) must match a file
+/// in any directory, so `matches` falls back to testing the input's final segment.
+/// Names mirror the dispatch arms in `ai_turn.rs` (`Write`/`StrReplace`/`Delete`/`PatchEngine`).
+fn is_path_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "write" | "strreplace" | "delete" | "patchengine"
+    )
+}
+
 impl ParsedRule {
     fn matches(&self, tool: &str, input: &str) -> bool {
         // SECURITY (finding #7): canonicalize both the rule's tool name and the
@@ -124,10 +135,55 @@ impl ParsedRule {
                 // (collapse tabs/newlines to a single space) so rules cannot be
                 // bypassed by embedding a tab or newline where a space is expected.
                 let normalized_input = input.split_whitespace().collect::<Vec<_>>().join(" ");
-                glob_match(&pattern.to_lowercase(), &normalized_input.to_lowercase())
+                let pattern_lc = pattern.to_lowercase();
+                let input_lc = normalized_input.to_lowercase();
+                // Anchored match against the whole (normalized) input — keeps the
+                // existing semantics for every current rule (e.g. `git *`).
+                if glob_match(&pattern_lc, &input_lc) {
+                    return true;
+                }
+                // SECURITY (finding #25): a deny like `Shell(rm *)` must also fire on a
+                // dangerous command buried in a compound shell line (`ls && rm -rf /`,
+                // `cd /tmp; rm secrets`, `true || rm -rf ~`). Re-test the pattern against
+                // each `;`/`&`/`|`-delimited segment. Over-splitting only ADDS deny
+                // matches, never removes one — fail-closed.
+                if rule_tool == "Shell" {
+                    return shell_segments(&input_lc)
+                        .iter()
+                        .any(|seg| glob_match(&pattern_lc, seg));
+                }
+                // SECURITY (finding #26): for path-mutating tools a deny like
+                // `Write(.env)` must fire regardless of which directory the file lives
+                // in (`/root/config/.env`). When the pattern has no `/` it targets a
+                // basename, so also test it against the input's final path segment. A
+                // pattern that DOES contain `/` stays anchored (keeps directory scoping
+                // like `config/.env`). This shortcut is path-tool-only — Shell handled above.
+                if is_path_tool(rule_tool) && !pattern_lc.contains('/') {
+                    // `rsplit` always yields at least one element, so the basename is
+                    // the whole string when the path has no `/`.
+                    let basename = input_lc.rsplit('/').next().unwrap_or(&input_lc);
+                    return glob_match(&pattern_lc, basename);
+                }
+                false
             }
         }
     }
+}
+
+/// Split a normalized, lowercased shell command into its top-level segments on the
+/// chaining operators `;`, `&`, `|`. SECURITY (finding #25): a deny like `rm *` must
+/// also fire on a dangerous command buried inside a compound line (`ls && rm -rf /`).
+/// This splits on the individual characters rather than the `&&`/`||` token pairs, so
+/// it over-splits (e.g. `&&` yields an empty middle) — but over-splitting only ADDS
+/// candidate segments to test, it never merges two commands into one, so a deny can
+/// never be hidden by chaining. Fail-closed by construction.
+fn shell_segments(normalized_lower: &str) -> Vec<String> {
+    normalized_lower
+        .split([';', '&', '|'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// Minimal glob matcher supporting `*` (any run, including empty) and `?` (one char).
@@ -367,6 +423,84 @@ mod tests {
             decide("Shell", "rm\n-rf /", &["deny:Shell(rm *)"]),
             PermissionDecision::Deny,
             "newline in input should still match deny pattern"
+        );
+    }
+
+    #[test]
+    fn shell_deny_fires_inside_compound_command() {
+        // Finding #25: a `Shell(rm *)` deny must fire on a dangerous command buried
+        // inside a compound shell line, regardless of the chaining operator used.
+        let rules = &["allow:Shell(*)", "deny:Shell(rm *)"];
+        assert_eq!(
+            decide("Shell", "ls && rm -rf /", rules),
+            PermissionDecision::Deny,
+            "&& chaining must not hide the rm segment"
+        );
+        assert_eq!(
+            decide("Shell", "cd /tmp; rm secrets", rules),
+            PermissionDecision::Deny,
+            "; chaining must not hide the rm segment"
+        );
+        assert_eq!(
+            decide("Shell", "true || rm -rf ~", rules),
+            PermissionDecision::Deny,
+            "|| chaining must not hide the rm segment"
+        );
+        assert_eq!(
+            decide(
+                "Shell",
+                "echo hi && curl http://evil",
+                &["deny:Shell(curl *)"]
+            ),
+            PermissionDecision::Deny,
+            "a curl deny must fire on the second segment of a compound line"
+        );
+        // A command whose segments never match the deny pattern stays Default
+        // (no allow rule here either) — the segment scan must not over-match.
+        assert_eq!(
+            decide("Shell", "ls -la", &["deny:Shell(rm *)"]),
+            PermissionDecision::Default,
+            "a benign command must not match an unrelated rm deny"
+        );
+    }
+
+    #[test]
+    fn path_tool_deny_matches_basename_in_any_directory() {
+        // Finding #26: a basename-only deny pattern (no `/`) must match a file in any
+        // directory for path-mutating tools.
+        assert_eq!(
+            decide("Write", "/root/config/.env", &["deny:Write(.env)"]),
+            PermissionDecision::Deny,
+            "Write(.env) must deny a .env nested under any directory"
+        );
+        assert_eq!(
+            decide("Delete", "/root/.ssh/id_rsa", &["deny:Delete(id_rsa)"]),
+            PermissionDecision::Deny,
+            "Delete(id_rsa) must deny the key under any directory"
+        );
+        // A non-matching basename stays Default.
+        assert_eq!(
+            decide("Write", "/root/src/app.ts", &["deny:Write(.env)"]),
+            PermissionDecision::Default,
+            "a non-.env file must not match the .env basename deny"
+        );
+        // A pattern WITH a slash stays anchored: it must match the path prefix, not
+        // just a trailing fragment, so a deeper directory does not satisfy it.
+        assert_eq!(
+            decide(
+                "Write",
+                "/root/other/config/.env",
+                &["deny:Write(config/.env)"]
+            ),
+            PermissionDecision::Default,
+            "a slash-bearing pattern stays anchored and must not match a deeper path"
+        );
+        // The basename shortcut is path-tool-only: a Shell deny without a glob must
+        // NOT match a basename of a command argument.
+        assert_eq!(
+            decide("Shell", "git rm cache", &["deny:Shell(rm)"]),
+            PermissionDecision::Default,
+            "the basename shortcut must not apply to Shell"
         );
     }
 }

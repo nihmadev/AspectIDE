@@ -164,6 +164,15 @@ pub fn validate_provider(provider: &str) -> Result<(), String> {
     ))
 }
 
+/// Session-id prefix. All sanitized session ids carry this prefix exactly once,
+/// so a value already returned from a previous `sanitize_session` (e.g. a name
+/// surfaced in `BrowserStatus.sessions`) round-trips back through this function
+/// unchanged rather than accumulating `lux-lux-` prefixes.
+const SESSION_PREFIX: &str = "lux-";
+
+/// Maximum length of the session body (the part after the `lux-` prefix).
+const SESSION_BODY_MAX: usize = 48;
+
 #[must_use]
 pub fn sanitize_session(value: &str) -> String {
     let cleaned: String = value
@@ -177,11 +186,20 @@ pub fn sanitize_session(value: &str) -> String {
         })
         .collect();
     let trimmed = cleaned.trim_matches('-');
-    if trimmed.is_empty() {
-        "lux-default".to_string()
-    } else {
-        format!("lux-{}", &trimmed[..trimmed.len().min(48)])
+    // Idempotent: strip an already-present `lux-` prefix *before* bounding the
+    // body, then re-apply the prefix exactly once. This guarantees a value that
+    // was already returned by this function (e.g. from `BrowserStatus.sessions`)
+    // round-trips unchanged instead of becoming `lux-lux-...`, and that the
+    // bounded length is stable across repeated calls. Trim again after stripping
+    // in case the prefix was followed by dashes (e.g. `lux--x`).
+    let body = trimmed
+        .strip_prefix(SESSION_PREFIX)
+        .map_or(trimmed, |rest| rest.trim_matches('-'));
+    if body.is_empty() {
+        return format!("{SESSION_PREFIX}default");
     }
+    let bounded = &body[..body.len().min(SESSION_BODY_MAX)];
+    format!("{SESSION_PREFIX}{bounded}")
 }
 
 pub fn mime_type_for_path(path: &Path) -> String {
@@ -206,6 +224,35 @@ mod tests {
     fn sanitize_session_prefixes_and_filters() {
         assert_eq!(sanitize_session("chat-123"), "lux-chat-123");
         assert_eq!(sanitize_session(""), "lux-default");
+    }
+
+    #[test]
+    fn sanitize_session_is_idempotent() {
+        // A name already returned from a previous call round-trips unchanged
+        // instead of re-accumulating the `lux-` prefix.
+        let once = sanitize_session("chat-123");
+        assert_eq!(once, "lux-chat-123");
+        assert_eq!(sanitize_session(&once), once);
+        // Applying it a third time is still stable.
+        assert_eq!(sanitize_session(&sanitize_session(&once)), once);
+        // Explicitly: a raw `lux-`-prefixed input is not double-prefixed.
+        assert_eq!(sanitize_session("lux-xxx"), "lux-xxx");
+        assert_eq!(sanitize_session("lux-default"), "lux-default");
+        // Dashes between the prefix and the body are collapsed away rather than
+        // producing an empty or dash-led body.
+        assert_eq!(sanitize_session("lux--x"), "lux-x");
+    }
+
+    #[test]
+    fn sanitize_session_bounded_length_is_idempotent() {
+        // An over-long body is bounded once; re-running keeps the same bounded
+        // result (no drift from re-truncation of the prefixed form).
+        let long = "a".repeat(200);
+        let once = sanitize_session(&long);
+        assert!(once.starts_with("lux-"));
+        assert_eq!(once.len(), "lux-".len() + 48);
+        assert_eq!(sanitize_session(&once), once);
+        assert_eq!(sanitize_session(&sanitize_session(&once)), once);
     }
 
     #[test]

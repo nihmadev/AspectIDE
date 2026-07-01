@@ -136,7 +136,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "WorkspaceIndex",
-        "Indexed snapshot of the workspace.",
+        "Indexed snapshot of the workspace. When the result is truncated, the language/directory/largest aggregates are a lexicographically-first sample (see aggregatesNote), not the whole project.",
         &[
             opt_int(
                 "maxFiles",
@@ -144,7 +144,12 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 1,
                 MAX_RESULTS_DEFAULT,
             ),
-            opt_int("maxScan", "Max scan.", 1, MAX_RESULTS_DEFAULT),
+            opt_int(
+                "maxScan",
+                "Max files to scan before aggregating (default 5000; clamped to 500–20000).",
+                500,
+                20_000,
+            ),
         ],
     ));
     tools.push(tool(
@@ -180,9 +185,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Durable project memory.",
         &[
             opt("query", "string", "Topic."),
-            opt_int("maxFiles", "Max.", 1, MAX_RESULTS_DEFAULT),
-            opt_int("maxSignals", "Max.", 1, MAX_RESULTS_DEFAULT),
-            opt("includeRecentChat", "boolean", "Include chat."),
+            opt_int("maxFiles", "Max files.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
@@ -200,7 +203,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             req("content", "string", "The fact to remember, as one self-contained sentence."),
             opt("category", "string", "core | episodic | semantic | procedural | custom (default semantic)."),
-            opt("importance", "number", "0..1 relevance weight (default 0.5)."),
+            opt("importance", "number", "0..1 relevance weight (default 0.5; out-of-range values are clamped)."),
             opt("pinned", "boolean", "Pin so it always surfaces first."),
         ],
     ));
@@ -222,20 +225,21 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Ranked context under a char budget.",
         &[
             req("query", "string", "Task."),
-            opt_int("targetChars", "Budget.", 1, 1_000_000),
-            opt("includeActiveText", "boolean", ""),
-            opt("includeOpenDocuments", "boolean", ""),
-            opt("includeToolContext", "boolean", ""),
-            opt_int("maxItems", "", 1, MAX_RESULTS_DEFAULT),
+            opt_int("targetChars", "Target character budget for the packet (default ~12000; clamped to 2000..22000).", 2_000, 22_000),
+            opt("includeActiveText", "boolean", "Include a trimmed excerpt from the active document. Default false."),
+            opt("includeOpenDocuments", "boolean", "Include open editor tabs and dirty-file excerpts. Default false."),
+            opt("includeToolContext", "boolean", "Gather ranked context from read-only tools (rules, memory, related files, diagnostics). Default true."),
+            opt_int("maxItems", "Hard cap on packet items. Default 28.", 4, 80),
         ],
     ));
     tools.push(tool(
         "SemanticSearch",
-        "Rank code locations by intent.",
+        "Rank code locations by intent. The `path` filter is a case-insensitive SUBSTRING match on the workspace-relative path (not a glob) — pass a directory fragment like `src/auth`, not `src/**/*.ts`.",
         &[
             req("query", "string", "Topic."),
-            opt("path", "string", "Path filter."),
-            opt_int("maxResults", "Max.", 1, MAX_RESULTS_DEFAULT),
+            opt("path", "string", "Case-insensitive substring of the file path to restrict results (e.g. `src/auth`); NOT a glob."),
+            opt_int("maxResults", "Max ranked results.", 1, MAX_RESULTS_DEFAULT),
+            opt_int("maxFiles", "Max workspace files scanned as candidates (default 5000).", 1, 20_000),
         ],
     ));
     tools.push(tool(
@@ -265,18 +269,30 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "Glob",
-        "List files matching a pattern.",
+        "List files matching a glob pattern (`*`, `?`, `[...]`, `{a,b}`). NOTE: `*` matches across `/`, so `src/*.ts` also finds nested files (no `**` needed). Results EXCLUDE .gitignored paths (dist/, build/, node_modules/, …) — those return no match. A plain string with no wildcard is treated as a case-insensitive path substring.",
         &[
-            req("pattern", "string", "Pattern."),
+            req("pattern", "string", "Glob pattern, or a plain path substring."),
             opt_int("maxResults", "Max.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
     tools.push(tool(
         "Read",
-        "Read a text file.",
+        "Read a text file. To page a large file instead of re-reading a truncated head, pass startLine (1-based) and maxLines; the response reports totalLines so you can request the next window.",
         &[
             req("path", "string", "File path."),
             opt_int("maxBytes", "Max bytes.", 1, MAX_BYTES_DEFAULT),
+            opt_int(
+                "startLine",
+                "1-based first line to return. Combine with maxLines to page a large file.",
+                1,
+                10_000_000,
+            ),
+            opt_int(
+                "maxLines",
+                "Maximum number of lines to return starting at startLine.",
+                1,
+                1_000_000,
+            ),
         ],
     ));
     tools.push(tool(
@@ -291,10 +307,10 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "Grep",
-        "Search text in workspace.",
+        "Search text in the workspace. The query is a LITERAL string by default — set useRegex:true to use a regular expression, including alternation like `foo|bar|baz` (which matches 0 results as a literal).",
         &[
-            req("query", "string", "Search text."),
-            opt("useRegex", "boolean", ""),
+            req("query", "string", "Search text (literal unless useRegex is true)."),
+            opt("useRegex", "boolean", "Treat query as a regex (needed for `a|b` alternation, anchors, character classes)."),
             opt("caseSensitive", "boolean", ""),
             opt_int("maxResults", "", 1, MAX_RESULTS_DEFAULT),
         ],
@@ -305,9 +321,24 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         &[
             opt("query", "string", "Symbol."),
             opt("path", "string", "File."),
-            opt_int("line", "", 0, LINE_MAX),
-            opt_int("column", "", 0, COLUMN_MAX),
-            opt_int("maxResults", "", 1, MAX_RESULTS_SYMBOL),
+            opt_int(
+                "line",
+                "0-based line number (first line is 0), matching the editor's LSP coordinates.",
+                0,
+                LINE_MAX,
+            ),
+            opt_int(
+                "column",
+                "0-based UTF-16 column offset within the line (first column is 0).",
+                0,
+                COLUMN_MAX,
+            ),
+            opt_int(
+                "maxResults",
+                "Max results per symbol list.",
+                1,
+                MAX_RESULTS_SYMBOL,
+            ),
         ],
     ));
     tools.push(tool(
@@ -317,6 +348,12 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             opt("path", "string", "Target."),
             opt("query", "string", "Topic."),
             opt_int("maxResults", "", 1, MAX_RESULTS_DEFAULT),
+            opt_int(
+                "maxFiles",
+                "Max workspace files scanned as candidates (default 5000).",
+                1,
+                20_000,
+            ),
         ],
     ));
     tools.push(tool(
@@ -368,8 +405,8 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         "Fetch ONE known URL's content. For an open-ended question across the web, use WebResearch instead.",
         &[
             req("url", "string", "URL."),
-            opt_int("maxBytes", "", 1, MAX_BYTES_DEFAULT),
-            opt_int("timeoutSecs", "", TIMEOUT_MIN, TIMEOUT_MAX),
+            opt_int("maxBytes", "Max response bytes to read (default 250000; clamped to 1024..1000000).", 1_024, 1_000_000),
+            opt_int("timeoutSecs", "Request timeout in seconds (default 20, max 60).", TIMEOUT_MIN, 60),
         ],
     ));
     tools.push(tool(
@@ -383,7 +420,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "SshList",
-        "List active SSH sessions and the hosts defined in ~/.ssh/config, plus whether the OpenSSH client is available. Read-only; call this to discover connectable hosts before SshConnect.",
+        "List active SSH sessions and the hosts defined in ~/.ssh/config, plus whether the OpenSSH client is available. Read-only discovery of hosts; opening a session (SshConnect) is only available in Agent/Automatic mode.",
         &[],
     ));
     tools.push(tool("TestHealth", "Run workspace tests.", &[]));
@@ -450,18 +487,18 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ));
         tools.push(tool(
             "StrReplace",
-            "Replace exact text in a file.",
+            "Replace exact text in a file. Line endings are matched tolerantly (LF vs CRLF), so `\\n`-only oldText matches a Windows `\\r\\n` file. Re-issuing an insert that is already present is a safe no-op, not a duplicate.",
             &[
-                req("path", "string", ""),
-                req("oldText", "string", ""),
-                req("newText", "string", ""),
+                req("path", "string", "File path."),
+                req("oldText", "string", "Exact text to find (whitespace-significant; EOL-tolerant)."),
+                req("newText", "string", "Replacement text; empty string deletes the matched text."),
                 opt_int("expectedReplacements", "", REPLACEMENT_MIN, REPLACEMENT_MAX),
                 opt("saveToDisk", "boolean", ""),
             ],
         ));
         tools.push(tool(
             "PatchEngine",
-            "Multi-file patch.",
+            "Apply many file edits in one atomic batch (all-or-nothing; rolls back on any failure). Each op needs `action` and `path`; an invalid op is reported by its index. StrReplace-style ops are EOL-tolerant like StrReplace.",
             &[
                 req_arr_items("operations", "Patch ops.", patch_operation_schema()),
                 opt("saveToDisk", "boolean", ""),
@@ -487,11 +524,11 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ));
         tools.push(tool(
             "Shell",
-            "Run a shell command.",
+            "Run ONE shell command and get {exitCode, stdout, stderr, timedOut, stdoutTruncated, stderrTruncated}. Runs non-interactively in the workspace root (override with cwd); default timeout 120s (max 600). Output over ~24k chars is head+tail truncated (see the *Truncated flags). On Windows it runs via cmd.exe /C as a SINGLE line — chain steps with `&&`, never a newline; use cmd syntax (dir/type, %VAR%, backslash paths). On Unix it is /bin/sh. Catastrophic commands are refused.",
             &[
-                req("command", "string", "Command."),
-                opt("cwd", "string", ""),
-                opt_int("timeoutSecs", "", TIMEOUT_MIN, TIMEOUT_MAX),
+                req("command", "string", "The command line (single line; chain with && or ;)."),
+                opt("cwd", "string", "Working directory (workspace-relative); defaults to the workspace root."),
+                opt_int("timeoutSecs", "Timeout in seconds (default 120).", TIMEOUT_MIN, TIMEOUT_MAX),
             ],
         ));
         tools.push(tool(
@@ -603,28 +640,38 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 "BrowserSnapshot",
                 "Accessibility tree with refs.",
                 &[
-                    opt("interactive", "boolean", ""),
-                    opt("compact", "boolean", ""),
-                    opt_int("depth", "", 1, 100),
-                    opt("selector", "string", ""),
-                    opt("includeUrls", "boolean", ""),
+                    opt("interactive", "boolean", "Only interactive elements."),
+                    opt("compact", "boolean", "Condensed output."),
+                    opt_int("depth", "Max tree depth.", 1, 100),
+                    opt(
+                        "selector",
+                        "string",
+                        "Scope the snapshot to a CSS selector.",
+                    ),
+                    opt(
+                        "includeUrls",
+                        "boolean",
+                        "Include href URLs for link elements.",
+                    ),
                 ],
             ));
             tools.push(tool(
                 "BrowserHelp",
                 "agent-browser help.",
                 &[
-                    opt("topic", "string", ""),
-                    opt("skill", "string", ""),
-                    opt("allSkills", "boolean", ""),
+                    opt("topic", "string", "Help topic."),
+                    opt("skill", "string", "Show full docs for one skill."),
+                    opt("allSkills", "boolean", "List all skills."),
                 ],
             ));
             // `fix` triggers a side-effecting repair, so expose it only when execute-capable;
             // diagnostics-only params stay available in read-only modes.
-            let mut doctor_params =
-                vec![opt("offline", "boolean", ""), opt("quick", "boolean", "")];
+            let mut doctor_params = vec![
+                opt("offline", "boolean", "Skip network checks."),
+                opt("quick", "boolean", "Fast subset of checks."),
+            ];
             if browser_write {
-                doctor_params.push(opt("fix", "boolean", ""));
+                doctor_params.push(opt("fix", "boolean", "Attempt automatic repair."));
             }
             tools.push(tool("BrowserDoctor", "Diagnostics.", &doctor_params));
         }
@@ -632,54 +679,86 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             tools.push(tool(
                 "BrowserOpen",
                 "Open browser session.",
-                &[opt("url", "string", ""), opt("headed", "boolean", "")],
+                &[
+                    opt("url", "string", "URL to navigate to on open."),
+                    opt(
+                        "headed",
+                        "boolean",
+                        "Run headed (visible) instead of headless.",
+                    ),
+                ],
             ));
             tools.push(tool(
                 "BrowserAct",
-                "Browser action.",
-                &[opt("command", "string", "")],
+                "Browser action against @refs from a snapshot. `command` is split on whitespace with NO quote handling — use it only when no argument contains spaces. For any value with spaces (typing/filling multi-word text) use `batchCommands`, one pre-tokenized argument per array element.",
+                &[
+                    opt(
+                        "command",
+                        "string",
+                        "Single action, split on whitespace into CLI args (no quotes). Use only when no argument has spaces.",
+                    ),
+                    opt_str_arr(
+                        "batchCommands",
+                        "Pre-tokenized args, one CLI token per element (e.g. [\"type\",\"#search\",\"hello world\"]); spaces inside an element are preserved. Preferred when any value has spaces.",
+                    ),
+                ],
             ));
             tools.push(tool(
                 "BrowserScreenshot",
-                "Screenshot.",
+                "Capture a screenshot to a file (returns the saved path; the image is not fed into vision).",
                 &[
-                    opt("path", "string", ""),
-                    opt("annotate", "boolean", ""),
-                    opt("fullPage", "boolean", ""),
-                    opt("attachVision", "boolean", ""),
+                    opt("path", "string", "Output file path."),
+                    opt("annotate", "boolean", "Annotate interactive elements."),
+                    opt("fullPage", "boolean", "Capture the full scrollable page."),
                 ],
             ));
             tools.push(tool(
                 "BrowserClose",
                 "Close browser.",
-                &[opt("all", "boolean", "")],
+                &[opt(
+                    "all",
+                    "boolean",
+                    "Close all sessions, not just the active one.",
+                )],
             ));
             tools.push(tool(
                 "BrowserChat",
                 "Natural-language browser.",
                 &[
-                    req("instruction", "string", ""),
-                    opt("quiet", "boolean", ""),
+                    req("instruction", "string", "What to do in natural language."),
+                    opt(
+                        "quiet",
+                        "boolean",
+                        "Suppress step-by-step narration (default true).",
+                    ),
                 ],
             ));
             tools.push(tool(
                 "BrowserDashboard",
                 "Dashboard.",
                 &[
-                    opt("action", "string", ""),
-                    opt_int("port", "", PORT_MIN, PORT_MAX),
-                    opt("openInBrowser", "boolean", ""),
+                    opt("action", "string", "Dashboard action (e.g. start/stop)."),
+                    opt_int(
+                        "port",
+                        "Port to serve the dashboard on.",
+                        PORT_MIN,
+                        PORT_MAX,
+                    ),
                 ],
             ));
             tools.push(tool(
                 "BrowserInstall",
                 "Install agent-browser.",
-                &[opt("withDeps", "boolean", "")],
+                &[opt(
+                    "withDeps",
+                    "boolean",
+                    "Also install system dependencies.",
+                )],
             ));
             tools.push(tool(
                 "BrowserInvoke",
-                "Raw CLI.",
-                &[req_str_arr("args", "CLI args.")],
+                "Run the agent-browser CLI. `args` is the argv array starting with the subcommand, e.g. [\"open\",\"https://example.com\"] or [\"click\",\"#submit\"]. Do NOT pass --json or --session — Lux injects those automatically; adding them yourself will conflict.",
+                &[req_str_arr("args", "argv array: [subcommand, ...flags]. Omit --json/--session (injected).")],
             ));
         }
     }
