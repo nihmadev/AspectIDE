@@ -42,14 +42,25 @@ function extractFilePaths(text: string) {
   return paths;
 }
 
-function extractDirPaths(text: string) {
+function extractDirPaths(text: string, knownRoots?: ReadonlySet<string>) {
   const paths: string[] = [];
   dirPathPattern.lastIndex = 0;
   for (const match of text.matchAll(dirPathPattern)) {
     const path = match[1]?.replace(/\\/g, "/");
     // Belt-and-suspenders vs future regex edits: a candidate must keep an
     // internal separator after trimming the trailing slash.
-    if (path && path.length <= 120 && path.replace(/\/+$/, "").includes("/")) paths.push(path);
+    if (!path || path.length > 120 || !path.replace(/\/+$/, "").includes("/")) continue;
+    // Prose alternation lists ("web/browser/MCP/SSH/", "read/search/graph/")
+    // are lexically indistinguishable from directory paths, so when the caller
+    // provides the workspace's real top-level directories, a citation only
+    // counts as a path when its first segment is one of them. `undefined`
+    // stays permissive (used for the *verified* side, where extra entries are
+    // harmless); an explicit set — even empty — gates the *cited* side.
+    if (knownRoots) {
+      const first = path.split("/", 1)[0]?.toLowerCase() ?? "";
+      if (!knownRoots.has(first)) continue;
+    }
+    paths.push(path);
   }
   return paths;
 }
@@ -75,7 +86,18 @@ function isPathVerifiedByTools(path: string, verified: Set<string>) {
   return false;
 }
 
-export function listUnverifiedPathsInAssistantMessage(message: AiChatMessage) {
+const NO_KNOWN_ROOTS: ReadonlySet<string> = new Set();
+
+/**
+ * `knownRoots` — lowercased names of the workspace's top-level directories.
+ * Directory citations whose first segment isn't one of them are treated as
+ * prose (slash-separated word lists), not paths. Omitted/empty → directory
+ * citations are never flagged (file paths with extensions still are).
+ */
+export function listUnverifiedPathsInAssistantMessage(
+  message: AiChatMessage,
+  knownRoots: ReadonlySet<string> = NO_KNOWN_ROOTS,
+) {
   const verified = new Set<string>();
   for (const call of message.toolCalls ?? []) collectVerifiedPathsFromToolCall(call, verified);
   for (const segment of message.segments ?? []) {
@@ -83,16 +105,20 @@ export function listUnverifiedPathsInAssistantMessage(message: AiChatMessage) {
   }
 
   const prose = decodeChatDisplayText(message.content);
-  const cited = [...new Set([...extractFilePaths(prose), ...extractDirPaths(prose)])];
+  const cited = [...new Set([...extractFilePaths(prose), ...extractDirPaths(prose, knownRoots)])];
   return cited.filter((path) => !isPathVerifiedByTools(path, verified));
 }
 
-export function shouldShowPathEvidenceNotice(message: AiChatMessage, streaming: boolean) {
+export function shouldShowPathEvidenceNotice(
+  message: AiChatMessage,
+  streaming: boolean,
+  knownRoots: ReadonlySet<string> = NO_KNOWN_ROOTS,
+) {
   if (streaming || message.role !== "assistant") return false;
   if (!(message.toolCalls?.length ?? 0) && !(message.segments?.some((segment) => segment.kind === "tool"))) {
     return false;
   }
-  const unverified = listUnverifiedPathsInAssistantMessage(message);
+  const unverified = listUnverifiedPathsInAssistantMessage(message, knownRoots);
   if (unverified.length === 0) return false;
   if (unverified.length >= 2) return true;
   return unverified.some((path) => path.endsWith("/"));

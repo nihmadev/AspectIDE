@@ -59,38 +59,59 @@ async fn status_inner(lightweight: bool) -> Result<AgentBrowserStatusResponse, S
 
     // Doctor: in non-lightweight mode, only the doctor data value is carried
     // into the response (available computed from its success field below).
-    let doctor: Option<serde_json::Value> = if lightweight {
+    // Short timeout: healthy offline+quick doctor runs finish in seconds, and
+    // the CLI's doctor is known to hang outright on some Windows machines — a
+    // hang must not stall BrowserStatus for most of a minute.
+    let doctor_outcome: Option<Result<serde_json::Value, String>> = if lightweight {
         None
     } else {
-        run_json(
-            &binary,
-            None,
-            &["doctor", "--json", "--offline", "--quick"],
-            45,
+        Some(
+            run_json(
+                &binary,
+                None,
+                &["doctor", "--json", "--offline", "--quick"],
+                12,
+            )
+            .await
+            .map(|resp| resp.data),
         )
-        .await
-        .map(|resp| resp.data)
-        .ok()
     };
+    let doctor_hung = matches!(&doctor_outcome, Some(Err(error)) if error.contains("timed out"));
+    let doctor: Option<serde_json::Value> = doctor_outcome.and_then(std::result::Result::ok);
 
-    // Fail-closed: non-lightweight requires explicit doctor success for available=true.
+    // Fail-closed only on an ACTUAL doctor verdict: doctor ran and reported
+    // failure → unavailable. A hung/killed doctor is a doctor problem, not
+    // evidence the CLI is broken (version/session probes still answer in <1s),
+    // so availability falls back to the version probe.
     let available = if lightweight {
         version.is_some()
-    } else {
+    } else if doctor.is_some() {
         doctor
             .as_ref()
             .and_then(|value| value.get("success"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
+    } else {
+        version.is_some()
     };
 
     let detail = if available {
-        format!(
-            "agent-browser is available ({})",
-            version
-                .clone()
-                .unwrap_or_else(|| "version unknown".to_string())
-        )
+        if doctor_hung {
+            format!(
+                "agent-browser responds ({}), but its `doctor` subcommand hung and was skipped — \
+                 a known CLI issue on some machines. Automation is likely functional.",
+                version
+                    .clone()
+                    .unwrap_or_else(|| "version unknown".to_string())
+            )
+        } else {
+            format!(
+                "agent-browser is available ({})",
+                version
+                    .clone()
+                    .unwrap_or_else(|| "version unknown".to_string())
+            )
+        }
     } else if lightweight {
         if version.is_some() {
             format!(
@@ -188,29 +209,35 @@ pub async fn invoke(
         .clamp(2_000, MAX_OUTPUT_CAP);
 
     let arg_refs: Vec<&str> = request.args.iter().map(String::as_str).collect();
-    let response = run_json(
-        &binary,
-        Some(InvokeOptions {
-            session: session.clone(),
-            headed: request.headed,
-            allowed_domains: request.allowed_domains.clone(),
-            max_output,
-            session_name: request.session_name.clone(),
-            profile: request.profile.clone(),
-            state_path: request.state_path.clone(),
-            content_boundaries: request.content_boundaries,
-            // Always deny these — the validate check above already rejected
-            // the request if they were requested. Set to false/Never.
-            ignore_https_errors: None,
-            allow_file_access: None,
-            provider: request.provider.clone(),
-            proxy: request.proxy.clone(),
-            cwd: request.cwd.clone(),
-        }),
-        &arg_refs,
-        timeout_secs,
-    )
-    .await?;
+    let options = InvokeOptions {
+        session: session.clone(),
+        headed: request.headed,
+        allowed_domains: request.allowed_domains.clone(),
+        max_output,
+        session_name: request.session_name.clone(),
+        profile: request.profile.clone(),
+        state_path: request.state_path.clone(),
+        content_boundaries: request.content_boundaries,
+        // Always deny these — the validate check above already rejected
+        // the request if they were requested. Set to false/Never.
+        ignore_https_errors: None,
+        allow_file_access: None,
+        provider: request.provider.clone(),
+        proxy: request.proxy.clone(),
+        cwd: request.cwd.clone(),
+    };
+    let mut response = run_json(&binary, Some(options.clone()), &arg_refs, timeout_secs).await?;
+
+    // The CLI reports transient daemon-state conflicts ("daemon version
+    // mismatch", "started concurrently with different daemon configuration")
+    // with an explicit instruction to retry — the retried command restarts the
+    // daemon with the requested configuration. Surface those raw and every
+    // browser tool "randomly" fails right after an app update or a config
+    // change; retry once instead.
+    if !response.success && is_retryable_daemon_conflict(&response.text) {
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        response = run_json(&binary, Some(options), &arg_refs, timeout_secs).await?;
+    }
 
     Ok(AgentBrowserInvokeResponse {
         session,
@@ -222,6 +249,37 @@ pub async fn invoke(
         truncated: response.truncated,
         exit_code: response.exit_code,
     })
+}
+
+/// Whether a failed CLI response is a transient daemon-state conflict the CLI
+/// itself asks the caller to retry (daemon restarts with the requested
+/// configuration on the next run).
+fn is_retryable_daemon_conflict(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("retry the command")
+        || lower.contains("daemon version mismatch")
+        || lower.contains("started concurrently with different daemon configuration")
+}
+
+#[cfg(test)]
+mod invoke_tests {
+    use super::is_retryable_daemon_conflict;
+
+    #[test]
+    fn daemon_conflicts_are_retryable() {
+        // The exact error observed live: screenshot against an existing session
+        // after an app/CLI update. The CLI's own message says to retry.
+        assert!(is_retryable_daemon_conflict(
+            "A daemon for session 'lux-chat-x' started concurrently with different daemon \
+             configuration. Retry the command so agent-browser can restart it with the \
+             requested configuration."
+        ));
+        assert!(is_retryable_daemon_conflict(
+            "⚠ Daemon version mismatch detected, restarting..."
+        ));
+        assert!(!is_retryable_daemon_conflict("element not found: #button"));
+        assert!(!is_retryable_daemon_conflict(""));
+    }
 }
 
 // ── Read Image (restricted) ──

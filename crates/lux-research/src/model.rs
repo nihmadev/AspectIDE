@@ -171,3 +171,31 @@ pub struct ResearchResponse {
     /// Human-facing notes (e.g. "configure SearxNG for better results").
     pub notes: Vec<String>,
 }
+
+/// One merged multi-query source: a [`RankedSource`] plus which of the input
+/// queries surfaced it (flattened, so the agent sees one uniform source shape
+/// with an extra `matchedQueries` field).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiRankedSource {
+    #[serde(flatten)]
+    pub source: RankedSource,
+    /// The input queries (verbatim) whose search surfaced this source.
+    pub matched_queries: Vec<String>,
+}
+
+/// The merged result of a parallel multi-query research run
+/// (`MultiWebResearch`): one globally ranked, domain-diverse source list built
+/// from all queries searched concurrently.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiResearchResponse {
+    pub queries: Vec<String>,
+    pub focus: FocusMode,
+    /// `"searxng"` or `"duckduckgo"`.
+    pub provider: String,
+    pub source_count: usize,
+    pub sources: Vec<MultiRankedSource>,
+    /// Human-facing notes (per-query outcomes, merge summary, provider hints).
+    pub notes: Vec<String>,
+}

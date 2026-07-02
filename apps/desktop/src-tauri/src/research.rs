@@ -11,9 +11,10 @@
 use std::collections::HashMap;
 
 use lux_research::{
-    duckduckgo_lite_search_url, duckduckgo_search_url, expand_queries, extract_result_links,
-    parse_duckduckgo_html, parse_searxng_json, rerank, rerank_deep, searxng_search_url, FocusMode,
-    ResearchDepth, ResearchOptions, ResearchResponse, SearchHit,
+    canonical_url_key, duckduckgo_lite_search_url, duckduckgo_search_url, expand_queries,
+    extract_result_links, focus_biased_query, parse_duckduckgo_html, parse_searxng_json, rerank,
+    rerank_deep, rerank_multi, searxng_search_url, FocusMode, MultiResearchResponse, ResearchDepth,
+    ResearchOptions, ResearchResponse, SearchHit,
 };
 use tauri::State;
 
@@ -30,6 +31,17 @@ const PAGE_MAX_BYTES: u64 = 200_000;
 const CRAWL_MAX_BYTES: usize = 300_000;
 /// Deep-mode crawl reads outbound links from at most this many top result pages.
 const CRAWL_SEED_PAGES: usize = 3;
+/// Max result pages fetched at once (politeness + socket pressure bound); results
+/// keep their input order regardless.
+const FETCH_CONCURRENCY: usize = 8;
+/// Hard cap on distinct queries per `MultiWebResearch` run.
+pub const MULTI_MAX_QUERIES: usize = 6;
+/// Total page-fetch budget across all queries of a multi run.
+const MULTI_MAX_FETCHES: usize = 18;
+/// Per-host diversity cap for the merged multi ranking.
+const MULTI_PER_HOST_CAP: usize = 2;
+/// Ceiling on returned merged sources for a multi run.
+const MULTI_MAX_SOURCES_CEILING: usize = 20;
 
 /// Read the configured `SearxNG` base URL from settings (trimmed; `None` if unset/blank).
 fn configured_searxng_url(state: &State<'_, SharedState>) -> Option<String> {
@@ -62,22 +74,29 @@ pub async fn web_research(
         );
     }
 
-    // ── 1. Search — deep mode expands the query into several variants and merges ──
+    // ── 1. Search — deep mode expands the query into several variants, issues
+    // them ALL concurrently, and merges ──
     let queries = if profile.max_queries > 1 {
         expand_queries(&query, options.focus, profile.max_queries)
     } else {
         vec![query.clone()]
     };
+    let searches = queries
+        .iter()
+        .map(|sub_query| search_provider(searxng.as_deref(), sub_query, &options));
+    let search_results = futures_util::future::join_all(searches).await;
+
     let mut merged: Vec<SearchHit> = Vec::new();
-    // How many of the (expanded) sub-queries surfaced each URL — a consensus signal
-    // the deep reranker uses to float widely-cited sources up.
+    // How many of the (expanded) sub-queries surfaced each URL (by canonical key,
+    // so tracking-param variants merge) — a consensus signal the deep reranker
+    // uses to float widely-cited sources up.
     let mut frequency: HashMap<String, usize> = HashMap::new();
     let mut provider = "duckduckgo";
     let mut backend_responded = false;
     let mut fallback_noted = false;
     let mut first_error: Option<String> = None;
-    for sub_query in &queries {
-        match search_provider(searxng.as_deref(), sub_query, &options).await {
+    for search_result in search_results {
+        match search_result {
             Ok(result) => {
                 provider = result.provider;
                 backend_responded |= result.backend_responded;
@@ -85,8 +104,17 @@ pub async fn web_research(
                     notes.push(msg);
                     fallback_noted = true;
                 }
+                // Consensus counts DISTINCT sub-queries per canonical key. One
+                // sub-query's result list can contain tracking-param variants of
+                // the same page (multi-engine SearxNG merges do) — those must not
+                // self-inflate the "how many sub-queries agree" signal.
+                let mut seen_this_query: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for hit in result.hits {
-                    *frequency.entry(hit.url.clone()).or_insert(0) += 1;
+                    let key = canonical_url_key(&hit.url);
+                    if seen_this_query.insert(key.clone()) {
+                        *frequency.entry(key).or_insert(0) += 1;
+                    }
                     merged.push(hit);
                 }
             }
@@ -118,17 +146,15 @@ pub async fn web_research(
     }
 
     // `focus` maps to SearxNG categories only; the DuckDuckGo fallback has no
-    // category knob, so a non-web focus is silently dropped there. Reflect the
-    // focus actually applied and tell the model when its focus was ignored.
-    let effective_focus = if provider == "duckduckgo" && options.focus != FocusMode::Web {
+    // category knob, so it is approximated there by biasing the query text
+    // (see [`focus_biased_query`]). Tell the model which mechanism applied.
+    let effective_focus = options.focus;
+    if provider == "duckduckgo" && options.focus != FocusMode::Web {
         notes.push(format!(
-            "focus '{}' was ignored: the DuckDuckGo fallback does not support focus categories. Configure a SearxNG instance in Settings → AI → Web Research to use focus.",
+            "focus '{}' has no native DuckDuckGo category; it was approximated by biasing the search query. Configure a SearxNG instance in Settings → AI → Web Research for true focus categories.",
             options.focus.searxng_category(),
         ));
-        FocusMode::Web
-    } else {
-        options.focus
-    };
+    }
 
     // Dedupe by URL (preserve first/highest-placed occurrence) and cap fetches by depth.
     dedupe_hits(&mut merged);
@@ -243,6 +269,199 @@ pub async fn web_research(
     })
 }
 
+/// Run several research queries CONCURRENTLY and merge them into one globally
+/// ranked, domain-diverse source list ("`MultiWebResearch`"): all searches fan out
+/// in parallel, hits merge by canonical URL with per-query attribution, a fair
+/// (round-robin across queries) slice of pages is fetched — bounded by
+/// [`MULTI_MAX_FETCHES`] total and [`FETCH_CONCURRENCY`] in flight — and one
+/// multi-query rerank scores every page against every query, boosting sources
+/// several queries agree on.
+#[tauri::command]
+pub async fn multi_web_research(
+    state: State<'_, SharedState>,
+    queries: Vec<String>,
+    options: Option<ResearchOptions>,
+) -> Result<MultiResearchResponse, String> {
+    // Normalize: trim, drop empties, dedupe case-insensitively, cap the count.
+    let mut seen_queries = std::collections::HashSet::new();
+    let mut cleaned: Vec<String> = Vec::new();
+    for raw in queries {
+        let trimmed = raw.trim().to_string();
+        if !trimmed.is_empty() && seen_queries.insert(trimmed.to_lowercase()) {
+            cleaned.push(trimmed);
+        }
+    }
+    if cleaned.is_empty() {
+        return Err(
+            "MultiWebResearch requires at least one non-empty query (2-6 distinct queries recommended)."
+                .to_string(),
+        );
+    }
+    let mut notes = Vec::new();
+    if cleaned.len() > MULTI_MAX_QUERIES {
+        notes.push(format!(
+            "Capped to the first {MULTI_MAX_QUERIES} distinct queries ({} were given).",
+            cleaned.len()
+        ));
+        cleaned.truncate(MULTI_MAX_QUERIES);
+    }
+    if cleaned.len() == 1 {
+        notes.push(
+            "Only one distinct query was given — WebResearch is the better fit for single queries."
+                .to_string(),
+        );
+    }
+    let options = options.unwrap_or_default();
+    let searxng = configured_searxng_url(&state);
+    if searxng.is_none() {
+        notes.push(
+            "Using the keyless DuckDuckGo fallback. Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
+        );
+    }
+
+    // ── 1. All queries search CONCURRENTLY ──
+    let searches = cleaned
+        .iter()
+        .map(|query| search_provider(searxng.as_deref(), query, &options));
+    let search_results = futures_util::future::join_all(searches).await;
+
+    let mut provider = "duckduckgo";
+    let mut backend_responded = false;
+    let mut fallback_noted = false;
+    let mut first_error: Option<String> = None;
+    let mut per_query_hits: Vec<Vec<SearchHit>> = Vec::with_capacity(cleaned.len());
+    for (query_index, search_result) in search_results.into_iter().enumerate() {
+        match search_result {
+            Ok(result) => {
+                provider = result.provider;
+                backend_responded |= result.backend_responded;
+                if let (Some(msg), false) = (result.fallback_note, fallback_noted) {
+                    notes.push(msg);
+                    fallback_noted = true;
+                }
+                if result.hits.is_empty() {
+                    notes.push(format!(
+                        "Query '{}' returned no results.",
+                        cleaned[query_index]
+                    ));
+                }
+                per_query_hits.push(result.hits);
+            }
+            Err(error) => {
+                notes.push(format!("Query '{}' failed: {error}", cleaned[query_index]));
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+                per_query_hits.push(Vec::new());
+            }
+        }
+    }
+
+    // ── 2. Merge round-robin (fair across queries) by canonical URL, keeping
+    // which queries surfaced each hit ──
+    let mut pool: Vec<SearchHit> = Vec::new();
+    let mut surfaced_by: Vec<Vec<usize>> = Vec::new();
+    let mut key_to_pool: HashMap<String, usize> = HashMap::new();
+    let deepest = per_query_hits.iter().map(Vec::len).max().unwrap_or(0);
+    for position in 0..deepest {
+        for (query_index, hits) in per_query_hits.iter().enumerate() {
+            let Some(hit) = hits.get(position) else {
+                continue;
+            };
+            let key = canonical_url_key(&hit.url);
+            if let Some(&pool_index) = key_to_pool.get(&key) {
+                if !surfaced_by[pool_index].contains(&query_index) {
+                    surfaced_by[pool_index].push(query_index);
+                }
+            } else {
+                key_to_pool.insert(key, pool.len());
+                surfaced_by.push(vec![query_index]);
+                pool.push(hit.clone());
+            }
+        }
+    }
+
+    if pool.is_empty() {
+        // Every attempt errored AND nothing responded → hard failure, not an
+        // empty result set in disguise.
+        if !backend_responded {
+            if let Some(error) = first_error {
+                return Err(error);
+            }
+        }
+        notes.push("No search results found for any query.".to_string());
+        return Ok(MultiResearchResponse {
+            queries: cleaned,
+            focus: options.focus,
+            provider: provider.to_string(),
+            source_count: 0,
+            sources: Vec::new(),
+            notes,
+        });
+    }
+    let merged_unique = pool.len();
+    pool.truncate(MULTI_MAX_FETCHES);
+    surfaced_by.truncate(MULTI_MAX_FETCHES);
+
+    if provider == "duckduckgo" && options.focus != FocusMode::Web {
+        notes.push(format!(
+            "focus '{}' has no native DuckDuckGo category; it was approximated by biasing the search queries.",
+            options.focus.searxng_category(),
+        ));
+    }
+
+    // ── 3. Fetch the merged slice (bounded concurrency) + backfill titles ──
+    let fetched = fetch_pages(&pool).await;
+    let hits_for_rank: Vec<SearchHit> = pool
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let mut hit = hit.clone();
+            if hit.title.trim().is_empty() {
+                if let Some(title) = fetched.get(index).and_then(|(_, title)| title.clone()) {
+                    hit.title = title;
+                }
+            }
+            hit
+        })
+        .collect();
+    let contents: Vec<String> = fetched.into_iter().map(|(text, _)| text).collect();
+
+    // ── 4. One global multi-query rerank ──
+    let max_sources = options.max_sources.clamp(1, MULTI_MAX_SOURCES_CEILING);
+    let sources = rerank_multi(
+        &cleaned,
+        &hits_for_rank,
+        &contents,
+        &surfaced_by,
+        max_sources,
+        options.max_chars_per_source,
+        MULTI_PER_HOST_CAP,
+    );
+
+    let domains: std::collections::HashSet<&str> = sources
+        .iter()
+        .map(|source| source.source.domain.as_str())
+        .collect();
+    notes.push(format!(
+        "Parallel research: {} quer{} searched concurrently; {merged_unique} unique result(s) merged; fetched {} page(s); returning {} source(s) across {} domain(s).",
+        cleaned.len(),
+        if cleaned.len() == 1 { "y" } else { "ies" },
+        pool.len(),
+        sources.len(),
+        domains.len()
+    ));
+
+    Ok(MultiResearchResponse {
+        queries: cleaned,
+        focus: options.focus,
+        provider: provider.to_string(),
+        source_count: sources.len(),
+        sources,
+        notes,
+    })
+}
+
 /// Outcome of one provider search: the label, hits, whether a `DuckDuckGo` backend
 /// answered (2xx) at all, and an optional note when it fell back `SearxNG` → DDG.
 struct ProviderSearch {
@@ -268,7 +487,7 @@ async fn search_provider(
                 fallback_note: None,
             }),
             Ok(_) => {
-                let outcome = search_duckduckgo(query).await?;
+                let outcome = search_duckduckgo(query, options.focus).await?;
                 Ok(ProviderSearch {
                     provider: "duckduckgo",
                     hits: outcome.hits,
@@ -279,7 +498,7 @@ async fn search_provider(
                 })
             }
             Err(error) => {
-                let outcome = search_duckduckgo(query).await?;
+                let outcome = search_duckduckgo(query, options.focus).await?;
                 Ok(ProviderSearch {
                     provider: "duckduckgo",
                     hits: outcome.hits,
@@ -291,7 +510,7 @@ async fn search_provider(
             }
         }
     } else {
-        let outcome = search_duckduckgo(query).await?;
+        let outcome = search_duckduckgo(query, options.focus).await?;
         Ok(ProviderSearch {
             provider: "duckduckgo",
             hits: outcome.hits,
@@ -303,10 +522,16 @@ async fn search_provider(
 
 /// Fetch each hit's page concurrently through the SSRF-guarded [`web_fetch`] path,
 /// returning `(extracted_text, page_title)` per hit (empty/None on any failure).
+/// Concurrency is bounded to [`FETCH_CONCURRENCY`] in-flight requests; output
+/// order matches input order.
 async fn fetch_pages(hits: &[SearchHit]) -> Vec<(String, Option<String>)> {
-    let fetches = hits.iter().map(|hit| {
-        let url = hit.url.clone();
-        async move {
+    use futures_util::StreamExt;
+    // Owned URLs first: a `|hit| async move` closure over `&SearchHit` ties the
+    // future's opaque type to the borrow's lifetime, which `buffered` rejects
+    // ("implementation of FnOnce is not general enough").
+    let urls: Vec<String> = hits.iter().map(|hit| hit.url.clone()).collect();
+    futures_util::stream::iter(urls)
+        .map(|url| async move {
             web_fetch::fetch(url, Some(PAGE_MAX_BYTES), Some(PAGE_TIMEOUT_SECS))
                 .await
                 .map_or_else(
@@ -318,9 +543,10 @@ async fn fetch_pages(hits: &[SearchHit]) -> Vec<(String, Option<String>)> {
                         )
                     },
                 )
-        }
-    });
-    futures_util::future::join_all(fetches).await
+        })
+        .buffered(FETCH_CONCURRENCY)
+        .collect()
+        .await
 }
 
 /// Deep-mode 1-hop crawl: read the raw HTML of the top few result pages, extract
@@ -397,7 +623,11 @@ struct DuckDuckGoOutcome {
     backend_responded: bool,
 }
 
-async fn search_duckduckgo(query: &str) -> Result<DuckDuckGoOutcome, String> {
+async fn search_duckduckgo(query: &str, focus: FocusMode) -> Result<DuckDuckGoOutcome, String> {
+    // DDG has no category verticals: approximate a non-web focus by biasing the
+    // query text (never stacks — see `focus_biased_query`).
+    let biased = focus_biased_query(query, focus);
+    let query = biased.as_deref().unwrap_or(query);
     let mut backend_responded = false;
     let mut last_error: Option<String> = None;
 
@@ -482,7 +712,9 @@ enum DuckDuckGoMethod {
     PostForm,
 }
 
+/// Dedupe by canonical URL key, so hits differing only in tracking decoration
+/// (utm_*, fbclid, …), `www.`, or a trailing slash collapse to one source.
 fn dedupe_hits(hits: &mut Vec<SearchHit>) {
     let mut seen = std::collections::HashSet::new();
-    hits.retain(|hit| seen.insert(hit.url.clone()));
+    hits.retain(|hit| seen.insert(canonical_url_key(&hit.url)));
 }

@@ -473,6 +473,91 @@ const fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// Canonical dedup key for a URL: lowercased scheme+host (with `www.` and the
+/// default port stripped), fragment removed, tracking parameters (`utm_*`,
+/// `fbclid`, `gclid`, …) filtered, and the trailing slash normalized. Two hits
+/// that differ only in tracking decoration collapse into one source, and their
+/// consensus counts merge. This is a *map key*, not a fetchable URL — always
+/// fetch the original.
+#[must_use]
+pub fn canonical_url_key(url: &str) -> String {
+    let url = url.trim();
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    let Some(scheme_end) = without_fragment.find("://") else {
+        return without_fragment.to_string();
+    };
+    let scheme = without_fragment[..scheme_end].to_ascii_lowercase();
+    let rest = &without_fragment[scheme_end + 3..];
+    let (authority, path_query) = rest
+        .find(['/', '?'])
+        .map_or((rest, ""), |split| (&rest[..split], &rest[split..]));
+
+    let mut host = authority.to_ascii_lowercase();
+    let default_port = if scheme == "https" { ":443" } else { ":80" };
+    if let Some(stripped) = host.strip_suffix(default_port) {
+        host = stripped.to_string();
+    }
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+
+    let (path, query) = path_query.find('?').map_or((path_query, ""), |split| {
+        (&path_query[..split], &path_query[split + 1..])
+    });
+    let path = path.trim_end_matches('/');
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|pair| !pair.is_empty() && !is_tracking_param(pair))
+        .collect();
+
+    let mut key = format!("{scheme}://{host}{path}");
+    if !kept.is_empty() {
+        key.push('?');
+        key.push_str(&kept.join("&"));
+    }
+    key
+}
+
+/// Whether a `name=value` query pair is pure tracking decoration (safe to ignore
+/// for identity purposes).
+fn is_tracking_param(pair: &str) -> bool {
+    let name = pair.split('=').next().unwrap_or(pair).to_ascii_lowercase();
+    name.starts_with("utm_")
+        || matches!(
+            name.as_str(),
+            "fbclid"
+                | "gclid"
+                | "msclkid"
+                | "yclid"
+                | "igshid"
+                | "mc_cid"
+                | "mc_eid"
+                | "ref"
+                | "ref_src"
+                | "si"
+                | "spm"
+        )
+}
+
+/// DuckDuckGo has no category verticals, so a non-web [`FocusMode`] is
+/// approximated by biasing the query text toward the requested source kind.
+/// Returns `None` for `Web` (no bias needed) or when the query already carries
+/// the bias words (e.g. a deep-mode expanded variant), so suffixes never stack.
+#[must_use]
+pub fn focus_biased_query(query: &str, focus: FocusMode) -> Option<String> {
+    let suffix = match focus {
+        FocusMode::Web => return None,
+        FocusMode::Academic => "research paper",
+        FocusMode::News => "news",
+        FocusMode::Social => "forum discussion",
+        FocusMode::Video => "video",
+        FocusMode::Code => "documentation",
+    };
+    let lower = query.to_lowercase();
+    if suffix.split_whitespace().all(|word| lower.contains(word)) {
+        return None;
+    }
+    Some(format!("{} {suffix}", query.trim()))
+}
+
 /// Very small English stop-word set for building the keyword-only query variant.
 /// Deliberately tiny — just the highest-frequency function words — so it never
 /// strips a term that could matter for a technical query.
@@ -875,6 +960,47 @@ mod tests {
         assert!(!links.iter().any(|u| u.ends_with("/about")));
         // SSRF loopback dropped even though the anchor text is on-topic.
         assert!(!links.iter().any(|u| u.contains("127.0.0.1")));
+    }
+
+    #[test]
+    fn canonical_url_key_strips_tracking_decoration() {
+        assert_eq!(
+            canonical_url_key(
+                "https://WWW.Example.com/Docs/?utm_source=x&utm_medium=y&fbclid=z#top"
+            ),
+            "https://example.com/Docs"
+        );
+        // Meaningful params survive; order preserved.
+        assert_eq!(
+            canonical_url_key("https://example.com/search?q=rust&page=2&gclid=abc"),
+            "https://example.com/search?q=rust&page=2"
+        );
+        // Default port + trailing slash + www all normalize to the same key.
+        assert_eq!(
+            canonical_url_key("https://www.example.com:443/a/"),
+            canonical_url_key("https://example.com/a")
+        );
+        // Different hosts stay different.
+        assert_ne!(
+            canonical_url_key("https://a.example.com/x"),
+            canonical_url_key("https://b.example.com/x")
+        );
+        // A clean URL is its own key (rerank consensus tests rely on this).
+        assert_eq!(canonical_url_key("https://b.com/y"), "https://b.com/y");
+    }
+
+    #[test]
+    fn focus_biased_query_biases_non_web_and_never_stacks() {
+        assert_eq!(focus_biased_query("btc price", FocusMode::Web), None);
+        assert_eq!(
+            focus_biased_query("btc price", FocusMode::News).as_deref(),
+            Some("btc price news")
+        );
+        // Already-biased text (e.g. a deep-mode expanded variant) is left alone.
+        assert_eq!(
+            focus_biased_query("tokio documentation", FocusMode::Code),
+            None
+        );
     }
 
     #[test]

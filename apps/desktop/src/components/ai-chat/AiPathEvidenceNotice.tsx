@@ -2,7 +2,9 @@ import { AlertTriangle } from "lucide-react";
 import { useMemo } from "react";
 import { listUnverifiedPathsInAssistantMessage, shouldShowPathEvidenceNotice } from "../../lib/aiChatPathEvidence";
 import type { AiChatMessage } from "../../lib/aiChatTypes";
+import { normalizePath } from "../../lib/fileTree";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { useLuxStore } from "../../lib/store";
 
 type AiPathEvidenceNoticeProps = {
   message: AiChatMessage;
@@ -11,8 +13,29 @@ type AiPathEvidenceNoticeProps = {
 };
 
 export function AiPathEvidenceNotice({ message, streaming, t }: AiPathEvidenceNoticeProps) {
-  const unverified = useMemo(() => listUnverifiedPathsInAssistantMessage(message), [message]);
-  const show = useMemo(() => shouldShowPathEvidenceNotice(message, streaming), [message, streaming]);
+  const workspaceRoot = useLuxStore((state) => state.workspace?.root ?? null);
+  const fileTreeDirectories = useLuxStore((state) => state.fileTreeDirectories);
+  // The workspace's real top-level directories gate which slash-separated
+  // citations count as directory paths — prose lists ("web/browser/MCP/SSH/")
+  // share the same shape and must not trigger the notice.
+  const knownRoots = useMemo(() => {
+    if (!workspaceRoot) return new Set<string>();
+    const entries = fileTreeDirectories[normalizePath(workspaceRoot)] ?? [];
+    return new Set(
+      entries
+        .filter((entry) => entry.kind === "directory")
+        .map((entry) => entry.name.toLowerCase()),
+    );
+  }, [workspaceRoot, fileTreeDirectories]);
+
+  const unverified = useMemo(
+    () => listUnverifiedPathsInAssistantMessage(message, knownRoots),
+    [message, knownRoots],
+  );
+  const show = useMemo(
+    () => shouldShowPathEvidenceNotice(message, streaming, knownRoots),
+    [message, streaming, knownRoots],
+  );
 
   if (!show) return null;
 

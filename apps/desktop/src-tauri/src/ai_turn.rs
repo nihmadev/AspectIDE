@@ -2265,16 +2265,46 @@ async fn execute_tool(
         }
         "GitContext" => {
             // A non-repo workspace (or missing git) previously surfaced as an opaque
-            // "service error:". Return an actionable, structured result instead so the
-            // model knows git is simply unavailable here rather than that the tool broke.
-            match crate::git::git_status(state.clone()).await {
-                Ok(status) => serde_json::to_string(&status).map_err(|e| e.to_string()),
-                Err(error) => Ok(serde_json::json!({
+            // "service error:". Answer AUTHORITATIVELY instead: `rev-parse
+            // --show-toplevel` decides repo membership (git status alone walks up
+            // the directory tree, so a non-git workspace nested under an unrelated
+            // repo would silently report the ancestor's state), and the not-a-repo
+            // payload names the working alternative so the model doesn't retry
+            // git-shaped tools that will all fail the same way.
+            let root = crate::workspace_root(state)?;
+            let repo_root = {
+                let root = root.clone();
+                tokio::task::spawn_blocking(move || lux_git::repo_root(root))
+                    .await
+                    .map_err(|e| e.to_string())?
+            };
+            match repo_root {
+                Ok(repo_root) => match crate::git::git_status(state.clone()).await {
+                    Ok(status) => {
+                        let mut payload =
+                            serde_json::to_value(&status).map_err(|e| e.to_string())?;
+                        if let Some(map) = payload.as_object_mut() {
+                            map.insert("isRepo".to_string(), serde_json::Value::Bool(true));
+                            map.insert(
+                                "repoRoot".to_string(),
+                                serde_json::Value::String(
+                                    dunce::simplified(&repo_root).to_string_lossy().into_owned(),
+                                ),
+                            );
+                        }
+                        serde_json::to_string(&payload).map_err(|e| e.to_string())
+                    }
+                    Err(error) => Err(format!(
+                        "GitContext: this workspace IS a git repository, but `git status` failed: {error}"
+                    )),
+                },
+                Err(_) => Ok(serde_json::json!({
                     "isRepo": false,
-                    "note": format!(
-                        "Git status is unavailable for this workspace ({error}). It may not be a \
-                         git repository (no .git), or git is not installed/on PATH."
-                    ),
+                    "note": "This workspace is NOT inside a git repository (or git is not \
+                             installed/on PATH). This is a definitive answer — do not retry \
+                             GitContext or other git-backed tools this turn. For change review \
+                             without git, use ReviewDiff (it falls back to the session \
+                             checkpoint diff automatically).",
                 })
                 .to_string()),
             }
@@ -2579,24 +2609,7 @@ async fn execute_tool(
             if query.trim().is_empty() {
                 return Err("WebResearch requires a query.".to_string());
             }
-            // An unrecognized focus previously fell through to Web silently, so the
-            // model believed it ran an academic/code search when it did not. Compute
-            // the focus and a note together and surface the note in the response.
-            let focus_raw = json_str_opt(&args, "focus").map(|v| v.trim().to_ascii_lowercase());
-            let (focus, focus_note) = match focus_raw.as_deref() {
-                None | Some("web" | "") => (lux_research::FocusMode::Web, None),
-                Some("academic") => (lux_research::FocusMode::Academic, None),
-                Some("news") => (lux_research::FocusMode::News, None),
-                Some("social") => (lux_research::FocusMode::Social, None),
-                Some("video") => (lux_research::FocusMode::Video, None),
-                Some("code") => (lux_research::FocusMode::Code, None),
-                Some(other) => (
-                    lux_research::FocusMode::Web,
-                    Some(format!(
-                        "Unrecognized focus '{other}'; used 'web'. Valid: web|academic|news|social|video|code."
-                    )),
-                ),
-            };
+            let (focus, focus_note) = parse_research_focus(&args);
             let max_sources = args
                 .get("maxSources")
                 .and_then(serde_json::Value::as_u64)
@@ -2619,6 +2632,44 @@ async fn execute_tool(
             };
             let mut result =
                 crate::research::web_research(state.clone(), query, Some(options)).await?;
+            if let Some(note) = focus_note {
+                result.notes.insert(0, note);
+            }
+            serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+        "MultiWebResearch" => {
+            let queries: Vec<String> = args
+                .get("queries")
+                .and_then(serde_json::Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(|item| item.trim().to_string())
+                        .filter(|item| !item.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if queries.len() < 2 {
+                return Err(
+                    "MultiWebResearch requires 2-6 distinct queries (a JSON array of strings). For a single query use WebResearch."
+                        .to_string(),
+                );
+            }
+            let (focus, focus_note) = parse_research_focus(&args);
+            let max_sources = args
+                .get("maxSources")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|v| usize::try_from(v).ok());
+            let options = lux_research::ResearchOptions {
+                focus,
+                // Merged multi-query runs return more sources than a single query
+                // by default (ceiling enforced by the research layer).
+                max_sources: max_sources.unwrap_or(10),
+                ..lux_research::ResearchOptions::default()
+            };
+            let mut result =
+                crate::research::multi_web_research(state.clone(), queries, Some(options)).await?;
             if let Some(note) = focus_note {
                 result.notes.insert(0, note);
             }
@@ -2804,6 +2855,18 @@ async fn execute_tool(
                     args["path"] = serde_json::Value::String(normalized);
                 }
             }
+            // BrowserChat delegates to agent-browser's own cloud AI, which hard-requires
+            // AI_GATEWAY_API_KEY. Fail fast with the requirement named — the CLI's own
+            // failure surfaces as an opaque error after a long spawn — and point at the
+            // equivalent no-key path.
+            if tc.name == "BrowserChat" && std::env::var("AI_GATEWAY_API_KEY").is_err() {
+                return Err(
+                    "BrowserChat requires the AI_GATEWAY_API_KEY environment variable (Vercel \
+                     AI Gateway) and it is not set. This is a hard requirement — do not retry. \
+                     Use BrowserSnapshot + BrowserAct instead: same capability, no external key."
+                        .to_string(),
+                );
+            }
             let browser_args = build_browser_args(&tc.name, &args);
             // F1: Classify every browser tool by side-effect risk. Previously only
             // 5 tools were gated; BrowserInvoke (raw CLI escape hatch), BrowserDoctor
@@ -2858,8 +2921,11 @@ async fn execute_tool(
                             .and_then(serde_json::Value::as_bool)
                             .unwrap_or(default)
                     };
+                    // Healthy offline+quick runs finish in single-digit seconds;
+                    // past ~25s the CLI is hung (see the degrade path below), so
+                    // fail fast into the useful fallback instead of stalling 60s.
                     if flag("offline", true) && flag("quick", true) && !flag("fix", false) {
-                        60
+                        25
                     } else {
                         180
                     }
@@ -2869,7 +2935,7 @@ async fn execute_tool(
             let browser_cwd = browser_cwd_path
                 .as_deref()
                 .map(|r| r.to_string_lossy().into_owned());
-            let result =
+            let invoke_result =
                 crate::agent_browser::invoke(crate::agent_browser::AgentBrowserInvokeRequest {
                     session: input.session_id.clone(),
                     args: browser_args,
@@ -2888,7 +2954,36 @@ async fn execute_tool(
                     proxy: None,
                     cwd: browser_cwd,
                 })
-                .await?;
+                .await;
+            let result = match invoke_result {
+                Ok(result) => result,
+                // Doctor is a DIAGNOSTIC tool: when the CLI's own `doctor` hangs
+                // (a real agent-browser issue seen on Windows even with
+                // --offline --quick), a dead wait + naked timeout error is the
+                // worst possible answer. Degrade into a useful verdict from fast
+                // probes instead — the CLI usually responds fine otherwise.
+                Err(error) if tc.name == "BrowserDoctor" && error.contains("timed out") => {
+                    let probe = crate::agent_browser::status(
+                        crate::agent_browser::AgentBrowserStatusRequest {
+                            lightweight: Some(true),
+                            command_path: None,
+                            skip_auto_update: None,
+                        },
+                    )
+                    .await
+                    .ok();
+                    let payload = serde_json::json!({
+                        "success": false,
+                        "doctorTimedOut": true,
+                        "timeoutSecs": timeout_secs,
+                        "cliResponds": probe.as_ref().is_some_and(|s| s.available),
+                        "version": probe.as_ref().and_then(|s| s.version.clone()),
+                        "note": "agent-browser's own `doctor` subcommand hung and was killed — a known CLI issue on some Windows setups (it can hang even with --offline --quick). The CLI itself responds, so browser automation is likely functional: use BrowserStatus for liveness and proceed with BrowserOpen/BrowserSnapshot directly. For install repair, run `agent-browser doctor --fix` manually in a terminal.",
+                    });
+                    return serde_json::to_string(&payload).map_err(|e| e.to_string());
+                }
+                Err(error) => return Err(error),
+            };
             // Parity with the TS runtime (aiRuntimeBrowser.ts), which throws on
             // `!result.success`: a failed CLI run (non-zero exit with stdout, or a
             // `success:false` JSON envelope) must reach the model as an Err — not as
@@ -3565,8 +3660,20 @@ async fn execute_tool(
                     })
                 })
                 .collect();
-            serde_json::to_string(&serde_json::json!({ "skills": catalog }))
-                .map_err(|e| e.to_string())
+            // Zero skills: say where skills live instead of returning a bare
+            // empty list (which reads like a broken tool, and the model retries).
+            let mut payload = serde_json::json!({ "skills": catalog });
+            if matched.is_empty() {
+                payload["note"] = serde_json::Value::String(
+                    "No skills are installed (this is a definitive answer, not an error — \
+                     don't retry). Skills are SKILL.md files discovered from \
+                     <workspace>/.lux/skills/<slug>/SKILL.md (project scope) and the user \
+                     skills directory (Settings → AI → Skills, where they can also be \
+                     imported). Proceed without a skill, or create one via Settings."
+                        .to_string(),
+                );
+            }
+            serde_json::to_string(&payload).map_err(|e| e.to_string())
         }
         "UseSkill" => {
             let slug = json_str(&args, "slug");
@@ -4923,24 +5030,49 @@ fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
             }
             a
         }
-        "BrowserAct" => args
-            .get("batchCommands")
-            .and_then(|v| v.as_array())
-            .map_or_else(
-                || {
-                    let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-                    cmd.split_whitespace().map(str::to_string).collect()
-                },
-                |cmds| {
-                    let mut a = vec!["batch".to_string()];
-                    for cmd in cmds {
-                        if let Some(s) = cmd.as_str() {
-                            a.push(s.to_string());
-                        }
+        "BrowserAct" => {
+            // Three shapes, in priority order:
+            //   * `commands`: full command STRINGS → the CLI's `batch "c1" "c2"`
+            //     (each argv entry is one complete command);
+            //   * `batchCommands`: ONE action pre-tokenized (["type","#s","hello
+            //     world"]) → passed as direct argv, spaces preserved per token.
+            //     The old code wrapped these in `batch`, which made the CLI treat
+            //     every token as its own command — the 1.0.13 contract mismatch;
+            //   * `command`: single action split on whitespace (no quoting).
+            if let Some(cmds) = args.get("commands").and_then(|v| v.as_array()) {
+                let mut a = vec!["batch".to_string()];
+                for cmd in cmds {
+                    if let Some(s) = cmd.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                        a.push(s.to_string());
                     }
+                }
+                a
+            } else if let Some(cmds) = args.get("batchCommands").and_then(|v| v.as_array()) {
+                let tokens: Vec<String> = cmds
+                    .iter()
+                    .filter_map(|c| c.as_str())
+                    .map(str::to_string)
+                    .filter(|s| !s.trim().is_empty())
+                    .collect();
+                // Rescue the legacy shape: when EVERY element is a multi-word
+                // string, these are full commands (the old `batch` contract),
+                // not tokens of one action — route them through `batch`.
+                let all_multiword = tokens.len() > 1
+                    && tokens
+                        .iter()
+                        .all(|t| t.trim().contains(char::is_whitespace));
+                if all_multiword {
+                    let mut a = vec!["batch".to_string()];
+                    a.extend(tokens);
                     a
-                },
-            ),
+                } else {
+                    tokens
+                }
+            } else {
+                let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                cmd.split_whitespace().map(str::to_string).collect()
+            }
+        }
         "BrowserSnapshot" => {
             let mut a = vec!["snapshot".to_string()];
             if args
@@ -5283,6 +5415,27 @@ fn json_str(value: &serde_json::Value, key: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+/// Parse the research `focus` argument shared by `WebResearch` and
+/// `MultiWebResearch`. An unrecognized focus falls back to Web WITH a note (so
+/// the model never believes it ran an academic/code search when it did not).
+fn parse_research_focus(args: &serde_json::Value) -> (lux_research::FocusMode, Option<String>) {
+    let focus_raw = json_str_opt(args, "focus").map(|v| v.trim().to_ascii_lowercase());
+    match focus_raw.as_deref() {
+        None | Some("web" | "") => (lux_research::FocusMode::Web, None),
+        Some("academic") => (lux_research::FocusMode::Academic, None),
+        Some("news") => (lux_research::FocusMode::News, None),
+        Some("social") => (lux_research::FocusMode::Social, None),
+        Some("video") => (lux_research::FocusMode::Video, None),
+        Some("code") => (lux_research::FocusMode::Code, None),
+        Some(other) => (
+            lux_research::FocusMode::Web,
+            Some(format!(
+                "Unrecognized focus '{other}'; used 'web'. Valid: web|academic|news|social|video|code."
+            )),
+        ),
+    }
 }
 
 fn json_str_opt(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -5742,6 +5895,51 @@ mod tests {
             build_browser_args("BrowserDashboard", &serde_json::json!({ "action": "stop" })),
             vec!["dashboard", "stop"]
         );
+    }
+
+    #[test]
+    fn browser_args_act_tokenized_action_is_direct_argv() {
+        // The documented batchCommands contract: ONE action pre-tokenized, spaces
+        // preserved inside elements. Must NOT be wrapped in `batch` (which treats
+        // every argv entry as its own command — the 1.0.13 mismatch).
+        let args = build_browser_args(
+            "BrowserAct",
+            &serde_json::json!({ "batchCommands": ["type", "#search", "hello world"] }),
+        );
+        assert_eq!(args, vec!["type", "#search", "hello world"]);
+    }
+
+    #[test]
+    fn browser_args_act_commands_route_through_batch() {
+        // `commands` = full command strings → CLI `batch "c1" "c2"`.
+        let args = build_browser_args(
+            "BrowserAct",
+            &serde_json::json!({ "commands": ["click @e1", "type #s hello world"] }),
+        );
+        assert_eq!(args, vec!["batch", "click @e1", "type #s hello world"]);
+    }
+
+    #[test]
+    fn browser_args_act_rescues_legacy_full_command_batch() {
+        // Legacy shape: batchCommands as full multi-word command strings still
+        // batches instead of degrading into one garbled action.
+        let args = build_browser_args(
+            "BrowserAct",
+            &serde_json::json!({ "batchCommands": ["click @e1", "wait 500"] }),
+        );
+        assert_eq!(args, vec!["batch", "click @e1", "wait 500"]);
+        // But a single tokenized action whose values contain spaces stays direct.
+        let single = build_browser_args(
+            "BrowserAct",
+            &serde_json::json!({ "batchCommands": ["fill", "#name", "Anna Maria"] }),
+        );
+        assert_eq!(single, vec!["fill", "#name", "Anna Maria"]);
+    }
+
+    #[test]
+    fn browser_args_act_plain_command_splits_on_whitespace() {
+        let args = build_browser_args("BrowserAct", &serde_json::json!({ "command": "click @e2" }));
+        assert_eq!(args, vec!["click", "@e2"]);
     }
 
     #[test]

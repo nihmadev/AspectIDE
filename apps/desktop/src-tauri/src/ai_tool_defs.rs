@@ -437,6 +437,15 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ],
     ));
     tools.push(tool(
+        "MultiWebResearch",
+        "Parallel multi-query web research: runs 2-6 searches CONCURRENTLY, merges + dedupes across queries, fetches the best pages, and returns ONE globally ranked, domain-diverse source list. Each source carries matchedQueries (which input queries surfaced it) and sources several queries agree on rank higher. Use for multi-facet questions — comparisons (X vs Y), tradeoff surveys, or any topic needing several angles — giving each query a DIFFERENT facet. Faster and broader than sequential WebResearch calls. Cite sources as [1], [2].",
+        &[
+            req_str_arr("queries", "2-6 distinct search queries, each covering a different facet of the question."),
+            opt("focus", "string", "web | academic | news | social | video | code (default web); applies to all queries."),
+            opt_int("maxSources", "Merged sources to return (default 10, up to 20).", 1, 20),
+        ],
+    ));
+    tools.push(tool(
         "SshList",
         "List active SSH sessions and the hosts defined in ~/.ssh/config, plus whether the OpenSSH client is available. Read-only discovery of hosts; opening a session (SshConnect) is only available in Agent/Automatic mode.",
         &[],
@@ -712,7 +721,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             ));
             tools.push(tool(
                 "BrowserAct",
-                "Browser action against @refs from a snapshot. `command` is split on whitespace with NO quote handling — use it only when no argument contains spaces. For any value with spaces (typing/filling multi-word text) use `batchCommands`, one pre-tokenized argument per array element.",
+                "Browser action against @refs from a snapshot. `command` is split on whitespace with NO quote handling — use it only when no argument contains spaces. For any value with spaces (typing/filling multi-word text) use `batchCommands`, one pre-tokenized argument per array element. For SEVERAL sequential actions use `commands` (each element one full command string).",
                 &[
                     opt(
                         "command",
@@ -721,7 +730,11 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                     ),
                     opt_str_arr(
                         "batchCommands",
-                        "Pre-tokenized args, one CLI token per element (e.g. [\"type\",\"#search\",\"hello world\"]); spaces inside an element are preserved. Preferred when any value has spaces.",
+                        "ONE action, pre-tokenized: one CLI token per element (e.g. [\"type\",\"#search\",\"hello world\"]); spaces inside an element are preserved. Preferred when any value has spaces.",
+                    ),
+                    opt_str_arr(
+                        "commands",
+                        "SEVERAL actions run sequentially: each element is one complete command string (e.g. [\"click @e1\", \"wait 500\", \"snapshot\"]).",
                     ),
                 ],
             ));
@@ -745,7 +758,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             ));
             tools.push(tool(
                 "BrowserChat",
-                "Natural-language browser.",
+                "Natural-language browser control via agent-browser's OWN cloud AI. Requires the AI_GATEWAY_API_KEY environment variable (Vercel AI Gateway) — without it this tool ALWAYS fails; do not retry, use BrowserSnapshot + BrowserAct instead (same capability, no external key).",
                 &[
                     req("instruction", "string", "What to do in natural language."),
                     opt(

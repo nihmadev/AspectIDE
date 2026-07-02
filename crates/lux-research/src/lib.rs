@@ -12,11 +12,12 @@ mod provider;
 mod rerank;
 
 pub use model::{
-    DepthProfile, FocusMode, RankedSource, ResearchDepth, ResearchOptions, ResearchResponse,
-    SearchHit,
+    DepthProfile, FocusMode, MultiRankedSource, MultiResearchResponse, RankedSource, ResearchDepth,
+    ResearchOptions, ResearchResponse, SearchHit,
 };
 pub use provider::{
-    duckduckgo_lite_search_url, duckduckgo_search_url, expand_queries, extract_result_links,
-    parse_duckduckgo_html, parse_searxng_json, searxng_search_url, validate_source_url,
+    canonical_url_key, duckduckgo_lite_search_url, duckduckgo_search_url, expand_queries,
+    extract_result_links, focus_biased_query, parse_duckduckgo_html, parse_searxng_json,
+    searxng_search_url, validate_source_url,
 };
-pub use rerank::{rerank, rerank_deep};
+pub use rerank::{rerank, rerank_deep, rerank_multi};

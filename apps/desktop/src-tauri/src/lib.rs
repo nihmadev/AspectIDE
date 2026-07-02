@@ -728,6 +728,7 @@ pub fn run() {
             skills::skills_discover_importable,
             skills::skills_import,
             research::web_research,
+            research::multi_web_research,
             mcp::mcp_connect_all,
             mcp::mcp_connect,
             mcp::mcp_disconnect,

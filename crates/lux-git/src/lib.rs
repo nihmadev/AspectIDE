@@ -31,6 +31,25 @@ const EMPTY_TREE_HASH: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Top-level directory of the repository containing `root`, or `Err` when
+/// `root` is not inside a git work tree.
+///
+/// This is the *authoritative* not-a-repo signal: `git status` alone silently
+/// walks UP the directory tree, so a non-git workspace nested under an
+/// unrelated repository would otherwise report the ancestor repo's state as if
+/// it were the workspace's.
+pub fn repo_root(root: impl AsRef<Path>) -> AppResult<std::path::PathBuf> {
+    let output =
+        run_git_capture(git_command(root.as_ref()).args(["rev-parse", "--show-toplevel"]))?;
+    let text = String::from_utf8_lossy(&output).trim().to_string();
+    if text.is_empty() {
+        return Err(AppError::Service(
+            "git rev-parse --show-toplevel returned no path".to_string(),
+        ));
+    }
+    Ok(std::path::PathBuf::from(text))
+}
+
 pub fn status(root: impl AsRef<Path>) -> AppResult<GitStatus> {
     // `-z` makes status NUL-delimit records and emit verbatim (unquoted) paths, so
     // filenames containing spaces, quotes, or newlines parse unambiguously.

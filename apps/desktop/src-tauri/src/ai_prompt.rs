@@ -233,7 +233,7 @@ fn tool_capability_map(
     }
     lines.push("- Memory & skills: RecallMemory/RememberMemory (durable per-project memory across sessions); ListSkills/UseSkill (reusable vetted procedures — prefer an existing skill over improvising).".to_string());
     lines.push("- Verify: ReadLints/DiagnosticsContext, TestHealth, FailureAnalyzer, ReviewDiff, ImpactAnalysis, SecretGuard. Git: GitContext.".to_string());
-    lines.push("- Web: WebResearch (first-class deep research — searches the web, fetches + reranks the top pages, returns ranked sources with content; use for any open question needing current external info, then cite [1],[2]). WebFetch only when you already have the exact URL.".to_string());
+    lines.push("- Web: WebResearch (first-class deep research — searches the web, fetches + reranks the top pages, returns ranked sources with content; use for any open question needing current external info, then cite [1],[2]). MultiWebResearch: 2-6 facet queries in parallel, one merged ranked list. WebFetch only when you already have the exact URL.".to_string());
     if browser_enabled {
         lines.push(
             "- Browser: BrowserOpen → BrowserSnapshot (-i) → BrowserAct on @refs → re-snapshot."
