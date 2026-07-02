@@ -675,23 +675,27 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
             ));
             tools.push(tool(
                 "BrowserHelp",
-                "agent-browser help.",
+                "agent-browser usage guide. No args = list available skills. Pass skill=<name> for that skill's docs; skill='core' is the command reference and snapshot/@ref workflow. Valid skills: core | electron | slack | dogfood | agentcore | vercel-sandbox. There are no other help topics.",
                 &[
-                    opt("topic", "string", "Help topic."),
-                    opt("skill", "string", "Show full docs for one skill."),
-                    opt("allSkills", "boolean", "List all skills."),
+                    opt("skill", "string", "Skill name: core | electron | slack | dogfood | agentcore | vercel-sandbox. Unknown names fall back to 'core'."),
+                    opt("full", "boolean", "Append the full command reference/templates (long; may truncate)."),
+                    opt("allSkills", "boolean", "Fetch every skill's docs at once (very long)."),
                 ],
             ));
             // `fix` triggers a side-effecting repair, so expose it only when execute-capable;
             // diagnostics-only params stay available in read-only modes.
             let mut doctor_params = vec![
-                opt("offline", "boolean", "Skip network checks."),
-                opt("quick", "boolean", "Fast subset of checks."),
+                opt("offline", "boolean", "Skip network checks. DEFAULT true — pass false only to include the registry/update probe (slow, needs network)."),
+                opt("quick", "boolean", "Skip the live Chromium launch test. DEFAULT true — pass false for a full launch check (30s+ cold start)."),
             ];
             if browser_write {
                 doctor_params.push(opt("fix", "boolean", "Attempt automatic repair."));
             }
-            tools.push(tool("BrowserDoctor", "Diagnostics.", &doctor_params));
+            tools.push(tool(
+                "BrowserDoctor",
+                "agent-browser install/health diagnostics. Default run is offline+quick (fast: no Chromium launch, no network). Pass offline:false and/or quick:false for the full diagnostic.",
+                &doctor_params,
+            ));
         }
         if browser_write {
             tools.push(tool(
@@ -725,7 +729,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
                 "BrowserScreenshot",
                 "Capture a screenshot to a file (returns the saved path; the image is not fed into vision).",
                 &[
-                    opt("path", "string", "Output file path."),
+                    opt("path", "string", "Output file path (.png/.jpg/.jpeg/.webp). Relative paths resolve against the workspace root; passing a directory saves screenshot-<timestamp>.png inside it; a missing extension gets .png appended."),
                     opt("annotate", "boolean", "Annotate interactive elements."),
                     opt("fullPage", "boolean", "Capture the full scrollable page."),
                 ],

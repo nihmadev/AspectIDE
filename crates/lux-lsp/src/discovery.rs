@@ -130,7 +130,10 @@ pub fn workspace_language_servers_with_dirs(
     root: impl AsRef<Path>,
     extra_dirs: &[std::path::PathBuf],
 ) -> AppResult<Vec<LanguageServerInfo>> {
-    let root = root.as_ref().canonicalize()?;
+    // dunce, not std: a Windows `\\?\` verbatim root would flow into every
+    // server's `initialize` rootUri/workspaceFolders as `file:////%3F/...`,
+    // silently breaking project indexing (workspace/symbol returns nothing).
+    let root = dunce::canonicalize(root.as_ref())?;
     let (detected_extensions, truncated) = detect_extensions_bounded(&root);
     if truncated {
         // Not silent: a too-large tree means an extension-only language past the

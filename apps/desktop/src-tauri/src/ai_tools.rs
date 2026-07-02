@@ -1287,8 +1287,10 @@ pub async fn ai_symbol_context(
             document_symbols = filter_document_symbols(&document_symbols, &query, max_results);
         }
 
-        if document_symbols.is_empty() && query.is_empty() {
-            notes.push("no document symbols returned; the language server may still be indexing or may not support document symbols for this file".to_string());
+        // Never return a bare empty result: name the likely reason so the model
+        // (and the user) can tell "no symbols" from "server not ready/running".
+        if document_symbols.is_empty() {
+            notes.push("no document symbols returned for this file; the language server may still be indexing, may not be running for this language (check Settings → Language Servers), or may not support document symbols".to_string());
         }
     }
 

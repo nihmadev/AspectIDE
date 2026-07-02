@@ -52,6 +52,7 @@ mod ai_chat_backend;
 mod ai_checkpoint;
 mod ai_compaction;
 mod ai_context_sources;
+mod ai_failure;
 mod ai_goal_eval;
 mod ai_permissions;
 mod ai_prompt;
@@ -902,20 +903,21 @@ fn resolve_workspace_path_from_root(
     path: &Path,
     must_exist: bool,
 ) -> Result<PathBuf, String> {
-    let root = root.canonicalize().map_err(|error| error.to_string())?;
+    // dunce, not std: on Windows std::fs::canonicalize returns a `\\?\` verbatim
+    // path, which corrupts every downstream consumer that stringifies it — LSP
+    // file URIs become `file:////%3F/...` (SymbolContext silently empty) and
+    // permission-rule globs see `//?/E:/...`. dunce yields the plain `E:\...` form.
+    let root = dunce::canonicalize(root).map_err(|error| error.to_string())?;
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
         root.join(path)
     };
     let resolved = if must_exist || candidate.exists() {
-        candidate
-            .canonicalize()
-            .map_err(|error| error.to_string())?
+        dunce::canonicalize(&candidate).map_err(|error| error.to_string())?
     } else {
         let resolved = normalize_path_lexically(&candidate);
-        let ancestor = nearest_existing_ancestor(&resolved)?
-            .canonicalize()
+        let ancestor = dunce::canonicalize(nearest_existing_ancestor(&resolved)?)
             .map_err(|error| error.to_string())?;
         if !path_starts_with(&ancestor, &root) {
             return Err(format!(
@@ -1011,7 +1013,10 @@ mod tests {
 
         assert_eq!(
             resolved,
-            root.canonicalize().unwrap().join("src").join("new-file.ts")
+            dunce::canonicalize(&root)
+                .unwrap()
+                .join("src")
+                .join("new-file.ts")
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1027,7 +1032,7 @@ mod tests {
 
         assert_eq!(
             resolved,
-            root.canonicalize()
+            dunce::canonicalize(&root)
                 .unwrap()
                 .join("src")
                 .join("generated")
@@ -1065,7 +1070,10 @@ mod tests {
 
         let resolved = resolve_workspace_path_from_root(&root, Path::new("scripts"), true).unwrap();
 
-        assert_eq!(resolved, root.canonicalize().unwrap().join("scripts"));
+        assert_eq!(
+            resolved,
+            dunce::canonicalize(&root).unwrap().join("scripts")
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 }

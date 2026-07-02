@@ -562,7 +562,16 @@ pub fn exit_notification() -> Value {
 
 #[must_use]
 pub fn path_to_file_uri(path: &Path) -> String {
-    let normalized = path.to_string_lossy().replace('\\', "/");
+    let mut normalized = path.to_string_lossy().replace('\\', "/");
+    // Defense-in-depth: a Windows `\\?\` verbatim path (std::fs::canonicalize's
+    // output) must degrade to the plain drive form here — otherwise the `?`
+    // percent-encodes into `file:////%3F/E:/...`, a URI no server resolves,
+    // and every request against the document silently returns nothing.
+    if let Some(rest) = normalized.strip_prefix("//?/UNC/") {
+        normalized = format!("//{rest}");
+    } else if let Some(rest) = normalized.strip_prefix("//?/") {
+        normalized = rest.to_string();
+    }
     let absolute_path = if cfg!(windows) && normalized.as_bytes().get(1) == Some(&b':') {
         format!("/{normalized}")
     } else {

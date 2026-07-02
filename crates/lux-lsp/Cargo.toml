@@ -6,6 +6,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+dunce.workspace = true
 lux-core = { path = "../lux-core" }
 lsp-types.workspace = true
 serde.workspace = true

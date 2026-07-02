@@ -2066,14 +2066,21 @@ async fn execute_tool(
         "SymbolContext" => {
             let query = json_str_opt(&args, "query");
             let path = json_str_opt(&args, "path").map(std::path::PathBuf::from);
+            // The tool schema advertises 0-based line/column; the backend
+            // (ai_symbol_context → lux-lsp) speaks 1-based editor coordinates
+            // and saturating_sub(1)s them. Convert here — passing the model's
+            // values through unchanged made every position query land one line
+            // up / one column left and miss the symbol.
             let line = args
                 .get("line")
                 .and_then(serde_json::Value::as_u64)
-                .and_then(|v| u32::try_from(v).ok());
+                .and_then(|v| u32::try_from(v).ok())
+                .map(|v| v.saturating_add(1));
             let column = args
                 .get("column")
                 .and_then(serde_json::Value::as_u64)
-                .and_then(|v| u32::try_from(v).ok());
+                .and_then(|v| u32::try_from(v).ok())
+                .map(|v| v.saturating_add(1));
             let max = json_usize(&args, "maxResults", 80);
             let result = crate::ai_tools::ai_symbol_context(
                 state.clone(),
@@ -2784,6 +2791,18 @@ async fn execute_tool(
         "BrowserOpen" | "BrowserAct" | "BrowserSnapshot" | "BrowserScreenshot" | "BrowserClose"
         | "BrowserChat" | "BrowserDashboard" | "BrowserInstall" | "BrowserHelp"
         | "BrowserDoctor" | "BrowserInvoke" => {
+            // Run the CLI in the workspace root so a relative/default screenshot path
+            // lands in a writable place instead of the app's (often read-only) launch
+            // dir — the "BrowserScreenshot: access denied" bug. Hoisted here so the
+            // screenshot path normalization below can absolutize against it too.
+            let browser_cwd_path = crate::workspace_root(state).ok();
+            let mut args = args.clone();
+            if tc.name == "BrowserScreenshot" {
+                if let Some(raw) = args.get("path").and_then(|v| v.as_str()) {
+                    let normalized = normalize_screenshot_path(raw, browser_cwd_path.as_deref());
+                    args["path"] = serde_json::Value::String(normalized);
+                }
+            }
             let browser_args = build_browser_args(&tc.name, &args);
             // F1: Classify every browser tool by side-effect risk. Previously only
             // 5 tools were gated; BrowserInvoke (raw CLI escape hatch), BrowserDoctor
@@ -2827,14 +2846,27 @@ async fn execute_tool(
             let timeout_secs = match tc.name.as_str() {
                 "BrowserInstall" => 600,
                 "BrowserOpen" | "BrowserAct" | "BrowserChat" => 120,
-                "BrowserScreenshot" | "BrowserDoctor" => 90,
+                "BrowserScreenshot" => 90,
+                // Default doctor is offline+quick (see build_browser_args) and
+                // finishes in seconds; a FULL doctor launches Chromium and hits
+                // registry.npmjs.org, which needs the invoke clamp ceiling — the
+                // old flat 90s was exactly why full runs "timed out after 90s".
+                "BrowserDoctor" => {
+                    let flag = |key: &str, default: bool| {
+                        args.get(key)
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(default)
+                    };
+                    if flag("offline", true) && flag("quick", true) && !flag("fix", false) {
+                        60
+                    } else {
+                        180
+                    }
+                }
                 _ => 60,
             };
-            // Run the CLI in the workspace root so a relative/default screenshot path
-            // lands in a writable place instead of the app's (often read-only) launch
-            // dir — the "BrowserScreenshot: access denied" bug.
-            let browser_cwd = crate::workspace_root(state)
-                .ok()
+            let browser_cwd = browser_cwd_path
+                .as_deref()
                 .map(|r| r.to_string_lossy().into_owned());
             let result =
                 crate::agent_browser::invoke(crate::agent_browser::AgentBrowserInvokeRequest {
@@ -3718,17 +3750,55 @@ async fn execute_tool(
             Ok(serde_json::json!({ "query": query, "context": parts.join("\n\n") }).to_string())
         }
         "ReviewDiff" => {
-            // ReviewDiff: git status + diff + diagnostics → findings.
-            let git = crate::git::git_status(state.clone()).await.ok();
-            let diff = crate::git::git_diff(state.clone()).await.ok();
+            // ReviewDiff: git status + diff + diagnostics → findings. In a non-git
+            // workspace the old arm .ok()'d both git calls into an empty payload
+            // indistinguishable from "clean tree" — now it falls back to the session
+            // checkpoint diff so it still shows what the AI changed this session.
             let diagnostics = crate::lsp::diagnostics_snapshot(state.clone()).unwrap_or_default();
-            Ok(serde_json::json!({
-                "branch": git.as_ref().map(|g| &g.branch),
-                "changedFiles": git.as_ref().map_or(0, |g| g.files.len()),
-                "patch": diff.as_ref().map(|d| d.patch.chars().take(8000).collect::<String>()).unwrap_or_default(),
-                "diagnosticCount": diagnostics.len(),
-                "diagnostics": diagnostics.into_iter().take(24).collect::<Vec<_>>(),
-            }).to_string())
+            let diagnostic_count = diagnostics.len();
+            let diagnostics_view: Vec<_> = diagnostics.into_iter().take(24).collect();
+            match crate::git::git_status(state.clone()).await {
+                Ok(git) => {
+                    let diff = crate::git::git_diff(state.clone()).await.ok();
+                    Ok(serde_json::json!({
+                        "source": "git",
+                        "branch": git.branch,
+                        "changedFiles": git.files.len(),
+                        "patch": diff.as_ref().map(|d| d.patch.chars().take(8000).collect::<String>()).unwrap_or_default(),
+                        "patchTruncated": diff.as_ref().is_some_and(|d| d.patch.chars().count() > 8000),
+                        "diagnosticCount": diagnostic_count,
+                        "diagnostics": diagnostics_view,
+                    }).to_string())
+                }
+                Err(git_error) => {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let checkpoint_diff = crate::ai_checkpoint::ai_checkpoint(
+                        app.clone(),
+                        state.clone(),
+                        "diff".to_string(),
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                        now_ms,
+                    )
+                    .await
+                    .ok();
+                    Ok(serde_json::json!({
+                        "source": "checkpoint",
+                        "gitAvailable": false,
+                        "gitError": git_error,
+                        "checkpointDiff": checkpoint_diff,
+                        "diagnosticCount": diagnostic_count,
+                        "diagnostics": diagnostics_view,
+                        "note": "Workspace is not a git repository — showing the diff against the latest session checkpoint instead. Create checkpoints (Checkpoint tool) to track changes without git.",
+                    }).to_string())
+                }
+            }
         }
         "FailureAnalyzer" => {
             // FailureAnalyzer: TestHealth (project test commands) + diagnostics → analysis.
@@ -3802,14 +3872,25 @@ async fn execute_tool(
                 Vec::new()
             };
             let diagnostic_count = diagnostics.len();
+            // Real analysis of the pasted log (tracebacks/panics/stacks/diagnostics
+            // → ranked workspace candidates) — previously the arm echoed the log
+            // back verbatim, adding nothing over reading it.
+            let analysis = provided_log
+                .as_deref()
+                .filter(|log| !log.trim().is_empty())
+                .map(|log| crate::ai_failure::analyze(log, root.as_deref(), max_findings.min(24)));
+            let note = if analysis.is_some() {
+                "`analysis` is a structural parse of providedLog: error class/message, extracted assertion, and ranked workspace root-cause candidates (best first). Start from analysis.candidates and analysis.nextActions."
+            } else {
+                "Pass the raw failing output in `log` to get a structural analysis (ranked root-cause file:line candidates)."
+            };
             Ok(serde_json::json!({
                 "testHealth": test_result,
-                // Surface the pasted failing output back in the payload so `log` is
-                // an analyzed input instead of being silently discarded.
+                "analysis": analysis,
                 "providedLog": provided_log,
                 "diagnosticCount": diagnostic_count,
                 "diagnostics": diagnostics.into_iter().take(max_findings).collect::<Vec<_>>(),
-                "notes": ["Analyze the provided failing output (providedLog), tests, and diagnostics above to identify root causes."],
+                "notes": [note],
             })
             .to_string())
         }
@@ -4787,6 +4868,43 @@ async fn require_tool_approval(
     }
 }
 
+/// Normalize the model-supplied screenshot path before it reaches the CLI:
+/// absolutize a relative path against the workspace root (the write happens in
+/// the daemon process, whose cwd is NOT ours), append a default filename when a
+/// directory is passed (writing to a directory path is the "access denied"
+/// report), guarantee an image extension (the CLI treats an extension-less
+/// token as a selector, not a path), and strip the Windows verbatim prefix.
+fn normalize_screenshot_path(raw: &str, root: Option<&std::path::Path>) -> String {
+    let trimmed = raw.trim();
+    let mut path = std::path::PathBuf::from(trimmed);
+    if path.is_relative() {
+        if let Some(root) = root {
+            path = root.join(path);
+        }
+    }
+    let ends_with_separator = trimmed.ends_with('/') || trimmed.ends_with('\\');
+    if ends_with_separator || path.is_dir() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        path.push(format!("screenshot-{stamp}.png"));
+    }
+    let has_image_extension = matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp")
+    );
+    if !has_image_extension {
+        let mut s = path.into_os_string();
+        s.push(".png");
+        path = std::path::PathBuf::from(s);
+    }
+    dunce::simplified(&path).to_string_lossy().into_owned()
+}
+
 /// Build agent-browser CLI args from tool name + arguments.
 fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> {
     match tool_name {
@@ -4946,56 +5064,68 @@ fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
             a
         }
         "BrowserHelp" => {
-            // Route the advertised skill/allSkills params to the CLI's `skills`
-            // subcommand (matching agent_browser::skills()); previously both were
-            // dropped and the model only ever got generic help.
+            // There is NO bare `help` subcommand (`agent-browser help` → "Unknown
+            // command", exit 1); the `skills` catalog IS the help surface, and it
+            // has exactly these fixed names. Any unknown skill/topic the model
+            // invents ("nav", "click", "commands", …) would exit 1 — snap those to
+            // "core" (the command reference) so BrowserHelp always returns docs.
+            const BROWSER_SKILLS: [&str; 6] = [
+                "agentcore",
+                "core",
+                "dogfood",
+                "electron",
+                "slack",
+                "vercel-sandbox",
+            ];
             let all_skills = args
                 .get("allSkills")
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            let skill = args
-                .get("skill")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
+            // `topic` stays as a compat alias for the old schema.
+            let requested = json_str_opt(args, "skill")
+                .or_else(|| json_str_opt(args, "topic"))
+                .map(|s| s.trim().to_ascii_lowercase())
                 .filter(|s| !s.is_empty());
             if all_skills {
                 vec!["skills".to_string(), "get".to_string(), "--all".to_string()]
-            } else if let Some(name) = skill {
-                vec![
-                    "skills".to_string(),
-                    "get".to_string(),
-                    name.to_string(),
-                    "--full".to_string(),
-                ]
-            } else if let Some(topic) = args
-                .get("topic")
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                // There is NO bare `help` subcommand (`agent-browser help` → "Unknown
-                // command"); the `skills` content IS the help. Treat a topic as a skill.
-                vec!["skills".to_string(), "get".to_string(), topic.to_string()]
+            } else if let Some(name) = requested {
+                let resolved = if BROWSER_SKILLS.contains(&name.as_str()) {
+                    name
+                } else {
+                    "core".to_string()
+                };
+                let mut a = vec!["skills".to_string(), "get".to_string(), resolved];
+                if args
+                    .get("full")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    a.push("--full".to_string());
+                }
+                a
             } else {
-                // No topic: list the available skills (the discovery/help surface).
+                // No skill requested: list the catalog (the discovery surface).
                 vec!["skills".to_string()]
             }
         }
         "BrowserDoctor" => {
             let mut a = vec!["doctor".to_string()];
-            // Honor `offline`/`quick` (the doctor CLI supports both) in addition to
-            // `fix`; previously offline/quick were dropped.
+            // offline+quick are opt-OUT: a bare `doctor` probes registry.npmjs.org
+            // AND live-launches headless Chromium — 30s+ cold / stalls on blocked
+            // networks (the "timed out after 90s" report). The default matches the
+            // proven Settings status recipe; the model passes offline:false /
+            // quick:false explicitly when it truly wants the full diagnostic.
             if args
                 .get("offline")
                 .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
+                .unwrap_or(true)
             {
                 a.push("--offline".to_string());
             }
             if args
                 .get("quick")
                 .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
+                .unwrap_or(true)
             {
                 a.push("--quick".to_string());
             }
@@ -5634,32 +5764,54 @@ mod tests {
             &serde_json::json!({ "offline": true, "quick": true, "fix": true }),
         );
         assert_eq!(args, vec!["doctor", "--offline", "--quick", "--fix"]);
-        // Default (no flags) is byte-identical to the old bare `doctor`.
+        // Default (no flags) is offline+quick: a bare `doctor` probes the npm
+        // registry AND live-launches Chromium — the "timed out after 90s" report.
         assert_eq!(
             build_browser_args("BrowserDoctor", &serde_json::json!({})),
+            vec!["doctor", "--offline", "--quick"]
+        );
+        // The full diagnostic stays reachable by explicit opt-out.
+        assert_eq!(
+            build_browser_args(
+                "BrowserDoctor",
+                &serde_json::json!({ "offline": false, "quick": false }),
+            ),
             vec!["doctor"]
         );
     }
 
     #[test]
     fn browser_args_help_routes_skills() {
-        // A45: allSkills / skill route to the `skills` subcommand; otherwise `help`.
+        // A45: allSkills / skill route to the `skills` subcommand; no args lists.
         assert_eq!(
             build_browser_args("BrowserHelp", &serde_json::json!({ "allSkills": true })),
             vec!["skills", "get", "--all"]
         );
+        // A real skill name passes through; `full` opts into the long reference.
+        assert_eq!(
+            build_browser_args("BrowserHelp", &serde_json::json!({ "skill": "electron" })),
+            vec!["skills", "get", "electron"]
+        );
+        assert_eq!(
+            build_browser_args(
+                "BrowserHelp",
+                &serde_json::json!({ "skill": "core", "full": true }),
+            ),
+            vec!["skills", "get", "core", "--full"]
+        );
+        // Unknown/invented names snap to `core` (the CLI exits 1 on unknown skills).
         assert_eq!(
             build_browser_args("BrowserHelp", &serde_json::json!({ "skill": "forms" })),
-            vec!["skills", "get", "forms", "--full"]
-        );
-        // No bare `help` subcommand exists → base help lists skills; a topic is a skill.
-        assert_eq!(
-            build_browser_args("BrowserHelp", &serde_json::json!({ "skill": "  " })),
-            vec!["skills"]
+            vec!["skills", "get", "core"]
         );
         assert_eq!(
             build_browser_args("BrowserHelp", &serde_json::json!({ "topic": "nav" })),
-            vec!["skills", "get", "nav"]
+            vec!["skills", "get", "core"]
+        );
+        // Blank skill / no args -> list the catalog.
+        assert_eq!(
+            build_browser_args("BrowserHelp", &serde_json::json!({ "skill": "  " })),
+            vec!["skills"]
         );
     }
 

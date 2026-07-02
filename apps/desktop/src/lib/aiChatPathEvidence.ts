@@ -22,7 +22,11 @@ const PATH_VERIFICATION_TOOLS = new Set([
 ]);
 
 const filePathPattern = /(?:^|[\s"'`(])([\w./\\-]+\.(?:ts|tsx|js|jsx|rs|py|go|java|css|html|md|json|yaml|yml|toml|sql|cs|cpp|h|vue|svelte|db|csv|zip|tar|gz|pdf|proto))(?:$|[\s"'`,.)])/gi;
-const dirPathPattern = /(?:^|[\s*`#>\-])([a-zA-Z][\w.-]*\/)/g;
+// Require at least two "/"-terminated segments: a real directory path has an
+// internal separator ("src/components/"), while bare tokens ("read/", "shell/")
+// and prose alternations ("read/write", "edit/apply") do not — those were being
+// flagged as "unconfirmed paths" purely because a tool-name preceded a slash.
+const dirPathPattern = /(?:^|[\s*`#>\-])([a-zA-Z][\w.-]*\/(?:[\w.-]+\/)+)/g;
 
 function normalizeEvidencePath(path: string) {
   return path.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
@@ -43,7 +47,9 @@ function extractDirPaths(text: string) {
   dirPathPattern.lastIndex = 0;
   for (const match of text.matchAll(dirPathPattern)) {
     const path = match[1]?.replace(/\\/g, "/");
-    if (path && path.length <= 120) paths.push(path);
+    // Belt-and-suspenders vs future regex edits: a candidate must keep an
+    // internal separator after trimming the trailing slash.
+    if (path && path.length <= 120 && path.replace(/\/+$/, "").includes("/")) paths.push(path);
   }
   return paths;
 }

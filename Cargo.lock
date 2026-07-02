@@ -3264,6 +3264,7 @@ name = "lux-lsp"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dunce",
  "lsp-types",
  "lux-core",
  "serde",
