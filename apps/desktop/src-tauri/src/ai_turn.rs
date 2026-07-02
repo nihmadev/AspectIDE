@@ -4507,6 +4507,65 @@ async fn run_subagent(
 //
 // Approval context (tool, summary, preview, risk) is passed positionally; bundling into a
 // struct would only shift the boilerplate to every call site without improving clarity.
+/// The pure outcome of the approval gate, BEFORE any UI plumbing. Extracted from
+/// [`require_tool_approval`] so the security-critical decision order — deny rules
+/// beat every mode, allow rules skip prompts, non-interactive callers can never
+/// silently run a gated tool — is unit-testable and regression-locked (the C1/C2
+/// class of native-loop enforcement bypass must never silently return).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ApprovalGate {
+    /// A deny rule fired: hard-block with this error, in EVERY mode.
+    Blocked(String),
+    /// Allowed without a prompt (allow rule, intrinsically-safe call, or full-access).
+    Allowed,
+    /// Needs a prompt but the caller has no UI (subagent): reject with this error.
+    RejectedNonInteractive(String),
+    /// Must ask the user through the UI.
+    Prompt,
+}
+
+/// Decide the approval gate for one tool call. Pure — no events, no waiting.
+///
+/// Order is load-bearing:
+/// 1. Permission rules are authoritative and evaluated BEFORE mode — a deny
+///    applies even in full-access/automatic mode; an explicit allow skips the prompt.
+/// 2. Without a forced ask, an intrinsically-safe call (`auto_approve`) or
+///    full-access mode auto-approves.
+/// 3. Anything still needing a prompt auto-rejects for non-interactive callers
+///    (subagents have no approval UI; waiting would deadlock the parent turn).
+fn resolve_approval_gate(
+    tool: &str,
+    permission_input: &str,
+    rules: &[String],
+    approval_mode: &str,
+    interactive: bool,
+    auto_approve: bool,
+) -> ApprovalGate {
+    let ev = crate::ai_permissions::evaluate(tool, permission_input, rules);
+    let force_ask = match ev.decision {
+        crate::ai_permissions::PermissionDecision::Deny => {
+            // F28: name the exact rule that fired so the user (and the model) can
+            // see WHY the call was blocked instead of a generic message.
+            return ApprovalGate::Blocked(ev.matched_rule.map_or_else(
+                || format!("{tool} is blocked by a permission rule."),
+                |rule| format!("{tool} is blocked by permission rule `{rule}`."),
+            ));
+        }
+        crate::ai_permissions::PermissionDecision::Allow => return ApprovalGate::Allowed,
+        crate::ai_permissions::PermissionDecision::Ask => true,
+        crate::ai_permissions::PermissionDecision::Default => false,
+    };
+    if !force_ask && (auto_approve || approval_mode == "full-access") {
+        return ApprovalGate::Allowed;
+    }
+    if !interactive {
+        return ApprovalGate::RejectedNonInteractive(format!(
+            "{tool} requires approval and is unavailable to subagents."
+        ));
+    }
+    ApprovalGate::Prompt
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn require_tool_approval(
     app: &tauri::AppHandle,
@@ -4522,38 +4581,19 @@ async fn require_tool_approval(
     permission_input: &str,
     auto_approve: bool,
 ) -> Result<(), String> {
-    // Permission rules are authoritative and evaluated BEFORE mode, so a deny
-    // applies even in full-access / automatic mode and an explicit allow runs
-    // without a prompt.
-    let ev = crate::ai_permissions::evaluate(tool, permission_input, rules);
-    let force_ask = match ev.decision {
-        crate::ai_permissions::PermissionDecision::Deny => {
-            // F28: name the exact rule that fired so the user (and the model) can see
-            // WHY the call was blocked instead of a generic message. Falls back to the
-            // generic text if the engine somehow reports a deny without a matched rule.
-            return Err(ev.matched_rule.map_or_else(
-                || format!("{tool} is blocked by a permission rule."),
-                |rule| format!("{tool} is blocked by permission rule `{rule}`."),
-            ));
+    match resolve_approval_gate(
+        tool,
+        permission_input,
+        rules,
+        approval_mode,
+        interactive,
+        auto_approve,
+    ) {
+        ApprovalGate::Blocked(error) | ApprovalGate::RejectedNonInteractive(error) => {
+            return Err(error);
         }
-        crate::ai_permissions::PermissionDecision::Allow => return Ok(()),
-        crate::ai_permissions::PermissionDecision::Ask => true,
-        crate::ai_permissions::PermissionDecision::Default => false,
-    };
-
-    // No rule forced a prompt: an intrinsically-safe call (read-only shell) and
-    // full-access mode both auto-approve.
-    if !force_ask && (auto_approve || approval_mode == "full-access") {
-        return Ok(());
-    }
-    // Non-interactive callers (subagents) have no UI to approve through: the
-    // approval event would be keyed by the agent id the UI filters out, so
-    // awaiting it would deadlock the parent's Task call. Auto-reject instead so
-    // the model adapts rather than hangs.
-    if !interactive {
-        return Err(format!(
-            "{tool} requires approval and is unavailable to subagents."
-        ));
+        ApprovalGate::Allowed => return Ok(()),
+        ApprovalGate::Prompt => {}
     }
     // Emit approval request and wait for decision from UI.
     // F2: check emit success; if the event cannot be delivered there is no
@@ -5490,5 +5530,198 @@ mod tests {
         let value = serde_json::json!({ "risks": big });
         let collected = json_str_array(&value, "risks", usize::MAX);
         assert_eq!(collected.len(), 20, "all submitted items are retained");
+    }
+
+    // ── Approval-gate regression suite (C1/C2/H7) ─────────────────────────────
+    //
+    // These lock the security-critical decision order of `resolve_approval_gate`.
+    // If any of them starts failing, the native turn loop has re-opened the
+    // permission-enforcement bypass class from the 2026-06 project review:
+    // deny rules MUST beat every mode, and non-interactive callers (subagents)
+    // MUST never silently run a gated tool.
+
+    fn rules(list: &[&str]) -> Vec<String> {
+        list.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn approval_gate_deny_rule_blocks_even_in_full_access() {
+        // C1: full-access mode must NOT override an explicit deny.
+        let gate = resolve_approval_gate(
+            "Write",
+            "/repo/.env",
+            &rules(&["deny:Write(*.env)"]),
+            "full-access",
+            true,
+            false,
+        );
+        let ApprovalGate::Blocked(error) = gate else {
+            panic!("deny rule must hard-block in full-access, got {gate:?}");
+        };
+        assert!(
+            error.contains("deny:Write(*.env)"),
+            "block message names the rule that fired: {error}"
+        );
+    }
+
+    #[test]
+    fn approval_gate_deny_rule_blocks_auto_approved_calls() {
+        // An intrinsically-safe (auto_approve) call still loses to a deny rule.
+        let gate = resolve_approval_gate(
+            "Shell",
+            "git push --force",
+            &rules(&["deny:Shell(git push*)"]),
+            "default",
+            true,
+            true,
+        );
+        assert!(
+            matches!(gate, ApprovalGate::Blocked(_)),
+            "auto_approve must not bypass deny, got {gate:?}"
+        );
+    }
+
+    #[test]
+    fn approval_gate_bash_alias_deny_blocks_shell_tool() {
+        // Finding #7: users write `Bash` in rules; the native tool is `Shell`.
+        let gate = resolve_approval_gate(
+            "Shell",
+            "rm -rf /",
+            &rules(&["deny:Bash(rm *)"]),
+            "full-access",
+            true,
+            false,
+        );
+        assert!(
+            matches!(gate, ApprovalGate::Blocked(_)),
+            "Bash-alias deny must match the Shell tool, got {gate:?}"
+        );
+    }
+
+    #[test]
+    fn approval_gate_allow_rule_skips_prompt_in_default_mode() {
+        let gate = resolve_approval_gate(
+            "Shell",
+            "git status",
+            &rules(&["allow:Shell(git *)"]),
+            "default",
+            true,
+            false,
+        );
+        assert_eq!(gate, ApprovalGate::Allowed);
+    }
+
+    #[test]
+    fn approval_gate_ask_rule_prompts_even_in_full_access() {
+        // C2: an explicit ask must force the prompt regardless of mode or
+        // auto-approve — rules are authoritative over both.
+        let gate = resolve_approval_gate(
+            "Shell",
+            "rm build/cache",
+            &rules(&["ask:Shell(rm *)"]),
+            "full-access",
+            true,
+            true,
+        );
+        assert_eq!(gate, ApprovalGate::Prompt);
+    }
+
+    #[test]
+    fn approval_gate_ask_rule_rejects_for_subagents() {
+        // H7: a subagent (no approval UI) must get a hard rejection, never a
+        // silent run and never a deadlocked wait.
+        let gate = resolve_approval_gate(
+            "Shell",
+            "rm build/cache",
+            &rules(&["ask:Shell(rm *)"]),
+            "full-access",
+            false,
+            true,
+        );
+        assert!(
+            matches!(gate, ApprovalGate::RejectedNonInteractive(_)),
+            "ask + non-interactive must reject, got {gate:?}"
+        );
+    }
+
+    #[test]
+    fn approval_gate_default_full_access_allows() {
+        let gate = resolve_approval_gate("Write", "src/main.rs", &[], "full-access", true, false);
+        assert_eq!(gate, ApprovalGate::Allowed);
+    }
+
+    #[test]
+    fn approval_gate_default_auto_approve_allows() {
+        // Intrinsically-safe call (read-only shell) with no rule intervening.
+        let gate = resolve_approval_gate("Shell", "git status", &[], "default", true, true);
+        assert_eq!(gate, ApprovalGate::Allowed);
+    }
+
+    #[test]
+    fn approval_gate_default_mode_prompts_interactive() {
+        let gate = resolve_approval_gate("Write", "src/main.rs", &[], "default", true, false);
+        assert_eq!(gate, ApprovalGate::Prompt);
+    }
+
+    #[test]
+    fn approval_gate_default_mode_rejects_subagents() {
+        // C1 regression shape: gated tool + no UI. Must be an error the caller
+        // surfaces, not an implicit allow.
+        let gate = resolve_approval_gate("Write", "src/main.rs", &[], "default", false, false);
+        let ApprovalGate::RejectedNonInteractive(error) = gate else {
+            panic!("gated tool without UI must reject, got {gate:?}");
+        };
+        assert!(error.contains("Write"), "error names the tool: {error}");
+    }
+
+    #[test]
+    fn approval_gate_deny_beats_allow_for_same_call() {
+        // Precedence: deny > allow even when both match.
+        let gate = resolve_approval_gate(
+            "Shell",
+            "git push origin main",
+            &rules(&["allow:Shell(git *)", "deny:Shell(git push*)"]),
+            "default",
+            true,
+            false,
+        );
+        assert!(
+            matches!(gate, ApprovalGate::Blocked(_)),
+            "deny must beat allow, got {gate:?}"
+        );
+    }
+
+    #[test]
+    fn approval_gate_compound_shell_command_cannot_hide_denied_segment() {
+        // Finding #25: `deny:Shell(rm *)` must fire on `ls && rm -rf /`.
+        let gate = resolve_approval_gate(
+            "Shell",
+            "ls && rm -rf /",
+            &rules(&["deny:Shell(rm *)"]),
+            "full-access",
+            true,
+            true,
+        );
+        assert!(
+            matches!(gate, ApprovalGate::Blocked(_)),
+            "chained command must still hit the deny, got {gate:?}"
+        );
+    }
+
+    #[test]
+    fn approval_gate_basename_deny_matches_nested_path() {
+        // Finding #26: `deny:Write(.env)` fires on a nested `config/.env`.
+        let gate = resolve_approval_gate(
+            "Write",
+            "/repo/config/.env",
+            &rules(&["deny:Write(.env)"]),
+            "full-access",
+            true,
+            false,
+        );
+        assert!(
+            matches!(gate, ApprovalGate::Blocked(_)),
+            "basename deny must match any directory, got {gate:?}"
+        );
     }
 }
