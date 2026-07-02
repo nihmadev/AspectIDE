@@ -108,10 +108,6 @@ export function SkillsSection({ workspace, t }: { workspace: WorkspaceInfo | nul
       {error && <p className="lux-skill-error" role="alert">{error}</p>}
       {loading && <p className="lux-skill-loading"><Loader2 size={14} className="lux-spin" /> {t("settings.skills.loading")}</p>}
 
-      {!loading && visible.length === 0 && (
-        <p className="lux-skill-empty">{t("settings.skills.none")}</p>
-      )}
-
       <ul className="lux-skill-list">
         {visible.map((skill) => (
           <li key={`${skill.scope}:${skill.slug}`} className="lux-skill-row" data-disabled={!skill.enabled || undefined}>
@@ -258,7 +254,7 @@ function SkillEditor({
 
       <div className="lux-skill-editor-actions">
         <button type="button" className="lux-skill-save" disabled={!canSave || saving} onClick={() => void save()}>
-          {saving ? <Loader2 size={14} className="lux-spin" /> : t("settings.skills.save")}
+          {saving ? <><Loader2 size={14} className="lux-spin" /> {t("settings.skills.save")}</> : t("settings.skills.save")}
         </button>
       </div>
     </div>
@@ -380,6 +376,7 @@ function SkillImporter({
       </div>
       {loading && <p className="lux-skill-loading"><Loader2 size={14} className="lux-spin" /> {t("settings.skills.importScanning")}</p>}
       {!loading && candidates.length === 0 && <p className="lux-skill-none">{t("settings.skills.importNone")}</p>}
+      {candidates.length > 0 && (
       <ul className="lux-skill-import-list">
         {candidates.map((candidate) => {
           const key = candidateKey(candidate);
@@ -397,17 +394,19 @@ function SkillImporter({
               <button
                 type="button"
                 className="lux-skill-import-btn"
+                data-done={done || undefined}
                 disabled={done || busy === key || importingAll}
                 onClick={() => void doImport(key, candidate.slug, candidate.content)}
               >
                 {done ? <><Check size={13} /> {t("settings.skills.imported")}</>
-                  : busy === key || importingAll ? <Loader2 size={13} className="lux-spin" />
+                  : busy === key ? <><Loader2 size={13} className="lux-spin" /> {t("settings.skills.importAction")}</>
                   : t("settings.skills.importAction")}
               </button>
             </li>
           );
         })}
       </ul>
+      )}
 
       <h4 className="lux-skill-import-h">{t("settings.skills.importManual")}</h4>
       <label className="lux-skill-field">
@@ -426,7 +425,7 @@ function SkillImporter({
           disabled={!canImportManual || busy === "manual"}
           onClick={() => { void doImport("manual", manualSlug, manualContent).then(() => { setManualName(""); setManualContent(""); }); }}
         >
-          {busy === "manual" ? <Loader2 size={14} className="lux-spin" /> : t("settings.skills.importAction")}
+          {busy === "manual" ? <><Loader2 size={14} className="lux-spin" /> {t("settings.skills.importAction")}</> : t("settings.skills.importAction")}
         </button>
       </div>
     </div>

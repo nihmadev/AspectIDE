@@ -317,7 +317,7 @@
 }
 
 .settings-panel-head p,
-.provider-editor-head p {
+.provider-detail-titles p {
   margin: 0;
   color: var(--text-3);
   font-size: 12px;
@@ -343,6 +343,12 @@
 
 .settings-field:last-child {
   border-bottom: 0;
+}
+
+/* Keep the row-divider rhythm across stacked grids in one panel: the first
+   grid's last row drops its border, so re-draw it at the junction. */
+.settings-control-grid + .settings-control-grid > .settings-field:first-child {
+  border-top: 1px solid var(--border-subtle);
 }
 
 .settings-field[data-wide="true"] {
@@ -390,6 +396,7 @@
 }
 
 .settings-textarea-control {
+  height: auto; /* undo the shared 32px control height so `rows` works */
   min-height: 160px;
   padding: 10px 11px;
   resize: vertical;
@@ -443,7 +450,9 @@
 
 .settings-segmented button {
   display: inline-grid;
-  height: 28px;
+  /* 26 + 2*2px wrapper padding + 2*1px border = 32px — same computed height
+     as every input/select/stepper sharing the row. */
+  height: 26px;
   place-items: center;
   padding: 0 10px;
   border: 0;
@@ -466,9 +475,15 @@
 
 .settings-compound-control {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(108px, 128px);
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   align-items: center;
+}
+
+/* Reserve the value column only while the stepper is rendered (limit active);
+   otherwise the segmented control leaves a ragged empty gap on its right. */
+.settings-compound-control:has(> .settings-stepper) {
+  grid-template-columns: minmax(0, 1fr) minmax(108px, 128px);
 }
 
 .settings-stepper {
@@ -479,6 +494,13 @@
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
   background: var(--bg-1);
+  transition: border-color 100ms ease, background 100ms ease;
+}
+
+/* The inner input has outline:0 — mirror the text-input focus treatment. */
+.settings-stepper:focus-within {
+  border-color: var(--accent-strong);
+  background: var(--bg-0);
 }
 
 .settings-stepper button {
@@ -559,6 +581,12 @@
   background: var(--text-3);
   content: "";
   transition: transform 100ms ease, background 100ms ease;
+}
+
+/* The real checkbox is visually hidden, so surface keyboard focus on the switch. */
+.settings-toggle-field input:focus-visible + .settings-switch {
+  border-color: var(--accent-strong);
+  box-shadow: 0 0 0 2px var(--accent-soft);
 }
 
 .settings-toggle-field input:checked + .settings-switch {
@@ -683,6 +711,8 @@
   color: var(--text-3);
   font-size: 11px;
   line-height: 1.4;
+  /* Raw backend errors embed long unbroken tokens (URLs, HTML bodies). */
+  overflow-wrap: anywhere;
 }
 
 .provider-diagnostic-card > div:first-child > span:first-child {
@@ -711,6 +741,11 @@
   padding: 8px 0 12px;
 }
 
+/* Match the 32px select beside it (shared button group is 28px). */
+.provider-create-row button {
+  height: 32px;
+}
+
 .provider-template-select {
   display: grid;
   gap: 6px;
@@ -731,8 +766,12 @@
 
 .provider-template-select svg {
   position: absolute;
+  /* The wrapper stacks a label above the select; `top` from the generic
+     .settings-select-control rule would pin the chevron beside the label,
+     so anchor to the bottom (inside the 32px select) instead. */
+  top: auto;
   right: 10px;
-  bottom: 10px;
+  bottom: 9px;
   color: var(--text-3);
   pointer-events: none;
 }
@@ -913,6 +952,7 @@
   width: 28px;
   height: 28px;
   place-items: center;
+  min-width: 0; /* neutralize .danger-button's 92px min-width on icon-only buttons */
   padding: 0;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
@@ -940,6 +980,11 @@
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-1);
+}
+
+/* Clip row hover/active backgrounds to the card's rounded corners. */
+.provider-model-list {
+  overflow: hidden;
 }
 
 .provider-model-list-head,
@@ -1133,7 +1178,16 @@
 
 .effort-row button {
   width: 32px;
+  height: 32px; /* match the 32px input beside it (shared group is 28px) */
   padding: 0;
+}
+
+/* Empty state ("no effort selector") — bare <p>, so mute the UA defaults. */
+.effort-editor > p {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 /* Indexing */
@@ -1149,6 +1203,20 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
+}
+
+/* The head's first cell stacks the bold status line over the muted counts line;
+   without this the inline <strong> and <span> run together ("Waiting0/0 files"). */
+.index-status-head > div:first-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.index-status-head > div:first-child > span {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .index-status-actions {
@@ -1222,12 +1290,30 @@
 
 .index-insights {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  align-items: start;
   gap: 12px;
 }
 
 .index-insight-list {
   display: grid;
   gap: 2px;
+}
+
+.index-insight-list h4 {
+  margin: 0 0 4px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.index-insight-list p {
+  margin: 0;
+  padding: 2px 8px;
+  color: var(--text-3);
+  font-size: 12px;
 }
 
 .index-bucket-row,
@@ -1271,6 +1357,12 @@
   .settings-field {
     grid-template-columns: minmax(0, 1fr);
     gap: 8px;
+  }
+
+  /* Same specificity as the .settings-field rule above — re-assert the
+     two-column toggle layout so the switch stays beside its label. */
+  .settings-toggle-field {
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
   .provider-model-manager {

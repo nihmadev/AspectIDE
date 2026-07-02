@@ -606,7 +606,9 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
   const installedCount = catalog?.filter((entry) => entry.installed).length ?? 0;
 
   return (
-    <SettingsPanel title={t("settings.lsp.title")} description={t("settings.lsp.description")}>
+    // No panel title/description: this is the section's only panel and the
+    // section header above it already renders the same title + description.
+    <SettingsPanel>
       <SettingsGrid>
         <ToggleSetting
           label={t("settings.lsp.autoInstall.label")}
@@ -880,7 +882,9 @@ function AgentBrowserSection({ onChange, preferences, t }: { onChange: (patch: P
         : t("settings.agentBrowser.status.unavailable");
 
   return (
-    <SettingsPanel title={t("settings.agentBrowser.title")} description={t("settings.agentBrowser.description")}>
+    // Title omitted: it would repeat the section header directly above. The
+    // description stays — it explains the agent-browser runtime, not the nav.
+    <SettingsPanel description={t("settings.agentBrowser.description")}>
       <section className="settings-banner agent-browser-status-card" data-state={diagnosticState}>
         <div className="settings-banner-main">
           <strong>{statusLabel}</strong>
@@ -1381,7 +1385,8 @@ function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: Ret
           <IndexImportantFiles files={aiIndex.importantFiles} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.importantFiles")} />
         </div>
       </section>
-      <SettingsPanel title={t("settings.indexing.title")} description={t("settings.indexing.description")}>
+      {/* No panel title/description: the section header above already renders them. */}
+      <SettingsPanel>
         <SettingsGrid>
           <ToggleSetting label={t("settings.indexing.projectIndexing.label")} detail={t("settings.indexing.projectIndexing.detail")} checked={preferences.projectIndexingEnabled} onChange={(projectIndexingEnabled) => onChange({ projectIndexingEnabled })} />
           <ToggleSetting label={t("settings.indexing.realtime.label")} detail={t("settings.indexing.realtime.detail")} checked={preferences.realtimeIndexing} onChange={(realtimeIndexing) => onChange({ realtimeIndexing })} />

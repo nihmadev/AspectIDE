@@ -255,7 +255,7 @@ function MemoryComposer({
           {t("settings.memory.pin")}
         </label>
         <button type="button" className="lux-mem-composer-save" disabled={!content.trim() || saving} onClick={() => void save()}>
-          {saving ? <Loader2 size={14} className="lux-spin" /> : t("settings.memory.save")}
+          {saving ? <><Loader2 size={14} className="lux-spin" /> {t("settings.memory.save")}</> : t("settings.memory.save")}
         </button>
       </div>
     </div>

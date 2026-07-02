@@ -106,7 +106,9 @@ export function SshSection({ t }: { t: TranslateFn }) {
           onChange={onTimeoutChange}
         />
       </SettingsGrid>
-      <SaveIndicator state={saveState} t={t} />
+      {/* Idle renders the header's "User settings" scope label, which reads as an
+          orphan caption inside this section — only surface active save feedback. */}
+      {saveState !== "idle" && <SaveIndicator state={saveState} t={t} />}
 
       <div className="lux-research-field">
         <div className="lux-research-status-row">

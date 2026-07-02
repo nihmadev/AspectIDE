@@ -104,7 +104,9 @@ export function AiProvidersSection({ onChange, preferences, t }: { onChange: (pa
   }
 
   return (
-    <SettingsPanel title={t("settings.providers.title")} description={t("settings.providers.description")}>
+    // No panel title/description: the section header above renders the same
+    // "Providers" title + description, so repeating them here reads as a glitch.
+    <SettingsPanel>
       <div className="provider-create-row">
         <label className="settings-select-control provider-template-select">
           <span className="provider-template-label">{t("settings.providers.template")}</span>
