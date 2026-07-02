@@ -772,11 +772,20 @@ mod tests {
     use super::{list_files, list_files_scanned, read_tree, read_tree_bounded, WorkspaceFs};
 
     fn test_root(tag: &str) -> PathBuf {
+        // Counter + timestamp: a timestamp alone can collide across parallel test
+        // threads within one clock tick when the same tag is reused, making two
+        // tests share (and mutually delete) one directory.
+        static NEXT_ROOT_ID: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT_ROOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be available")
             .as_nanos();
-        std::env::temp_dir().join(format!("lux-fs-{tag}-{}-{suffix}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "lux-fs-{tag}-{}-{unique}-{suffix}",
+            std::process::id()
+        ))
     }
 
     fn build_fixture(root: &Path) {

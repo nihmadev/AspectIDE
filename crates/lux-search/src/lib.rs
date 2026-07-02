@@ -607,10 +607,21 @@ mod tests {
     }
 
     fn test_root() -> PathBuf {
+        // A process-wide counter guarantees uniqueness across the parallel test
+        // threads: a timestamp alone can collide when two tests call this within
+        // the clock's tick (seen on macOS CI), making them share one directory —
+        // whichever test finished first would remove_dir_all the files out from
+        // under the other, flaking its assertions with zero hits.
+        static NEXT_ROOT_ID: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT_ROOT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should be available")
             .as_nanos();
-        std::env::temp_dir().join(format!("lux-search-test-{}-{suffix}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "lux-search-test-{}-{unique}-{suffix}",
+            std::process::id()
+        ))
     }
 }

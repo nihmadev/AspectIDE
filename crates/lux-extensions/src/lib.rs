@@ -1429,10 +1429,15 @@ mod tests {
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {
+        // Counter + timestamp: a timestamp alone can collide across parallel test
+        // threads within one clock tick, making two tests share (and mutually
+        // delete) one directory.
+        static NEXT_DIR_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT_DIR_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after epoch")
             .as_nanos();
-        std::env::temp_dir().join(format!("{prefix}-{nonce}"))
+        std::env::temp_dir().join(format!("{prefix}-{}-{unique}-{nonce}", std::process::id()))
     }
 }
