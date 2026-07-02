@@ -25,6 +25,7 @@ import { maybeAutoInstallLanguageServers, resetLspAutoInstallAttempts } from "./
 import { bootstrapManagedRuntimes } from "./lib/runtimeBootstrap";
 import { createEmptyAiIndexState, createIdleProjectLoadState, isAiChatSessionBusyStatus, useLuxStore, type Activity } from "./lib/store";
 import { luxCommands, subscribeLuxEvents } from "./lib/tauri";
+import { AI_MIRROR_TERMINAL_ID, AI_MIRROR_TERMINAL_LABEL } from "./lib/terminalTypes";
 import type { RecentWorkspace, WorkspaceInfo } from "./lib/types";
 
 const BottomPanel = lazy(() => import("./components/BottomPanel").then((module) => ({ default: module.BottomPanel })));
@@ -553,6 +554,25 @@ export function App() {
       if (event.type === "editorDiagnosticsChanged") setDiagnosticsForPath(event.path, event.diagnostics);
       if (event.type === "gitStatusChanged") setGitStatus(event.status);
       if (event.type === "terminalOutput") appendTerminalOutput(event.session_id, event.data);
+      if (event.type === "aiShellOutput") {
+        // Live mirror of the agent's Shell commands: materialize the virtual
+        // read-only "Lux AI" tab on first output (without stealing focus), then
+        // stream through the same buffer pipeline as real PTY sessions — so the
+        // Ctrl+` panel shows exactly what the agent's terminal is doing.
+        const state = useLuxStore.getState();
+        if (!state.terminalSessions.some((session) => session.id === AI_MIRROR_TERMINAL_ID)) {
+          state.upsertTerminalSession(
+            {
+              id: AI_MIRROR_TERMINAL_ID,
+              shell: AI_MIRROR_TERMINAL_LABEL,
+              cwd: state.workspace?.root ?? "",
+              created_at: new Date().toISOString(),
+            },
+            false,
+          );
+        }
+        appendTerminalOutput(AI_MIRROR_TERMINAL_ID, event.data);
+      }
       if (event.type === "settingsChanged" && event.key === KEYBINDINGS_SETTINGS_KEY) {
         void luxCommands.keybindingsGet().then(setKeybindingProfile).catch(() => undefined);
       }

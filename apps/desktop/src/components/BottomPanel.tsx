@@ -8,6 +8,7 @@ import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { useLuxStore, type BottomPanelTab } from "../lib/store";
 import { isTauriRuntime, luxCommands } from "../lib/tauri";
 import { isTerminalSpawnInFlight, spawnTerminalSession } from "../lib/terminalSpawn";
+import { AI_MIRROR_TERMINAL_LABEL, isAiMirrorTerminal } from "../lib/terminalTypes";
 import type { TerminalSessionInfo, WorkspaceDiagnostic } from "../lib/types";
 import { XtermTerminal } from "./XtermTerminal";
 
@@ -92,7 +93,12 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
   const spawnPending = terminalMutation.isPending;
   useEffect(() => {
     if (activeTab !== "terminal") return;
-    if (terminalSessions.length > 0) { autoSpawnedRef.current = false; return; }
+    // The read-only AI mirror doesn't count as a usable shell — opening the
+    // Terminal tab with only "Lux AI" present must still spawn a real one.
+    if (terminalSessions.some((session) => !isAiMirrorTerminal(session.id))) {
+      autoSpawnedRef.current = false;
+      return;
+    }
     // Also skip if an external create (e.g. palette "terminal.new") is already in flight,
     // otherwise both paths would each open a shell before the first lands in the store.
     if (autoSpawnedRef.current || spawnPending || isTerminalSpawnInFlight()) return;
@@ -434,11 +440,13 @@ function OutputPanel({ entries, hasAnyEntries }: { entries: OutputEntry[]; hasAn
 
 function terminalShellLabel(session: TerminalSessionInfo | null, t: TranslateFn) {
   if (!session) return t("panel.terminal.shellFallback");
+  if (isAiMirrorTerminal(session.id)) return AI_MIRROR_TERMINAL_LABEL;
   const normalized = session.shell.replace(/\\/g, "/");
   return normalized.split("/").pop()?.replace(/\.exe$/i, "") || session.shell;
 }
 
 function terminalSessionLabel(session: TerminalSessionInfo, index: number) {
+  if (isAiMirrorTerminal(session.id)) return AI_MIRROR_TERMINAL_LABEL;
   const normalized = session.shell.replace(/\\/g, "/");
   const shell = normalized.split("/").pop()?.replace(/\.exe$/i, "") || session.shell;
   return `${index + 1}: ${shell}`;

@@ -657,6 +657,7 @@ pub fn ai_shell_classify(command: String) -> AiShellClassification {
 
 #[tauri::command]
 pub async fn ai_shell(
+    app: tauri::AppHandle,
     state: State<'_, SharedState>,
     command: String,
     cwd: Option<PathBuf>,
@@ -721,6 +722,17 @@ pub async fn ai_shell(
         std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let shared_stderr: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>> =
         std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    // Live terminal mirror: stream the captured output into the read-only
+    // "Lux AI" tab in the bottom terminal panel while the command runs, so the
+    // user can expand the terminal and watch the agent work in real time.
+    let mirror = spawn_shell_mirror(
+        app,
+        &command,
+        &dunce::simplified(&cwd).to_string_lossy(),
+        std::sync::Arc::clone(&shared_stdout),
+        std::sync::Arc::clone(&shared_stderr),
+    );
 
     // Own the child explicitly (rather than `process.output()`, which hides the
     // PID): drain both pipes concurrently to avoid a full-buffer deadlock, then
@@ -826,6 +838,12 @@ pub async fn ai_shell(
                 truncate_shell_output_flagged(&String::from_utf8_lossy(&stdout_buf));
             let (stderr, stderr_truncated) =
                 truncate_shell_output_flagged(&String::from_utf8_lossy(&stderr_buf));
+            mirror.finish(format!(
+                "\r\n\x1b[2m[exit {} in {duration_ms}ms]\x1b[0m\r\n",
+                status
+                    .code()
+                    .map_or_else(|| "?".to_string(), |code| code.to_string())
+            ));
             Ok(AiShellResponse {
                 workspace_root: root,
                 cwd,
@@ -841,13 +859,19 @@ pub async fn ai_shell(
                 stderr_truncated,
             })
         }
-        Ok(Err(error)) => Err(format!("Failed to run shell command: {error}")),
+        Ok(Err(error)) => {
+            mirror.finish(format!("\r\n\x1b[31m[failed to run: {error}]\x1b[0m\r\n"));
+            Err(format!("Failed to run shell command: {error}"))
+        }
         Err(_) => {
             // Timed out: `child` is still alive (only the borrow held by `collect`
             // was dropped). Kill the whole process tree before returning so no
             // grandchild keeps running orphaned; start_kill backstops the shell.
             kill_process_tree(child_pid).await;
             let _ = child.start_kill();
+            mirror.finish(format!(
+                "\r\n\x1b[31m[timeout after {timeout_secs}s - process tree killed]\x1b[0m\r\n"
+            ));
             // Finding 5: preserve partial stdout/stderr captured before timeout.
             let partial_stdout = {
                 let buf = shared_stdout.lock().await;
@@ -881,6 +905,101 @@ pub async fn ai_shell(
             })
         }
     }
+}
+
+/// Handle to the live "Lux AI" terminal mirror of one running Shell command.
+/// The poller task streams capture-buffer deltas as `LuxEvent::AiShellOutput`
+/// events; `finish` delivers the final status line and stops the task after one
+/// last flush, so trailing output is never dropped.
+struct ShellMirror {
+    done: Option<tokio::sync::oneshot::Sender<String>>,
+}
+
+impl ShellMirror {
+    fn finish(mut self, status_line: String) {
+        if let Some(done) = self.done.take() {
+            let _ = done.send(status_line);
+        }
+    }
+}
+
+/// Poll cadence for the mirror. Fast enough to read as live streaming, slow
+/// enough that a chatty command coalesces into a handful of events per second.
+const SHELL_MIRROR_POLL_MS: u64 = 90;
+
+fn spawn_shell_mirror(
+    app: tauri::AppHandle,
+    command: &str,
+    cwd_display: &str,
+    stdout: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    stderr: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+) -> ShellMirror {
+    use tauri::Emitter;
+    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<String>();
+    let banner = format!(
+        "\r\n\x1b[1;36m$\x1b[0m \x1b[1m{}\x1b[0m \x1b[2m({cwd_display})\x1b[0m\r\n",
+        command.replace(['\r', '\n'], " ")
+    );
+    tokio::spawn(async move {
+        let _ = app.emit(
+            "lux://event",
+            lux_core::LuxEvent::AiShellOutput { data: banner },
+        );
+        let mut sent_stdout = 0usize;
+        let mut sent_stderr = 0usize;
+        loop {
+            let status_line = tokio::select! {
+                status = &mut done_rx => Some(status.unwrap_or_default()),
+                () = tokio::time::sleep(std::time::Duration::from_millis(SHELL_MIRROR_POLL_MS)) => None,
+            };
+            emit_shell_mirror_delta(&app, &stdout, &mut sent_stdout).await;
+            emit_shell_mirror_delta(&app, &stderr, &mut sent_stderr).await;
+            if let Some(status_line) = status_line {
+                if !status_line.is_empty() {
+                    let _ = app.emit(
+                        "lux://event",
+                        lux_core::LuxEvent::AiShellOutput { data: status_line },
+                    );
+                }
+                break;
+            }
+        }
+    });
+    ShellMirror {
+        done: Some(done_tx),
+    }
+}
+
+/// Emit the not-yet-mirrored suffix of a capture buffer, holding back an
+/// incomplete trailing UTF-8 sequence (pipe chunks split multibyte code points;
+/// the remainder is emitted once the next chunk completes it).
+async fn emit_shell_mirror_delta(
+    app: &tauri::AppHandle,
+    sink: &std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    sent: &mut usize,
+) {
+    use tauri::Emitter;
+    let chunk = {
+        let buffer = sink.lock().await;
+        if buffer.len() <= *sent {
+            return;
+        }
+        let pending = &buffer[*sent..];
+        let valid = match std::str::from_utf8(pending) {
+            Ok(text) => text.len(),
+            Err(error) => error.valid_up_to(),
+        };
+        if valid == 0 {
+            return;
+        }
+        let text = String::from_utf8_lossy(&pending[..valid]).into_owned();
+        *sent += valid;
+        text
+    };
+    let _ = app.emit(
+        "lux://event",
+        lux_core::LuxEvent::AiShellOutput { data: chunk },
+    );
 }
 
 /// Best-effort kill of a timed-out shell command's entire process tree.

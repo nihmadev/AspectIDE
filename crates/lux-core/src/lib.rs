@@ -1169,6 +1169,13 @@ pub enum LuxEvent {
         session_id: Uuid,
         data: String,
     },
+    /// Live mirror of an AI `Shell` command's captured output, rendered by the
+    /// frontend as a read-only "Lux AI" terminal tab. Not backed by a PTY —
+    /// `data` is pipe output streamed while the command runs, so the user can
+    /// expand the terminal panel and watch the agent work in real time.
+    AiShellOutput {
+        data: String,
+    },
     GitStatusChanged {
         status: GitStatus,
     },

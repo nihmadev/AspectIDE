@@ -3,6 +3,7 @@ import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import { useLuxStore } from "../lib/store";
 import { isBrowserPreviewRuntime, isTauriRuntime, luxCommands } from "../lib/tauri";
+import { isAiMirrorTerminal } from "../lib/terminalTypes";
 import type { TerminalSessionInfo } from "../lib/types";
 import "@xterm/xterm/css/xterm.css";
 
@@ -107,7 +108,12 @@ export function XtermTerminal({ clearToken, session }: XtermTerminalProps) {
         fitAddon.fit();
 
         const activeSession = sessionRef.current;
-        if (activeSession && (terminal.cols !== previousCols || terminal.rows !== previousRows)) {
+        // The AI mirror tab has no PTY behind it — nothing to resize.
+        if (
+          activeSession
+          && !isAiMirrorTerminal(activeSession.id)
+          && (terminal.cols !== previousCols || terminal.rows !== previousRows)
+        ) {
           void luxCommands.terminalResize(activeSession.id, terminal.cols, terminal.rows);
         }
       });
@@ -119,6 +125,9 @@ export function XtermTerminal({ clearToken, session }: XtermTerminalProps) {
 
     terminal.onData((data) => {
       const activeSession = sessionRef.current;
+      // The AI mirror tab is read-only: it renders the agent's captured Shell
+      // output, there is no PTY to type into.
+      if (activeSession && isAiMirrorTerminal(activeSession.id)) return;
       if (activeSession && isTauriRuntime()) {
         // Write keystrokes to the PTY; the shell echoes them back through the
         // global terminalOutput listener → store buffer → delta write below.

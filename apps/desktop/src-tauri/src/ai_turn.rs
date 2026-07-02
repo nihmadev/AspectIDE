@@ -2023,6 +2023,7 @@ async fn execute_tool(
             )
             .await?;
             let result = crate::ai_tools::ai_shell(
+                app.clone(),
                 state.clone(),
                 command,
                 cwd.map(std::path::PathBuf::from),
