@@ -996,6 +996,7 @@ export const messagesEn = {
   "aiChat.question.send": "Send answer",
   "aiChat.question.sendHint": "⌘/Ctrl+Enter to send",
   "aiChat.compact.checkpointLabel": "Context checkpoint",
+  "aiChat.compact.checkpointExpand": "Show checkpoint summary",
   "aiChat.compact.checkpointHint": "Older turns were summarized so the agent can continue the same task with a smaller context.",
   "aiChat.turnCheckpoint.defaultLabel": "Chat turn",
   "aiChat.turnCheckpoint.edit": "Edit",

@@ -210,7 +210,12 @@ const AiChatMessageView = memo(function AiChatMessageView({
         </div>
         <div className="ai-chat-compaction-body">
           <p>{t("aiChat.compact.checkpointHint")}</p>
-          <pre>{formatCompactionPreview(message.content)}</pre>
+          {/* Collapsed by default: the full checkpoint is reference material,
+              not conversation — one line in the transcript, expandable on demand. */}
+          <details className="ai-chat-compaction-details">
+            <summary>{t("aiChat.compact.checkpointExpand")}</summary>
+            <pre>{formatCompactionPreview(message.content)}</pre>
+          </details>
         </div>
       </article>
     );

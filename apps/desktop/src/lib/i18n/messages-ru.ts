@@ -996,6 +996,7 @@ export const messagesRu: Messages = {
   "aiChat.question.send": "Отправить ответ",
   "aiChat.question.sendHint": "⌘/Ctrl+Enter — отправить",
   "aiChat.compact.checkpointLabel": "Checkpoint контекста",
+  "aiChat.compact.checkpointExpand": "Показать сводку чекпоинта",
   "aiChat.compact.checkpointHint": "Старые ходы сжаты — агент продолжит ту же задачу с меньшим контекстом.",
   "aiChat.turnCheckpoint.defaultLabel": "Ход чата",
   "aiChat.turnCheckpoint.edit": "Изменить",

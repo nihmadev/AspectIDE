@@ -86,13 +86,14 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
             truncate(&input.previous_summary, 4_000)
         ));
     }
-    // Use tail-preserving compaction for the ordered transcript so the latest
-    // user direction, tool output, and errors are always visible to the summary
-    // model instead of only the oldest prefix.
+    // Head+tail windowing: the head carries the ORIGINAL task statement (the
+    // opening user message that defines what "done" means) and the tail carries
+    // the latest direction/tool output/errors. Tail-only windowing silently lost
+    // the task's origin on long chats whenever no goal was pinned.
     user_parts.push(format!(
         "Transcript ({} chars):\n{}",
         input.transcript.len(),
-        transcript_tail(&input.transcript, MAX_TRANSCRIPT_CHARS),
+        transcript_window(&input.transcript, MAX_TRANSCRIPT_CHARS),
     ));
 
     let mut payload = serde_json::json!({
@@ -184,21 +185,32 @@ fn validate_summary_sections(content: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Keep the last `max` characters of `value`, preserving the message order that
-/// matters most for continuity (tool output, errors, latest user direction).
-fn transcript_tail(value: &str, max: usize) -> String {
-    if value.chars().count() <= max {
+/// Fraction of the transcript budget spent on the HEAD (the opening messages
+/// that state the original task); the rest goes to the tail (latest direction,
+/// tool output, errors). Both ends matter for a faithful checkpoint.
+const TRANSCRIPT_HEAD_FRACTION: usize = 4; // 1/4 head, 3/4 tail
+
+/// Keep the first `max / TRANSCRIPT_HEAD_FRACTION` and the trailing remainder
+/// of `value`, marking the omitted middle. Preserves both the task's origin and
+/// the most recent context instead of only the newest suffix.
+fn transcript_window(value: &str, max: usize) -> String {
+    let total = value.chars().count();
+    if total <= max {
         return value.to_string();
     }
+    let head_chars = max / TRANSCRIPT_HEAD_FRACTION;
+    let tail_chars = max - head_chars;
+    let head: String = value.chars().take(head_chars).collect();
     let tail_start = value.len()
         - value
             .chars()
             .rev()
-            .take(max)
+            .take(tail_chars)
             .map(char::len_utf8)
             .sum::<usize>();
-    let tail: String = value[tail_start..].chars().collect();
-    format!("…{tail}")
+    let tail = &value[tail_start..];
+    let omitted = total - head_chars - tail_chars;
+    format!("{head}\n…[{omitted} chars of the middle omitted]…\n{tail}")
 }
 
 fn truncate(value: &str, max: usize) -> String {
@@ -224,13 +236,14 @@ mod tests {
     }
 
     #[test]
-    fn transcript_tail_keeps_suffix() {
-        assert_eq!(transcript_tail("short", 100), "short");
-        let long = "abcdefghij";
-        let result = transcript_tail(long, 4);
-        assert!(result.starts_with('…'));
-        assert!(result.contains("ghij"));
-        assert_eq!(result.chars().count(), 5); // 4 + ellipsis
+    fn transcript_window_keeps_head_and_tail() {
+        assert_eq!(transcript_window("short", 100), "short");
+        let long = "abcdefghijklmnopqrstuvwxyz";
+        let result = transcript_window(long, 8);
+        // 1/4 head (2 chars) + 3/4 tail (6 chars), middle marked as omitted.
+        assert!(result.starts_with("ab"), "head preserved: {result}");
+        assert!(result.ends_with("uvwxyz"), "tail preserved: {result}");
+        assert!(result.contains("omitted"), "omission marked: {result}");
     }
 
     #[test]

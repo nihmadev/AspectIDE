@@ -4486,6 +4486,21 @@
   font: 12px/1.4 var(--font-ui);
 }
 
+.ai-chat-compaction-details > summary {
+  cursor: pointer;
+  color: var(--text-2);
+  font: 11px/1.4 var(--font-ui);
+  user-select: none;
+}
+
+.ai-chat-compaction-details > summary:hover {
+  color: var(--text-0);
+}
+
+.ai-chat-compaction-details[open] > summary {
+  margin-bottom: 6px;
+}
+
 .ai-chat-compaction-body pre {
   margin: 0;
   max-height: 220px;
