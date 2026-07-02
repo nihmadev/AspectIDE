@@ -755,8 +755,17 @@ impl DebugSessionManager {
         };
         tokio::time::timeout(timeout, async {
             loop {
-                // Check for adapter exit before blocking on recv.
-                {
+                if let Some(response) = self.take_pending_response(session_id, request_seq)? {
+                    return self.apply_expected_response(session_id, response, command);
+                }
+                // Drain everything already delivered before consulting child
+                // liveness: an adapter that answered and then exited must still
+                // have its queued answer honored. Only when the queue is empty
+                // does an exited child mean the response will never arrive.
+                let queued = self.try_recv_message(session_id)?;
+                let message = if let Some(message) = queued {
+                    message
+                } else {
                     if let Some(session) = self.sessions.get_mut(&session_id) {
                         if let Ok(Some(_)) = session.child.try_wait() {
                             return Err(AppError::Service(format!(
@@ -764,11 +773,8 @@ impl DebugSessionManager {
                             )));
                         }
                     }
-                }
-                if let Some(response) = self.take_pending_response(session_id, request_seq)? {
-                    return self.apply_expected_response(session_id, response, command);
-                }
-                let message = self.recv_message(session_id).await?;
+                    self.recv_message(session_id).await?
+                };
                 match message {
                     DapMessage::Response(response) if response.request_seq == request_seq => {
                         return self.apply_expected_response(session_id, response, command);
@@ -840,6 +846,16 @@ impl DebugSessionManager {
             .recv()
             .await
             .ok_or_else(|| AppError::Service("debug adapter message stream closed".into()))
+    }
+
+    /// Non-blocking receive: returns a message already sitting in the queue, or
+    /// `None` when the queue is currently empty (including after stream close —
+    /// the blocking `recv_message` path reports the close as an error).
+    fn try_recv_message(&mut self, session_id: Uuid) -> AppResult<Option<DapMessage>> {
+        let Some(session) = self.sessions.get_mut(&session_id) else {
+            return Err(AppError::NotFound(format!("debug session {session_id}")));
+        };
+        Ok(session.messages.try_recv().ok())
     }
 
     async fn apply_message(&mut self, session_id: Uuid, message: DapMessage) -> AppResult<()> {
