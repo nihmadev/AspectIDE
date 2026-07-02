@@ -65,3 +65,6 @@ skills-lock.json
 lux-updater.key
 lux-updater.key.pub
 .lux-review/
+
+# Local audit screenshots
+/*.png
