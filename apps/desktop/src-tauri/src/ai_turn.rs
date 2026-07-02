@@ -2119,8 +2119,20 @@ async fn execute_tool(
             serde_json::to_string(&result).map_err(|e| e.to_string())
         }
         "GitContext" => {
-            let status = crate::git::git_status(state.clone()).await?;
-            serde_json::to_string(&status).map_err(|e| e.to_string())
+            // A non-repo workspace (or missing git) previously surfaced as an opaque
+            // "service error:". Return an actionable, structured result instead so the
+            // model knows git is simply unavailable here rather than that the tool broke.
+            match crate::git::git_status(state.clone()).await {
+                Ok(status) => serde_json::to_string(&status).map_err(|e| e.to_string()),
+                Err(error) => Ok(serde_json::json!({
+                    "isRepo": false,
+                    "note": format!(
+                        "Git status is unavailable for this workspace ({error}). It may not be a \
+                         git repository (no .git), or git is not installed/on PATH."
+                    ),
+                })
+                .to_string()),
+            }
         }
         "DiagnosticsContext" => {
             let max = json_usize(&args, "maxResults", 80);
@@ -2444,13 +2456,21 @@ async fn execute_tool(
                 .get("maxSources")
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|v| usize::try_from(v).ok());
+            // `depth`: standard (fast) vs deep (query expansion + multi-engine +
+            // 1-hop crawl + more diverse sources). Unknown values → standard.
+            let depth = match json_str_opt(&args, "depth")
+                .map(|v| v.trim().to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("deep") => lux_research::ResearchDepth::Deep,
+                _ => lux_research::ResearchDepth::Standard,
+            };
+            let defaults = lux_research::ResearchOptions::default();
             let options = lux_research::ResearchOptions {
                 focus,
-                ..lux_research::ResearchOptions::default()
-            };
-            let options = lux_research::ResearchOptions {
-                max_sources: max_sources.unwrap_or(options.max_sources),
-                ..options
+                depth,
+                max_sources: max_sources.unwrap_or(defaults.max_sources),
+                ..defaults
             };
             let mut result =
                 crate::research::web_research(state.clone(), query, Some(options)).await?;
@@ -2673,6 +2693,12 @@ async fn execute_tool(
                 "BrowserScreenshot" | "BrowserDoctor" => 90,
                 _ => 60,
             };
+            // Run the CLI in the workspace root so a relative/default screenshot path
+            // lands in a writable place instead of the app's (often read-only) launch
+            // dir — the "BrowserScreenshot: access denied" bug.
+            let browser_cwd = crate::workspace_root(state)
+                .ok()
+                .map(|r| r.to_string_lossy().into_owned());
             let result =
                 crate::agent_browser::invoke(crate::agent_browser::AgentBrowserInvokeRequest {
                     session: input.session_id.clone(),
@@ -2690,6 +2716,7 @@ async fn execute_tool(
                     allow_file_access: None,
                     provider: None,
                     proxy: None,
+                    cwd: browser_cwd,
                 })
                 .await?;
             // Parity with the TS runtime (aiRuntimeBrowser.ts), which throws on
@@ -4693,14 +4720,20 @@ fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
             }
         }
         "BrowserDashboard" => {
+            // The CLI only has `dashboard start|stop` (bare `dashboard` == start).
+            // Map any other/absent action (e.g. the old "status"/"open") to `start`
+            // so the model never emits an unknown subcommand.
             let action = args
                 .get("action")
                 .and_then(|v| v.as_str())
-                .unwrap_or("status");
-            let mut a = vec!["dashboard".to_string(), action.to_string()];
-            // Honor the advertised `port` (the CLI accepts `dashboard <action>
-            // --port <n>`); previously it was dropped and the model silently got
-            // the default 4848.
+                .unwrap_or("start");
+            let sub = if action.eq_ignore_ascii_case("stop") {
+                "stop"
+            } else {
+                "start"
+            };
+            let mut a = vec!["dashboard".to_string(), sub.to_string()];
+            // Honor the advertised `port` (`dashboard start --port <n>`).
             if let Some(port) = args.get("port").and_then(serde_json::Value::as_u64) {
                 a.push("--port".to_string());
                 a.push(port.to_string());
@@ -4742,12 +4775,18 @@ fn build_browser_args(tool_name: &str, args: &serde_json::Value) -> Vec<String> 
                     name.to_string(),
                     "--full".to_string(),
                 ]
+            } else if let Some(topic) = args
+                .get("topic")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                // There is NO bare `help` subcommand (`agent-browser help` → "Unknown
+                // command"); the `skills` content IS the help. Treat a topic as a skill.
+                vec!["skills".to_string(), "get".to_string(), topic.to_string()]
             } else {
-                let mut a = vec!["help".to_string()];
-                if let Some(t) = args.get("topic").and_then(|v| v.as_str()) {
-                    a.push(t.to_string());
-                }
-                a
+                // No topic: list the available skills (the discovery/help surface).
+                vec!["skills".to_string()]
             }
         }
         "BrowserDoctor" => {
@@ -5370,12 +5409,16 @@ mod tests {
             &serde_json::json!({ "action": "start", "port": 5000 }),
         );
         assert_eq!(args, vec!["dashboard", "start", "--port", "5000"]);
-        // No port → unchanged from the legacy behavior.
+        // Unknown/absent action (the CLI only has start|stop) maps to `start`.
         let plain = build_browser_args(
             "BrowserDashboard",
             &serde_json::json!({ "action": "status" }),
         );
-        assert_eq!(plain, vec!["dashboard", "status"]);
+        assert_eq!(plain, vec!["dashboard", "start"]);
+        assert_eq!(
+            build_browser_args("BrowserDashboard", &serde_json::json!({ "action": "stop" })),
+            vec!["dashboard", "stop"]
+        );
     }
 
     #[test]
@@ -5417,14 +5460,14 @@ mod tests {
             build_browser_args("BrowserHelp", &serde_json::json!({ "skill": "forms" })),
             vec!["skills", "get", "forms", "--full"]
         );
-        // A blank skill and no flags fall back to the existing help path.
+        // No bare `help` subcommand exists → base help lists skills; a topic is a skill.
         assert_eq!(
             build_browser_args("BrowserHelp", &serde_json::json!({ "skill": "  " })),
-            vec!["help"]
+            vec!["skills"]
         );
         assert_eq!(
             build_browser_args("BrowserHelp", &serde_json::json!({ "topic": "nav" })),
-            vec!["help", "nav"]
+            vec!["skills", "get", "nav"]
         );
     }
 

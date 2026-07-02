@@ -56,6 +56,9 @@ pub struct AgentBrowserInvokeRequest {
     pub allow_file_access: Option<bool>,
     pub provider: Option<String>,
     pub proxy: Option<String>,
+    /// Working directory for the CLI process (should be the workspace root) so
+    /// relative/default output paths land somewhere writable.
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -190,6 +193,11 @@ pub struct InvokeOptions {
     pub allow_file_access: Option<bool>,
     pub provider: Option<String>,
     pub proxy: Option<String>,
+    /// Working directory for the CLI process. Relative output paths (e.g. a
+    /// `screenshot foo.png`) and the CLI's default screenshot location resolve
+    /// against this, so it should be the workspace root — otherwise the process
+    /// inherits the app's launch dir, which is often read-only ("access denied").
+    pub cwd: Option<String>,
 }
 
 /// Normalised result of a parsed agent-browser CLI JSON response.

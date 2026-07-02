@@ -71,13 +71,24 @@ pub fn duckduckgo_lite_search_url(query: &str) -> String {
     )
 }
 
-/// Parse a DuckDuckGo results page. Handles both the full page (`result__a` /
-/// `result__snippet`) and the lite page (`result-link` / `result-snippet`), and
-/// dedupes by URL. Best-effort and defensive: malformed entries are skipped.
+/// Parse a DuckDuckGo results page. Tolerant of several markup variants so a
+/// selector drift on either endpoint degrades gracefully instead of yielding zero:
+///   * the full page (`result__a` / `result__snippet`),
+///   * the lite page's historical class (`result-link` / `result-snippet`), and
+///   * the lite page's *current* class-less markup, where result anchors carry no
+///     class at all and are recognized purely by their `/l/?uddg=` redirect href.
+///
+/// Results are deduped by URL. Best-effort and defensive: malformed entries are
+/// skipped.
 #[must_use]
 pub fn parse_duckduckgo_html(html: &str) -> Vec<SearchHit> {
     let mut hits = parse_result_anchors(html, "result__a", "result__snippet");
     hits.extend(parse_result_anchors(html, "result-link", "result-snippet"));
+    // Lite-page fallback: current lite markup dropped the `result-link` class, so
+    // the class-based pass above finds nothing there. Recognize a result by its
+    // DuckDuckGo redirect href instead, and pair it with the nearest following
+    // `result-snippet` cell.
+    hits.extend(parse_redirect_anchors(html, "result-snippet"));
     let mut seen = std::collections::HashSet::new();
     hits.retain(|hit| seen.insert(hit.url.clone()));
     hits
@@ -122,6 +133,74 @@ fn parse_result_anchors(html: &str, link_class: &str, snippet_class: &str) -> Ve
         });
     }
     hits
+}
+
+/// Class-less fallback for the current lite page: scan every `<a href=...>`, keep
+/// only anchors whose href is a DuckDuckGo `/l/?uddg=` redirect (the shape a real
+/// organic result uses), and normalize each to its public http(s) target. This
+/// deliberately ignores navigation/footer/settings anchors (which are relative
+/// `/lite/…` or absolute duckduckgo.com links without `uddg=`), so it does not
+/// pollute results with chrome links.
+fn parse_redirect_anchors(html: &str, snippet_class: &str) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = html[cursor..].find("<a") {
+        let tag_start = cursor + relative;
+        let Some(tag_rel_end) = html[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + tag_rel_end;
+        let tag = &html[tag_start..=tag_end];
+        let href = extract_attr(tag, "href").unwrap_or_default();
+
+        let inner_start = tag_end + 1;
+        let Some(close_rel) = html[inner_start..].find("</a>") else {
+            break;
+        };
+        let title = strip_tags(&html[inner_start..inner_start + close_rel]);
+        cursor = inner_start + close_rel + "</a>".len();
+
+        // Only anchors that are DuckDuckGo result redirects are organic results.
+        if !href.contains("uddg=") {
+            continue;
+        }
+        let url = normalize_ddg_href(&href);
+        if url.is_empty() || title.is_empty() {
+            continue;
+        }
+        hits.push(SearchHit {
+            url,
+            title,
+            snippet: extract_lite_snippet(html, cursor, snippet_class),
+            engine: "duckduckgo".to_string(),
+            provider_score: 0.0,
+        });
+    }
+    hits
+}
+
+/// Pull the nearest following `snippet_class` cell for a lite result, bounded so a
+/// result with no snippet of its own doesn't borrow a distant one. Unlike
+/// [`extract_following_snippet`], there is no per-result link class to bound
+/// against on the class-less lite page, so we bound purely by distance.
+fn extract_lite_snippet(html: &str, from: usize, snippet_class: &str) -> String {
+    let Some(relative) = html[from..].find(snippet_class) else {
+        return String::new();
+    };
+    if relative > 1_500 {
+        return String::new();
+    }
+    let snippet_pos = from + relative;
+    let Some(open_rel) = html[snippet_pos..].find('>') else {
+        return String::new();
+    };
+    let start = snippet_pos + open_rel + 1;
+    let end = html[start..]
+        .find("</td>")
+        .or_else(|| html[start..].find("</a>"))
+        .or_else(|| html[start..].find("</div>"))
+        .map_or(html.len(), |rel| start + rel);
+    strip_tags(&html[start..end])
 }
 
 fn string_field(item: &serde_json::Value, key: &str) -> String {
@@ -394,6 +473,166 @@ const fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
+/// Very small English stop-word set for building the keyword-only query variant.
+/// Deliberately tiny — just the highest-frequency function words — so it never
+/// strips a term that could matter for a technical query.
+const STOP_WORDS: &[&str] = &[
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "how", "what", "is",
+    "are", "do", "does", "can", "vs", "my", "i", "me",
+];
+
+/// Expand one query into up to `max` mechanical variants for deep research, so a
+/// single phrasing doesn't cap recall. No LLM: purely lexical transforms —
+///   * the original query (always first),
+///   * a quoted exact phrase (when multi-word) to surface pages with the literal phrase,
+///   * a focus-aware suffix variant (e.g. `… documentation` for code, `… 2026` for news),
+///   * a stop-word-stripped keyword-only variant (when it differs from the original).
+///
+/// Variants are de-duplicated case-insensitively and capped at `max` (which the
+/// caller derives from the depth profile). Returns at least the original query.
+#[must_use]
+pub fn expand_queries(query: &str, focus: FocusMode, max: usize) -> Vec<String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || max <= 1 {
+        return vec![trimmed.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let push =
+        |candidate: String, out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
+            let candidate = candidate.trim().to_string();
+            if !candidate.is_empty() && seen.insert(candidate.to_lowercase()) {
+                out.push(candidate);
+            }
+        };
+
+    push(trimmed.to_string(), &mut out, &mut seen);
+
+    let word_count = trimmed.split_whitespace().count();
+    if word_count >= 2 {
+        push(format!("\"{trimmed}\""), &mut out, &mut seen);
+    }
+
+    // Focus-aware suffix: bias the extra query toward the requested source kind.
+    let suffix = match focus {
+        FocusMode::Code => "documentation",
+        FocusMode::Academic => "paper pdf",
+        FocusMode::News => "latest 2026",
+        FocusMode::Social => "discussion forum",
+        FocusMode::Video => "video tutorial",
+        FocusMode::Web => "guide",
+    };
+    push(format!("{trimmed} {suffix}"), &mut out, &mut seen);
+
+    // Keyword-only variant: drop stop words so a verbose question matches
+    // term-dense pages. Only added when it actually differs from the original.
+    let keywords: Vec<&str> = trimmed
+        .split_whitespace()
+        .filter(|word| {
+            let lower = word
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            !lower.is_empty() && !STOP_WORDS.contains(&lower.as_str())
+        })
+        .collect();
+    if keywords.len() >= 2 && keywords.len() < word_count {
+        push(keywords.join(" "), &mut out, &mut seen);
+    }
+
+    out.truncate(max.max(1));
+    out
+}
+
+/// Extract candidate follow-up links from a fetched result page's raw HTML for the
+/// deep-mode 1-hop crawl. Keeps only anchors whose visible text shares at least one
+/// query term (so we follow on-topic links, not nav/footer chrome), resolves
+/// relative/protocol-relative hrefs against `base_url`, funnels every candidate
+/// through the SSRF gate ([`validate_source_url`]), and de-duplicates. Bounded to
+/// `max` links so one link-heavy page can't explode the crawl.
+#[must_use]
+pub fn extract_result_links(html: &str, base_url: &str, query: &str, max: usize) -> Vec<String> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let query_terms: std::collections::HashSet<String> = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= 3)
+        .map(str::to_string)
+        .collect();
+    let origin = origin_of(base_url);
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let bytes = html.as_bytes();
+    let mut cursor = 0usize;
+    while let Some(rel) = html[cursor..].find("<a ") {
+        let tag_start = cursor + rel;
+        let Some(rel_gt) = html[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + rel_gt;
+        let tag = &html[tag_start..tag_end];
+        cursor = tag_end + 1;
+        // Anchor text: from after '>' to the next '</a>'.
+        let text = html[cursor..]
+            .find("</a>")
+            .map_or("", |rel_close| &html[cursor..cursor + rel_close]);
+        let Some(href) = extract_attr(tag, "href") else {
+            continue;
+        };
+        // Only follow links whose anchor text is on-topic.
+        let text_lower = strip_tags(text).to_lowercase();
+        let on_topic = query_terms.is_empty()
+            || query_terms
+                .iter()
+                .any(|term| text_lower.contains(term.as_str()));
+        if !on_topic {
+            continue;
+        }
+        let absolute = resolve_href(&href, &origin);
+        if let Some(url) = validate_source_url(&absolute) {
+            if seen.insert(url.clone()) {
+                out.push(url);
+                if out.len() >= max {
+                    break;
+                }
+            }
+        }
+        // `bytes` kept in scope to satisfy borrow reasoning on `html` slicing.
+        let _ = bytes;
+    }
+    out
+}
+
+/// The `scheme://host[:port]` origin of `url` (best-effort; empty when unparseable).
+fn origin_of(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return String::new();
+    };
+    let after = scheme_end + 3;
+    let authority_len = url[after..]
+        .find(['/', '?', '#'])
+        .unwrap_or(url.len() - after);
+    url[..after + authority_len].to_string()
+}
+
+/// Resolve an href against an origin: absolute http(s) as-is, protocol-relative
+/// `//host` upgraded to https, root-relative `/path` joined to the origin. Anything
+/// else (fragment, mailto, relative path) yields an empty string (dropped later).
+fn resolve_href(href: &str, origin: &str) -> String {
+    let href = href.trim();
+    if href.starts_with("http://") || href.starts_with("https://") {
+        href.to_string()
+    } else if let Some(rest) = href.strip_prefix("//") {
+        format!("https://{rest}")
+    } else if href.starts_with('/') && !origin.is_empty() {
+        format!("{origin}{href}")
+    } else {
+        String::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +696,56 @@ mod tests {
         assert_eq!(hits[0].url, "https://rust-lang.org/");
         assert_eq!(hits[0].title, "The Rust Language");
         assert_eq!(hits[0].snippet, "A language empowering everyone.");
+    }
+
+    #[test]
+    fn parses_classless_lite_results() {
+        // CURRENT lite markup: result anchors carry NO class — they are recognized
+        // purely by their `/l/?uddg=` redirect href — and the snippet is a
+        // `result-snippet` cell. This is the markup the old class-based pass missed
+        // (returning zero results); this regression-guards the href-based fallback.
+        let html = r#"
+          <table>
+            <tr><td valign="top">1.&nbsp;</td>
+                <td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&amp;rut=abc">The Rust Programming Language</a></td></tr>
+            <tr><td>&nbsp;</td><td class="result-snippet">A language empowering everyone to build reliable software.</td></tr>
+            <tr><td>&nbsp;</td><td><span class="link-text">www.rust-lang.org</span></td></tr>
+            <tr><td valign="top">2.&nbsp;</td>
+                <td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdoc.rust-lang.org%2Fbook%2F">The Rust Book</a></td></tr>
+            <tr><td>&nbsp;</td><td class="result-snippet">The official Rust book.</td></tr>
+            <tr><td><a href="/lite/?q=rust&s=30&nextParams=">Next Page &gt;</a></td></tr>
+          </table>
+        "#;
+        let hits = parse_duckduckgo_html(html);
+        assert_eq!(hits.len(), 2, "both organic results, no nav anchor");
+        assert_eq!(hits[0].url, "https://www.rust-lang.org/");
+        assert_eq!(hits[0].title, "The Rust Programming Language");
+        assert_eq!(
+            hits[0].snippet,
+            "A language empowering everyone to build reliable software."
+        );
+        assert_eq!(hits[1].url, "https://doc.rust-lang.org/book/");
+        assert_eq!(hits[1].title, "The Rust Book");
+        // The "Next Page" nav anchor (relative, no uddg=) must NOT become a hit.
+        assert!(
+            hits.iter().all(|hit| !hit.url.contains("/lite/")),
+            "navigation anchors must be excluded"
+        );
+    }
+
+    #[test]
+    fn classless_lite_pass_ignores_non_redirect_anchors() {
+        // Header/footer/settings anchors on the lite page (absolute duckduckgo.com
+        // links WITHOUT a uddg= redirect, or relative links) must never be results.
+        let html = r#"
+          <a href="https://duckduckgo.com/settings">Settings</a>
+          <a href="/lite/about">About</a>
+          <a href="https://duckduckgo.com/html/?q=x">Switch to HTML</a>
+        "#;
+        assert!(
+            parse_duckduckgo_html(html).is_empty(),
+            "chrome links are not organic results"
+        );
     }
 
     #[test]
@@ -538,5 +827,64 @@ mod tests {
         let hits = parse_searxng_json(&json);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].url, "https://safe.example/ok");
+    }
+
+    #[test]
+    fn expand_queries_produces_deduped_capped_variants() {
+        let out = expand_queries("rust async runtime", FocusMode::Code, 5);
+        assert_eq!(out[0], "rust async runtime", "original is always first");
+        assert!(
+            out.iter().any(|q| q == "\"rust async runtime\""),
+            "multi-word query gets a quoted exact-phrase variant"
+        );
+        assert!(
+            out.iter().any(|q| q.contains("documentation")),
+            "code focus adds a documentation-suffixed variant"
+        );
+        assert!(out.len() <= 5, "capped at max");
+        // No duplicates (case-insensitive).
+        let lowered: std::collections::HashSet<String> =
+            out.iter().map(|q| q.to_lowercase()).collect();
+        assert_eq!(lowered.len(), out.len());
+    }
+
+    #[test]
+    fn expand_queries_single_word_and_cap_one() {
+        // A one-word query has no quoted/keyword variant but still gets the suffix.
+        let out = expand_queries("bitcoin", FocusMode::News, 5);
+        assert_eq!(out[0], "bitcoin");
+        assert!(out.iter().any(|q| q.contains("2026")));
+        // max = 1 collapses to just the original.
+        assert_eq!(expand_queries("a b c", FocusMode::Web, 1), vec!["a b c"]);
+    }
+
+    #[test]
+    fn extract_result_links_filters_and_resolves() {
+        let html = r#"
+            <a href="/docs/guide">rust async guide</a>
+            <a href="https://other.example/async">async in rust</a>
+            <a href="/about">company about page</a>
+            <a href="https://evil.test/x">rust async</a>
+            <a href="http://127.0.0.1/rust">rust async localhost</a>
+        "#;
+        let links = extract_result_links(html, "https://base.example/page", "rust async", 10);
+        // Root-relative resolved against origin, and the absolute on-topic link kept.
+        assert!(links.contains(&"https://base.example/docs/guide".to_string()));
+        assert!(links.contains(&"https://other.example/async".to_string()));
+        // Off-topic anchor text ("company about page") dropped.
+        assert!(!links.iter().any(|u| u.ends_with("/about")));
+        // SSRF loopback dropped even though the anchor text is on-topic.
+        assert!(!links.iter().any(|u| u.contains("127.0.0.1")));
+    }
+
+    #[test]
+    fn extract_result_links_respects_max() {
+        let html = r#"
+            <a href="https://a.example/rust">rust one</a>
+            <a href="https://b.example/rust">rust two</a>
+            <a href="https://c.example/rust">rust three</a>
+        "#;
+        let links = extract_result_links(html, "https://base.example/", "rust", 2);
+        assert_eq!(links.len(), 2, "crawl budget cap honored");
     }
 }

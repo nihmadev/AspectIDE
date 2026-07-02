@@ -205,6 +205,7 @@ pub async fn invoke(
             allow_file_access: None,
             provider: request.provider.clone(),
             proxy: request.proxy.clone(),
+            cwd: request.cwd.clone(),
         }),
         &arg_refs,
         timeout_secs,

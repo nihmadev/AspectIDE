@@ -10,7 +10,6 @@ use serde_json::json;
 /// Max result bounds reused across many tools.
 const MAX_RESULTS_DEFAULT: i64 = 500;
 const MAX_RESULTS_SYMBOL: i64 = 300;
-const MAX_RESULTS_SOURCES: i64 = 8;
 const MAX_RESULTS_FINDINGS: i64 = 500;
 /// Max byte limits for reading content.
 const MAX_BYTES_DEFAULT: i64 = 10_485_760;
@@ -79,6 +78,24 @@ fn ask_user_options_item_schema() -> serde_json::Value {
                 "required": ["label"]
             }
         ]
+    })
+}
+
+/// Returns the JSON Schema for one TodoWrite.todos item — an object with a required
+/// `content` plus optional id/status/priority/notes. MUST match the handler in
+/// `ai_turn.rs`, which reads objects (not bare strings).
+fn todo_item_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "content": { "type": "string", "description": "The task text" },
+            "id": { "type": "string", "description": "Stable id (optional; auto-assigned if omitted)" },
+            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Task status (default pending)" },
+            "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "Task priority (default medium)" },
+            "notes": { "type": "string", "description": "Optional notes" }
+        },
+        "required": ["content"],
+        "additionalProperties": false
     })
 }
 
@@ -411,11 +428,12 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "WebResearch",
-        "Deep web research: searches the web (SearxNG or DuckDuckGo), fetches the top pages, reranks them by relevance, and returns ranked sources with extracted content + citation indices. Use this to answer open questions from current external information, then cite sources as [1], [2]. Prefer over WebFetch when you don't already have the exact URL.",
+        "Web research: searches the web (SearxNG or DuckDuckGo), fetches the top pages, reranks by relevance, and returns cited sources with extracted content. Two modes via `depth`: standard (fast, one query, ~6-8 sources) and deep (expands the query into several variants, merges all engines, follows one hop of in-page links, and returns more domain-diverse sources — slower, ~30-60s, best for hard/open questions). Cite sources as [1], [2]. Prefer over WebFetch when you don't already have the exact URL.",
         &[
             req("query", "string", "The research question or topic."),
             opt("focus", "string", "web | academic | news | social | video | code (default web)."),
-            opt_int("maxSources", "How many ranked sources to return, default 6 (max 8).", 1, MAX_RESULTS_SOURCES),
+            opt("depth", "string", "standard (default, fast) | deep (query expansion + multi-engine + in-page link crawl + more diverse sources; slower)."),
+            opt_int("maxSources", "How many ranked sources to return (default 6; up to 8 standard / 15 deep).", 1, 15),
         ],
     ));
     tools.push(tool(
@@ -599,8 +617,8 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ));
         tools.push(tool(
             "TodoWrite",
-            "Replace session task list.",
-            &[req_str_arr("todos", "Task list.")],
+            "Replace the session task list. `todos` is an array of OBJECTS, each with a required `content` and optional id/status/priority/notes.",
+            &[req_arr_items("todos", "Task items (objects, not strings).", todo_item_schema())],
         ));
         tools.push(tool(
             "Task",

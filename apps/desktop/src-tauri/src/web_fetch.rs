@@ -13,7 +13,7 @@ const MAX_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MAX_BYTES: u64 = 250_000;
 const MAX_BYTES: u64 = 1_000_000;
 const USER_AGENT: &str = "LuxIDE-WebFetch/0.1";
-/// Browser-like UA for SEARCH-PROVIDER requests only — DuckDuckGo/SearxNG serve an
+/// Browser-like UA for SEARCH-PROVIDER requests only — `DuckDuckGo`/`SearxNG` serve an
 /// empty/challenge page to bot user-agents, so the research search query must look
 /// like a browser. (`fetch`/`WebFetch` keep the honest `USER_AGENT`.)
 const SEARCH_USER_AGENT: &str =
@@ -72,6 +72,7 @@ pub async fn fetch(
         timeout_secs,
         max_bytes: usize::try_from(max_bytes).unwrap_or(usize::MAX),
         allow_private: false,
+        form: None,
     })
     .await?;
 
@@ -104,6 +105,38 @@ pub async fn fetch_text(
     max_bytes: usize,
     allow_private: bool,
 ) -> Result<String, String> {
+    fetch_search_text(url, None, accept, timeout_secs, max_bytes, allow_private).await
+}
+
+/// SSRF-safe POST that submits `form` as an `application/x-www-form-urlencoded`
+/// body and returns the raw response text. The public `DuckDuckGo` fallback keeps
+/// the private-host guard on (`allow_private = false`): DDG's html/lite endpoints
+/// now answer a plain GET with an anomaly/empty page and only return results for a
+/// POST whose body carries the query, so the research search path uses this.
+pub async fn fetch_text_form(
+    url: &str,
+    form: &[(&str, &str)],
+    accept: &str,
+    timeout_secs: u64,
+    max_bytes: usize,
+) -> Result<String, String> {
+    let owned: Vec<(String, String)> = form
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect();
+    fetch_search_text(url, Some(owned), accept, timeout_secs, max_bytes, false).await
+}
+
+/// Shared core for [`fetch_text`] (GET) and [`fetch_text_form`] (POST). Builds the
+/// browser-UA, native-TLS search request and enforces a 2xx status.
+async fn fetch_search_text(
+    url: &str,
+    form: Option<Vec<(String, String)>>,
+    accept: &str,
+    timeout_secs: u64,
+    max_bytes: usize,
+    allow_private: bool,
+) -> Result<String, String> {
     let initial = validate_url(url)?;
     let timeout_secs = timeout_secs.clamp(1, MAX_TIMEOUT_SECS);
     // `allow_private` here is NOT model-controlled — it is set from user config
@@ -120,6 +153,7 @@ pub async fn fetch_text(
         timeout_secs,
         max_bytes,
         allow_private,
+        form,
     })
     .await?;
     if !(200..300).contains(&guarded.status) {
@@ -138,6 +172,12 @@ struct GuardedRequest {
     timeout_secs: u64,
     max_bytes: usize,
     allow_private: bool,
+    /// When present, issue a POST with these fields as an
+    /// `application/x-www-form-urlencoded` body instead of a GET. Used by the
+    /// research search path: `DuckDuckGo`'s html/lite endpoints now serve an
+    /// anomaly/empty page to a plain GET and only return results for a POST whose
+    /// body carries the query.
+    form: Option<Vec<(String, String)>>,
 }
 
 /// Outcome of a guarded fetch: final hop, status, content-type, capped body.
@@ -183,7 +223,12 @@ async fn fetch_guarded(req: GuardedRequest) -> Result<GuardedResponse, String> {
         }
         let client = builder.build().map_err(|error| error.to_string())?;
 
-        let mut request = client.get(current.clone());
+        // POST the form body only on the FIRST hop; a redirect is followed as a
+        // GET (standard 303 semantics) so we never replay the body to a new host.
+        let mut request = match &req.form {
+            Some(fields) if redirects == 0 => client.post(current.clone()).form(fields),
+            _ => client.get(current.clone()),
+        };
         if let Some(accept) = &req.accept {
             request = request.header(reqwest::header::ACCEPT, accept.clone());
         }

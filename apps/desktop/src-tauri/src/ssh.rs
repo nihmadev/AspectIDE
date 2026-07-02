@@ -692,7 +692,14 @@ pub async fn ssh_transfer(
         return Err(format!("Upload source does not exist: {}", local.display()));
     }
     let recursive = recursive.unwrap_or(false);
-    let local_str = local.to_string_lossy().to_string();
+    // The resolved local path is `canonicalize`d, which on Windows yields the
+    // extended-length verbatim form (`\\?\E:\…`). scp splits every non-flag
+    // argument into `host:path` at the first `:` before any separator, so the
+    // verbatim prefix makes scp read `\\?\E` as a hostname ("Could not resolve
+    // hostname"). `local_scp_path` strips the `\\?\` prefix (mirrors `ai_tools`'
+    // `dunce::simplified` usage) back to a plain `E:\…` the Win32 OpenSSH client
+    // treats as local, so only the REMOTE side is ever `host:path`.
+    let local_str = local_scp_path(&local);
     let opts = ssh_options_from_settings(&state);
     let args = build_scp_args(
         &session.target,
@@ -738,6 +745,30 @@ pub async fn ssh_transfer(
         stderr,
         timed_out: run.timed_out,
     })
+}
+
+/// Render a resolved LOCAL path as a plain filesystem string safe to hand to
+/// `scp`/`sftp`.
+///
+/// The path arrives from [`resolve_workspace_path`], which `canonicalize`s it —
+/// and on Windows `canonicalize` returns the extended-length **verbatim** form
+/// (`\\?\E:\a\b.py`). That form is doubly wrong for scp:
+///
+/// - OpenSSH does not accept a verbatim path as a filename; and, worse,
+/// - scp splits every non-flag argument into `host:path` at the first `:` that
+///   precedes any `/` (its `colon()` scan). In `\\?\E:\…` the first `:` follows
+///   `\\?\E`, so scp reads `\\?\E` as a **hostname** and fails with
+///   "Could not resolve hostname" — the exact smoke-test failure.
+///
+/// [`dunce::simplified`] strips the `\\?\` prefix back to the ordinary
+/// `E:\a\b.py` (mirrors how `ai_tools`/`lux-terminal` normalize a Windows path
+/// for external tools). The bundled Win32 OpenSSH client — the one this engine
+/// targets — special-cases a leading drive letter (`X:`) as a local path, so the
+/// simplified form is handed to scp verbatim and only the REMOTE side is ever
+/// `host:path`. On non-Windows targets there is no verbatim prefix or drive
+/// letter, so the path passes through unchanged.
+fn local_scp_path(path: &std::path::Path) -> String {
+    dunce::simplified(path).to_string_lossy().into_owned()
 }
 
 /// Confirm that a completed download stayed inside its intended destination.
@@ -928,6 +959,67 @@ mod tests {
         assert!(marked.starts_with("partial"));
         assert!(marked.contains(&SSH_MAX_OUTPUT_BYTES.to_string()));
         assert!(marked.contains("output truncated"));
+    }
+
+    // ── Local-path normalization for scp (Windows `\\?\` verbatim prefix) ──
+
+    /// The token before scp's `host:path` separator: the substring up to the first
+    /// `:` that precedes any path separator, or `None` when the token is a pure
+    /// local path (a separator appears before any colon, or there is no colon).
+    /// This mirrors OpenSSH scp's `colon()` scan and is what a "hostname" would be.
+    fn scp_host_fragment(token: &str) -> Option<&str> {
+        for (idx, ch) in token.char_indices() {
+            match ch {
+                ':' => return Some(&token[..idx]),
+                '/' | '\\' => return None,
+                _ => {}
+            }
+        }
+        None
+    }
+
+    // `dunce::simplified` only rewrites paths on Windows (it is a documented no-op
+    // elsewhere), so the verbatim-strip behavior is asserted under `cfg(windows)`.
+    #[cfg(windows)]
+    #[test]
+    fn local_scp_path_strips_verbatim_prefix() {
+        // The exact smoke-test failure: a canonicalized workspace file arrives as an
+        // extended-length verbatim path `\\?\E:\…`. scp's colon-split reads `\\?\E`
+        // as a hostname ("Could not resolve hostname"). After normalization the
+        // `\\?\` prefix is gone, so no verbatim fragment can be taken as a host.
+        let verbatim = std::path::Path::new(r"\\?\E:\Projects\test\btc_bot.py");
+        let out = local_scp_path(verbatim);
+        assert!(
+            !out.contains(r"\\?\"),
+            "verbatim prefix must be stripped: {out}"
+        );
+        // Whatever scp would read as the host must never be the verbatim `\\?\E`.
+        assert_ne!(scp_host_fragment(&out), Some(r"\\?\E"));
+        // The drive-lettered result (`E:\…`) is what the bundled Win32 OpenSSH
+        // client special-cases as a local path.
+        assert!(out.starts_with("E:"), "drive letter preserved: {out}");
+        assert!(out.contains("btc_bot.py"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn local_scp_path_preserves_plain_drive_letter_path() {
+        // A path without a verbatim prefix is left intact: the bundled Win32 OpenSSH
+        // client special-cases a leading `X:` drive letter as a LOCAL path, so the
+        // ordinary `E:\a\b.py` is the correct, unmangled local argument.
+        let plain = std::path::Path::new(r"E:\a\b.py");
+        let out = local_scp_path(plain);
+        assert_eq!(out, r"E:\a\b.py", "path preserved verbatim: {out}");
+    }
+
+    #[test]
+    fn local_scp_path_posix_is_passthrough() {
+        // A POSIX-style absolute path has no verbatim prefix or drive letter and is
+        // returned verbatim; scp sees a separator before any colon, so it is local.
+        let p = std::path::Path::new("/home/deploy/btc_bot.py");
+        let out = local_scp_path(p);
+        assert_eq!(out, "/home/deploy/btc_bot.py");
+        assert_eq!(scp_host_fragment(&out), None);
     }
 
     #[test]

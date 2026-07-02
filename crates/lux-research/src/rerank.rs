@@ -63,16 +63,136 @@ pub fn rerank(
     scored
         .into_iter()
         .enumerate()
-        .map(|(index, (score, _matched, hit, content))| RankedSource {
-            rank: index + 1,
-            url: hit.url.clone(),
-            title: hit.title.clone(),
-            snippet: hit.snippet.clone(),
-            content: trim_to_chars(content, max_chars_per_source),
-            relevance: (score * 1000.0).round() / 1000.0,
-            engine: hit.engine.clone(),
+        .map(|(index, (score, _matched, hit, content))| {
+            to_ranked(index + 1, hit, content, score, max_chars_per_source)
         })
         .collect()
+}
+
+/// Deep-mode rerank: like [`rerank`] but folds in a cross-query *consensus* signal
+/// (a source surfaced by several expanded sub-queries is more trustworthy) and a
+/// small URL-authority signal, then enforces **domain diversity** — at most
+/// `per_host_cap` sources per registrable host — so the result spans sites instead
+/// of clustering on one. `frequency` maps a hit URL to how many sub-queries surfaced
+/// it (absent/0 → 1). Zero-coverage sources are still dropped.
+#[must_use]
+pub fn rerank_deep(
+    query: &str,
+    hits: &[SearchHit],
+    contents: &[String],
+    max_sources: usize,
+    max_chars_per_source: usize,
+    per_host_cap: usize,
+    frequency: &HashMap<String, usize>,
+) -> Vec<RankedSource> {
+    let query_terms = tokenize_unique(query);
+    let has_query = !query_terms.is_empty();
+    let provider_max = hits
+        .iter()
+        .map(|hit| hit.provider_score)
+        .fold(0.0_f64, f64::max);
+
+    let mut scored: Vec<(f64, usize, &SearchHit, &str)> = hits
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let content = contents.get(index).map_or("", String::as_str);
+            let (base, matched) = score_hit(&query_terms, hit, content, provider_max);
+            // Consensus: +0.04 per extra sub-query that surfaced this URL, capped.
+            let seen = frequency.get(&hit.url).copied().unwrap_or(1).max(1);
+            let consensus = (f64::from(u32::try_from(seen - 1).unwrap_or(0)) * 0.04).min(0.12);
+            let score = (base + consensus + authority_bonus(&hit.url)).min(1.0);
+            (score, matched, hit, content)
+        })
+        .filter(|(_, matched, _, _)| !has_query || *matched > 0)
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Domain diversity: keep at most `per_host_cap` of the highest-scoring sources
+    // per host, preserving the sorted order.
+    let mut per_host: HashMap<String, usize> = HashMap::new();
+    let cap = per_host_cap.max(1);
+    scored.retain(|(_, _, hit, _)| {
+        let host = host_of(&hit.url);
+        let count = per_host.entry(host).or_insert(0);
+        *count += 1;
+        *count <= cap
+    });
+    scored.truncate(max_sources.max(1));
+
+    scored
+        .into_iter()
+        .enumerate()
+        .map(|(index, (score, _matched, hit, content))| {
+            to_ranked(index + 1, hit, content, score, max_chars_per_source)
+        })
+        .collect()
+}
+
+/// Build a `RankedSource` from a scored hit (shared by both rerank paths).
+fn to_ranked(
+    rank: usize,
+    hit: &SearchHit,
+    content: &str,
+    score: f64,
+    max_chars: usize,
+) -> RankedSource {
+    RankedSource {
+        rank,
+        url: hit.url.clone(),
+        title: hit.title.clone(),
+        snippet: hit.snippet.clone(),
+        content: trim_to_chars(content, max_chars),
+        relevance: (score * 1000.0).round() / 1000.0,
+        engine: hit.engine.clone(),
+        domain: host_of(&hit.url),
+    }
+}
+
+/// Registrable-ish host of a URL: the authority between `scheme://` and the first
+/// `/`, `?`, or `#`, with any `user@` and `:port` stripped. Empty when unparseable.
+#[must_use]
+fn host_of(url: &str) -> String {
+    let after_scheme = url.split("://").nth(1).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    // Strip a :port (but keep IPv6 brackets intact).
+    let host = if host.starts_with('[') {
+        host.split(']').next().map_or(host, |h| &h[1..])
+    } else {
+        host.split(':').next().unwrap_or(host)
+    };
+    host.to_ascii_lowercase()
+}
+
+/// A tiny, capped authority nudge so official docs/known-good hosts edge out
+/// content farms at equal lexical relevance. Deliberately small (≤0.05) so the
+/// lexical signal always dominates.
+fn authority_bonus(url: &str) -> f64 {
+    let mut bonus: f64 = 0.0;
+    if url.starts_with("https://") {
+        bonus += 0.01;
+    }
+    let host = host_of(url);
+    const TRUSTED: &[&str] = &[
+        "docs.rs",
+        "developer.mozilla.org",
+        "wikipedia.org",
+        "github.com",
+        "stackoverflow.com",
+        "arxiv.org",
+    ];
+    if TRUSTED
+        .iter()
+        .any(|t| host == *t || host.ends_with(&format!(".{t}")))
+    {
+        bonus += 0.04;
+    }
+    bonus.min(0.05)
 }
 
 /// Score one hit against the query. Returns `(blended_score, matched_term_count)`
@@ -258,5 +378,49 @@ mod tests {
         let hits = vec![hit("a", "a", "a")];
         let ranked = rerank("", &hits, &[String::new()], 5, 100);
         assert_eq!(ranked.len(), 1);
+    }
+
+    #[test]
+    fn rerank_deep_enforces_domain_diversity() {
+        // Three strong results from ONE host + one from another; per_host_cap=2 must
+        // drop the third same-host result so the output spans sites.
+        let hits = vec![
+            hit("https://same.com/1", "rust async", "rust async tokio"),
+            hit("https://same.com/2", "rust async", "rust async tokio"),
+            hit("https://same.com/3", "rust async", "rust async tokio"),
+            hit("https://other.com/1", "rust async", "rust async tokio"),
+        ];
+        let contents = vec![
+            "rust async tokio".to_string(),
+            "rust async tokio".to_string(),
+            "rust async tokio".to_string(),
+            "rust async tokio".to_string(),
+        ];
+        let freq = HashMap::new();
+        let ranked = rerank_deep("rust async tokio", &hits, &contents, 10, 200, 2, &freq);
+        let same = ranked.iter().filter(|s| s.domain == "same.com").count();
+        assert_eq!(same, 2, "at most per_host_cap sources per host");
+        assert!(ranked.iter().any(|s| s.domain == "other.com"));
+    }
+
+    #[test]
+    fn rerank_deep_consensus_lifts_multi_query_hit() {
+        let hits = vec![
+            hit("https://a.com/x", "rust", "rust guide"),
+            hit("https://b.com/y", "rust", "rust guide"),
+        ];
+        let contents = vec!["rust guide".to_string(), "rust guide".to_string()];
+        // b.com surfaced from 3 sub-queries → consensus boost floats it above a.com.
+        let mut freq = HashMap::new();
+        freq.insert("https://b.com/y".to_string(), 3);
+        let ranked = rerank_deep("rust", &hits, &contents, 5, 200, 3, &freq);
+        assert_eq!(ranked[0].url, "https://b.com/y");
+    }
+
+    #[test]
+    fn host_of_strips_scheme_userinfo_and_port() {
+        assert_eq!(host_of("https://user@Docs.RS:443/x"), "docs.rs");
+        assert_eq!(host_of("http://example.com/path?q=1"), "example.com");
+        assert_eq!(host_of("https://[2001:db8::1]:8080/x"), "2001:db8::1");
     }
 }
