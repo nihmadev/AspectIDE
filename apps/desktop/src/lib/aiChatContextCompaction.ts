@@ -710,3 +710,29 @@ function buildCompactionDroppedReport(messages: AiChatMessage[]): ContextCompact
     .sort((left, right) => right.tokens - left.tokens)
     .slice(0, 12);
 }
+
+/**
+ * Reconcile a compaction result with the session's LIVE messages at apply time.
+ *
+ * The summarization await takes seconds; a send committed during that window
+ * (composer, queued "Send now", goal continuation) appends messages the
+ * compaction snapshot never saw. Blindly replacing with the compacted list
+ * would delete the new user message and the in-flight assistant shell — every
+ * subsequent stream update then no-ops on the missing id and the whole turn
+ * vanishes. Appends everything committed after the snapshot to the compacted
+ * result and reports whether such divergence happened (callers should skip the
+ * replace entirely when a turn is live — it was built from the uncompacted
+ * history anyway, so the checkpoint buys nothing and only risks divergence).
+ */
+export function reconcileCompactedMessages(
+  snapshot: readonly AiChatMessage[],
+  compacted: AiChatMessage[],
+  live: readonly AiChatMessage[],
+): { messages: AiChatMessage[]; divergedDuringCompaction: boolean } {
+  const snapshotIds = new Set(snapshot.map((message) => message.id));
+  const appended = live.filter((message) => !snapshotIds.has(message.id));
+  if (appended.length === 0) {
+    return { messages: compacted, divergedDuringCompaction: false };
+  }
+  return { messages: [...compacted, ...appended], divergedDuringCompaction: true };
+}

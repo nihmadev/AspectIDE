@@ -542,7 +542,17 @@ where
                     attempt += 1;
                     continue;
                 }
-                let text = response.text().await.unwrap_or_default();
+                // Bounded + cancellable: a proxy that sends error headers then
+                // stalls without a body would otherwise pin the turn forever —
+                // this is the only await here not already raced against Stop.
+                let text =
+                    match race_cancel(response.text(), Duration::from_secs(15), &should_cancel)
+                        .await
+                    {
+                        CancelRace::Ready(result) => result.unwrap_or_default(),
+                        CancelRace::Cancelled => return Err("cancelled".to_string()),
+                        CancelRace::TimedOut => String::new(),
+                    };
                 return Err(stream_response_error(status, &text));
             }
             break response;
@@ -556,10 +566,12 @@ where
     };
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    // Full decoded body, kept so a provider that ignores `stream:true` and returns a
-    // single non-SSE JSON object (some gateways do) can still be parsed below — the
+    // Full raw body BYTES, kept so a provider that ignores `stream:true` and returns
+    // a single non-SSE JSON object (some gateways do) can still be parsed below — the
     // SSE loop would otherwise find no `data:` events and finalize an empty answer.
-    let mut raw_body = String::new();
+    // Bytes, not per-chunk lossy decode: chunk boundaries split multibyte code points
+    // (Cyrillic/CJK/emoji) and per-chunk from_utf8_lossy would bake U+FFFD into them.
+    let mut raw_bytes: Vec<u8> = Vec::new();
     // Whether any SSE `data:` event was actually ingested. If not, raw_body is parsed
     // as a complete (non-streamed) response.
     let mut ingested_event = false;
@@ -599,8 +611,8 @@ where
         }
         let bytes = chunk.map_err(|error| stream_chunk_error(&error))?;
         // Keep a bounded copy of the raw body for the non-SSE fallback below.
-        if raw_body.len() < MAX_SSE_BUFFER {
-            raw_body.push_str(&String::from_utf8_lossy(&bytes));
+        if raw_bytes.len() < MAX_SSE_BUFFER {
+            raw_bytes.extend_from_slice(&bytes);
         }
         byte_tail.extend_from_slice(&bytes);
         // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
@@ -672,6 +684,20 @@ where
             accumulator.ingest(&value, &mut on_delta);
         }
     }
+    // A stream that closes right after `data: {...}\n` (no blank-line terminator)
+    // leaves its final frame — often the finish_reason/usage frame, or the last
+    // content token — in `buffer`. Ingest it too (matches stream_completion);
+    // a truncated partial-JSON remainder simply fails the parse and is ignored.
+    if !buffer.trim().is_empty() {
+        if let Some(data) = sse_event_data(buffer.trim()) {
+            if data.trim() != "[DONE]" {
+                if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                    ingested_event = true;
+                    accumulator.ingest(&value, &mut on_delta);
+                }
+            }
+        }
+    }
 
     // Non-SSE fallback: some gateways ignore `stream:true` and return a single plain
     // JSON object (no `data:` events). The SSE loops above then ingest nothing and the
@@ -679,7 +705,8 @@ where
     // stream it through on_delta so the answer renders. Handles both the Anthropic
     // shape ({content:[{type:text,…}]}) and the OpenAI shape ({choices:[…]}).
     if !ingested_event {
-        let trimmed = raw_body.trim();
+        let decoded = String::from_utf8_lossy(&raw_bytes);
+        let trimmed = decoded.trim();
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             let normalized = if anthropic && value.get("choices").is_none() {
                 crate::ai_anthropic::from_anthropic_response(&value)
@@ -760,35 +787,45 @@ struct StreamToolCall {
     arguments: String,
 }
 
+/// Detect a mid-stream error frame on an already-200 SSE stream: a top-level
+/// `error` object with a string `message`, `error` as a plain string, or a
+/// top-level string `message` when `choices` is absent (an object `message` —
+/// e.g. Anthropic's `message_start` frame — is NOT an error). Shared by the
+/// native-turn accumulator and the Tauri event path so BOTH fail the turn
+/// instead of finalizing a mid-stream provider error as a truncated success.
+fn sse_stream_error(value: &Value) -> Option<String> {
+    let msg = value
+        .get("error")
+        .and_then(|e| {
+            e.get("message")
+                .and_then(Value::as_str)
+                .or_else(|| e.as_str())
+        })
+        .or_else(|| {
+            // Some gateways send a top-level `{"message":"..."}` error shape.
+            if value.get("choices").is_none() {
+                value.get("message").and_then(Value::as_str)
+            } else {
+                None
+            }
+        })?;
+    let kind = value
+        .get("error")
+        .and_then(|e| e.get("code").or_else(|| e.get("type")))
+        .and_then(Value::as_str);
+    Some(match kind {
+        Some(k) => format!("AI provider stream error ({k}): {msg}"),
+        None => format!("AI provider stream error: {msg}"),
+    })
+}
+
 impl StreamAccumulator {
     fn ingest<F: FnMut(&str, &str)>(&mut self, value: &Value, on_delta: &mut F) {
         // OpenAI-compatible gateways can send `{"error":{...}}` on a 200 stream.
         // Capture the first one so the turn fails instead of returning empty content.
         if self.stream_error.is_none() {
-            let err_msg = value
-                .get("error")
-                .and_then(|e| {
-                    e.get("message")
-                        .and_then(Value::as_str)
-                        .or_else(|| e.as_str())
-                })
-                .or_else(|| {
-                    // Some gateways send a top-level `{"message":"..."}` error shape.
-                    if value.get("choices").is_none() {
-                        value.get("message").and_then(Value::as_str)
-                    } else {
-                        None
-                    }
-                });
-            if let Some(msg) = err_msg {
-                let kind = value
-                    .get("error")
-                    .and_then(|e| e.get("code").or_else(|| e.get("type")))
-                    .and_then(Value::as_str);
-                self.stream_error = Some(match kind {
-                    Some(k) => format!("AI provider stream error ({k}): {msg}"),
-                    None => format!("AI provider stream error: {msg}"),
-                });
+            if let Some(message) = sse_stream_error(value) {
+                self.stream_error = Some(message);
                 return;
             }
         }
@@ -1884,7 +1921,14 @@ async fn stream_completion(
                     attempt += 1;
                     continue;
                 }
-                let text = response.text().await.unwrap_or_default();
+                // Bounded + cancellable (matches every other await here): a
+                // stalled error body must not hang the turn or outlive a Stop.
+                let text = tokio::select! {
+                    _ = &mut cancel_rx => return Ok(StreamCompletion::Cancelled),
+                    body = timeout(Duration::from_secs(15), response.text()) => {
+                        body.map(Result::unwrap_or_default).unwrap_or_default()
+                    }
+                };
                 return Err(stream_response_error(status, &text));
             }
             break response;
@@ -1893,9 +1937,10 @@ async fn stream_completion(
 
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    // Full decoded body, kept so a provider that ignores `stream:true` and
+    // Full raw body BYTES (not per-chunk lossy decode — chunk boundaries split
+    // multibyte code points), kept so a provider that ignores `stream:true` and
     // returns a single non-SSE JSON object can still be parsed below.
-    let mut raw_body = String::new();
+    let mut raw_bytes: Vec<u8> = Vec::new();
     // Whether any SSE `data:` event was actually forwarded to the frontend.
     let mut ingested_event = false;
     // Carry an incomplete trailing UTF-8 sequence across chunks.
@@ -1915,8 +1960,8 @@ async fn stream_completion(
             break;
         };
         let bytes = chunk.map_err(|error| stream_chunk_error(&error))?;
-        if raw_body.len() < MAX_SSE_BUFFER {
-            raw_body.push_str(&String::from_utf8_lossy(&bytes));
+        if raw_bytes.len() < MAX_SSE_BUFFER {
+            raw_bytes.extend_from_slice(&bytes);
         }
         byte_tail.extend_from_slice(&bytes);
         // Drain byte_tail fully each chunk, handling partial multibyte sequences.
@@ -1967,7 +2012,8 @@ async fn stream_completion(
     // JSON object. Parse it and emit a synthetic chunk+done so the frontend
     // renders the answer instead of seeing an empty completed turn.
     if !ingested_event {
-        let trimmed = raw_body.trim();
+        let decoded = String::from_utf8_lossy(&raw_bytes);
+        let trimmed = decoded.trim();
         if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
             let normalized = if anthropic && value.get("choices").is_none() {
                 crate::ai_anthropic::from_anthropic_response(&value)
@@ -2104,6 +2150,13 @@ fn emit_stream_sse_event(
     let Ok(value) = serde_json::from_str::<Value>(&data) else {
         return Ok(false);
     };
+    // A mid-stream error frame ({"error":{...}} on a 200 stream) must fail the
+    // turn: forwarding it as a chunk would let the unconditional trailing "done"
+    // present a truncated answer as a successful completion. The Err propagates
+    // out of stream_completion and surfaces through the single "error" event.
+    if let Some(message) = sse_stream_error(&value) {
+        return Err(message);
+    }
     *ingested = true;
     emit_stream_event(
         app,

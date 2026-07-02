@@ -21,6 +21,14 @@ export type QueuedMessage = {
   text: string;
   mode: QueuedMessageMode;
   createdAt: number;
+  /**
+   * The live turn this recommendation was already injected into (mid-work
+   * fold-in). Stored HERE — in the module-level queue, not a component ref — so
+   * a panel remount during the turn cannot re-inject the same text. Self-heals:
+   * a dead turn's id never matches the next live turn, so an unconfirmed entry
+   * becomes injectable again exactly when a new turn starts.
+   */
+  injectedTurnId?: string;
 };
 
 type Listener = () => void;
@@ -61,6 +69,17 @@ export function updateQueuedMessage(id: string, patch: { text?: string; mode?: Q
     if (!text) return entry; // never blank a queued message via edit; delete it instead.
     changed = true;
     return { ...entry, text, mode: patch.mode ?? entry.mode };
+  });
+  if (changed) emit();
+}
+
+/** Record (or clear with `null`) the live turn an entry was injected into. */
+export function setQueuedMessageInjectedTurn(id: string, turnId: string | null): void {
+  let changed = false;
+  queue = queue.map((entry) => {
+    if (entry.id !== id) return entry;
+    changed = true;
+    return { ...entry, injectedTurnId: turnId ?? undefined };
   });
   if (changed) emit();
 }

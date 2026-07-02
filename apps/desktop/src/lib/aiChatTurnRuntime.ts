@@ -55,10 +55,18 @@ export function isActiveChatTurn(sessionId: string, generation: number, abortCon
     && abortControllersBySession.get(sessionId) === abortController;
 }
 
+/**
+ * Abort reason used when a NEW turn supersedes a running one (force-send, queued
+ * "Send now"). Callers must distinguish it from a user Stop: a superseded turn's
+ * session keeps running (the replacement turn is live), so goal runs and
+ * automatic-retry state must survive — only a real Stop kills them.
+ */
+export const TURN_SUPERSEDED = new DOMException("Turn superseded by a newer send", "AbortError");
+
 export function startAiChatTurn(sessionId: string, abortController: AbortController) {
   const previous = abortControllersBySession.get(sessionId);
   if (previous && previous !== abortController) {
-    previous.abort();
+    previous.abort(TURN_SUPERSEDED);
   }
   turnGenerationBySession.set(sessionId, (turnGenerationBySession.get(sessionId) ?? 0) + 1);
   abortControllersBySession.set(sessionId, abortController);

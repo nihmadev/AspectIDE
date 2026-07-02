@@ -164,10 +164,14 @@ export async function buildMessageDisplayAttachments(
       continue;
     }
     if (attachment.isImage) {
+      // A rejected read (backing file deleted/moved after attach) must not throw
+      // the whole send away — degrade to the same name-only card an oversized
+      // image gets. This runs BEFORE the send's try block, so a throw here would
+      // silently drop the message and leak the pending-send lock.
       const previewUrl =
         attachment.previewUrl?.startsWith("data:")
           ? attachment.previewUrl
-          : await readFileAsDataUrl(attachment.file, maxMessageImagePreviewBytes);
+          : await readFileAsDataUrl(attachment.file, maxMessageImagePreviewBytes).catch(() => undefined);
       if (previewUrl) {
         items.push({
           id: attachment.id,

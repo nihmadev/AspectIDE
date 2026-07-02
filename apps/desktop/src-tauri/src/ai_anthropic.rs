@@ -113,26 +113,25 @@ pub fn to_anthropic_request(openai: &Value) -> Value {
         out.insert("temperature".to_string(), temperature.clone());
     }
 
-    // Tools + tool choice. Anthropic has no `"none"` tool-choice type, so when the
-    // OpenAI caller disables tools (`tool_choice: "none"`) we omit both `tools` and
-    // `tool_choice` entirely: sending the tools array with an unsupported choice
-    // makes the Messages API reject the request instead of simply preventing tool
-    // use. The caller's sequencing constraint (`parallel_tool_calls: false`) is
-    // carried into Anthropic's `disable_parallel_tool_use` flag on the choice.
+    // Tools + tool choice. `tool_choice: "none"` maps to Anthropic's
+    // `{"type": "none"}` and the tools array is STILL sent: the Messages API
+    // rejects any request whose messages contain `tool_use`/`tool_result` blocks
+    // without a `tools` definition, and the recovery-synthesis call ("answer
+    // without tools now") always carries prior tool rounds. Omitting the array
+    // here used to 400 exactly those recovery calls. The caller's sequencing
+    // constraint (`parallel_tool_calls: false`) is carried into Anthropic's
+    // `disable_parallel_tool_use` flag on the choice (not valid on `none`).
     let tool_choice = openai.get("tool_choice");
-    let tools_disabled = matches!(tool_choice, Some(Value::String(value)) if value == "none");
-    if !tools_disabled {
-        if let Some(tools) = openai.get("tools").and_then(Value::as_array) {
-            let converted: Vec<Value> = tools.iter().filter_map(convert_tool).collect();
-            if !converted.is_empty() {
-                out.insert("tools".to_string(), Value::Array(converted));
-                let disable_parallel =
-                    openai.get("parallel_tool_calls").and_then(Value::as_bool) == Some(false);
-                out.insert(
-                    "tool_choice".to_string(),
-                    convert_tool_choice(tool_choice, disable_parallel),
-                );
-            }
+    if let Some(tools) = openai.get("tools").and_then(Value::as_array) {
+        let converted: Vec<Value> = tools.iter().filter_map(convert_tool).collect();
+        if !converted.is_empty() {
+            out.insert("tools".to_string(), Value::Array(converted));
+            let disable_parallel =
+                openai.get("parallel_tool_calls").and_then(Value::as_bool) == Some(false);
+            out.insert(
+                "tool_choice".to_string(),
+                convert_tool_choice(tool_choice, disable_parallel),
+            );
         }
     }
 
@@ -413,12 +412,17 @@ fn convert_tool(tool: &Value) -> Option<Value> {
     Some(out)
 }
 
-/// Map an `OpenAI` `tool_choice` onto an Anthropic one. `"none"` never reaches here —
-/// the caller omits tools for it. `disable_parallel` (from `parallel_tool_calls:
-/// false`) adds `disable_parallel_tool_use: true` so the caller's one-tool-per-turn
-/// constraint survives the protocol hop.
+/// Map an `OpenAI` `tool_choice` onto an Anthropic one. `"none"` becomes
+/// `{"type": "none"}` (tools stay defined so prior `tool_use`/`tool_result`
+/// blocks remain valid). `disable_parallel` (from `parallel_tool_calls: false`)
+/// adds `disable_parallel_tool_use: true` so the caller's one-tool-per-turn
+/// constraint survives the protocol hop — except on `none`, which accepts no
+/// extra fields.
 fn convert_tool_choice(choice: Option<&Value>, disable_parallel: bool) -> Value {
     let mut out = match choice {
+        Some(Value::String(value)) if value == "none" => {
+            return json!({ "type": "none" });
+        }
         Some(Value::String(value)) if value == "required" || value == "any" => {
             json!({ "type": "any" })
         }
@@ -531,20 +535,30 @@ mod tests {
     }
 
     #[test]
-    fn tool_choice_none_omits_tools_and_choice() {
-        // Anthropic has no "none" tool-choice type. Disabling tools must drop both
-        // `tools` and `tool_choice` so the request isn't rejected by the API.
+    fn tool_choice_none_keeps_tools_and_maps_to_none_type() {
+        // Recovery-synthesis regression: `tool_choice: "none"` must keep the tools
+        // array (messages with tool_use/tool_result blocks REQUIRE `tools`) and map
+        // to Anthropic's `{"type": "none"}` — omitting them 400s every recovery call
+        // after a tool round. `none` accepts no extra fields, so parallel_tool_calls
+        // must not attach disable_parallel_tool_use here.
         let openai = json!({
             "model": "claude-sonnet-4-5",
             "messages": [{ "role": "user", "content": "go" }],
             "tools": [{ "type": "function", "function": { "name": "Read", "parameters": {} } }],
             "tool_choice": "none",
+            "parallel_tool_calls": false,
         });
         let out = to_anthropic_request(&openai);
-        assert!(out.get("tools").is_none(), "tools must be omitted for none");
+        assert_eq!(
+            out["tools"][0]["name"], "Read",
+            "tools stay defined for none"
+        );
+        assert_eq!(out["tool_choice"]["type"], "none");
         assert!(
-            out.get("tool_choice").is_none(),
-            "tool_choice must be omitted for none"
+            out["tool_choice"]
+                .get("disable_parallel_tool_use")
+                .is_none(),
+            "none accepts no extra fields"
         );
     }
 

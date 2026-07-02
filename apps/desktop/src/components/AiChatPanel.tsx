@@ -23,6 +23,7 @@ import {
   compactChatHistory as runContextCompaction,
   pruneReducedTokenEstimate,
   pruneStaleToolOutputs,
+  reconcileCompactedMessages,
   shouldAutoCompactContext,
 } from "../lib/aiChatContextCompaction";
 import { loadProjectSlashCommands, type ProjectSlashCommand } from "../lib/aiChatProjectCommands";
@@ -96,7 +97,7 @@ import { applyMentionSelection, mentionMenuVisible, parseMentionQuery, searchMen
 import { buildPlanHandoffUserMessage, extractPlanHandoffPayload } from "../lib/aiChatPlanHandoff";
 import { clearPendingPlan, getPendingPlanForSession, getPendingPlansSnapshot, subscribePendingPlans } from "../lib/aiPendingPlan";
 import { getPendingQuestionForSession, getPendingQuestionsSnapshot, settlePendingQuestion, subscribePendingQuestions } from "../lib/aiPendingQuestion";
-import { buildQueuedMessagePayload, dequeueFirstForSession, enqueueChatMessage, getQueuedMessagesForSession, removeQueuedMessage, updateQueuedMessage, useAllQueuedMessages, type QueuedMessage } from "../lib/aiChatQueue";
+import { buildQueuedMessagePayload, dequeueFirstForSession, enqueueChatMessage, getQueuedMessagesForSession, removeQueuedMessage, setQueuedMessageInjectedTurn, updateQueuedMessage, useAllQueuedMessages, type QueuedMessage } from "../lib/aiChatQueue";
 import { AiChatQueuedMessages } from "./ai-chat/AiChatQueuedMessages";
 import { readEditorDocumentAttachment, readSelectionAttachment } from "../lib/aiChatDocumentAttachment";
 import { readChatAttachment, sendAiChatMessage } from "../lib/aiChatRuntime";
@@ -124,8 +125,9 @@ import {
   resolveAiToolApproval,
   startAiChatTurn,
   subscribeAiChatTurnRuntime,
+  TURN_SUPERSEDED,
 } from "../lib/aiChatTurnRuntime";
-import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision, AiToolApprovalRequest } from "../lib/aiChatTypes";
+import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision } from "../lib/aiChatTypes";
 import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
 import { isTauriRuntime, luxCommands } from "../lib/tauri";
 import { getActiveTurnId } from "../lib/aiActiveTurns";
@@ -555,12 +557,14 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
   const runCompaction = useCallback(async (force = false) => {
     if (!activeChatSession || !selectedProvider || !selectedModel || compacting || activeSessionBusy) return false;
+    const compactionSessionId = activeChatSession.id;
+    const snapshotMessages = activeChatSession.messages;
     setCompacting(true);
     setSendError(null);
     try {
       const result = await runContextCompaction({
-        chatSessionId: activeChatSession.id,
-        messages: activeChatSession.messages,
+        chatSessionId: compactionSessionId,
+        messages: snapshotMessages,
         compactionState: activeChatSession.contextCompaction ?? null,
         model: selectedModel,
         provider: selectedProvider,
@@ -570,14 +574,32 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         force,
       });
       if (result.compacted) {
-        replaceAiChatMessages(activeChatSession.id, result.messages, { contextCompaction: result.compactionState });
+        // The summarization ran for seconds; a send may have committed messages
+        // in that window. Replacing with the stale snapshot would wipe the new
+        // user message AND the in-flight assistant turn (its stream updates
+        // then no-op on the missing id). Reconcile instead — and when a turn is
+        // live, skip the replace entirely: it was built from the uncompacted
+        // history, so the checkpoint buys nothing and only risks divergence.
+        const liveMessages = useLuxStore.getState().aiChatSessions
+          .find((session) => session.id === compactionSessionId)?.messages ?? [];
+        const reconciled = reconcileCompactedMessages(snapshotMessages, result.messages, liveMessages);
+        const turnLive = getAiChatTurnRuntimeSnapshot().sendingSessionId === compactionSessionId
+          || pendingSendLockRef.current.has(compactionSessionId);
+        if (reconciled.divergedDuringCompaction && turnLive) {
+          return false;
+        }
+        replaceAiChatMessages(compactionSessionId, reconciled.messages, { contextCompaction: result.compactionState });
       } else {
         // Persist the cooldown/throttle state even when nothing was compacted: the
         // "no-reduction" path returns a fresh state carrying lastCompactedAt so the
         // expensive summarization isn't re-run on every subsequent over-threshold send.
         // Skip the write when the state is unchanged (other skip reasons return it as-is).
+        // Write the LIVE messages, not the pre-await snapshot — a send committed
+        // during the summarization must not be wiped by a state-only persist.
         if (result.compactionState && result.compactionState !== (activeChatSession.contextCompaction ?? null)) {
-          replaceAiChatMessages(activeChatSession.id, result.messages, { contextCompaction: result.compactionState });
+          const liveMessages = useLuxStore.getState().aiChatSessions
+            .find((session) => session.id === compactionSessionId)?.messages ?? result.messages;
+          replaceAiChatMessages(compactionSessionId, liveMessages, { contextCompaction: result.compactionState });
         }
         if (force) {
           const reasonKey = result.reason === "too-few-messages"
@@ -730,10 +752,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     trimCancelledAssistantShell(sessionId, replaceAiChatMessages);
   }, [activeAiChatSessionId, activeStatus, replaceAiChatMessages, sendingSessionId, setAiChatSessionStatus]);
 
-  const requestToolApproval = useCallback((request: AiToolApprovalRequest) => {
-    return requestAiToolApproval(request.id);
-  }, []);
-
   const resolveToolApproval = useCallback((approvalId: string, decision: AiToolApprovalDecision) => {
     resolveAiToolApproval(approvalId, decision);
   }, []);
@@ -780,9 +798,13 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       // yet (checkpoint/compaction awaits): treat it as busy so a rapid second send
       // can't double-fire during that window.
       || pendingSendLockRef.current.has(sessionId);
+    // targetSessionBusy is the ONLY check reading the fresh runtime snapshot and
+    // the pending-send lock (render-time activeSessionBusy stays false through the
+    // pre-turn awaits) — it must gate the composer path too, or a rapid second
+    // Enter double-sends and supersedes the first turn.
     const sendBlocked = options?.sessionId
       ? targetSessionClosed || targetSessionBusy
-      : activeSessionClosed || activeSessionBusy;
+      : activeSessionClosed || activeSessionBusy || targetSessionBusy;
 
     if (!isInternalSend) {
       if (!nextMessage && attachments.length === 0) return;
@@ -1020,7 +1042,17 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           abortSignal: abortController.signal,
         });
         if (compacted.compacted) {
-          replaceAiChatMessages(sessionId, compacted.messages, { contextCompaction: compacted.compactionState });
+          // A force-send (queued "Send now", goal continuation) may have started
+          // a turn during the summarization await — reconcile with the live
+          // messages so its user message and streaming assistant shell survive,
+          // and skip the store replace entirely when such a turn is running.
+          const liveMessages = useLuxStore.getState().aiChatSessions
+            .find((session) => session.id === sessionId)?.messages ?? [];
+          const reconciled = reconcileCompactedMessages(workingHistory, compacted.messages, liveMessages);
+          if (!(reconciled.divergedDuringCompaction
+            && getAiChatTurnRuntimeSnapshot().sendingSessionId === sessionId)) {
+            replaceAiChatMessages(sessionId, reconciled.messages, { contextCompaction: compacted.compactionState });
+          }
           workingHistory = compacted.messages;
         }
       } catch (compactionError) {
@@ -1046,7 +1078,18 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     // at the top of the component — see the note by the other store selectors).
     const { terminal, terminalOutputBuffers, terminalSessions, activeTerminalId } = useLuxStore.getState();
     const currentAttachments = overrideMessage && !options?.useComposerAttachments ? [] : attachments;
-    const messageAttachments = isGoalOrchestration ? [] : await buildMessageDisplayAttachments(currentAttachments);
+    let messageAttachments: Awaited<ReturnType<typeof buildMessageDisplayAttachments>>;
+    try {
+      messageAttachments = isGoalOrchestration ? [] : await buildMessageDisplayAttachments(currentAttachments);
+    } catch (error) {
+      // Defense in depth: this await runs before the turn's try/finally, so a
+      // throw here must release the pending-send reservation and surface the
+      // error — otherwise the send silently vanishes and the session is locked
+      // out of every future non-forced send.
+      pendingSendLockRef.current.delete(sessionId);
+      setSendError(classifyAiChatError(error, t));
+      return;
+    }
     const userMessageId = crypto.randomUUID();
     let turnCheckpointId: string | undefined;
     let turnFileCheckpointId: string | undefined;
@@ -1229,7 +1272,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           if (notice) setAiRetryNotice(sessionId, notice);
           else clearAiRetryNotice(sessionId);
         },
-        onToolApproval: requestToolApproval,
+        // Tag each approval with THIS turn's session + generation: defaulting to
+        // the global sendingSessionId would hand ownership to whichever session
+        // sent last, so finishing that session would silently auto-reject this
+        // session's pending approval.
+        onToolApproval: (request) => requestAiToolApproval(request.id, sessionId, turnGeneration),
         onContextBudgetReport: (report) => {
           if (!isActiveTurn()) return;
           setAiChatSessionContextBudgetReport(sessionId, report);
@@ -1273,11 +1320,14 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         clearTimeout(pendingContinuation);
         goalContinuationTimersRef.current.delete(sessionId);
       }
-      if (abortController.signal.aborted) {
-        // User pressed Stop — the only thing that ends Automatic's retry loop.
+      if (abortController.signal.aborted && abortController.signal.reason !== TURN_SUPERSEDED) {
+        // User pressed Stop (or /undo, edit-resend, dispose) — the only things
+        // that end Automatic's retry loop. A supersede (force-send / queued
+        // "Send now" replacing this turn) is NOT a Stop: the replacement turn is
+        // live and the goal run must survive for its continuation evaluation.
         resetAutomaticRetry(sessionId);
         stopGoalRun(sessionId);
-      } else {
+      } else if (!abortController.signal.aborted) {
         const sessionAfterTurn = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === sessionId);
         const turnFailed = sessionAfterTurn?.status === "error";
         const agentMode = useLuxStore.getState().aiPreferences.agentMode;
@@ -1441,7 +1491,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         }
       }
     }
-  }, [activeChatSession?.id, activeDocument, activeSessionBusy, activeSessionClosed, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, projectInstructions, replaceAiChatMessages, requestToolApproval, resizeComposerTextarea, runCompaction, selectedAgent, selectedModel, selectedProvider, setAiChatSessionContextBudgetReport, setAiChatSessionStatus, t, updateAiChatMessage, updateMessage, workspace]);
+  }, [activeChatSession?.id, activeDocument, activeSessionBusy, activeSessionClosed, aiPreferences, appendAiChatMessage, attachments, createAiChatSession, locale, message, openDocuments, projectInstructions, replaceAiChatMessages, resizeComposerTextarea, runCompaction, selectedAgent, selectedModel, selectedProvider, setAiChatSessionContextBudgetReport, setAiChatSessionStatus, t, updateAiChatMessage, updateMessage, workspace]);
 
   // Keep the freshest handleSend instance reachable from the deferred goal-continuation
   // timer so a delayed continuation turn picks up current provider/model/openDocuments/
@@ -1761,7 +1811,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     if (!isTauriRuntime()) return;
     for (const entry of allQueuedMessages) {
       if (entry.mode !== "recommendation") continue;
-      if (injectingRef.current.has(entry.id)) continue;
       const session = aiChatSessions.find((candidate) => candidate.id === entry.sessionId);
       if (!session || session.closedAt) continue;
       const running = sendingSessionId === entry.sessionId || isAiChatSessionBusyStatus(session.status);
@@ -1771,10 +1820,16 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       // as a "recommendation" and retry on the next tick instead of mis-routing it.
       const turnId = getActiveTurnId(entry.sessionId);
       if (!turnId) continue;
+      // In-flight is tracked on the queue entry itself (module state), not just a
+      // component ref: a panel remount mid-turn would reset the ref and re-inject
+      // the same text into the live Rust loop. Keyed by turn id so an entry left
+      // unconfirmed by a dead turn becomes injectable again for the next turn.
+      if (entry.injectedTurnId === turnId || injectingRef.current.has(entry.id)) continue;
       // Mark in-flight BEFORE the await so a re-render can't double-inject. The chip
       // is NOT removed here — it is removed only when Rust confirms the fold-in
       // (onUserMessageInjected), so a turn that ends before the drain never loses it.
       injectingRef.current.add(entry.id);
+      setQueuedMessageInjectedTurn(entry.id, turnId);
       const pending = injectedTextBySessionRef.current.get(entry.sessionId) ?? [];
       pending.push(entry.text);
       injectedTextBySessionRef.current.set(entry.sessionId, pending);
@@ -1783,6 +1838,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           // Inject call itself failed — un-track so the end-of-turn drain re-sends it
           // as a follow-up turn (flip to "queued") instead of stranding it.
           injectingRef.current.delete(entry.id);
+          setQueuedMessageInjectedTurn(entry.id, null);
           const list = injectedTextBySessionRef.current.get(entry.sessionId);
           if (list) {
             const at = list.indexOf(entry.text);

@@ -333,6 +333,12 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           break;
         }
         case "turnError":
+          // Tokens spent by a failed/cancelled turn are still real spend: Rust
+          // emits TurnUsage just before TurnError, so flush it to the store here
+          // — settleReject alone would discard it from the cost log and budgets.
+          if (assistantMessage.turnUsage) {
+            input.onAssistantMessageUpdate(messageId, { turnUsage: assistantMessage.turnUsage });
+          }
           settleReject(new Error(event.error));
           break;
         case "turnRetry":
@@ -349,6 +355,9 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           input.onStatusChange?.("thinking");
           break;
         case "turnCancelled":
+          if (assistantMessage.turnUsage) {
+            input.onAssistantMessageUpdate(messageId, { turnUsage: assistantMessage.turnUsage });
+          }
           settleReject(new DOMException("AI request was cancelled", "AbortError"));
           break;
       }

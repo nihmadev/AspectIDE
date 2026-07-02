@@ -105,13 +105,62 @@ fn pending_injections() -> &'static Mutex<HashMap<String, VecDeque<String>>> {
 /// when the cap is hit). Prevents a flood of staged messages from exploding context.
 const MAX_INJECTIONS_PER_TURN: usize = 16;
 
+/// The set of `session_id:turn_id` keys whose turn loop is currently running.
+/// `enqueue_injection` refuses keys that aren't live, so a UI inject racing the
+/// end of a turn can't create a map entry no exit path will ever clear (leak).
+fn live_turns() -> &'static Mutex<HashSet<String>> {
+    static LIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    LIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// RAII marker for a running turn: registers `session_id:turn_id` as live on
+/// creation and removes it on drop, so EVERY exit path of `ai_run_turn` —
+/// including early returns and future ones — closes the injection window.
+struct LiveTurnGuard {
+    key: String,
+}
+
+impl LiveTurnGuard {
+    fn register(session_id: &str, turn_id: &str) -> Self {
+        let key = format!("{session_id}:{turn_id}");
+        if let Ok(mut live) = live_turns().lock() {
+            live.insert(key.clone());
+        }
+        Self { key }
+    }
+}
+
+impl Drop for LiveTurnGuard {
+    fn drop(&mut self) {
+        if let Ok(mut live) = live_turns().lock() {
+            live.remove(&self.key);
+        }
+        // Sweep any injections staged for this turn that were never drained —
+        // the turn is over, so they can only leak (the UI re-queues undelivered
+        // recommendations for the next turn on its side).
+        if let Ok(mut map) = pending_injections().lock() {
+            map.remove(&self.key);
+        }
+    }
+}
+
 /// Queue a user message for injection into the running turn identified by
-/// `session_id` + `turn_id`. Silently drops messages beyond the per-turn cap.
+/// `session_id` + `turn_id`. Silently drops messages beyond the per-turn cap, and
+/// refuses turns that are not live (racing the end of a turn would otherwise leak
+/// a permanent map entry and buffer text no one will ever deliver).
 pub fn enqueue_injection(session_id: &str, turn_id: &str, text: String) {
     if text.trim().is_empty() {
         return;
     }
     let key = format!("{session_id}:{turn_id}");
+    // Hold the live-turn lock across the insert (same live→pending lock order as
+    // LiveTurnGuard::drop) so the guard can't sweep between our check and insert.
+    let Ok(live) = live_turns().lock() else {
+        return;
+    };
+    if !live.contains(&key) {
+        return;
+    }
     if let Ok(mut map) = pending_injections().lock() {
         let queue = map.entry(key).or_default();
         if queue.len() < MAX_INJECTIONS_PER_TURN {
@@ -841,6 +890,10 @@ pub async fn ai_run_turn(
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let started_at = std::time::Instant::now();
+    // Mark this turn live for the whole function (RAII): enqueue_injection only
+    // accepts live turns, and the guard's Drop sweeps undrained injections on
+    // EVERY exit path — no more hand-placed clear calls to forget.
+    let _live_turn = LiveTurnGuard::register(&input.session_id, &turn_id);
     // Clamp to [1, 128]: a limit of 0 would skip the loop entirely and emit a
     // fake "Done." success with no model call, so guarantee at least one round.
     let max_rounds = input.tool_round_limit.unwrap_or(32).clamp(1, 128) as usize;
@@ -932,6 +985,14 @@ pub async fn ai_run_turn(
         if is_turn_cancelled(&turn_id) {
             clear_turn_cancelled(&turn_id);
             clear_injections(&input.session_id, &turn_id); // F5: clean on every exit
+            emit_accumulated_usage(
+                &app,
+                &turn_id,
+                usage_prompt,
+                usage_completion,
+                usage_total,
+                usage_cached,
+            );
             let _ = emit_turn_event(
                 &app,
                 &TurnEvent::TurnError {
@@ -1031,6 +1092,14 @@ pub async fn ai_run_turn(
                 // the clear-on-finish path below).
                 clear_turn_cancelled(&turn_id);
                 clear_injections(&input.session_id, &turn_id); // F5: clean on every exit
+                emit_accumulated_usage(
+                    &app,
+                    &turn_id,
+                    usage_prompt,
+                    usage_completion,
+                    usage_total,
+                    usage_cached,
+                );
                 let _ = emit_turn_event(
                     &app,
                     &TurnEvent::TurnError {
@@ -1074,6 +1143,14 @@ pub async fn ai_run_turn(
         if is_turn_cancelled(&turn_id) {
             clear_turn_cancelled(&turn_id);
             clear_injections(&input.session_id, &turn_id); // F5: clean on every exit
+            emit_accumulated_usage(
+                &app,
+                &turn_id,
+                usage_prompt,
+                usage_completion,
+                usage_total,
+                usage_cached,
+            );
             let _ = emit_turn_event(
                 &app,
                 &TurnEvent::TurnError {
@@ -1165,7 +1242,7 @@ pub async fn ai_run_turn(
         };
 
         // Execute each tool call.
-        for tc in &assistant.tool_calls {
+        for (tc_index, tc) in assistant.tool_calls.iter().enumerate() {
             let _ = emit_turn_event(
                 &app,
                 &TurnEvent::ToolCallStarted {
@@ -1305,6 +1382,14 @@ pub async fn ai_run_turn(
             if is_turn_cancelled(&turn_id) {
                 clear_turn_cancelled(&turn_id);
                 clear_injections(&input.session_id, &turn_id); // F5: clean on every exit
+                emit_accumulated_usage(
+                    &app,
+                    &turn_id,
+                    usage_prompt,
+                    usage_completion,
+                    usage_total,
+                    usage_cached,
+                );
                 let _ = emit_turn_event(
                     &app,
                     &TurnEvent::TurnError {
@@ -1323,6 +1408,19 @@ pub async fn ai_run_turn(
                 || turn_tool_calls >= TURN_TOOL_CALL_BUDGET
             {
                 tool_budget_exceeded = true;
+                // Every remaining tool_call_id in this batch must still get a tool
+                // response, and it must come BEFORE the user-role notice: OpenAI
+                // rejects an assistant tool_calls message whose ids aren't each
+                // answered by a directly-following tool message, and the Anthropic
+                // translation needs a tool_result per tool_use block. Without these
+                // stubs the recovery synthesis below 400s and the turn's work is lost.
+                for skipped in &assistant.tool_calls[tc_index + 1..] {
+                    messages.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": skipped.id,
+                        "content": "{\"error\":\"skipped: turn tool budget reached\"}",
+                    }));
+                }
                 messages.push(serde_json::json!({
                     "role": "user",
                     "content": format!(
@@ -1435,6 +1533,14 @@ pub async fn ai_run_turn(
                 if is_turn_cancelled(&turn_id) {
                     clear_turn_cancelled(&turn_id);
                     clear_injections(&input.session_id, &turn_id);
+                    emit_accumulated_usage(
+                        &app,
+                        &turn_id,
+                        usage_prompt,
+                        usage_completion,
+                        usage_total,
+                        usage_cached,
+                    );
                     let _ = emit_turn_event(
                         &app,
                         &TurnEvent::TurnError {
@@ -1467,6 +1573,14 @@ pub async fn ai_run_turn(
                 // with stale content from an earlier round (F3 — correctness).
                 clear_turn_cancelled(&turn_id);
                 clear_injections(&input.session_id, &turn_id);
+                emit_accumulated_usage(
+                    &app,
+                    &turn_id,
+                    usage_prompt,
+                    usage_completion,
+                    usage_total,
+                    usage_cached,
+                );
                 let _ = emit_turn_event(
                     &app,
                     &TurnEvent::TurnError {
@@ -1484,22 +1598,14 @@ pub async fn ai_run_turn(
         final_content =
             "The turn produced no answer. Press **Retry** or rephrase your request.".to_string();
     }
-    if usage_prompt > 0 || usage_completion > 0 || usage_total > 0 {
-        let _ = emit_turn_event(
-            &app,
-            &TurnEvent::TurnUsage {
-                turn_id: turn_id.clone(),
-                prompt_tokens: usage_prompt,
-                completion_tokens: usage_completion,
-                total_tokens: if usage_total > 0 {
-                    usage_total
-                } else {
-                    usage_prompt + usage_completion
-                },
-                cached_prompt_tokens: usage_cached,
-            },
-        );
-    }
+    emit_accumulated_usage(
+        &app,
+        &turn_id,
+        usage_prompt,
+        usage_completion,
+        usage_total,
+        usage_cached,
+    );
     // Turn finished normally — drop any stale cancellation flag for this id and
     // discard anything staged but not yet drained (it would target a dead turn;
     // the frontend re-queues it for the next turn instead).
@@ -1516,6 +1622,37 @@ pub async fn ai_run_turn(
     );
 
     Ok(())
+}
+
+/// Emit the turn's accumulated token usage if any was recorded. Called on the
+/// success path AND before every `TurnError` exit — tokens spent by a failed or
+/// cancelled turn are still real spend, so the cost log and goal-run budget must
+/// see them (silently discarding them undercounts both).
+fn emit_accumulated_usage(
+    app: &tauri::AppHandle,
+    turn_id: &str,
+    usage_prompt: u64,
+    usage_completion: u64,
+    usage_total: u64,
+    usage_cached: u64,
+) {
+    if usage_prompt == 0 && usage_completion == 0 && usage_total == 0 {
+        return;
+    }
+    let _ = emit_turn_event(
+        app,
+        &TurnEvent::TurnUsage {
+            turn_id: turn_id.to_string(),
+            prompt_tokens: usage_prompt,
+            completion_tokens: usage_completion,
+            total_tokens: if usage_total > 0 {
+                usage_total
+            } else {
+                usage_prompt + usage_completion
+            },
+            cached_prompt_tokens: usage_cached,
+        },
+    );
 }
 
 /// Cancel a running native turn — signals stop and aborts pending approvals.
@@ -2880,6 +3017,12 @@ async fn execute_tool(
             // F2: check emit success before awaiting; a missing frontend card would
             // otherwise cause the turn to hang forever.
             let rx = register_question(turn_id, &tc.id);
+            // TOCTOU guard (same as require_tool_approval): a Stop landing before
+            // this registration swept an empty map — re-check after registering.
+            if is_turn_cancelled(turn_id) {
+                cancel_questions_for_turn(turn_id);
+                return Err("AskUser cancelled: the turn was stopped by the user.".to_string());
+            }
             let _ = emit_turn_event(
                 app,
                 &TurnEvent::StatusChange {
@@ -4600,6 +4743,15 @@ async fn require_tool_approval(
     // frontend listener and awaiting forever would deadlock the turn. Clean up
     // the registered channel and return a recoverable error instead.
     let rx = register_approval(turn_id, &tc.id);
+    // TOCTOU guard: a Stop that landed before the registration above would have
+    // swept an empty channel map, leaving this wait to burn the full timeout.
+    // Checking AFTER registration closes the race in every interleaving.
+    if is_turn_cancelled(turn_id) {
+        cancel_approvals_for_turn(turn_id);
+        return Err(format!(
+            "{tool} cancelled: the turn was stopped by the user."
+        ));
+    }
     if let Err(emit_err) = emit_turn_event(
         app,
         &TurnEvent::ApprovalRequired {
