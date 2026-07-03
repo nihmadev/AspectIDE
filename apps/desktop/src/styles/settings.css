@@ -580,6 +580,11 @@
 }
 
 .settings-toggle-field {
+  /* Anchor for the visually-hidden checkbox below: without this its containing
+     block is the fixed .settings-dialog, so the input renders at the dialog's
+     top-left corner and clicking the label focus-scrolls the whole settings
+     list back to the top. */
+  position: relative;
   grid-template-columns: minmax(0, 1fr) auto;
   cursor: pointer;
 }

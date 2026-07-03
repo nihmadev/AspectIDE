@@ -1856,6 +1856,159 @@ fn tool_names_from_defs(tools: &[serde_json::Value]) -> std::collections::HashSe
         .collect()
 }
 
+/// Lowercase a tool name and strip separators so `str_replace_editor`,
+/// `StrReplace` and `strreplace` all compare equal.
+fn normalize_tool_name(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
+
+/// Tool names models hallucinate from OTHER harnesses (Claude Code, Cursor,
+/// `OpenAI` tool sets) mapped to the Lux tool that actually does the job. Keyed
+/// by `normalize_tool_name` output. Returning the redirect sentence directly
+/// keeps the rejection message a single self-correcting instruction.
+fn harness_alias_hint(normalized: &str) -> Option<&'static str> {
+    Some(match normalized {
+        "toolsearch" => {
+            "There is no deferred tool loading in Lux — every callable tool is already in this request's tools array. For web research use WebResearch or MultiWebResearch; WebFetch for a known URL; SemanticSearch/Grep for code."
+        }
+        "bash" | "exec" | "execcommand" | "runcommand" | "runterminalcmd" | "runshellcommand" => {
+            "Use Shell (one single-line command; cmd.exe /C on Windows)."
+        }
+        "edit" | "multiedit" | "editfile" | "strreplaceeditor" | "applypatch" | "applydiff" => {
+            "Use StrReplace for one in-file replacement, or PatchEngine for a multi-file batch."
+        }
+        "websearch" | "searchweb" | "googlesearch" | "google" | "search" => {
+            "Use WebResearch (open web question) or MultiWebResearch (several facets in parallel); SemanticSearch/Grep for code."
+        }
+        "askuserquestion" | "askfollowupquestion" => "Use AskUser.",
+        "readfile" | "openfile" | "cat" | "viewfile" | "view" => {
+            "Use Read (source/text) or InspectFile (tables/PDF/Office/archives/media/binaries)."
+        }
+        "ls" | "listdir" | "listdirectory" | "listfiles" => {
+            "Use Glob (e.g. pattern \"src/*\")."
+        }
+        "agent" | "subagent" | "spawnagent" | "dispatchagent" | "workflow" => {
+            "Use Task to run an isolated subagent."
+        }
+        "writefile" | "createfile" | "notebookedit" => "Use Write.",
+        "codebasesearch" => "Use SemanticSearch.",
+        "fetch" | "curl" | "httpget" | "fetchurl" => "Use WebFetch with the exact URL.",
+        "skill" | "useskillfile" => "Use ListSkills to discover skills, then UseSkill to run one.",
+        "sendmessage" => "Use AgentMessage (post/read on the shared agent board).",
+        _ => return None,
+    })
+}
+
+/// Rank the allowlisted tools closest to a mistyped name (case/separator
+/// mangling first, then containment, then shared prefix). Returns up to 3.
+fn closest_tool_names(target: &str, candidates: &std::collections::HashSet<String>) -> Vec<String> {
+    let t = normalize_tool_name(target);
+    if t.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, &String)> = candidates
+        .iter()
+        .filter_map(|c| {
+            let n = normalize_tool_name(c);
+            let score = if n == t {
+                1000
+            } else if n.contains(&t) || t.contains(&n) {
+                500_usize.saturating_sub(n.len().abs_diff(t.len()))
+            } else {
+                let prefix = n.bytes().zip(t.bytes()).take_while(|(a, b)| a == b).count();
+                if prefix >= 4 {
+                    prefix * 10
+                } else {
+                    0
+                }
+            };
+            (score > 0).then_some((score, c))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    scored.into_iter().take(3).map(|(_, c)| c.clone()).collect()
+}
+
+/// Build the rejection message for a tool call whose name is not in the
+/// allowlist. The cases are distinct because the message steers the model's
+/// NEXT action: a tool that exists but is mode-gated ("switch modes or finish
+/// read-only"), a Browser tool blocked only by the browser toggle ("disabled in
+/// settings"), a tool withheld from a read-only subagent, and a name that
+/// exists in NO Lux mode — usually hallucinated from another assistant's
+/// harness — which must say "does not exist" (the old blanket "not available in
+/// this mode" made models believe the tool was real and merely locked, so they
+/// stalled or asked to switch modes instead of picking the Lux equivalent).
+///
+/// `agent_mode`/`browser_enabled` describe the request whose definitions built
+/// `allowed` — for a read-only subagent `allowed` is narrower than the parent
+/// mode's defs, which is detected below rather than assumed from the mode.
+fn tool_rejection_error(
+    name: &str,
+    agent_mode: &str,
+    browser_enabled: bool,
+    allowed: &std::collections::HashSet<String>,
+) -> String {
+    if let Some((server, _)) = name
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+    {
+        return format!(
+            "{name} is not attached to this request: MCP tools need Agent or Automatic mode and a connected `{server}` MCP server (see McpManage). Use the tools in this request's tools array instead."
+        );
+    }
+    // Full universe (most permissive mode + browser on): distinguishes "exists
+    // but gated" from "does not exist anywhere in Lux".
+    let universe = tool_names_from_defs(&crate::ai_tool_defs::runtime_tool_definitions(
+        "automatic",
+        true,
+    ));
+    if universe.contains(name) {
+        let mode_defs_with_browser = tool_names_from_defs(
+            &crate::ai_tool_defs::runtime_tool_definitions(agent_mode, true),
+        );
+        if mode_defs_with_browser.contains(name) {
+            // The mode itself offers this tool — so the block came from either
+            // the browser toggle or a narrower (read-only subagent) allowlist.
+            if !browser_enabled
+                && !tool_names_from_defs(&crate::ai_tool_defs::runtime_tool_definitions(
+                    agent_mode, false,
+                ))
+                .contains(name)
+            {
+                return format!(
+                    "{name} is blocked: browser automation is disabled in Lux settings (Settings → AI → Browser). Do not retry Browser tools; continue without the browser or ask the user to enable it."
+                );
+            }
+            return format!(
+                "{name} is not available in this read-only context and was blocked by the tool allowlist. Do not retry it; finish with the read-only tools attached to this request."
+            );
+        }
+        return format!(
+            "{name} is not available in {agent_mode} mode and was blocked by the tool allowlist. It exists only in Agent/Automatic mode — do not retry it here; finish with the read-only tools attached to this request or ask the user to switch modes."
+        );
+    }
+    let mut message = format!(
+        "Unknown tool {name} — it does not exist in Lux in ANY mode (that name comes from a different assistant's harness). "
+    );
+    if let Some(hint) = harness_alias_hint(&normalize_tool_name(name)) {
+        message.push_str(hint);
+    } else {
+        let suggestions = closest_tool_names(name, allowed);
+        if suggestions.is_empty() {
+            message.push_str(
+                "Pick a tool from this request's tools array — that list is complete and final.",
+            );
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(message, "Did you mean: {}?", suggestions.join(", "));
+        }
+    }
+    message
+}
+
 /// Read-before-edit guard. An edit against an **existing** file must be preceded
 /// by a `Read`/`InspectFile` of that file in the same session, so the model never
 /// mutates content it hasn't seen. Editing a path that does not yet exist (a
@@ -1945,10 +2098,15 @@ async fn execute_tool(
     // F4: hard-enforce mode allowlist — reject tool calls whose name was not in the
     // definitions sent to the model. A compromised proxy or malformed response cannot
     // route Write/Shell/McpManage into plan/ask modes by naming them in the response.
+    // The error text distinguishes mode-gated / browser-disabled / nonexistent names
+    // and points at the Lux equivalent, so the model self-corrects in ONE round
+    // instead of retrying or concluding the capability is absent.
     if !allowed_tool_names.is_empty() && !allowed_tool_names.contains(&tc.name) {
-        return Err(format!(
-            "{} is not available in {} mode and was blocked by the tool allowlist.",
-            tc.name, input.agent_mode
+        return Err(tool_rejection_error(
+            &tc.name,
+            &input.agent_mode,
+            input.agent_browser_enabled,
+            allowed_tool_names,
         ));
     }
 
@@ -6065,6 +6223,100 @@ mod tests {
                 "StrReplace expected in {mode} allowlist"
             );
         }
+    }
+
+    fn agent_allowlist() -> std::collections::HashSet<String> {
+        tool_names_from_defs(&crate::ai_tool_defs::runtime_tool_definitions(
+            "agent", false,
+        ))
+    }
+
+    #[test]
+    fn rejection_message_nonexistent_tool_says_does_not_exist() {
+        // A name from another harness (Claude Code's ToolSearch) exists in NO
+        // Lux mode: the message must say so and redirect to the Lux equivalent,
+        // NOT claim it is merely mode-gated (which stalls the model).
+        let msg = tool_rejection_error("ToolSearch", "agent", false, &agent_allowlist());
+        assert!(msg.contains("does not exist in Lux in ANY mode"), "{msg}");
+        assert!(msg.contains("WebResearch"), "{msg}");
+        assert!(!msg.contains("not available in agent mode"), "{msg}");
+    }
+
+    #[test]
+    fn rejection_message_harness_aliases_redirect() {
+        let allowed = agent_allowlist();
+        for (foreign, lux) in [
+            ("Bash", "Shell"),
+            ("Edit", "StrReplace"),
+            ("WebSearch", "WebResearch"),
+            ("read_file", "Read"),
+            ("codebase_search", "SemanticSearch"),
+        ] {
+            let msg = tool_rejection_error(foreign, "agent", false, &allowed);
+            assert!(
+                msg.contains(lux),
+                "{foreign} should redirect to {lux}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejection_message_mode_gated_tool_names_the_gate() {
+        // Shell IS a real Lux tool, just absent from plan mode — the message
+        // must present it as mode-gated, not nonexistent.
+        let plan_allowed = tool_names_from_defs(&crate::ai_tool_defs::runtime_tool_definitions(
+            "plan", false,
+        ));
+        let msg = tool_rejection_error("Shell", "plan", false, &plan_allowed);
+        assert!(msg.contains("not available in plan mode"), "{msg}");
+        assert!(msg.contains("Agent/Automatic"), "{msg}");
+        assert!(!msg.contains("does not exist"), "{msg}");
+    }
+
+    #[test]
+    fn rejection_message_browser_disabled_names_the_setting() {
+        // BrowserOpen exists in agent mode, but only with the browser toggle on:
+        // blame the setting, not the mode.
+        let msg = tool_rejection_error("BrowserOpen", "agent", false, &agent_allowlist());
+        assert!(msg.contains("disabled in Lux settings"), "{msg}");
+        assert!(!msg.contains("does not exist"), "{msg}");
+    }
+
+    #[test]
+    fn rejection_message_mcp_tool_explains_requirements() {
+        let msg = tool_rejection_error(
+            "mcp__github__create_issue",
+            "plan",
+            false,
+            &tool_names_from_defs(&crate::ai_tool_defs::runtime_tool_definitions(
+                "plan", false,
+            )),
+        );
+        assert!(
+            msg.contains("MCP tools need Agent or Automatic mode"),
+            "{msg}"
+        );
+        assert!(msg.contains("`github`"), "{msg}");
+    }
+
+    #[test]
+    fn closest_tool_names_finds_case_and_separator_mangles() {
+        let allowed = agent_allowlist();
+        // Exact-after-normalization match ranks first.
+        assert_eq!(
+            closest_tool_names("str_replace", &allowed)
+                .first()
+                .map(String::as_str),
+            Some("StrReplace")
+        );
+        assert_eq!(
+            closest_tool_names("webresearch", &allowed)
+                .first()
+                .map(String::as_str),
+            Some("WebResearch")
+        );
+        // Gibberish with no shared prefix or containment yields nothing.
+        assert!(closest_tool_names("qqqqzzzz", &allowed).is_empty());
     }
 
     // ── E6: SecretGuard actually scans ──
