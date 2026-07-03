@@ -283,7 +283,11 @@ pub enum TurnEvent {
         reasoning: String,
     },
 
-    /// Status phase changed (thinking, streaming, running-tools, waiting-approval).
+    /// Status phase changed (thinking, streaming, building-tools, running-tools,
+    /// waiting-approval). `building-tools` fires once per round the moment a tool
+    /// call begins streaming its arguments — before the round's tool dispatch
+    /// phase (`running-tools`), which still only starts once the whole response
+    /// has finished streaming.
     #[serde(rename_all = "camelCase")]
     StatusChange { turn_id: String, phase: String },
 
@@ -840,6 +844,13 @@ pub struct TurnInput {
     pub base_url: String,
     pub api_key: Option<String>,
     pub model: String,
+    /// Optional embeddings model id for the active provider's `/embeddings`
+    /// endpoint (semantic memory search). `None`/empty means skip embedding
+    /// generation entirely — RememberMemory/RecallMemory still work via
+    /// lexical/graph search. Never used when the provider protocol is
+    /// `anthropic` (no `/embeddings` endpoint on that API).
+    #[serde(default)]
+    pub embedding_model: Option<String>,
     pub agent_mode: String,
     pub tool_round_limit: Option<u32>,
     pub tool_approval_mode: String,
@@ -871,6 +882,15 @@ pub struct TurnInput {
     /// Terminal context snapshot (sessions + output buffer tails from React state).
     #[serde(default)]
     pub terminal_context: Option<serde_json::Value>,
+    /// Id of the pre-turn file checkpoint the frontend created before this turn
+    /// started (see `ai_checkpoint`), if any. When present, every native
+    /// file-mutating tool call (Write/StrReplace/Delete/PatchEngine) captures a
+    /// pre-edit snapshot of the path(s) it's about to touch into this checkpoint
+    /// BEFORE mutating, via `ai_checkpoint::augment_checkpoint` — so a later
+    /// rollback can restore even files the model never explicitly ran the
+    /// Checkpoint tool on. Best-effort: augmentation never fails the tool call.
+    #[serde(default)]
+    pub file_checkpoint_id: Option<String>,
 }
 
 /// Start a native AI turn. Runs the full model↔tool loop in Rust,
@@ -932,7 +952,12 @@ pub async fn ai_run_turn(
         .clone()
         .filter(|value| !matches!(value, serde_json::Value::Null))
         .unwrap_or_else(|| serde_json::Value::String(input.message.clone()));
-    messages.push(serde_json::json!({ "role": "user", "content": user_content }));
+    // An all-empty content (blank string / empty part array) must never reach the
+    // wire — the Anthropic translation (`content_blocks`) rejects an empty content
+    // array, and pushing one here would surface as a 400 on the very first round.
+    if !is_empty_message_content(&user_content) {
+        messages.push(serde_json::json!({ "role": "user", "content": user_content }));
+    }
 
     // Runtime tool definitions — generated natively in Rust, filtered by mode, plus
     // the live tools of any connected MCP server (namespaced mcp__<server>__<tool>).
@@ -1044,7 +1069,15 @@ pub async fn ai_run_turn(
         let cancel_turn_id = turn_id.clone();
         let retry_app = app.clone();
         let retry_turn_id = turn_id.clone();
+        let tool_start_app = app.clone();
+        let tool_start_turn_id = turn_id.clone();
         let mut announced_streaming = false;
+        // Tool-call argument JSON streams through neither text nor reasoning, so
+        // without this a model that answers with a pure tool call (no preceding
+        // text/reasoning tokens) leaves the UI stuck on "thinking" for the whole
+        // tool-argument generation. Flip to "building-tools" the moment ANY tool
+        // call starts construction — once per round, before the stream finishes.
+        let mut announced_building_tools = false;
         let response = match crate::ai_chat_backend::completion_streaming(
             request,
             move |content, reasoning| {
@@ -1082,6 +1115,21 @@ pub async fn ai_run_turn(
             // Surface each automatic transient retry so the user sees a live
             // "retrying (reason) — attempt n/m" notice instead of a frozen turn.
             move |notice| emit_retry_event(&retry_app, &retry_turn_id, &notice),
+            move |_tool_name: &str| {
+                if is_turn_cancelled(&tool_start_turn_id) {
+                    return;
+                }
+                if !announced_building_tools {
+                    announced_building_tools = true;
+                    let _ = emit_turn_event(
+                        &tool_start_app,
+                        &TurnEvent::StatusChange {
+                            turn_id: tool_start_turn_id.clone(),
+                            phase: "building-tools".to_string(),
+                        },
+                    );
+                }
+            },
         )
         .await
         {
@@ -1174,10 +1222,14 @@ pub async fn ai_run_turn(
             // Commit the assistant's just-streamed answer so the conversation stays
             // well-formed, then append the staged user message(s) and loop again.
             if !assistant.content.is_empty() {
-                messages.push(serde_json::json!({
+                let mut committed = serde_json::json!({
                     "role": "assistant",
                     "content": assistant.content.clone(),
-                }));
+                });
+                if let Some(anthropic_content) = &assistant.anthropic_content {
+                    committed["anthropic_content"] = anthropic_content.clone();
+                }
+                messages.push(committed);
             }
             for text in injected {
                 let _ = emit_turn_event(
@@ -1187,13 +1239,19 @@ pub async fn ai_run_turn(
                         text: text.clone(),
                     },
                 );
-                messages.push(serde_json::json!({ "role": "user", "content": text }));
+                if !text.trim().is_empty() {
+                    messages.push(serde_json::json!({ "role": "user", "content": text }));
+                }
             }
             continue;
         }
 
-        // Append assistant message with tool_calls to conversation.
-        messages.push(serde_json::json!({
+        // Append assistant message with tool_calls to conversation. When the
+        // response carried Anthropic's exact ordered content blocks (thinking +
+        // tool_use etc.), attach them so a later round's replay through
+        // `to_anthropic_request` → `convert_assistant` can reconstruct the exact
+        // sequence instead of losing thinking signatures to the flattened fields.
+        let mut assistant_message = serde_json::json!({
             "role": "assistant",
             "content": if assistant.content.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(assistant.content.clone()) },
             "tool_calls": assistant.tool_calls.iter().map(|tc| serde_json::json!({
@@ -1201,7 +1259,11 @@ pub async fn ai_run_turn(
                 "type": "function",
                 "function": { "name": tc.name, "arguments": tc.arguments },
             })).collect::<Vec<_>>(),
-        }));
+        });
+        if let Some(anthropic_content) = &assistant.anthropic_content {
+            assistant_message["anthropic_content"] = anthropic_content.clone();
+        }
+        messages.push(assistant_message);
 
         let _ = emit_turn_event(
             &app,
@@ -1450,7 +1512,9 @@ pub async fn ai_run_turn(
                     text: injected.clone(),
                 },
             );
-            messages.push(serde_json::json!({ "role": "user", "content": injected }));
+            if !injected.trim().is_empty() {
+                messages.push(serde_json::json!({ "role": "user", "content": injected }));
+            }
         }
     }
 
@@ -1525,6 +1589,9 @@ pub async fn ai_run_turn(
             },
             move || is_turn_cancelled(&cancel_turn_id),
             move |notice| emit_retry_event(&retry_app, &retry_turn_id, &notice),
+            // This recovery call forces tool_choice: "none", so no tool call can
+            // start here.
+            |_tool_name: &str| {},
         )
         .await
         {
@@ -1673,6 +1740,20 @@ pub fn ai_inject_message(session_id: String, turn_id: String, text: String) {
     enqueue_injection(&session_id, &turn_id, text);
 }
 
+/// True when a message's `content` (`OpenAI` shape: plain string or content-part
+/// array) carries no real text/vision content. An all-empty user/assistant
+/// message must never reach the wire — the Anthropic translation's
+/// `content_blocks` yields an empty vec for it, and the Messages API rejects an
+/// empty `content` array outright.
+fn is_empty_message_content(content: &serde_json::Value) -> bool {
+    match content {
+        serde_json::Value::String(text) => text.trim().is_empty(),
+        serde_json::Value::Array(parts) => parts.is_empty(),
+        serde_json::Value::Null => true,
+        _ => false,
+    }
+}
+
 // ── Response parsing ──
 
 struct ParsedAssistant {
@@ -1682,6 +1763,13 @@ struct ParsedAssistant {
     /// thought — can fall back to it instead of finishing as "no answer".
     reasoning: String,
     tool_calls: Vec<ParsedToolCall>,
+    /// Anthropic's exact ordered content-block sequence for this message (vendor
+    /// field set by the Anthropic transport — `ai_anthropic`/`ai_chat_backend`),
+    /// carried through so replaying this assistant turn in a later round's
+    /// history can reconstruct `thinking`/`redacted_thinking` blocks with their
+    /// signatures instead of losing them to the flattened `content`/`tool_calls`
+    /// fields. `None` for `OpenAI`-protocol responses and older history.
+    anthropic_content: Option<serde_json::Value>,
 }
 
 struct ParsedToolCall {
@@ -1716,10 +1804,15 @@ fn parse_assistant_message(body: &serde_json::Value) -> ParsedAssistant {
         .and_then(|tc| tc.as_array())
         .map(|arr| arr.iter().filter_map(parse_tool_call).collect())
         .unwrap_or_default();
+    let anthropic_content = message
+        .and_then(|m| m.get("anthropic_content"))
+        .filter(|v| v.as_array().is_some_and(|arr| !arr.is_empty()))
+        .cloned();
     ParsedAssistant {
         content,
         reasoning,
         tool_calls,
+        anthropic_content,
     }
 }
 
@@ -1789,6 +1882,55 @@ fn require_file_read_before_edit(
     Err(format!(
         "{tool} blocked: read {raw_path} before editing it. Call Read (or InspectFile) on this file first, then retry the edit so the change is based on its current contents."
     ))
+}
+
+/// Best-effort pre-edit checkpoint capture: when the turn carries a
+/// `file_checkpoint_id` (a pre-turn file checkpoint the frontend created before
+/// this turn started — see `ai_checkpoint`), snapshot `raw_path`'s CURRENT
+/// content (or its "did not exist" marker) into that checkpoint before the
+/// caller's mutation below overwrites it. This is what lets a rollback restore
+/// files the model never explicitly ran the `Checkpoint` tool on itself.
+///
+/// Uses `session_id: None` deliberately — the frontend creates/augments the
+/// turn's file checkpoint without a session id (a workspace-scoped store key),
+/// so augmenting it here with `Some(&input.session_id)` would silently target a
+/// DIFFERENT (empty) store entry instead of the checkpoint the rollback UI reads.
+///
+/// Failure here must never fail the tool call — this is a defense-in-depth
+/// safety net, not the primary edit path. Logged via `tracing` and swallowed.
+async fn augment_checkpoint_before_edit(
+    state: &tauri::State<'_, crate::SharedState>,
+    input: &TurnInput,
+    raw_path: &str,
+) {
+    let Some(checkpoint_id) = input
+        .file_checkpoint_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    else {
+        return;
+    };
+    let Ok(root) = crate::workspace_root(state) else {
+        return;
+    };
+    let root_str = crate::ai_semantic::normalize_slashes_pub(&root.to_string_lossy());
+    if let Err(error) = crate::ai_checkpoint::augment_checkpoint(
+        state,
+        &root_str,
+        checkpoint_id,
+        None,
+        vec![raw_path.to_string()],
+    )
+    .await
+    {
+        tracing::debug!(
+            %error,
+            checkpoint_id,
+            path = raw_path,
+            "augment_checkpoint_before_edit: pre-edit checkpoint capture failed (non-fatal)"
+        );
+    }
 }
 
 async fn execute_tool(
@@ -2006,6 +2148,13 @@ async fn execute_tool(
             // rules run first; only a command classified read-only auto-approves
             // at the default tier (mirrors the TS `autoApproveOnDefault`).
             // Catastrophic commands are still refused inside `ai_shell` itself.
+            //
+            // NOT covered by `augment_checkpoint_before_edit`: a shell command can
+            // mutate arbitrary files (redirects, `rm`, package managers, …) that we
+            // have no structured "path(s) about to change" to snapshot ahead of
+            // time, unlike the native file tools below. Rollback for Shell-driven
+            // edits therefore still depends entirely on the model explicitly
+            // running the `Checkpoint` tool first.
             let read_only = crate::ai_shell_safety::classify_shell_command(&command).read_only;
             require_tool_approval(
                 app,
@@ -2028,6 +2177,7 @@ async fn execute_tool(
                 command,
                 cwd.map(std::path::PathBuf::from),
                 timeout_secs,
+                Some(tc.id.clone()),
             )
             .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
@@ -2136,6 +2286,7 @@ async fn execute_tool(
                 false,
             )
             .await?;
+            augment_checkpoint_before_edit(state, input, &path).await;
             let result = crate::ai_tools::ai_file_write(
                 app.clone(),
                 state.clone(),
@@ -2192,6 +2343,7 @@ async fn execute_tool(
                 false,
             )
             .await?;
+            augment_checkpoint_before_edit(state, input, &path).await;
             let result = crate::ai_tools::ai_file_str_replace(
                 app.clone(),
                 state.clone(),
@@ -2230,6 +2382,7 @@ async fn execute_tool(
                 false,
             )
             .await?;
+            augment_checkpoint_before_edit(state, input, &path).await;
             let result = crate::ai_tools::ai_file_delete(
                 app.clone(),
                 state.clone(),
@@ -2418,6 +2571,11 @@ async fn execute_tool(
             // guard every action that touches an EXISTING file; pure "create" ops
             // are exempt — the guard already no-ops on non-existent paths.
             let mut guarded_paths: Vec<String> = Vec::new();
+            // Plain "create" ops need no read-before-edit guard, but they DO need
+            // pre-edit checkpoint capture (an "existed: false" marker) so a turn
+            // rollback can delete the file PatchEngine created — same coverage the
+            // standalone Write tool gets unconditionally.
+            let mut checkpoint_paths: Vec<String> = Vec::new();
             if let Some(ops) = operations_raw.as_array() {
                 for op in ops {
                     let action = op
@@ -2446,18 +2604,17 @@ async fn execute_tool(
                             | "remove" // F8: treat create+overwrite on an existing file as an existing-file
                                        // mutation — require a prior eligible read rather than bypassing the guard.
                     ) || (is_create && overwrite_flag);
+                    let Some(path) = op.get("path").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if mutates_existing || is_create {
+                        checkpoint_paths.push(path.to_string());
+                    }
                     if !mutates_existing {
                         continue;
                     }
-                    if let Some(path) = op.get("path").and_then(|v| v.as_str()) {
-                        require_file_read_before_edit(
-                            state,
-                            &input.session_id,
-                            "PatchEngine",
-                            path,
-                        )?;
-                        guarded_paths.push(path.to_string());
-                    }
+                    require_file_read_before_edit(state, &input.session_id, "PatchEngine", path)?;
+                    guarded_paths.push(path.to_string());
                 }
             }
             // Deserialize op-by-op so a malformed entry names WHICH one (and why)
@@ -2529,6 +2686,15 @@ async fn execute_tool(
                         false,
                     )
                     .await?;
+                }
+            }
+            // Pre-edit checkpoint capture for every path this patch is about to
+            // touch (mutations AND creates — the "existed: false" marker lets a
+            // rollback delete created files). A dry run performs no mutation, so
+            // there's nothing to protect against yet.
+            if !dry_run.unwrap_or(false) {
+                for path in &checkpoint_paths {
+                    augment_checkpoint_before_edit(state, input, path).await;
                 }
             }
             let result = crate::ai_tools::ai_file_patch(
@@ -2883,7 +3049,14 @@ async fn execute_tool(
                     .unwrap_or(false),
                 // BrowserScreenshot with a file path writes to disk.
                 "BrowserScreenshot" => args.get("path").and_then(|v| v.as_str()).is_some(),
-                // BrowserSnapshot, BrowserStatus, BrowserDashboard, BrowserHelp are read-only.
+                // Dashboard "start" opens a local HTTP listener and "stop" mutates
+                // daemon state — only "status" is a read-only probe. Gating start
+                // keeps the zero-listening-ports posture user-approved.
+                "BrowserDashboard" => args
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .is_none_or(|action| !action.eq_ignore_ascii_case("status")),
+                // BrowserSnapshot, BrowserStatus, BrowserHelp are read-only.
                 _ => false,
             };
             if browser_is_side_effecting {
@@ -2932,6 +3105,24 @@ async fn execute_tool(
                 }
                 _ => 60,
             };
+            // BrowserInstall with no CLI on the machine at all: the invoke path
+            // requires an existing binary, so bootstrap the full install instead
+            // (managed Node if needed + npm package + Chromium) — the same flow
+            // as Settings -> Browser automation -> Install now.
+            if tc.name == "BrowserInstall" && crate::agent_browser::resolve_binary().is_err() {
+                let install_result = crate::agent_browser::install(
+                    app,
+                    crate::agent_browser::AgentBrowserInstallRequest {
+                        command_path: None,
+                        with_deps: args.get("withDeps").and_then(serde_json::Value::as_bool),
+                    },
+                )
+                .await?;
+                if install_result.success {
+                    return serde_json::to_string(&install_result).map_err(|e| e.to_string());
+                }
+                return Err(install_result.detail);
+            }
             let browser_cwd = browser_cwd_path
                 .as_deref()
                 .map(|r| r.to_string_lossy().into_owned());
@@ -3546,9 +3737,19 @@ async fn execute_tool(
                 .and_then(serde_json::Value::as_u64)
                 .and_then(|v| usize::try_from(v).ok())
                 .unwrap_or(8);
+            let include_related = args
+                .get("includeRelated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            // Best-effort hybrid recall: a configured, non-anthropic provider
+            // embedding model adds a vector-similarity signal to the RRF fusion.
+            // `None` (no model, anthropic protocol, or a failed request) simply
+            // falls back to lexical + graph search — never blocks the tool.
+            let query_embedding = maybe_embed(input, &query).await;
             let options = lux_memory::SearchOptions {
                 category: category.clone(),
                 limit,
+                query_embedding,
                 ..Default::default()
             };
             let hits =
@@ -3578,9 +3779,88 @@ async fn execute_tool(
                     }
                 }
             }
-            serde_json::to_string(&serde_json::json!({ "memories": hits }))
+            // includeRelated: surface the knowledge-graph-lite neighborhood of the
+            // top 3 hits so the model sees related/contradicting/superseding memories
+            // without a separate round-trip. Best-effort — a lookup failure just
+            // omits that hit's `related` array rather than failing the whole recall.
+            let mut payload: Vec<serde_json::Value> = Vec::with_capacity(hits.len());
+            for (idx, hit) in hits.iter().enumerate() {
+                let mut hit_json =
+                    serde_json::to_value(hit).unwrap_or_else(|_| serde_json::json!({}));
+                if include_related && idx < 3 {
+                    if let Ok(related) = crate::memory::memory_related(
+                        app.clone(),
+                        state.clone(),
+                        hit.memory.id.clone(),
+                        Some(1),
+                        Some(0.3),
+                    )
+                    .await
+                    {
+                        let edges = crate::memory::memory_relations(
+                            app.clone(),
+                            state.clone(),
+                            hit.memory.id.clone(),
+                        )
+                        .await
+                        .unwrap_or_default();
+                        let related_json: Vec<serde_json::Value> = related
+                            .iter()
+                            .map(|r| {
+                                let kind = edges
+                                    .iter()
+                                    .find(|edge| {
+                                        edge.source_id == r.memory.id
+                                            || edge.target_id == r.memory.id
+                                    })
+                                    .map_or_else(
+                                        || "related".to_string(),
+                                        |edge| edge.relation.to_string(),
+                                    );
+                                serde_json::json!({
+                                    "id": r.memory.id,
+                                    "content": r.memory.content,
+                                    "category": r.memory.category,
+                                    "relation": kind,
+                                })
+                            })
+                            .collect();
+                        if let Some(obj) = hit_json.as_object_mut() {
+                            obj.insert("related".to_string(), serde_json::json!(related_json));
+                        }
+                    }
+                }
+                payload.push(hit_json);
+            }
+            serde_json::to_string(&serde_json::json!({ "memories": payload }))
                 .map_err(|e| e.to_string())
         }
+        "RelateMemories" => {
+            let source_id = json_str(&args, "sourceId");
+            let target_id = json_str(&args, "targetId");
+            let relation = json_str(&args, "relation");
+            if source_id.trim().is_empty() || target_id.trim().is_empty() {
+                return Ok(serde_json::json!({
+                    "error": "sourceId and targetId are required"
+                })
+                .to_string());
+            }
+            match crate::memory::memory_relate(
+                app.clone(),
+                state.clone(),
+                source_id,
+                target_id,
+                relation,
+                None,
+            )
+            .await
+            {
+                Ok(relation) => serde_json::to_string(&serde_json::json!({ "relation": relation }))
+                    .map_err(|e| e.to_string()),
+                Err(error) => Ok(serde_json::json!({ "error": error }).to_string()),
+            }
+        }
+
         "RememberMemory" => {
             let content = json_str(&args, "content");
             if content.trim().is_empty() {
@@ -3588,54 +3868,39 @@ async fn execute_tool(
             }
             let category =
                 json_str_opt(&args, "category").unwrap_or_else(|| "semantic".to_string());
-            // Dedup: the store mints a fresh uuid on every call, so re-remembering
-            // the same fact silently piles up duplicate rows that later pollute
-            // recall. Probe for a byte-identical (after trim) memory in the same
-            // category and short-circuit with a `duplicate` signal so the model gets
-            // the feedback loop it needs to stop re-saving known facts. Only exact
-            // trimmed-content matches dedup; every genuinely new fact still inserts.
-            let probe = lux_memory::SearchOptions {
-                category: Some(category.clone()),
-                limit: 1,
-                touch: false,
-                ..Default::default()
-            };
-            if let Ok(existing) = crate::memory::memory_search(
-                app.clone(),
-                state.clone(),
-                content.clone(),
-                Some(probe),
-            )
-            .await
-            {
-                if let Some(hit) = existing.into_iter().next() {
-                    if hit.lexical >= 0.999 && hit.memory.content.trim() == content.trim() {
-                        return serde_json::to_string(&serde_json::json!({
-                            "status": "duplicate",
-                            "existingId": hit.memory.id,
-                            "category": hit.memory.category,
-                            "importance": hit.memory.importance,
-                        }))
-                        .map_err(|e| e.to_string());
-                    }
-                }
-            }
-            let input = lux_memory::NewMemory {
+            let ttl_days = args.get("ttlDays").and_then(serde_json::Value::as_f64);
+            // Best-effort embedding for hybrid (lexical + vector) recall — see
+            // `maybe_embed`; `None` on no model/anthropic protocol/request failure
+            // simply stores the memory without a vector, never blocking the save.
+            let embedding = maybe_embed(input, &content).await;
+            let new_input = lux_memory::NewMemory {
                 category,
                 content,
                 importance: args.get("importance").and_then(serde_json::Value::as_f64),
                 pinned: args.get("pinned").and_then(serde_json::Value::as_bool),
                 source: Some("agent".to_string()),
+                ttl_days,
+                embedding,
                 ..Default::default()
             };
-            let memory = crate::memory::memory_create(app.clone(), state.clone(), input).await?;
+            // The store now owns dedup itself (create_with_outcome): a byte-identical
+            // re-remember REINFORCES the existing row (importance bumps to the max of
+            // the two, timestamps advance) instead of cloning it, and a near-duplicate
+            // in the same category is SUPERSEDED by the fresh one. A reinforce is
+            // detectable because only its `updatedAt` moves — the row's `createdAt`
+            // stays pinned to the original write, whereas a genuinely fresh insert sets
+            // both to the same instant.
+            let outcome =
+                crate::memory::memory_create(app.clone(), state.clone(), new_input).await?;
+            let reinforced = outcome.memory.created_at != outcome.memory.updated_at;
             serde_json::to_string(&serde_json::json!({
-                "status": "remembered",
-                "id": memory.id,
-                "category": memory.category,
+                "status": if reinforced { "reinforced" } else { "remembered" },
+                "id": outcome.memory.id,
+                "category": outcome.memory.category,
                 // Echo the effective (store-clamped to [0,1]) importance so the model
                 // sees the applied weight rather than assuming its raw value stuck.
-                "importance": memory.importance,
+                "importance": outcome.memory.importance,
+                "superseded": outcome.superseded_ids,
             }))
             .map_err(|e| e.to_string())
         }
@@ -4765,6 +5030,7 @@ async fn run_subagent(
             move || is_turn_cancelled(&cancel_turn),
             // Subagents run in an isolated context with no UI to notify.
             |_notice| {},
+            |_tool_name| {},
         )
         .await?;
         let assistant = parse_assistant_message(&response.body);
@@ -5415,6 +5681,32 @@ fn json_str(value: &serde_json::Value, key: &str) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string()
+}
+
+/// Best-effort embedding for the memory tools' hybrid (lexical + vector)
+/// recall: `None` whenever there is no configured embedding model, the active
+/// provider speaks the `anthropic` protocol (no `/embeddings` endpoint on that
+/// API), or the request itself fails — callers fall back to lexical/graph
+/// search rather than failing the enclosing tool call. Failures are logged at
+/// `debug` (not `warn`/`error`) since this path degrading is expected and
+/// silent-by-design for providers/users who never set an embedding model.
+async fn maybe_embed(input: &TurnInput, text: &str) -> Option<Vec<f32>> {
+    let model = input.embedding_model.as_deref()?.trim();
+    if model.is_empty() {
+        return None;
+    }
+    if crate::ai_anthropic::is_anthropic(&input.prompt_input.provider_protocol) {
+        return None;
+    }
+    match crate::ai_chat_backend::embeddings(&input.base_url, input.api_key.as_deref(), model, text)
+        .await
+    {
+        Ok(vector) => Some(vector),
+        Err(error) => {
+            tracing::debug!("embedding generation skipped: {error}");
+            None
+        }
+    }
 }
 
 /// Parse the research `focus` argument shared by `WebResearch` and

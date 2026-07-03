@@ -207,23 +207,35 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "RecallMemory",
-        "Search this project's durable memory — facts, decisions, and conventions saved across sessions. Prefer this over re-deriving things you may have learned before.",
+        "Search this project's durable memory — facts, decisions, and conventions saved across sessions. Prefer this over re-deriving things you may have learned before. Each hit's `id` can be passed to RelateMemories to link it to other memories.",
         &[
             req("query", "string", "What to recall."),
             opt("category", "string", "Restrict to a category (core, episodic, semantic, procedural, or custom)."),
             opt_int("limit", "Max results, default 8.", 1, MAX_RESULTS_DEFAULT),
+            opt("includeRelated", "boolean", "For the top 3 hits, also include their directly-related memories (1 hop, confidence >= 0.3) as a `related` array on each hit."),
         ],
     ));
     tools.push(tool(
         "RememberMemory",
-        "Save a durable, project-scoped memory for future sessions (a stable fact, decision, or convention). Keep each memory one concise, self-contained statement.",
+        "Save a durable, project-scoped memory for future sessions (a stable fact, decision, or convention). Keep each memory one concise, self-contained statement. Re-remembering a byte-identical fact REINFORCES it (importance rises, no duplicate row); a near-duplicate fact in the same category SUPERSEDES the older one (the store keeps the newer wording and marks the old row stale) — so re-saving an updated fact is correct behavior, not spam.",
         &[
             req("content", "string", "The fact to remember, as one self-contained sentence."),
             opt("category", "string", "core | episodic | semantic | procedural | custom (default semantic)."),
             opt("importance", "number", "0..1 relevance weight (default 0.5; out-of-range values are clamped)."),
             opt("pinned", "boolean", "Pin so it always surfaces first."),
+            opt_int("ttlDays", "Optional time-to-live in days; the memory is auto-forgotten after it expires (pinning still wins over an expired TTL).", 0, 3650),
         ],
     ));
+    tools.push(tool(
+        "RelateMemories",
+        "Link two memories in the knowledge graph — mark one as superseding, extending, deriving from, contradicting, or otherwise related to the other. Get ids from RecallMemory results.",
+        &[
+            req("sourceId", "string", "Id of the source memory (from RecallMemory)."),
+            req("targetId", "string", "Id of the target memory (from RecallMemory)."),
+            req("relation", "string", "supersedes | extends | derives | contradicts | related."),
+        ],
+    ));
+
     tools.push(tool(
         "ListSkills",
         "List available skills — reusable, vetted instruction modules for recurring tasks. Check here before improvising a procedure; an existing skill is more reliable.",

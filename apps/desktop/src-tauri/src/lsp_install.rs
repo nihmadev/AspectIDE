@@ -34,10 +34,22 @@ static NPM_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(
 static GO_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static PIP_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static RUSTUP_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Serializes GitHub-release installs (lua-language-server, clangd). They each own
+/// a distinct `<lsp>/gh/<command>/` directory, but share one lock (like the simpler
+/// `NPM_INSTALL_LOCK`) rather than per-target locks — there are only two of them and
+/// both stage-then-swap into place, so the extra parallelism a per-target lock would
+/// buy is not worth another static.
+static GH_INSTALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// How a given language server is obtained. Each variant maps to a concrete
 /// package-manager invocation in `install_server`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// No `PartialEq`/`Eq`: `GithubRelease` carries a `fn` pointer (`GithubReleaseSpec::
+// asset_for`), and rustc's `unpredictable_function_pointer_comparisons` lint flags a
+// derived `==` over one for good reason (addresses aren't guaranteed unique after
+// inlining/dedup). Nothing compares `InstallMethod` values as a whole; the one place
+// that compares recipes (`uninstall_npm`'s shared-package detection) matches down to
+// the `&str` spec instead.
+#[derive(Debug, Clone, Copy)]
 pub enum InstallMethod {
     /// `npm install <pkg>` into the managed prefix; binary lands in node bin dir.
     Npm(&'static str),
@@ -49,9 +61,111 @@ pub enum InstallMethod {
     Pip(&'static str),
     /// `rustup component add <name>` — installs into the active rust toolchain.
     RustupComponent(&'static str),
-    /// No automated installer (toolchain-specific); UI shows a manual hint.
+    /// Download a prebuilt binary directly from a GitHub Releases page — no host
+    /// toolchain required. Used for lua-language-server and clangd, whose upstreams
+    /// publish per-platform archives with no npm/pip/go packaging at all.
+    GithubRelease(GithubReleaseSpec),
+    /// No automated installer (toolchain-specific); UI shows a manual hint. Currently
+    /// unused — lua/clangd (the last two recipes that needed it) moved to
+    /// `GithubRelease` above — but kept as the escape hatch for a future language
+    /// server with no automatable install path; `method_label`/the catalog/uninstall
+    /// dispatch all still handle it.
+    #[allow(dead_code)]
     Manual(&'static str),
 }
+
+/// Host OS bucket for selecting a GitHub release asset. Deliberately coarser than
+/// `std::env::consts::OS` — every upstream here only ships windows/linux/macos builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhOs {
+    Windows,
+    Linux,
+    Macos,
+}
+
+/// CPU-architecture bucket for selecting a GitHub release asset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GhArch {
+    X64,
+    Arm64,
+}
+
+const fn current_gh_os() -> GhOs {
+    if cfg!(windows) {
+        GhOs::Windows
+    } else if cfg!(target_os = "macos") {
+        GhOs::Macos
+    } else {
+        GhOs::Linux
+    }
+}
+
+fn current_gh_arch() -> Option<GhArch> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some(GhArch::X64),
+        "aarch64" => Some(GhArch::Arm64),
+        _ => None,
+    }
+}
+
+/// A managed install sourced directly from a GitHub Releases page (no host
+/// toolchain, no package manager). `asset_for` picks the release asset name for the
+/// resolved OS/arch/version (`None` when upstream ships no build for that platform);
+/// `bin_subdirs` are the directory/directories — relative to the extracted, top-level-
+/// stripped release tree — that hold the resolvable executable. Directories (not exact
+/// file paths) because resolution reuses `managed_bin_dirs`/`resolve_in_dir`, which
+/// already knows how to find a named command inside a directory (Windows extensions
+/// included) — a separate exact-path lookup would just duplicate that.
+#[derive(Debug, Clone, Copy)]
+pub struct GithubReleaseSpec {
+    /// `"<owner>/<repo>"` for the GitHub releases API and download URLs.
+    pub repo: &'static str,
+    /// Pin to a specific release tag; `None` resolves `/releases/latest`.
+    pub version_tag: Option<&'static str>,
+    /// Selects the release asset file name; `None` means no build for this platform.
+    pub asset_for: fn(GhOs, GhArch, &str) -> Option<String>,
+    pub bin_subdirs: &'static [&'static str],
+}
+
+fn lua_language_server_asset(os: GhOs, arch: GhArch, version: &str) -> Option<String> {
+    let v = version.trim_start_matches('v');
+    let name = match (os, arch) {
+        (GhOs::Windows, GhArch::X64) => format!("lua-language-server-{v}-win32-x64.zip"),
+        (GhOs::Linux, GhArch::X64) => format!("lua-language-server-{v}-linux-x64.tar.gz"),
+        (GhOs::Linux, GhArch::Arm64) => format!("lua-language-server-{v}-linux-arm64.tar.gz"),
+        (GhOs::Macos, GhArch::X64) => format!("lua-language-server-{v}-darwin-x64.tar.gz"),
+        (GhOs::Macos, GhArch::Arm64) => format!("lua-language-server-{v}-darwin-arm64.tar.gz"),
+        // LuaLS ships no win32-arm64 build.
+        (GhOs::Windows, GhArch::Arm64) => return None,
+    };
+    Some(name)
+}
+
+fn clangd_asset(os: GhOs, arch: GhArch, version: &str) -> Option<String> {
+    let v = version.trim_start_matches('v');
+    match (os, arch) {
+        (GhOs::Windows, GhArch::X64) => Some(format!("clangd-windows-{v}.zip")),
+        (GhOs::Linux, GhArch::X64) => Some(format!("clangd-linux-{v}.zip")),
+        // clangd's mac build is a universal (x86_64 + arm64) binary — one asset covers both.
+        (GhOs::Macos, _) => Some(format!("clangd-mac-{v}.zip")),
+        // No windows-arm64 or linux-arm64 build is published.
+        (GhOs::Windows | GhOs::Linux, GhArch::Arm64) => None,
+    }
+}
+
+const LUA_LANGUAGE_SERVER_RELEASE: GithubReleaseSpec = GithubReleaseSpec {
+    repo: "LuaLS/lua-language-server",
+    version_tag: None,
+    asset_for: lua_language_server_asset,
+    bin_subdirs: &["bin"],
+};
+
+const CLANGD_RELEASE: GithubReleaseSpec = GithubReleaseSpec {
+    repo: "clangd/clangd",
+    version_tag: None,
+    asset_for: clangd_asset,
+    bin_subdirs: &["bin"],
+};
 
 /// Install recipe for one catalog server, keyed by `language_id` (matches the
 /// `lux-lsp` `BUILTIN_SERVERS` catalog so discovery + install stay in lockstep).
@@ -65,17 +179,50 @@ pub struct InstallRecipe {
 /// in Settings; npm-based servers first (fast, cross-platform), then toolchain
 /// ones. Every `language_id` here MUST exist in `lux_lsp::BUILTIN_SERVERS`.
 pub const INSTALL_RECIPES: &[InstallRecipe] = &[
-    InstallRecipe { language_id: "typescript", method: InstallMethod::Npm("typescript-language-server typescript") },
-    InstallRecipe { language_id: "python", method: InstallMethod::Pip("ty") },
-    InstallRecipe { language_id: "json", method: InstallMethod::Npm("vscode-langservers-extracted") },
-    InstallRecipe { language_id: "html", method: InstallMethod::Npm("vscode-langservers-extracted") },
-    InstallRecipe { language_id: "css", method: InstallMethod::Npm("vscode-langservers-extracted") },
-    InstallRecipe { language_id: "yaml", method: InstallMethod::Npm("yaml-language-server") },
-    InstallRecipe { language_id: "bash", method: InstallMethod::Npm("bash-language-server") },
-    InstallRecipe { language_id: "go", method: InstallMethod::GoInstall("golang.org/x/tools/gopls") },
-    InstallRecipe { language_id: "rust", method: InstallMethod::RustupComponent("rust-analyzer") },
-    InstallRecipe { language_id: "lua", method: InstallMethod::Manual("Install lua-language-server from your package manager (brew install lua-language-server, or download from the LuaLS releases) and ensure it is on PATH.") },
-    InstallRecipe { language_id: "cpp", method: InstallMethod::Manual("Install clangd via your LLVM toolchain (apt install clangd, brew install llvm, or the LLVM releases) and ensure it is on PATH.") },
+    InstallRecipe {
+        language_id: "typescript",
+        method: InstallMethod::Npm("typescript-language-server typescript"),
+    },
+    InstallRecipe {
+        language_id: "python",
+        method: InstallMethod::Pip("ty"),
+    },
+    InstallRecipe {
+        language_id: "json",
+        method: InstallMethod::Npm("vscode-langservers-extracted"),
+    },
+    InstallRecipe {
+        language_id: "html",
+        method: InstallMethod::Npm("vscode-langservers-extracted"),
+    },
+    InstallRecipe {
+        language_id: "css",
+        method: InstallMethod::Npm("vscode-langservers-extracted"),
+    },
+    InstallRecipe {
+        language_id: "yaml",
+        method: InstallMethod::Npm("yaml-language-server"),
+    },
+    InstallRecipe {
+        language_id: "bash",
+        method: InstallMethod::Npm("bash-language-server"),
+    },
+    InstallRecipe {
+        language_id: "go",
+        method: InstallMethod::GoInstall("golang.org/x/tools/gopls"),
+    },
+    InstallRecipe {
+        language_id: "rust",
+        method: InstallMethod::RustupComponent("rust-analyzer"),
+    },
+    InstallRecipe {
+        language_id: "lua",
+        method: InstallMethod::GithubRelease(LUA_LANGUAGE_SERVER_RELEASE),
+    },
+    InstallRecipe {
+        language_id: "cpp",
+        method: InstallMethod::GithubRelease(CLANGD_RELEASE),
+    },
 ];
 
 #[must_use]
@@ -97,13 +244,36 @@ pub fn managed_bin_dirs(app: &AppHandle) -> Vec<PathBuf> {
         return Vec::new();
     };
     // Search every place an install method can drop an executable.
-    vec![
+    let mut dirs = vec![
         root.join("bin"),
         root.join("npm").join("node_modules").join(".bin"),
         root.join("pip").join("bin"),
         root.join("pip").join("Scripts"),
         root.join("go").join("bin"),
-    ]
+    ];
+    // GithubRelease servers keep their extracted tree intact under `<lsp>/gh/<command>/`
+    // instead of a copied/symlinked binary (LuaLS needs its `main.lua`/`meta` beside the
+    // exe; clangd needs its bundled clang resource headers) — so their bin dir(s) are
+    // searched here rather than landing in the flat `bin/` above. Cheap: a handful of
+    // extra `PathBuf`s: existence is checked downstream, by whoever resolves a command
+    // in each dir, not here.
+    for recipe in INSTALL_RECIPES {
+        if let InstallMethod::GithubRelease(spec) = recipe.method {
+            if let Some(command) = command_for(recipe.language_id) {
+                let base = root.join("gh").join(command);
+                dirs.extend(spec.bin_subdirs.iter().map(|sub| base.join(sub)));
+            }
+        }
+    }
+    dirs
+}
+
+/// The catalog `BuiltinServer.command` for a `language_id`, or `None` if unknown.
+fn command_for(language_id: &str) -> Option<&'static str> {
+    lux_lsp::BUILTIN_SERVERS
+        .iter()
+        .find(|s| s.language_id == language_id)
+        .map(|s| s.command)
 }
 
 // ── Status / catalog (Rust → UI) ──
@@ -115,7 +285,7 @@ pub struct LspCatalogEntry {
     pub name: String,
     pub command: String,
     pub extensions: Vec<String>,
-    /// How it installs: "npm" | "go" | "pip" | "rustup" | "manual".
+    /// How it installs: "npm" | "go" | "pip" | "rustup" | "github" | "manual".
     pub install_method: String,
     /// Manual-install guidance (non-empty only for the "manual" method).
     pub manual_hint: String,
@@ -133,6 +303,7 @@ const fn method_label(method: InstallMethod) -> &'static str {
         InstallMethod::GoInstall(_) => "go",
         InstallMethod::Pip(_) => "pip",
         InstallMethod::RustupComponent(_) => "rustup",
+        InstallMethod::GithubRelease(_) => "github",
         InstallMethod::Manual(_) => "manual",
     }
 }
@@ -263,6 +434,254 @@ pub async fn lsp_install_server(app: AppHandle, language_id: String) -> Result<S
     result
 }
 
+/// Remove a managed install for `language_id`, streaming progress on the same
+/// `lux://lsp-install` channel as install (with a distinguishable "Uninstalling"
+/// step) so the Settings store refreshes the same way it does after an install.
+/// Managed-only: refuses with a clear error for anything that resolves only on the
+/// system PATH (or isn't installed at all) — a system install is never touched.
+#[tauri::command]
+pub async fn lsp_uninstall_server(app: AppHandle, language_id: String) -> Result<String, String> {
+    let Some(server) = lux_lsp::BUILTIN_SERVERS
+        .iter()
+        .find(|s| s.language_id == language_id)
+    else {
+        return Err(format!("Unknown language server: {language_id}"));
+    };
+    let Some(recipe) = recipe_for(&language_id) else {
+        return Err(format!("No install recipe for {language_id}"));
+    };
+
+    let managed_path = managed_bin_dirs(&app)
+        .iter()
+        .find_map(|dir| resolve_in_dir(dir, server.command));
+    managed_uninstall_guard(server.name, managed_path, resolve_on_path(server.command))?;
+
+    emit_install(
+        &app,
+        &LspInstallEvent::Started {
+            language_id: language_id.clone(),
+            name: server.name.to_string(),
+        },
+    );
+    progress(&app, &language_id, 20, "Uninstalling");
+
+    let result = run_uninstall(&app, &language_id, server.command, recipe.method).await;
+
+    match &result {
+        Ok(_) => emit_install(
+            &app,
+            &LspInstallEvent::Finished {
+                language_id: language_id.clone(),
+                success: true,
+                path: None,
+                error: None,
+            },
+        ),
+        Err(error) => emit_install(
+            &app,
+            &LspInstallEvent::Finished {
+                language_id: language_id.clone(),
+                success: false,
+                path: None,
+                error: Some(error.clone()),
+            },
+        ),
+    }
+    result
+}
+
+/// Pure guard behind `lsp_uninstall_server`'s managed-only refusal, factored out so it
+/// is testable without an `AppHandle`. `Err` carries the exact message the command
+/// returns; `Ok(())` means the server has a managed install and uninstall may proceed.
+fn managed_uninstall_guard(
+    name: &str,
+    managed_path: Option<PathBuf>,
+    path_fallback: Option<PathBuf>,
+) -> Result<(), String> {
+    if managed_path.is_some() {
+        return Ok(());
+    }
+    Err(if path_fallback.is_some() {
+        format!(
+            "{name} resolves from your system PATH, not a Lux-managed install — uninstall it via your package manager instead."
+        )
+    } else {
+        format!("{name} is not installed.")
+    })
+}
+
+async fn run_uninstall(
+    app: &AppHandle,
+    language_id: &str,
+    command: &str,
+    method: InstallMethod,
+) -> Result<String, String> {
+    let root = managed_root(app)?;
+    match method {
+        InstallMethod::Npm(spec) => uninstall_npm(app, language_id, command, &root, spec).await,
+        InstallMethod::GoInstall(_) => uninstall_go(app, language_id, command, &root).await,
+        InstallMethod::Pip(_) => uninstall_pip(app, language_id, command, &root).await,
+        InstallMethod::GithubRelease(_) => {
+            uninstall_github_release(app, language_id, command, &root).await
+        }
+        InstallMethod::RustupComponent(name) => uninstall_rustup(name),
+        InstallMethod::Manual(_) => {
+            Err("This server has no managed install to uninstall.".to_string())
+        }
+    }
+}
+
+/// `npm uninstall` from the shared `<lsp>/npm` prefix. `vscode-langservers-extracted`
+/// backs three catalog entries (json/html/css) with one package — uninstalling it
+/// uninstalls all three, so the response names the others affected.
+async fn uninstall_npm(
+    app: &AppHandle,
+    language_id: &str,
+    command: &str,
+    root: &Path,
+    spec: &str,
+) -> Result<String, String> {
+    let npm = resolve_tool(app, "npm")
+        .ok_or_else(|| "npm is not resolvable; cannot uninstall.".to_string())?;
+    let prefix = root.join("npm");
+    let _guard = acquire_install_lock(app, language_id, &NPM_INSTALL_LOCK, "npm").await;
+    progress(app, language_id, 50, "Uninstalling");
+    let mut args = vec![
+        "uninstall".to_string(),
+        "--prefix".to_string(),
+        prefix.to_string_lossy().to_string(),
+    ];
+    args.extend(spec.split_whitespace().map(str::to_string));
+    let env: Vec<(String, String)> = crate::runtime_provision::prepended_path(app)
+        .into_iter()
+        .collect();
+    let step = run_command_env(&npm, &args, None, &env).await?;
+    if !step.success {
+        return Err(trim_output(&step.output, "npm uninstall failed"));
+    }
+
+    let shared: Vec<&str> = INSTALL_RECIPES
+        .iter()
+        .filter(|r| r.language_id != language_id)
+        .filter_map(|r| match r.method {
+            InstallMethod::Npm(other_spec) if other_spec == spec => Some(r.language_id),
+            _ => None,
+        })
+        .collect();
+    Ok(if shared.is_empty() {
+        format!("Uninstalled {command}.")
+    } else {
+        format!(
+            "Uninstalled {command}. This package is shared with {}, which {} now uninstalled too.",
+            shared.join(", "),
+            if shared.len() == 1 { "is" } else { "are" }
+        )
+    })
+}
+
+/// Delete the `gopls` binary from `<lsp>/go/bin` — the managed Go SDK itself is left
+/// alone (it may back other tooling), only the LSP install is removed.
+async fn uninstall_go(
+    app: &AppHandle,
+    language_id: &str,
+    command: &str,
+    root: &Path,
+) -> Result<String, String> {
+    let _guard = acquire_install_lock(app, language_id, &GO_INSTALL_LOCK, command).await;
+    let gobin = root.join("go").join("bin");
+    let Some(path) = resolve_in_dir(&gobin, command) else {
+        return Err(format!(
+            "{command} is not installed in the managed Go bin directory."
+        ));
+    };
+    tokio::fs::remove_file(&path)
+        .await
+        .map_err(|e| format!("Could not remove {command}: {e}"))?;
+    Ok(format!("Uninstalled {command}."))
+}
+
+/// `pip uninstall -y <pkg>` best-effort (a `--target` install isn't tracked in the
+/// interpreter's own registry, so pip may report "not installed" and do nothing),
+/// then authoritatively delete the console script(s) pip dropped into the managed
+/// target's bin dirs — that's what `resolve_in_dir`/discovery actually looks at.
+async fn uninstall_pip(
+    app: &AppHandle,
+    language_id: &str,
+    command: &str,
+    root: &Path,
+) -> Result<String, String> {
+    let _guard = acquire_install_lock(app, language_id, &PIP_INSTALL_LOCK, command).await;
+    let Some(recipe) = recipe_for(language_id) else {
+        return Err(format!("No install recipe for {language_id}"));
+    };
+    let InstallMethod::Pip(pkg) = recipe.method else {
+        return Err(format!("{language_id} is not a pip-installed server"));
+    };
+    if let Some(python) = resolve_tool(app, "python3").or_else(|| resolve_tool(app, "python")) {
+        let env: Vec<(String, String)> = crate::runtime_provision::prepended_path(app)
+            .into_iter()
+            .collect();
+        let _ = run_command_env(
+            &python,
+            &[
+                "-m".to_string(),
+                "pip".to_string(),
+                "uninstall".to_string(),
+                "-y".to_string(),
+                pkg.to_string(),
+            ],
+            None,
+            &env,
+        )
+        .await;
+    }
+
+    let target = root.join("pip");
+    let mut removed = false;
+    for dir in [target.join("bin"), target.join("Scripts")] {
+        if let Some(path) = resolve_in_dir(&dir, command) {
+            tokio::fs::remove_file(&path)
+                .await
+                .map_err(|e| format!("Could not remove {command}: {e}"))?;
+            removed = true;
+        }
+    }
+    if removed {
+        Ok(format!("Uninstalled {command}."))
+    } else {
+        Err(format!(
+            "{command} is not installed in the managed pip directory."
+        ))
+    }
+}
+
+/// Delete `<lsp>/gh/<command>/` (the whole extracted release tree) via the same
+/// tombstone-safe removal `runtime_provision` uses when replacing a runtime dir.
+async fn uninstall_github_release(
+    app: &AppHandle,
+    language_id: &str,
+    command: &str,
+    root: &Path,
+) -> Result<String, String> {
+    let _guard = acquire_install_lock(app, language_id, &GH_INSTALL_LOCK, command).await;
+    let dest = root.join("gh").join(command);
+    if tokio::fs::metadata(&dest).await.is_err() {
+        return Err(format!(
+            "{command} is not installed in the managed directory."
+        ));
+    }
+    crate::runtime_provision::remove_dir_tombstoned(&dest).await?;
+    Ok(format!("Uninstalled {command}."))
+}
+
+/// rust-analyzer ships as a rustup component of the managed Rust toolchain — it has no
+/// standalone uninstall; removing it means removing the whole managed Rust runtime.
+fn uninstall_rustup(component: &str) -> Result<String, String> {
+    Err(format!(
+        "{component} ships with the managed Rust toolchain and can't be uninstalled on its own — removing it would require uninstalling the whole managed Rust runtime."
+    ))
+}
+
 async fn run_install(
     app: &AppHandle,
     language_id: &str,
@@ -280,6 +699,9 @@ async fn run_install(
         InstallMethod::Pip(pkg) => install_pip(app, language_id, command, &root, pkg).await,
         InstallMethod::RustupComponent(name) => {
             install_rustup(app, language_id, command, name).await
+        }
+        InstallMethod::GithubRelease(spec) => {
+            install_github_release(app, language_id, command, &root, &spec).await
         }
         InstallMethod::Manual(hint) => Err(hint.to_string()),
     }
@@ -550,6 +972,253 @@ async fn install_rustup(
         .ok_or_else(|| "rustup reported success but rust-analyzer is not resolvable.".to_string())
 }
 
+/// Install a `GithubReleaseSpec` server. Needs no host toolchain at all (unlike the
+/// npm/go/pip/rustup methods, there is no `ensure_runtime` step) — it is a plain
+/// download-and-extract straight from the upstream's GitHub Releases page.
+async fn install_github_release(
+    app: &AppHandle,
+    language_id: &str,
+    command: &str,
+    root: &Path,
+    spec: &GithubReleaseSpec,
+) -> Result<String, String> {
+    // Serialize concurrent GitHub-release installs (see GH_INSTALL_LOCK); a queued
+    // duplicate that already produced the binary short-circuits before re-downloading.
+    let _guard = acquire_install_lock(app, language_id, &GH_INSTALL_LOCK, command).await;
+    if let Some(path) = already_installed(app, command) {
+        return Ok(path);
+    }
+
+    let gh_root = root.join("gh");
+    tokio::fs::create_dir_all(&gh_root)
+        .await
+        .map_err(|e| e.to_string())?;
+    // PID+nanos-unique scratch names (see `unique_scratch_path`) so a concurrent second
+    // app instance installing the same server can't collide on a fixed name mid-extract.
+    let archive_path = crate::runtime_provision::unique_scratch_path(
+        &gh_root,
+        &format!("{command}-download"),
+        ".part",
+    );
+    let staging =
+        crate::runtime_provision::unique_scratch_path(&gh_root, &format!("{command}-staging"), "");
+
+    let result = install_github_release_inner(
+        app,
+        language_id,
+        command,
+        spec,
+        &gh_root,
+        &archive_path,
+        &staging,
+    )
+    .await;
+
+    // Always sweep scratch artifacts — success already moved what it needed out of
+    // `staging` (see `single_child_dir`), and a failure must never leave a partial
+    // download or half-extracted tree behind for a later re-install to trip over.
+    let _ = tokio::fs::remove_file(&archive_path).await;
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    result
+}
+
+async fn install_github_release_inner(
+    app: &AppHandle,
+    language_id: &str,
+    command: &str,
+    spec: &GithubReleaseSpec,
+    gh_root: &Path,
+    archive_path: &Path,
+    staging: &Path,
+) -> Result<String, String> {
+    progress(app, language_id, 8, "Resolving latest release");
+    let client = crate::runtime_provision::http_client()?;
+    let tag = resolve_release_tag(&client, spec.repo, spec.version_tag).await?;
+
+    let os = current_gh_os();
+    let Some(arch) = current_gh_arch() else {
+        return Err(format!(
+            "{}: unsupported CPU architecture for a GitHub-release install",
+            spec.repo
+        ));
+    };
+    let Some(asset) = (spec.asset_for)(os, arch, &tag) else {
+        return Err(no_asset_error(spec.repo, os, arch));
+    };
+    let url = format!(
+        "https://github.com/{}/releases/download/{tag}/{asset}",
+        spec.repo
+    );
+
+    // GitHub releases here publish no companion sha256 manifest (unlike nodejs.org's
+    // SHASUMS256.txt or go.dev's per-file digests, which `runtime_provision` pins
+    // against). Integrity instead comes from the archive successfully opening right
+    // after — a truncated/corrupt download fails loudly at `extract_archive` rather
+    // than silently installing a broken tree.
+    progress(app, language_id, 15, "Downloading");
+    let downloaded = download_asset(app, language_id, &client, &url, archive_path, 15, 75).await?;
+    if downloaded == 0 {
+        return Err(format!("Downloaded asset {asset} was empty"));
+    }
+
+    progress(app, language_id, 78, "Extracting");
+    let ext = archive_ext(&asset)?;
+    let _ = tokio::fs::remove_dir_all(staging).await;
+    crate::runtime_provision::extract_archive(archive_path, staging, ext)
+        .await
+        .map_err(|e| {
+            format!("Downloaded archive {asset} could not be opened (likely corrupt): {e}")
+        })?;
+
+    // Normalize the top-level dir away when the archive wraps everything in one (e.g.
+    // clangd's `clangd_<ver>/`); LuaLS's archives have no such wrapper, so `None` here
+    // just means "the staging root is already the install tree".
+    progress(app, language_id, 90, "Installing");
+    let inner = crate::runtime_provision::single_child_dir(staging)
+        .await?
+        .unwrap_or_else(|| staging.to_path_buf());
+    let dest = gh_root.join(command);
+    // Tombstone-swap into place — same atomic replace `runtime_provision` uses for
+    // Node/Go/Python, so a re-install over a broken/partial `dest` always succeeds.
+    crate::runtime_provision::replace_runtime_dir(&inner, &dest).await?;
+
+    write_release_manifest(&dest, spec.repo, &tag, &asset).await;
+
+    progress(app, language_id, 96, "Verifying");
+    finalize(app, command)
+}
+
+#[derive(serde::Deserialize)]
+struct GhReleaseResponse {
+    tag_name: String,
+}
+
+/// Resolve the release tag to install: the pinned `version_tag`, or GitHub's
+/// `/releases/latest` when unpinned.
+async fn resolve_release_tag(
+    client: &reqwest::Client,
+    repo: &str,
+    pinned: Option<&str>,
+) -> Result<String, String> {
+    if let Some(tag) = pinned {
+        return Ok(tag.to_string());
+    }
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let release: GhReleaseResponse = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("Could not reach the GitHub releases API for {repo}: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("GitHub releases API error for {repo}: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Malformed GitHub release response for {repo}: {e}"))?;
+    Ok(release.tag_name)
+}
+
+/// A clear, actionable error for a platform with no published release asset.
+fn no_asset_error(repo: &str, os: GhOs, arch: GhArch) -> String {
+    if os == GhOs::Windows && arch == GhArch::Arm64 {
+        format!(
+            "{repo} publishes no native Windows-arm64 build. Run Lux IDE under x64 emulation (Windows 11's built-in x86-64 emulation for Arm) to install it, or install it manually."
+        )
+    } else {
+        format!("{repo} publishes no release asset for this platform.")
+    }
+}
+
+/// Derive the archive kind from a release asset's file name.
+fn archive_ext(asset: &str) -> Result<&'static str, String> {
+    let path = Path::new(asset);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default();
+    if ext.eq_ignore_ascii_case("zip") || ext.eq_ignore_ascii_case("tgz") {
+        return Ok(if ext.eq_ignore_ascii_case("zip") {
+            "zip"
+        } else {
+            "tar.gz"
+        });
+    }
+    // `.tar.gz` is a compound extension: `Path::extension()` only sees the trailing
+    // `gz`, so also check the stem's own extension is `tar`.
+    if ext.eq_ignore_ascii_case("gz")
+        && Path::new(path.file_stem().unwrap_or_default())
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("tar"))
+    {
+        return Ok("tar.gz");
+    }
+    Err(format!(
+        "Unsupported archive format for release asset {asset}"
+    ))
+}
+
+/// Record which release is installed at `dest` (repo/tag/asset) so the install can
+/// be inspected later — informational only, never consulted by `finalize`/resolution.
+async fn write_release_manifest(dest: &Path, repo: &str, tag: &str, asset: &str) {
+    let manifest = serde_json::json!({ "repo": repo, "tag": tag, "asset": asset });
+    if let Ok(bytes) = serde_json::to_vec_pretty(&manifest) {
+        let _ = tokio::fs::write(dest.join("manifest.json"), bytes).await;
+    }
+}
+
+/// Stream a GitHub release asset to `dest`, emitting `Downloading` progress on
+/// `lux://lsp-install` between `from`..`to` percent. A sibling of
+/// `runtime_provision::download_to_file`, kept separate rather than reused directly:
+/// that helper's progress calls are hard-wired to `lux://runtime-provision`, which
+/// would misroute a GitHub-release install's progress to the wrong UI surface (and it
+/// requires an `Integrity` checksum, which these assets don't publish). Returns the
+/// number of bytes written.
+async fn download_asset(
+    app: &AppHandle,
+    language_id: &str,
+    client: &reqwest::Client,
+    url: &str,
+    dest: &Path,
+    from: u8,
+    to: u8,
+) -> Result<u64, String> {
+    use futures_util::StreamExt;
+    use tokio::io::AsyncWriteExt;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed ({url}): {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Download error ({url}): {e}"))?;
+    let total = response.content_length();
+
+    let mut file = tokio::fs::File::create(dest)
+        .await
+        .map_err(|e| format!("Could not create {}: {e}", dest.display()))?;
+    let mut stream = response.bytes_stream();
+    let mut downloaded: u64 = 0;
+    let span = u64::from(to.saturating_sub(from));
+    let mut last_percent = from;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("Download interrupted: {e}"))?;
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("Write failed: {e}"))?;
+        downloaded += chunk.len() as u64;
+        if let Some(total) = total.filter(|t| *t > 0) {
+            let pct = from + u8::try_from(downloaded.min(total) * span / total).unwrap_or(0);
+            if pct > last_percent {
+                last_percent = pct;
+                progress(app, language_id, pct, "Downloading");
+            }
+        }
+    }
+    file.flush().await.map_err(|e| e.to_string())?;
+    Ok(downloaded)
+}
+
 /// After an install that targets the managed dir, confirm the binary resolves and
 /// return its absolute path. Fails loudly (never a silent success) if the expected
 /// executable is not where the install method should have placed it.
@@ -684,5 +1353,231 @@ fn trim_output(output: &str, fallback: &str) -> String {
             .rev()
             .collect();
         format!("{fallback}: {tail}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── GitHub-release asset selection ──
+
+    #[test]
+    fn lua_asset_selection_matrix() {
+        assert_eq!(
+            lua_language_server_asset(GhOs::Windows, GhArch::X64, "3.13.0").as_deref(),
+            Some("lua-language-server-3.13.0-win32-x64.zip")
+        );
+        assert_eq!(
+            lua_language_server_asset(GhOs::Linux, GhArch::X64, "3.13.0").as_deref(),
+            Some("lua-language-server-3.13.0-linux-x64.tar.gz")
+        );
+        assert_eq!(
+            lua_language_server_asset(GhOs::Linux, GhArch::Arm64, "3.13.0").as_deref(),
+            Some("lua-language-server-3.13.0-linux-arm64.tar.gz")
+        );
+        assert_eq!(
+            lua_language_server_asset(GhOs::Macos, GhArch::X64, "3.13.0").as_deref(),
+            Some("lua-language-server-3.13.0-darwin-x64.tar.gz")
+        );
+        assert_eq!(
+            lua_language_server_asset(GhOs::Macos, GhArch::Arm64, "3.13.0").as_deref(),
+            Some("lua-language-server-3.13.0-darwin-arm64.tar.gz")
+        );
+        // No win32-arm64 build is published — must fail closed, not guess.
+        assert_eq!(
+            lua_language_server_asset(GhOs::Windows, GhArch::Arm64, "3.13.0"),
+            None
+        );
+        // A leading `v` in a tag (not currently emitted by LuaLS, but defensive) is
+        // stripped rather than baked into the asset name.
+        assert_eq!(
+            lua_language_server_asset(GhOs::Linux, GhArch::X64, "v3.13.0").as_deref(),
+            Some("lua-language-server-3.13.0-linux-x64.tar.gz")
+        );
+    }
+
+    #[test]
+    fn clangd_asset_selection_matrix() {
+        assert_eq!(
+            clangd_asset(GhOs::Windows, GhArch::X64, "18.1.3").as_deref(),
+            Some("clangd-windows-18.1.3.zip")
+        );
+        assert_eq!(
+            clangd_asset(GhOs::Linux, GhArch::X64, "18.1.3").as_deref(),
+            Some("clangd-linux-18.1.3.zip")
+        );
+        // The mac build is a universal binary — one asset for both architectures.
+        assert_eq!(
+            clangd_asset(GhOs::Macos, GhArch::X64, "18.1.3").as_deref(),
+            Some("clangd-mac-18.1.3.zip")
+        );
+        assert_eq!(
+            clangd_asset(GhOs::Macos, GhArch::Arm64, "18.1.3").as_deref(),
+            Some("clangd-mac-18.1.3.zip")
+        );
+        // clangd/clangd publishes no windows-arm64 or linux-arm64 build.
+        assert_eq!(clangd_asset(GhOs::Windows, GhArch::Arm64, "18.1.3"), None);
+        assert_eq!(clangd_asset(GhOs::Linux, GhArch::Arm64, "18.1.3"), None);
+    }
+
+    #[test]
+    fn no_asset_error_calls_out_windows_arm_emulation() {
+        let msg = no_asset_error("clangd/clangd", GhOs::Windows, GhArch::Arm64);
+        assert!(
+            msg.contains("emulation"),
+            "should suggest x64 emulation: {msg}"
+        );
+        let generic = no_asset_error("clangd/clangd", GhOs::Linux, GhArch::Arm64);
+        assert!(
+            !generic.contains("emulation"),
+            "non-Windows-arm case shouldn't mention it: {generic}"
+        );
+    }
+
+    #[test]
+    fn archive_ext_detects_known_formats() {
+        assert_eq!(archive_ext("clangd-windows-18.1.3.zip").unwrap(), "zip");
+        assert_eq!(
+            archive_ext("lua-language-server-3.13.0-linux-x64.tar.gz").unwrap(),
+            "tar.gz"
+        );
+        assert!(archive_ext("lua-language-server-3.13.0.7z").is_err());
+    }
+
+    // ── Uninstall refusal (managed-only) ──
+
+    #[test]
+    fn managed_uninstall_guard_allows_managed_install() {
+        let managed = Some(PathBuf::from("/managed/lsp/gh/clangd/bin/clangd"));
+        assert!(managed_uninstall_guard("clangd", managed, None).is_ok());
+    }
+
+    #[test]
+    fn managed_uninstall_guard_refuses_path_only_install() {
+        let on_path = Some(PathBuf::from("/usr/bin/clangd"));
+        let err = managed_uninstall_guard("clangd", None, on_path).unwrap_err();
+        assert!(
+            err.contains("system PATH"),
+            "should explain it is a system install: {err}"
+        );
+    }
+
+    #[test]
+    fn managed_uninstall_guard_refuses_when_not_installed_at_all() {
+        let err = managed_uninstall_guard("clangd", None, None).unwrap_err();
+        assert!(
+            err.contains("not installed"),
+            "should say it isn't installed: {err}"
+        );
+    }
+
+    // ── Catalog / recipe wiring ──
+
+    #[test]
+    fn method_label_reports_github_for_release_installs() {
+        assert_eq!(
+            method_label(InstallMethod::GithubRelease(LUA_LANGUAGE_SERVER_RELEASE)),
+            "github"
+        );
+    }
+
+    #[test]
+    fn lua_and_cpp_recipes_use_github_release_with_no_manual_hint() {
+        for language_id in ["lua", "cpp"] {
+            let recipe = recipe_for(language_id).expect("recipe must exist");
+            assert!(
+                matches!(recipe.method, InstallMethod::GithubRelease(_)),
+                "{language_id} should install via GithubRelease"
+            );
+        }
+    }
+
+    #[test]
+    fn command_for_resolves_known_and_rejects_unknown_language_ids() {
+        assert_eq!(command_for("lua"), Some("lua-language-server"));
+        assert_eq!(command_for("cpp"), Some("clangd"));
+        assert_eq!(command_for("not-a-real-language"), None);
+    }
+
+    // ── Archive top-level-dir normalization (via the reused `single_child_dir`) ──
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "lux-lsp-install-test-{label}-{}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    #[tokio::test]
+    async fn single_child_dir_strips_a_lone_wrapper_like_clangds_archive() {
+        // clangd's archives wrap everything in one `clangd_<ver>/` directory.
+        let root = unique_temp_dir("wrapped");
+        let wrapper = root.join("clangd_18.1.3");
+        tokio::fs::create_dir_all(wrapper.join("bin"))
+            .await
+            .unwrap();
+        tokio::fs::write(wrapper.join("bin").join("clangd"), b"stub")
+            .await
+            .unwrap();
+
+        let inner = crate::runtime_provision::single_child_dir(&root)
+            .await
+            .unwrap();
+        assert_eq!(inner, Some(wrapper));
+
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    #[tokio::test]
+    async fn single_child_dir_keeps_root_for_lua_ls_unwrapped_layout() {
+        // LuaLS's archives have no wrapper: bin/, locale/, LICENSE, … sit at the root.
+        let root = unique_temp_dir("unwrapped");
+        tokio::fs::create_dir_all(root.join("bin")).await.unwrap();
+        tokio::fs::write(root.join("bin").join("lua-language-server"), b"stub")
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(root.join("locale"))
+            .await
+            .unwrap();
+        tokio::fs::write(root.join("LICENSE"), b"stub")
+            .await
+            .unwrap();
+
+        let inner = crate::runtime_provision::single_child_dir(&root)
+            .await
+            .unwrap();
+        assert_eq!(inner, None, "multi-entry root must not be stripped");
+
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    // ── manifest.json ──
+
+    #[tokio::test]
+    async fn write_release_manifest_round_trips_repo_tag_asset() {
+        let dir = unique_temp_dir("manifest");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        write_release_manifest(
+            &dir,
+            "LuaLS/lua-language-server",
+            "3.13.0",
+            "lua-language-server-3.13.0-linux-x64.tar.gz",
+        )
+        .await;
+
+        let raw = tokio::fs::read_to_string(dir.join("manifest.json"))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["repo"], "LuaLS/lua-language-server");
+        assert_eq!(value["tag"], "3.13.0");
+        assert_eq!(
+            value["asset"],
+            "lua-language-server-3.13.0-linux-x64.tar.gz"
+        );
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
     }
 }

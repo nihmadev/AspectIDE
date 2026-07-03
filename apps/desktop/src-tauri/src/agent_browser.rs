@@ -22,6 +22,7 @@ mod validate;
 mod version;
 
 pub use operations::{dashboard, install, invoke, read_image, skills, status, stream_status};
+pub use resolver::{resolve_binary, set_app_data_dir};
 pub use types::{
     AgentBrowserDashboardRequest, AgentBrowserDashboardResponse, AgentBrowserInstallRequest,
     AgentBrowserInstallResponse, AgentBrowserInvokeRequest, AgentBrowserInvokeResponse,
@@ -48,9 +49,10 @@ pub async fn agent_browser_invoke(
 
 #[tauri::command]
 pub async fn agent_browser_install(
+    app: tauri::AppHandle,
     request: Option<AgentBrowserInstallRequest>,
 ) -> Result<AgentBrowserInstallResponse, String> {
-    install(request.unwrap_or_default()).await
+    install(&app, request.unwrap_or_default()).await
 }
 
 #[tauri::command]

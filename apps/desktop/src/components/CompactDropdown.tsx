@@ -1,5 +1,5 @@
 import { ChevronDown, ChevronRight, EyeOff, Search } from "lucide-react";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -35,7 +35,24 @@ type CompactDropdownProps<T extends string> = {
   hideOptionLabel?: string;
   /** Optional node rendered pinned at the bottom of the menu (e.g. "Show N hidden"). */
   footer?: ReactNode;
+  /** Per-option inline style (also applied to the trigger's current value) — e.g. font pickers previewing each family in itself. */
+  getOptionStyle?: (value: T) => CSSProperties | undefined;
 };
+
+// Session-scoped view memory per dropdown (keyed by className + label): the
+// scroll offset and collapsed groups survive close/reopen AND component
+// remounts (panel switches, chat re-open) — refs alone die with the instance.
+type DropdownViewMemory = { scrollTop: number | null; collapsed: ReadonlySet<string> };
+const dropdownViewMemory = new Map<string, DropdownViewMemory>();
+
+function viewMemoryFor(key: string): DropdownViewMemory {
+  let memory = dropdownViewMemory.get(key);
+  if (!memory) {
+    memory = { scrollTop: null, collapsed: new Set() };
+    dropdownViewMemory.set(key, memory);
+  }
+  return memory;
+}
 
 const ROW_HEIGHT = 30;
 const GROUP_HEADER_HEIGHT = 32;
@@ -62,16 +79,31 @@ export function CompactDropdown<T extends string>({
   onHideOption,
   hideOptionLabel,
   footer,
+  getOptionStyle,
 }: CompactDropdownProps<T>) {
+  // Label is part of the key so the three composer selects (same className)
+  // don't share one memory slot.
+  const viewMemory = viewMemoryFor(`${className}::${label}`);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<DropdownPosition | null>(null);
-  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set(viewMemory.collapsed));
   const [query, setQuery] = useState("");
   const [activeValue, setActiveValue] = useState<T | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const activeRowRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  // Inside a modal dialog (Radix) the menu must portal into the dialog content,
+  // not document.body: a body-level portal counts as "outside" for the dialog's
+  // dismiss/focus/scroll-lock layers — clicking an option would close the whole
+  // dialog and the scroll lock would swallow wheel events over the list.
+  const portalHostRef = useRef<HTMLElement | null>(null);
+  const selectedRowRef = useRef<HTMLDivElement | null>(null);
+  const scrollRestoredRef = useRef(false);
+  // Auto-scroll follows the active row only for keyboard navigation; hovering while
+  // the wheel is moving must never yank the list around.
+  const keyboardNavRef = useRef(false);
   const selectedLabel = options.find((option) => option.value === value)?.label ?? label;
 
   const showSearch = searchable && options.length >= searchThreshold;
@@ -102,19 +134,35 @@ export function CompactDropdown<T extends string>({
     const trigger = triggerRef.current;
     if (!trigger) return;
     const rect = trigger.getBoundingClientRect();
+    const host = portalHostRef.current ?? document.body;
+    const hosted = host !== document.body;
+    // Bounds the menu must stay within: the viewport, or the host dialog's box
+    // (its overflow/paint containment would clip anything past the edge anyway).
+    const clip = hosted
+      ? host.getBoundingClientRect()
+      : { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight };
     const viewportGap = 8;
     const menuGap = 5;
     const longestLabel = options.reduce((longest, option) => Math.max(longest, option.label.length, option.group?.length ?? 0), label.length);
     const contentWidth = Math.min(MENU_MAX_WIDTH, Math.max(MENU_MIN_WIDTH, rect.width, longestLabel * LABEL_WIDTH_FACTOR + MENU_HORIZONTAL_PADDING));
     const chrome = (showSearch ? SEARCH_ROW_HEIGHT : 0) + (footer ? FOOTER_ROW_HEIGHT : 0);
     const naturalHeight = Math.min(MENU_MAX_HEIGHT, Math.max(MENU_MIN_HEIGHT, visibleOptionsCount * ROW_HEIGHT + chrome + 8));
-    const spaceBelow = window.innerHeight - rect.bottom - viewportGap;
-    const spaceAbove = rect.top - viewportGap;
+    const spaceBelow = clip.bottom - rect.bottom - viewportGap;
+    const spaceAbove = rect.top - clip.top - viewportGap;
     const openBelow = spaceBelow >= Math.min(naturalHeight, 112) || spaceBelow >= spaceAbove;
     const maxHeight = Math.max(MENU_MIN_HEIGHT, Math.min(naturalHeight, openBelow ? spaceBelow : spaceAbove));
-    const top = openBelow ? rect.bottom + menuGap : rect.top - maxHeight - menuGap;
-    const left = Math.min(Math.max(viewportGap, rect.left), window.innerWidth - contentWidth - viewportGap);
-    setPosition({ left, maxHeight, top: Math.max(viewportGap, top), width: contentWidth });
+    const top = Math.max(clip.top + viewportGap, openBelow ? rect.bottom + menuGap : rect.top - maxHeight - menuGap);
+    const left = Math.min(Math.max(clip.left + viewportGap, rect.left), clip.right - contentWidth - viewportGap);
+    // Hosted menus are absolutely positioned inside the (positioned) dialog, so
+    // viewport coordinates shift into the host's padding-box space.
+    const offsetX = hosted ? clip.left + host.clientLeft : 0;
+    const offsetY = hosted ? clip.top + host.clientTop : 0;
+    setPosition({
+      left: left - offsetX,
+      maxHeight,
+      top: top - offsetY,
+      width: contentWidth,
+    });
   }, [label.length, options, visibleOptionsCount, showSearch, footer]);
 
   useLayoutEffect(() => {
@@ -137,10 +185,36 @@ export function CompactDropdown<T extends string>({
   }, [open, showSearch]);
 
   // Keep the active row visible while arrow-key navigating a long/grouped list.
+  // Mouse-driven activation (hover) is excluded on purpose — see keyboardNavRef.
   useEffect(() => {
-    if (!open || activeValue == null) return;
+    if (!open || activeValue == null || !keyboardNavRef.current) return;
+    keyboardNavRef.current = false;
     activeRowRef.current?.scrollIntoView({ block: "nearest" });
   }, [open, activeValue]);
+
+  // Restore the remembered scroll offset once per open (after the portal has laid
+  // out); fall back to centering the current selection on the very first open.
+  useLayoutEffect(() => {
+    if (!open || !position) {
+      scrollRestoredRef.current = false;
+      return;
+    }
+    if (scrollRestoredRef.current) return;
+    scrollRestoredRef.current = true;
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    if (viewMemory.scrollTop != null) {
+      scroller.scrollTop = viewMemory.scrollTop;
+      return;
+    }
+    // Center the selection manually — scrollIntoView could also scroll outer
+    // containers (e.g. the settings page behind a hosted menu).
+    const row = selectedRowRef.current;
+    if (!row) return;
+    const rowRect = row.getBoundingClientRect();
+    const scrollerRect = scroller.getBoundingClientRect();
+    scroller.scrollTop += rowRect.top - scrollerRect.top - (scroller.clientHeight - rowRect.height) / 2;
+  }, [open, position]);
 
   useEffect(() => {
     if (!open) return;
@@ -149,12 +223,18 @@ export function CompactDropdown<T extends string>({
       if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
       setOpen(false);
     };
+    // Reposition when the surrounding UI scrolls — but the menu's own list
+    // scrolling must not churn position state on every wheel tick.
+    const handleScroll = (event: Event) => {
+      if (menuRef.current?.contains(event.target as Node | null)) return;
+      updatePosition();
+    };
     window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
+    window.addEventListener("scroll", handleScroll, true);
     window.addEventListener("pointerdown", handlePointerDown);
     return () => {
       window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
+      window.removeEventListener("scroll", handleScroll, true);
       window.removeEventListener("pointerdown", handlePointerDown);
     };
   }, [open, updatePosition]);
@@ -170,6 +250,7 @@ export function CompactDropdown<T extends string>({
       const next = new Set(current);
       if (next.has(groupName)) next.delete(groupName);
       else next.add(groupName);
+      viewMemory.collapsed = next;
       return next;
     });
   };
@@ -178,11 +259,15 @@ export function CompactDropdown<T extends string>({
     if (navigableValues.length === 0) return;
     const currentIndex = activeValue ? navigableValues.indexOf(activeValue) : -1;
     const nextIndex = (currentIndex + delta + navigableValues.length) % navigableValues.length;
+    keyboardNavRef.current = true;
     setActiveValue(navigableValues[nextIndex]);
   };
 
-  const handleMenuKeyDown = (event: { key: string; preventDefault: () => void }) => {
+  const handleMenuKeyDown = (event: { key: string; preventDefault: () => void; stopPropagation: () => void }) => {
     if (event.key === "Escape") {
+      // Close only the menu — inside a dialog the bubbled Escape would
+      // otherwise dismiss the whole dialog too.
+      event.stopPropagation();
       setOpen(false);
       triggerRef.current?.focus();
       return;
@@ -214,21 +299,26 @@ export function CompactDropdown<T extends string>({
         aria-label={label}
         title={label}
         ref={triggerRef}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => {
+          portalHostRef.current = triggerRef.current?.closest<HTMLElement>("[role=\"dialog\"]") ?? null;
+          setOpen((current) => !current);
+        }}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" || event.key === "ArrowUp") {
             event.preventDefault();
+            portalHostRef.current = triggerRef.current?.closest<HTMLElement>("[role=\"dialog\"]") ?? null;
             setOpen(true);
           }
         }}
       >
         {icon}
-        <span className="compact-dropdown-value">{selectedLabel}</span>
+        <span className="compact-dropdown-value" style={getOptionStyle?.(value)}>{selectedLabel}</span>
         <ChevronDown size={12} />
       </button>
       {open && position && createPortal(
         <div
           className="compact-dropdown-menu"
+          data-hosted={portalHostRef.current ? "true" : undefined}
           role="listbox"
           aria-label={label}
           aria-activedescendant={activeValue ? `cdo-${className}-${activeValue}` : undefined}
@@ -250,7 +340,15 @@ export function CompactDropdown<T extends string>({
               />
             </div>
           )}
-          <div className="compact-dropdown-scroll">
+          <div
+            className="compact-dropdown-scroll"
+            ref={scrollRef}
+            onScroll={(event) => {
+              // Only unfiltered positions are worth remembering — an offset
+              // inside search results is meaningless once the query resets.
+              if (!query.trim()) viewMemory.scrollTop = event.currentTarget.scrollTop;
+            }}
+          >
             {groupedOptions.length === 0 && (
               <div className="compact-dropdown-empty">{query.trim() ? (searchEmptyLabel ?? `No matches for "${query.trim()}"`) : "—"}</div>
             )}
@@ -277,7 +375,10 @@ export function CompactDropdown<T extends string>({
                       data-selected={option.value === value}
                       data-active={option.value === activeValue}
                       key={option.value}
-                      ref={option.value === activeValue ? activeRowRef : undefined}
+                      ref={option.value === activeValue || option.value === value ? (node) => {
+                        if (option.value === activeValue) activeRowRef.current = node;
+                        if (option.value === value) selectedRowRef.current = node;
+                      } : undefined}
                     >
                       <button
                         className="compact-dropdown-option"
@@ -288,7 +389,7 @@ export function CompactDropdown<T extends string>({
                         onClick={() => selectOption(option.value)}
                         onMouseEnter={() => setActiveValue(option.value)}
                       >
-                        <span>{option.label}</span>
+                        <span style={getOptionStyle?.(option.value)}>{option.label}</span>
                       </button>
                       {onHideOption && option.value !== value && (
                         <button
@@ -309,7 +410,7 @@ export function CompactDropdown<T extends string>({
           </div>
           {footer && <div className="compact-dropdown-footer">{footer}</div>}
         </div>,
-        document.body,
+        portalHostRef.current ?? document.body,
       )}
     </div>
   );

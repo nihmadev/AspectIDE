@@ -1,4 +1,4 @@
-import type { AiChatMessage, AiChatSendInput, AiToolApprovalRequest } from "./aiChatTypes";
+import type { AiChatMessage, AiChatRuntimeStatus, AiChatSendInput, AiToolApprovalRequest } from "./aiChatTypes";
 import { createTurnTimeline } from "./aiChatTimeline";
 import { isAnthropicCacheModel, reasoningPayload } from "./aiChatTransport";
 import { attachTurnCostEstimate } from "./aiTurnUsage";
@@ -396,11 +396,16 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
   });
 }
 
-function mapPhase(phase: string): "thinking" | "streaming" | "running-tools" | "waiting-approval" {
+function mapPhase(phase: string): AiChatRuntimeStatus {
   switch (phase) {
     case "streaming": return "streaming";
     case "running-tools": return "running-tools";
     case "waiting-approval": return "waiting-approval";
+    // The model finished thinking and is now constructing a tool call — no tokens
+    // are streaming and no tool has started yet, so neither "thinking" nor
+    // "running-tools" is true. Without this distinct status the chip/shimmer kept
+    // reporting "thinking" through this gap, which read as a stuck turn.
+    case "building-tools": return "preparing";
     default: return "thinking";
   }
 }
@@ -434,6 +439,9 @@ async function buildRunTurnInput(input: AiChatSendInput, turnId: string, message
     baseUrl: input.provider.baseUrl,
     apiKey: input.provider.apiKey || null,
     model: selectedModelAlias,
+    // Best-effort semantic memory: empty for anthropic-protocol providers (no
+    // /embeddings endpoint) or when the user never set one.
+    embeddingModel: input.provider.protocol === "anthropic" ? null : (input.provider.embeddingModel || null),
     agentMode: input.preferences.agentMode,
     toolRoundLimit: input.preferences.toolRoundLimit,
     toolApprovalMode: input.preferences.toolApprovalMode,
@@ -476,5 +484,9 @@ async function buildRunTurnInput(input: AiChatSendInput, turnId: string, message
     activeDocumentPath: input.activeDocument?.path ?? null,
     openDocumentPaths: input.openDocuments.map((doc) => doc.path ?? "").filter(Boolean),
     terminalContext: input.terminalContext,
+    // Critical wire for Rollback (#31): without this the wave-1 Rust capture
+    // (Write/StrReplace/Delete/PatchEngine augmenting the checkpoint) never runs,
+    // because the native turn never learns which checkpoint to augment.
+    fileCheckpointId: input.turnCheckpoint?.fileCheckpointId,
   };
 }

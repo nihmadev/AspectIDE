@@ -281,6 +281,84 @@ pub async fn ai_list_provider_models(
     Ok(ids)
 }
 
+/// Build the `/embeddings` endpoint from a provider base URL, mirroring
+/// [`models_endpoint`]'s trailing-slash/`/chat/completions` normalization.
+fn embeddings_endpoint(base_url: &str) -> Result<String, String> {
+    let trimmed = base_url.trim();
+    if trimmed.is_empty() {
+        return Err("AI provider base URL is empty".to_string());
+    }
+    let url = reqwest::Url::parse(trimmed)
+        .map_err(|error| format!("Invalid AI provider URL: {error}"))?;
+    match url.scheme() {
+        "http" | "https" => {}
+        scheme => return Err(format!("Unsupported AI provider URL scheme: {scheme}")),
+    }
+    let text = url.as_str().trim_end_matches('/');
+    let root = text.strip_suffix("/chat/completions").unwrap_or(text);
+    Ok(format!("{root}/embeddings"))
+}
+
+/// Generate an OpenAI-shape embedding vector for `input` from a provider's
+/// `/embeddings` endpoint. Best-effort by design (see call sites in
+/// `ai_turn.rs`'s `RememberMemory`/`RecallMemory` dispatch): never called for
+/// `anthropic`-protocol providers (no such endpoint on that API), and callers
+/// should treat any `Err` as "skip the embedding, proceed without it" rather
+/// than failing the enclosing tool call.
+#[allow(clippy::cast_possible_truncation)]
+pub async fn embeddings(
+    base_url: &str,
+    api_key: Option<&str>,
+    model: &str,
+    input: &str,
+) -> Result<Vec<f32>, String> {
+    let endpoint = embeddings_endpoint(base_url)?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let key = api_key.map(str::trim).filter(|value| !value.is_empty());
+    let mut builder = client
+        .post(&endpoint)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::ACCEPT, "application/json")
+        .json(&serde_json::json!({ "model": model, "input": input }));
+    if let Some(key) = key {
+        builder = builder.bearer_auth(key);
+    }
+    let response = builder
+        .send()
+        .await
+        .map_err(|error| format!("Failed to reach {endpoint}: {error}"))?;
+    let status = response.status();
+    let body: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Invalid embeddings response: {error}"))?;
+    if !status.is_success() {
+        let detail = body
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("provider returned an error");
+        return Err(format!("Embeddings request failed ({status}): {detail}"));
+    }
+    let vector = body
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("embedding"))
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Embeddings response had no data[0].embedding array".to_string())?
+        .iter()
+        // f32 precision loss on an embedding component is harmless (cosine
+        // similarity doesn't need f64), and this is the crate's own encoded
+        // storage type (`lux_memory::encode_embedding` takes `&[f32]`).
+        .filter_map(|value| value.as_f64().map(|v| v as f32))
+        .collect();
+    Ok(vector)
+}
+
 pub async fn completion<R>(
     request: AiChatCompletionRequest,
     mut on_retry: R,
@@ -419,17 +497,30 @@ where
 /// post-stream cancellation check can finalize the turn as cancelled.
 // The future is awaited inline by the native turn loop (never `tokio::spawn`ed),
 // so the non-Send `should_cancel: Fn` closure it holds across awaits is fine.
+//
+// `on_tool_start` fires the moment a tool call BEGINS construction (OpenAI's first
+// `tool_calls` delta fragment for a given index / Anthropic's `content_block_start`
+// for a `tool_use` block), carrying the tool name once known (empty string if the
+// provider hasn't sent it yet). Tool-call argument JSON otherwise streams silently
+// through neither `on_delta` channel, so without this a model that answers with a
+// pure tool call (no preceding text/reasoning tokens) never signals the caller
+// until the whole call finishes — the UI-visible symptom is a "thinking" status
+// stuck for the entire tool-argument generation (which can be many seconds for a
+// large file write). Separate from `on_delta` so every existing text/reasoning
+// caller is unaffected.
 #[allow(clippy::future_not_send)]
-pub async fn completion_streaming<F, C, R>(
+pub async fn completion_streaming<F, C, R, T>(
     request: AiChatCompletionRequest,
     mut on_delta: F,
     should_cancel: C,
     mut on_retry: R,
+    mut on_tool_start: T,
 ) -> Result<AiChatCompletionResponse, String>
 where
     F: FnMut(&str, &str),
     C: Fn() -> bool,
     R: FnMut(RetryNotice),
+    T: FnMut(&str),
 {
     let anthropic = crate::ai_anthropic::is_anthropic(&request.protocol);
     let endpoint = if anthropic {
@@ -658,7 +749,7 @@ where
             }
             if let Ok(value) = serde_json::from_str::<Value>(&data) {
                 ingested_event = true;
-                accumulator.ingest(&value, &mut on_delta);
+                accumulator.ingest(&value, &mut on_delta, &mut on_tool_start);
             }
         }
     }
@@ -681,7 +772,7 @@ where
         }
         if let Ok(value) = serde_json::from_str::<Value>(&data) {
             ingested_event = true;
-            accumulator.ingest(&value, &mut on_delta);
+            accumulator.ingest(&value, &mut on_delta, &mut on_tool_start);
         }
     }
     // A stream that closes right after `data: {...}\n` (no blank-line terminator)
@@ -693,7 +784,7 @@ where
             if data.trim() != "[DONE]" {
                 if let Ok(value) = serde_json::from_str::<Value>(&data) {
                     ingested_event = true;
-                    accumulator.ingest(&value, &mut on_delta);
+                    accumulator.ingest(&value, &mut on_delta, &mut on_tool_start);
                 }
             }
         }
@@ -820,7 +911,12 @@ fn sse_stream_error(value: &Value) -> Option<String> {
 }
 
 impl StreamAccumulator {
-    fn ingest<F: FnMut(&str, &str)>(&mut self, value: &Value, on_delta: &mut F) {
+    fn ingest<F: FnMut(&str, &str), T: FnMut(&str)>(
+        &mut self,
+        value: &Value,
+        on_delta: &mut F,
+        on_tool_start: &mut T,
+    ) {
         // OpenAI-compatible gateways can send `{"error":{...}}` on a 200 stream.
         // Capture the first one so the turn fails instead of returning empty content.
         if self.stream_error.is_none() {
@@ -875,7 +971,7 @@ impl StreamAccumulator {
         }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
-                self.merge_tool_call(call);
+                self.merge_tool_call(call, on_tool_start);
             }
         }
     }
@@ -953,7 +1049,7 @@ impl StreamAccumulator {
         }
     }
 
-    fn merge_tool_call(&mut self, call: &Value) {
+    fn merge_tool_call<T: FnMut(&str)>(&mut self, call: &Value, on_tool_start: &mut T) {
         // A single response never has more than a handful of tool calls. Clamp the
         // attacker-controlled `index` to a hard ceiling so a hostile endpoint
         // streaming `{"index":4e9}` can't drive the `while push` loop into a
@@ -966,6 +1062,9 @@ impl StreamAccumulator {
             // No explicit index: extend the most recent call (or start the first).
             None => self.tool_calls.len().saturating_sub(1),
         };
+        // Only a brand-new index is the START of a tool call's construction; later
+        // fragments for the same index just stream more argument JSON.
+        let is_new = index >= self.tool_calls.len();
         while self.tool_calls.len() <= index {
             self.tool_calls.push(StreamToolCall::default());
         }
@@ -984,6 +1083,9 @@ impl StreamAccumulator {
             if let Some(args) = function.get("arguments").and_then(Value::as_str) {
                 slot.arguments.push_str(args);
             }
+        }
+        if is_new {
+            on_tool_start(&slot.name);
         }
     }
 
@@ -1024,6 +1126,35 @@ impl StreamAccumulator {
     }
 }
 
+/// One position in the Anthropic response's ordered content-block list, tracked by
+/// content-block `index` exactly like `tool_calls` (below) so the block shapes the
+/// Messages API actually sent — `thinking`/`redacted_thinking` (with a signature),
+/// `text`, `tool_use` — can be replayed verbatim on a later turn. Anthropic requires
+/// any `thinking`/`redacted_thinking` blocks from a turn that used tools to precede
+/// the `tool_use` blocks on replay; capturing them here (rather than only the
+/// flattened `content`/`reasoning` strings) is what makes that possible.
+#[derive(Default, Clone)]
+enum PendingBlock {
+    #[default]
+    Empty,
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    RedactedThinking {
+        data: String,
+    },
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        /// Raw (possibly partial) input JSON text, matching `StreamToolCall::arguments`.
+        input: String,
+    },
+}
+
 /// Reassembles an Anthropic Messages SSE stream into the same OpenAI-style response
 /// body the rest of the transport expects. Anthropic emits typed events
 /// (`message_start`, `content_block_start/delta/stop`, `message_delta`, …) keyed by
@@ -1036,6 +1167,12 @@ struct AnthropicStreamAccumulator {
     content: String,
     reasoning: String,
     tool_calls: Vec<StreamToolCall>,
+    /// Ordered content blocks (same index space as `tool_calls`), preserved so the
+    /// exact Anthropic block sequence — including thinking signatures and
+    /// redacted-thinking blobs the flattened fields above don't carry — can be
+    /// replayed. Exposed on the response body as the `anthropic_content` vendor
+    /// field.
+    content_blocks: Vec<PendingBlock>,
     stop_reason: Option<String>,
     input_tokens: u64,
     output_tokens: u64,
@@ -1049,7 +1186,12 @@ struct AnthropicStreamAccumulator {
 }
 
 impl AnthropicStreamAccumulator {
-    fn ingest<F: FnMut(&str, &str)>(&mut self, value: &Value, on_delta: &mut F) {
+    fn ingest<F: FnMut(&str, &str), T: FnMut(&str)>(
+        &mut self,
+        value: &Value,
+        on_delta: &mut F,
+        on_tool_start: &mut T,
+    ) {
         match value.get("type").and_then(Value::as_str).unwrap_or("") {
             "message_start" => {
                 if let Some(usage) = value.pointer("/message/usage") {
@@ -1069,27 +1211,70 @@ impl AnthropicStreamAccumulator {
             }
             "content_block_start" => {
                 let block = value.get("content_block");
-                if block.and_then(|b| b.get("type")).and_then(Value::as_str) == Some("tool_use") {
-                    let index = block_index(value);
-                    self.ensure_slot(index);
-                    let slot = &mut self.tool_calls[index];
-                    if let Some(id) = block.and_then(|b| b.get("id")).and_then(Value::as_str) {
-                        slot.id = id.to_string();
-                    }
-                    if let Some(name) = block.and_then(|b| b.get("name")).and_then(Value::as_str) {
-                        slot.name = name.to_string();
-                    }
-                    // A tool_use that ships its full input up front (no streamed
-                    // input_json_delta) seeds arguments here.
-                    if let Some(input) = block.and_then(|b| b.get("input")) {
-                        if input.as_object().is_some_and(|object| !object.is_empty()) {
-                            slot.arguments = input.to_string();
+                let index = block_index(value);
+                match block.and_then(|b| b.get("type")).and_then(Value::as_str) {
+                    Some("tool_use") => {
+                        self.ensure_slot(index);
+                        let slot = &mut self.tool_calls[index];
+                        if let Some(id) = block.and_then(|b| b.get("id")).and_then(Value::as_str) {
+                            slot.id = id.to_string();
                         }
+                        if let Some(name) =
+                            block.and_then(|b| b.get("name")).and_then(Value::as_str)
+                        {
+                            slot.name = name.to_string();
+                        }
+                        // A tool_use that ships its full input up front (no streamed
+                        // input_json_delta) seeds arguments here.
+                        if let Some(input) = block.and_then(|b| b.get("input")) {
+                            if input.as_object().is_some_and(|object| !object.is_empty()) {
+                                slot.arguments = input.to_string();
+                            }
+                        }
+                        // Snapshot before releasing the `tool_calls` borrow so
+                        // `ensure_block_slot` below (which needs `&mut self`) can run.
+                        let (id, name, arguments) =
+                            (slot.id.clone(), slot.name.clone(), slot.arguments.clone());
+                        // This is always the START of a new tool call — a
+                        // content_block_start with a fresh index never repeats.
+                        on_tool_start(&name);
+                        self.ensure_block_slot(index);
+                        self.content_blocks[index] = PendingBlock::ToolUse {
+                            id,
+                            name,
+                            input: arguments,
+                        };
                     }
+                    Some("thinking") => {
+                        self.ensure_block_slot(index);
+                        self.content_blocks[index] = PendingBlock::Thinking {
+                            thinking: String::new(),
+                            signature: String::new(),
+                        };
+                    }
+                    Some("redacted_thinking") => {
+                        // The whole opaque blob ships up front — there is no delta
+                        // event for a redacted_thinking block.
+                        let data = block
+                            .and_then(|b| b.get("data"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        self.ensure_block_slot(index);
+                        self.content_blocks[index] = PendingBlock::RedactedThinking { data };
+                    }
+                    Some("text") => {
+                        self.ensure_block_slot(index);
+                        self.content_blocks[index] = PendingBlock::Text {
+                            text: String::new(),
+                        };
+                    }
+                    _ => {}
                 }
             }
             "content_block_delta" => {
                 let delta = value.get("delta");
+                let index = block_index(value);
                 match delta.and_then(|d| d.get("type")).and_then(Value::as_str) {
                     Some("text_delta") => {
                         if let Some(text) =
@@ -1097,6 +1282,12 @@ impl AnthropicStreamAccumulator {
                         {
                             self.content.push_str(text);
                             on_delta(text, "");
+                            self.ensure_block_slot(index);
+                            if let PendingBlock::Text { text: block_text } =
+                                &mut self.content_blocks[index]
+                            {
+                                block_text.push_str(text);
+                            }
                         }
                     }
                     Some("thinking_delta") => {
@@ -1106,6 +1297,25 @@ impl AnthropicStreamAccumulator {
                         {
                             self.reasoning.push_str(text);
                             on_delta("", text);
+                            self.ensure_block_slot(index);
+                            if let PendingBlock::Thinking { thinking, .. } =
+                                &mut self.content_blocks[index]
+                            {
+                                thinking.push_str(text);
+                            }
+                        }
+                    }
+                    Some("signature_delta") => {
+                        if let Some(signature_fragment) = delta
+                            .and_then(|d| d.get("signature"))
+                            .and_then(Value::as_str)
+                        {
+                            self.ensure_block_slot(index);
+                            if let PendingBlock::Thinking { signature, .. } =
+                                &mut self.content_blocks[index]
+                            {
+                                signature.push_str(signature_fragment);
+                            }
                         }
                     }
                     Some("input_json_delta") => {
@@ -1113,9 +1323,14 @@ impl AnthropicStreamAccumulator {
                             .and_then(|d| d.get("partial_json"))
                             .and_then(Value::as_str)
                         {
-                            let index = block_index(value);
                             self.ensure_slot(index);
                             self.tool_calls[index].arguments.push_str(fragment);
+                            self.ensure_block_slot(index);
+                            if let PendingBlock::ToolUse { input, .. } =
+                                &mut self.content_blocks[index]
+                            {
+                                input.push_str(fragment);
+                            }
                         }
                     }
                     _ => {}
@@ -1162,6 +1377,14 @@ impl AnthropicStreamAccumulator {
         }
     }
 
+    fn ensure_block_slot(&mut self, index: usize) {
+        const MAX_BLOCKS: usize = 256;
+        let index = index.min(MAX_BLOCKS - 1);
+        while self.content_blocks.len() <= index {
+            self.content_blocks.push(PendingBlock::Empty);
+        }
+    }
+
     fn into_response_body(self) -> Value {
         let mut message = serde_json::json!({
             "role": "assistant",
@@ -1189,7 +1412,11 @@ impl AnthropicStreamAccumulator {
         if has_tools {
             message["tool_calls"] = Value::Array(tool_calls);
         }
-        serde_json::json!({
+        let anthropic_content = anthropic_content_blocks(&self.content_blocks);
+        if !anthropic_content.is_empty() {
+            message["anthropic_content"] = Value::Array(anthropic_content);
+        }
+        let mut body = serde_json::json!({
             "choices": [{
                 "index": 0,
                 "message": message,
@@ -1199,8 +1426,65 @@ impl AnthropicStreamAccumulator {
                 "cache_read_input_tokens": self.cache_read,
                 "cache_creation_input_tokens": self.cache_creation,
             }))),
-        })
+        });
+        if crate::ai_anthropic::stop_reason_needs_marker(self.stop_reason.as_deref()) {
+            body["anthropic_stop_reason"] = serde_json::json!(self.stop_reason.unwrap_or_default());
+        }
+        body
     }
+}
+
+/// Render the ordered Anthropic content blocks captured during streaming into the
+/// exact block shapes the Messages API uses, filtering blocks that must never
+/// round-trip: an empty text block, and any `thinking` block missing its text or
+/// signature (the API rejects a broken/partial thinking block on replay, while
+/// dropping ALL thinking blocks for a turn is valid).
+fn anthropic_content_blocks(blocks: &[PendingBlock]) -> Vec<Value> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            PendingBlock::Empty => None,
+            PendingBlock::Thinking {
+                thinking,
+                signature,
+            } => {
+                if thinking.is_empty() || signature.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::json!({
+                        "type": "thinking",
+                        "thinking": thinking,
+                        "signature": signature,
+                    }))
+                }
+            }
+            PendingBlock::RedactedThinking { data } => {
+                if data.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::json!({ "type": "redacted_thinking", "data": data }))
+                }
+            }
+            PendingBlock::Text { text } => {
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(serde_json::json!({ "type": "text", "text": text }))
+                }
+            }
+            PendingBlock::ToolUse { id, name, input } => {
+                if id.is_empty() && name.is_empty() {
+                    None
+                } else {
+                    let parsed = serde_json::from_str::<Value>(input)
+                        .unwrap_or_else(|_| serde_json::json!({}));
+                    Some(serde_json::json!({
+                        "type": "tool_use", "id": id, "name": name, "input": parsed,
+                    }))
+                }
+            }
+        })
+        .collect()
 }
 
 /// `index` field of an Anthropic content-block event, defaulting to 0.
@@ -1220,10 +1504,15 @@ enum StreamMode {
 }
 
 impl StreamMode {
-    fn ingest<F: FnMut(&str, &str)>(&mut self, value: &Value, on_delta: &mut F) {
+    fn ingest<F: FnMut(&str, &str), T: FnMut(&str)>(
+        &mut self,
+        value: &Value,
+        on_delta: &mut F,
+        on_tool_start: &mut T,
+    ) {
         match self {
-            Self::OpenAi(acc) => acc.ingest(value, on_delta),
-            Self::Anthropic(acc) => acc.ingest(value, on_delta),
+            Self::OpenAi(acc) => acc.ingest(value, on_delta, on_tool_start),
+            Self::Anthropic(acc) => acc.ingest(value, on_delta, on_tool_start),
         }
     }
 
@@ -2220,7 +2509,7 @@ mod tests {
                 );
             }
             let value = serde_json::json!({ "choices": [{ "delta": Value::Object(delta) }] });
-            acc.ingest(&value, &mut on_delta);
+            acc.ingest(&value, &mut on_delta, &mut |_: &str| {});
         }
         acc.flush(&mut on_delta);
         // The streamed deltas and the accumulated body must agree.
@@ -2489,7 +2778,7 @@ mod tests {
             let chunk = serde_json::json!({
                 "choices": [{ "delta": { "content": token } }]
             });
-            acc.ingest(&chunk, &mut push);
+            acc.ingest(&chunk, &mut push, &mut |_: &str| {});
         }
         assert_eq!(seen, "Hello world");
         let body = acc.into_response_body();
@@ -2500,6 +2789,7 @@ mod tests {
     fn stream_accumulator_merges_fragmented_tool_calls() {
         let mut acc = StreamAccumulator::default();
         let mut noop = |_: &str, _: &str| {};
+        let mut tool_starts: Vec<String> = Vec::new();
         // id+name arrive first, then arguments stream in fragments (OpenAI shape).
         let frames = [
             serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"Read","arguments":""}}]}}]}),
@@ -2507,8 +2797,12 @@ mod tests {
             serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.rs\"}"}}]}}]}),
         ];
         for frame in frames {
-            acc.ingest(&frame, &mut noop);
+            acc.ingest(&frame, &mut noop, &mut |name: &str| {
+                tool_starts.push(name.to_string());
+            });
         }
+        // The tool-call-start signal fires exactly once, on the first fragment.
+        assert_eq!(tool_starts, vec!["Read".to_string()]);
         let body = acc.into_response_body();
         let call = &body["choices"][0]["message"]["tool_calls"][0];
         assert_eq!(call["id"], "call_1");
@@ -2526,6 +2820,7 @@ mod tests {
                 "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
             }),
             &mut noop,
+            &mut |_: &str| {},
         );
         let body = acc.into_response_body();
         assert_eq!(body["usage"]["total_tokens"], 15);
@@ -2540,10 +2835,12 @@ mod tests {
             content.push_str(c);
             reasoning.push_str(r);
         };
+        let mut tool_starts: Vec<String> = Vec::new();
         let events = [
             serde_json::json!({ "type": "message_start", "message": { "usage": { "input_tokens": 20, "cache_read_input_tokens": 4 } } }),
             serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking" } }),
             serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "let me think" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "signature_delta", "signature": "sig-abc" } }),
             serde_json::json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text" } }),
             serde_json::json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "Hello " } }),
             serde_json::json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "world" } }),
@@ -2554,10 +2851,14 @@ mod tests {
             serde_json::json!({ "type": "message_stop" }),
         ];
         for event in &events {
-            acc.ingest(event, &mut on_delta);
+            acc.ingest(event, &mut on_delta, &mut |name: &str| {
+                tool_starts.push(name.to_string());
+            });
         }
         assert_eq!(content, "Hello world");
         assert_eq!(reasoning, "let me think");
+        // The tool-call-start signal fires exactly once, at content_block_start.
+        assert_eq!(tool_starts, vec!["Read".to_string()]);
         let body = acc.into_response_body();
         assert_eq!(body["choices"][0]["message"]["content"], "Hello world");
         assert_eq!(
@@ -2573,6 +2874,65 @@ mod tests {
         assert_eq!(body["usage"]["completion_tokens"], 9);
         assert_eq!(body["usage"]["total_tokens"], 29);
         assert_eq!(body["usage"]["cache_read_input_tokens"], 4);
+        // Ordered anthropic_content preserves the thinking (with signature), text,
+        // then tool_use block sequence for replay.
+        let anthropic_content = body["choices"][0]["message"]["anthropic_content"]
+            .as_array()
+            .expect("anthropic_content array");
+        assert_eq!(anthropic_content.len(), 3);
+        assert_eq!(anthropic_content[0]["type"], "thinking");
+        assert_eq!(anthropic_content[0]["thinking"], "let me think");
+        assert_eq!(anthropic_content[0]["signature"], "sig-abc");
+        assert_eq!(anthropic_content[1]["type"], "text");
+        assert_eq!(anthropic_content[1]["text"], "Hello world");
+        assert_eq!(anthropic_content[2]["type"], "tool_use");
+        assert_eq!(anthropic_content[2]["id"], "tu1");
+        assert_eq!(anthropic_content[2]["input"]["path"], "a.rs");
+    }
+
+    #[test]
+    fn anthropic_stream_drops_thinking_block_missing_signature() {
+        // A thinking block that never receives a signature_delta must not appear
+        // in anthropic_content — replaying a signature-less thinking block 400s.
+        let mut acc = AnthropicStreamAccumulator::default();
+        let mut noop = |_: &str, _: &str| {};
+        for event in [
+            serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "thinking" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "thinking_delta", "thinking": "no signature yet" } }),
+            serde_json::json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "answer" } }),
+        ] {
+            acc.ingest(&event, &mut noop, &mut |_: &str| {});
+        }
+        let body = acc.into_response_body();
+        let anthropic_content = body["choices"][0]["message"]["anthropic_content"]
+            .as_array()
+            .expect("anthropic_content array");
+        assert_eq!(
+            anthropic_content.len(),
+            1,
+            "the broken thinking block must be dropped"
+        );
+        assert_eq!(anthropic_content[0]["type"], "text");
+    }
+
+    #[test]
+    fn anthropic_stream_captures_redacted_thinking_block() {
+        let mut acc = AnthropicStreamAccumulator::default();
+        let mut noop = |_: &str, _: &str| {};
+        for event in [
+            serde_json::json!({ "type": "content_block_start", "index": 0, "content_block": { "type": "redacted_thinking", "data": "opaque-blob" } }),
+            serde_json::json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "text" } }),
+            serde_json::json!({ "type": "content_block_delta", "index": 1, "delta": { "type": "text_delta", "text": "answer" } }),
+        ] {
+            acc.ingest(&event, &mut noop, &mut |_: &str| {});
+        }
+        let body = acc.into_response_body();
+        let anthropic_content = body["choices"][0]["message"]["anthropic_content"]
+            .as_array()
+            .expect("anthropic_content array");
+        assert_eq!(anthropic_content[0]["type"], "redacted_thinking");
+        assert_eq!(anthropic_content[0]["data"], "opaque-blob");
     }
 
     #[test]
@@ -2584,7 +2944,7 @@ mod tests {
             serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "done" } }),
             serde_json::json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 2 } }),
         ] {
-            acc.ingest(&event, &mut noop);
+            acc.ingest(&event, &mut noop, &mut |_: &str| {});
         }
         let body = acc.into_response_body();
         assert_eq!(body["choices"][0]["finish_reason"], "stop");
@@ -2600,7 +2960,7 @@ mod tests {
             serde_json::json!({ "type": "content_block_delta", "index": 0, "delta": { "type": "text_delta", "text": "partial" } }),
             serde_json::json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } }),
         ] {
-            acc.ingest(&event, &mut noop);
+            acc.ingest(&event, &mut noop, &mut |_: &str| {});
         }
         // The error is captured so the caller fails the turn instead of returning
         // the truncated "partial" content as a success.
@@ -2622,10 +2982,12 @@ mod tests {
         acc.ingest(
             &serde_json::json!({"choices":[{"delta":{"content":"partial"}}]}),
             &mut noop,
+            &mut |_: &str| {},
         );
         acc.ingest(
             &serde_json::json!({"error":{"code":"rate_limit_exceeded","message":"Rate limit hit"}}),
             &mut noop,
+            &mut |_: &str| {},
         );
 
         let mode = StreamMode::OpenAi(acc);
@@ -2649,10 +3011,12 @@ mod tests {
         acc.ingest(
             &serde_json::json!({"choices":[{"delta":{"content":"hello"}}]}),
             &mut noop,
+            &mut |_: &str| {},
         );
         acc.ingest(
             &serde_json::json!({"error":{"message":"context length exceeded"}}),
             &mut noop,
+            &mut |_: &str| {},
         );
         // Content accumulated before the error is preserved.
         assert_eq!(acc.content, "hello");

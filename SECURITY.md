@@ -30,5 +30,6 @@ High-priority areas:
 - extension manifest loading that can execute untrusted code
 - AI tool calls that bypass approval or workspace boundaries
 - credential leakage through logs, prompts, telemetry, or generated context
+- any new listening socket that violates the [local channel policy](docs/architecture/local-channels.md) (the core ships with zero listening ports)
 
 Lux IDE must never delete user project directories during uninstall, cleanup, update, or cache maintenance.

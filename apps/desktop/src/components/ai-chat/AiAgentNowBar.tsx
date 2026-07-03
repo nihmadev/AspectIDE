@@ -50,6 +50,7 @@ export function AiAgentNowBar({ sessionId, sessionStatus, t }: AiAgentNowBarProp
 function mapSessionStatus(status: AiChatSessionStatus) {
   if (status === "waiting-approval") return "waiting-approval";
   if (status === "running-tools") return "running-tools";
+  if (status === "preparing") return "preparing";
   if (status === "streaming") return "streaming";
   return "thinking";
 }

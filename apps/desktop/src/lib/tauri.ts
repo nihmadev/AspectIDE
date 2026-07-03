@@ -97,6 +97,12 @@ export type MemoryRecord = {
   lastAccessedAt: number;
   accessCount: number;
   hasEmbedding: boolean;
+  /** Set when a newer memory superseded this one (near-duplicate replacement
+   *  or a contradiction sweep). Excluded from search/list unless
+   *  `includeSuperseded` is set. */
+  superseded: boolean;
+  /** TTL cutoff (epoch millis); absent means no expiry. */
+  forgetAfter?: number;
 };
 
 /** A memory with its blended retrieval score (Rust flattens the record in). */
@@ -121,6 +127,9 @@ export type MemorySearchOptions = {
   sort?: MemorySortOrder;
   includePinned?: boolean;
   touch?: boolean;
+  /** Include rows marked `superseded` (near-duplicate replacement or a
+   *  contradiction sweep). Off by default. */
+  includeSuperseded?: boolean;
 };
 
 export type NewMemoryInput = {
@@ -131,6 +140,9 @@ export type NewMemoryInput = {
   pinned?: boolean;
   source?: string;
   id?: string;
+  /** Time-to-live in days; the memory is hard-deleted by prune once it expires
+   *  (pinned status still wins over an expired TTL). */
+  ttlDays?: number;
 };
 
 export type MemoryPatch = {
@@ -140,6 +152,35 @@ export type MemoryPatch = {
   importance?: number;
   pinned?: boolean;
   source?: string;
+};
+
+/** Outcome of `memory_create`: the written memory plus the ids of any older,
+ *  same-category memories it superseded (near-duplicate replacement). */
+export type MemoryCreateOutcome = MemoryRecord & { supersededIds: string[] };
+
+/** Kind of edge in the knowledge-graph-lite `memory_relations` table. */
+export type MemoryRelationKind = "supersedes" | "extends" | "derives" | "contradicts" | "related";
+
+/** A directed edge between two memories in the knowledge-graph-lite. */
+export type MemoryRelation = {
+  id: string;
+  sourceId: string;
+  targetId: string;
+  relation: MemoryRelationKind;
+  confidence: number;
+  createdAt: number;
+};
+
+/** One hop-reachable memory returned by `memory_related`. */
+export type RelatedMemory = MemoryRecord & { hops: number; pathConfidence: number };
+
+/** Aggregate retention-tier counts for the whole store (Ebbinghaus-style
+ *  forgetting curve), for a Settings UI health card. */
+export type MemoryRetentionReport = {
+  hot: number;
+  warm: number;
+  cold: number;
+  evictable: number;
 };
 
 // ── Web research (lux-research) ──
@@ -772,6 +813,11 @@ export const luxCommands = {
   // maps. Fire-and-forget: failure (e.g. command unavailable in a stripped build)
   // must never block JS-side session teardown.
   aiSessionDispose: (sessionId: string) => invokeOptional<void>("ai_session_dispose", { sessionId }, () => undefined),
+  // Mirror checkpoint-restored goal/tasks into the native session store so the
+  // next turn's FastContext doesn't re-inject rolled-back orchestration state.
+  aiSessionGoalSet: (sessionId: string, goal: string) => invokeOptional<void>("ai_session_goal_set", { sessionId, goal }, () => undefined),
+  aiSessionTodosSet: (sessionId: string, items: Array<{ id: string; content: string; status: string; priority: string; notes?: string }>) =>
+    invokeOptional<void>("ai_session_todos_set", { sessionId, items }, () => undefined),
   workspacePickFolder: () => invokeOptional<WorkspaceInfo | null>("workspace_pick_folder", undefined, () => null),
   // The file-tree reads feed trusted explorer/AI-index state, so they validate the
   // payload shape at the IPC boundary (expectArray) instead of trusting the erased
@@ -973,7 +1019,7 @@ export const luxCommands = {
   gitCheckoutBranch: (name: string) => invokeRequired<GitStatus>("git_checkout_branch", { name }),
   gitCreateBranch: (name: string) => invokeRequired<GitStatus>("git_create_branch", { name }),
   gitFileDiff: (path: string) => invokeRequired<GitFileDiff>("git_file_diff", { path }),
-  memoryCreate: (input: NewMemoryInput) => invokeRequired<MemoryRecord>("memory_create", { input }),
+  memoryCreate: (input: NewMemoryInput) => invokeRequired<MemoryCreateOutcome>("memory_create", { input }),
   memorySearch: (query: string, options?: MemorySearchOptions) => invokeRequired<ScoredMemory[]>("memory_search", { query, options }),
   memoryGet: (id: string) => invokeRequired<MemoryRecord | null>("memory_get", { id }),
   memoryUpdate: (id: string, patch: MemoryPatch) => invokeRequired<MemoryRecord>("memory_update", { id, patch }),
@@ -981,6 +1027,14 @@ export const luxCommands = {
   memoryList: (options?: MemorySearchOptions) => invokeRequired<MemoryRecord[]>("memory_list", { options }),
   memoryStats: () => invokeRequired<MemoryStats>("memory_stats"),
   memoryWipe: (category?: string | null) => invokeRequired<number>("memory_wipe", { category: category ?? null }),
+  memoryPrune: () => invokeRequired<number>("memory_prune"),
+  memoryRelate: (sourceId: string, targetId: string, relation: MemoryRelationKind, confidence?: number) =>
+    invokeRequired<MemoryRelation>("memory_relate", { sourceId, targetId, relation, confidence: confidence ?? null }),
+  memoryUnrelate: (relationId: string) => invokeRequired<boolean>("memory_unrelate", { relationId }),
+  memoryRelations: (memoryId: string) => invokeRequired<MemoryRelation[]>("memory_relations", { memoryId }),
+  memoryRelated: (memoryId: string, maxHops?: number, minConfidence?: number) =>
+    invokeRequired<RelatedMemory[]>("memory_related", { memoryId, maxHops: maxHops ?? null, minConfidence: minConfidence ?? null }),
+  memoryRetention: () => invokeRequired<MemoryRetentionReport>("memory_retention"),
   skillsList: () => invokeRequired<Skill[]>("skills_list"),
   skillsGet: (slug: string) => invokeRequired<Skill | null>("skills_get", { slug }),
   skillsMatch: (query: string, limit?: number) => invokeRequired<ScoredSkill[]>("skills_match", { query, limit }),
@@ -1021,6 +1075,8 @@ export const luxCommands = {
   lspServerCatalog: () => invokeRequired<LspCatalogEntry[]>("lsp_server_catalog"),
   /** Install (or reinstall) a language server into the managed dir; streams lux://lsp-install. */
   lspInstallServer: (languageId: string) => invokeRequired<string>("lsp_install_server", { languageId }),
+  /** Remove a managed language-server install; streams lux://lsp-install (managed-only, refuses PATH installs). */
+  lspUninstallServer: (languageId: string) => invokeRequired<string>("lsp_uninstall_server", { languageId }),
   /** Managed language runtimes (Node/Rust/Python) with live installed-state. */
   runtimeCatalog: () => invokeRequired<RuntimeCatalogEntry[]>("runtime_catalog"),
   /** Provision (or repair) a managed runtime; streams lux://runtime-provision. */
@@ -1069,6 +1125,9 @@ export const luxCommands = {
       browserSettings.set(key, setting);
       return setting;
     }),
+  // System font families for the appearance pickers. Browser preview has no OS
+  // font scan, so the pickers degrade to the "default" entry there.
+  listSystemFontFamilies: () => invokeOptional<string[]>("list_system_font_families", undefined, () => []),
   keybindingsGet: () => invokeOptional<KeybindingProfile>("keybindings_get", undefined, () => defaultKeybindingProfile()),
   keybindingsSet: (profile: KeybindingProfile) => invokeOptional<KeybindingProfile>("keybindings_set", { profile }, () => profile),
   // Auto-update. In non-desktop/browser-preview runtimes there is no updater, so
@@ -1213,6 +1272,11 @@ export type AiRunTurnInput = {
   baseUrl: string;
   apiKey: string | null;
   model: string;
+  /** Optional embeddings model id for the active provider's `/embeddings`
+   *  endpoint (semantic memory search). Empty/omitted skips embedding
+   *  generation — RememberMemory/RecallMemory still work via lexical/graph
+   *  search. Never used when the provider protocol is `anthropic`. */
+  embeddingModel?: string | null;
   agentMode: string;
   toolRoundLimit: number | null;
   toolApprovalMode: string;
@@ -1240,6 +1304,12 @@ export type AiRunTurnInput = {
   activeDocumentPath: string | null;
   openDocumentPaths: string[];
   terminalContext: unknown | null;
+  /** Id of the pre-turn file checkpoint created before this turn started (see
+   *  `ai_checkpoint`). When present, every native file-mutating tool call
+   *  (Write/StrReplace/Delete/PatchEngine) augments this checkpoint with a
+   *  pre-edit snapshot of the path(s) it is about to touch — so a later Rollback
+   *  can restore files the model never explicitly ran the Checkpoint tool on. */
+  fileCheckpointId?: string;
 };
 
 /** One suggested answer to an AskUser question. */
@@ -1250,7 +1320,7 @@ export type AiTurnPlanStep = { title: string; detail: string; file: string };
 export type AiPlanDecision = { option: string; tradeoff: string };
 
 /** Status phases emitted by statusChange (mirrors ai_turn.rs StatusChange.phase). */
-export type AiTurnPhase = "thinking" | "streaming" | "running-tools" | "waiting-approval";
+export type AiTurnPhase = "thinking" | "streaming" | "running-tools" | "waiting-approval" | "building-tools";
 /** Terminal status of a completed tool call (mirrors ai_turn.rs ToolCallCompleted.status). */
 export type AiTurnToolStatus = "success" | "error";
 
@@ -1289,7 +1359,7 @@ export type LspCatalogEntry = {
   name: string;
   command: string;
   extensions: string[];
-  /** "npm" | "go" | "pip" | "rustup" | "manual". */
+  /** "npm" | "go" | "pip" | "rustup" | "github" | "manual". */
   installMethod: string;
   /** Manual-install guidance (non-empty only for installMethod === "manual"). */
   manualHint: string;

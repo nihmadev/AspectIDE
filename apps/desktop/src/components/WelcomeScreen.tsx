@@ -2,9 +2,6 @@ import { Clock3, FolderOpen, MessageCircle, X } from "lucide-react";
 import type { MouseEvent } from "react";
 import { displayPath } from "../lib/fileTree";
 import { useTranslation } from "../lib/i18n/useTranslation";
-import { useLuxStore } from "../lib/store";
-import { AI_PREFERENCES_KEY, mergeAiPreferences } from "../lib/aiPreferences";
-import { luxCommands } from "../lib/tauri";
 import type { RecentWorkspace } from "../lib/types";
 
 type WelcomeScreenProps = {
@@ -17,49 +14,33 @@ type WelcomeScreenProps = {
 
 export function WelcomeScreen({ loading = false, onForgetRecentWorkspace, onOpenProject, onOpenRecentWorkspace, recentWorkspaces }: WelcomeScreenProps) {
   const { t } = useTranslation();
-  const preferences = useLuxStore((state) => state.aiPreferences);
-  const setAiPreferences = useLuxStore((state) => state.setAiPreferences);
-  const showTelegramBanner = !preferences.seenTelegramNotice;
-
-  const dismissTelegramBanner = () => {
-    const next = mergeAiPreferences(preferences, { seenTelegramNotice: true });
-    setAiPreferences(next);
-    void luxCommands.settingsSet("user", AI_PREFERENCES_KEY, next).catch(() => undefined);
-  };
 
   return (
     <main className="welcome-screen">
       <section className="welcome-content" aria-label={t("welcome.aria")}>
         <header className="welcome-hero">
-          <span className="welcome-logo" aria-hidden="true">L</span>
+          <span className="welcome-logo" aria-hidden="true">
+            <img src="/lux-mark.svg" alt="" draggable={false} />
+          </span>
           <h1>{t("welcome.title")}</h1>
           <p>{t("welcome.subtitle")}</p>
         </header>
 
-        {showTelegramBanner && (
-          <div className="welcome-telegram-banner">
-            <MessageCircle size={18} strokeWidth={1.8} />
-            <div className="welcome-telegram-text">
-              <span>{t("welcome.telegramBanner.text")}</span>
-              <a
-                href="https://t.me/lux_ide"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="welcome-telegram-link"
-              >
-                {t("welcome.telegramBanner.link")}
-              </a>
-            </div>
-            <button
-              type="button"
-              className="welcome-telegram-dismiss"
-              onClick={dismissTelegramBanner}
-              aria-label={t("welcome.telegramBanner.dismiss")}
+        {/* Community banner is permanent by design — no dismiss affordance. */}
+        <div className="welcome-telegram-banner">
+          <MessageCircle size={18} strokeWidth={1.8} />
+          <div className="welcome-telegram-text">
+            <span>{t("welcome.telegramBanner.text")}</span>
+            <a
+              href="https://t.me/lux_ide"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="welcome-telegram-link"
             >
-              <X size={14} />
-            </button>
+              {t("welcome.telegramBanner.link")}
+            </a>
           </div>
-        )}
+        </div>
 
         <div className="welcome-actions" aria-label={t("welcome.projectActions")}>
           <button className="welcome-action-card" type="button" disabled={loading} onClick={onOpenProject}>

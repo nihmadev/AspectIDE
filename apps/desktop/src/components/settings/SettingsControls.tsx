@@ -1,5 +1,7 @@
 import { Check, ChevronDown, Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { CompactDropdown } from "../CompactDropdown";
+import { withFontFallback } from "../../lib/editorPreferences";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 
 export type SaveState = "idle" | "saving" | "saved" | "error";
@@ -208,6 +210,46 @@ export function TextareaSetting({ commitOnBlur = false, detail, label, onChange,
         onFocus={commitOnBlur ? () => { focusedRef.current = true; } : undefined}
         onChange={(event) => (commitOnBlur ? setDraft(event.currentTarget.value) : onChange(event.currentTarget.value))}
         onBlur={commitOnBlur ? commit : undefined}
+      />
+    </SettingField>
+  );
+}
+
+/**
+ * Font-family picker: a searchable dropdown over the system font list where every
+ * option previews itself in its own typeface. The empty value is the "default"
+ * entry (built-in stack); `fonts` may still be loading — the current value and the
+ * default entry are always selectable so the control never blocks on the scan.
+ */
+export function FontSelectSetting({ defaultLabel, detail, fonts, label, onChange, searchEmptyLabel, searchPlaceholder, value }: {
+  defaultLabel: string;
+  detail?: string;
+  fonts: string[];
+  label: string;
+  onChange: (value: string) => void;
+  searchEmptyLabel?: string;
+  searchPlaceholder?: string;
+  value: string;
+}) {
+  const options = [
+    { label: defaultLabel, value: "" },
+    // A persisted font that vanished from the system (or is still loading) stays
+    // visible so the trigger reflects the real setting instead of lying "default".
+    ...(value && !fonts.includes(value) ? [{ label: value, value }] : []),
+    ...fonts.map((family) => ({ label: family, value: family })),
+  ];
+  return (
+    <SettingField detail={detail} label={label}>
+      <CompactDropdown
+        className="settings-font-dropdown"
+        label={label}
+        value={value}
+        options={options}
+        onChange={onChange}
+        searchable
+        searchPlaceholder={searchPlaceholder}
+        searchEmptyLabel={searchEmptyLabel}
+        getOptionStyle={(family) => (family ? { fontFamily: withFontFallback(family, "sans-serif") } : undefined)}
       />
     </SettingField>
   );

@@ -19,6 +19,7 @@ import { resolveEditorPaneKind } from "../lib/documentViewRouting";
 import { AgentBrowserPreviewEditorPane } from "./AgentBrowserPreviewEditorPane";
 import { useTranslation } from "../lib/i18n/useTranslation";
 import { resetEditorFontZoom, updateEditorFontSize, zoomEditorFontIn, zoomEditorFontOut } from "../lib/editorPreferenceCommands";
+import { DEFAULT_EDITOR_FONT_STACK, withFontFallback } from "../lib/editorPreferences";
 import {
   closedDocumentIdsForAllDocuments,
   closedDocumentIdsForDocumentInGroup,
@@ -393,6 +394,8 @@ function EditorGroupPane({
   const editorPaneKind = resolveEditorPaneKind(activeDocument);
   const isMonacoDocument = editorPaneKind === "monaco" || editorPaneKind === "markdown" || editorPaneKind === "diagram";
   const isEditableDocument = isEditableTextDocument(activeDocument);
+  // User-selected code font (Settings → Fonts) ahead of the built-in mono stack.
+  const editorFontFamily = withFontFallback(editorPreferences.fontFamily, DEFAULT_EDITOR_FONT_STACK);
 
   useEffect(() => () => {
     disposeLspProviders(lspProviderDisposablesRef.current);
@@ -594,7 +597,7 @@ function EditorGroupPane({
           ) : editorPaneKind === "diagram" ? (
             <DiagramEditorPane
               document={activeDocument}
-              fontFamily="JetBrains Mono, Cascadia Code, Consolas, monospace"
+              fontFamily={editorFontFamily}
               fontLigatures={editorPreferences.fontLigatures}
               fontSize={editorPreferences.fontSize}
               lineHeight={editorPreferences.lineHeight}
@@ -618,7 +621,7 @@ function EditorGroupPane({
           ) : editorPaneKind === "markdown" ? (
             <MarkdownEditorPane
               document={activeDocument}
-              fontFamily="JetBrains Mono, Cascadia Code, Consolas, monospace"
+              fontFamily={editorFontFamily}
               fontLigatures={editorPreferences.fontLigatures}
               fontSize={editorPreferences.fontSize}
               lineHeight={editorPreferences.lineHeight}
@@ -645,7 +648,7 @@ function EditorGroupPane({
                 value={activeDocument.text}
                 options={{
                   automaticLayout: true,
-                  fontFamily: "JetBrains Mono, Cascadia Code, Consolas, monospace",
+                  fontFamily: editorFontFamily,
                   fontLigatures: editorPreferences.fontLigatures,
                   fontSize: editorPreferences.fontSize,
                   lineHeight: editorPreferences.lineHeight,

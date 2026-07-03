@@ -1175,6 +1175,10 @@ pub enum LuxEvent {
     /// expand the terminal panel and watch the agent work in real time.
     AiShellOutput {
         data: String,
+        /// Tool-call id of the running Shell invocation, so the chat panel can
+        /// attach the live stream to the matching tool-call row. None when the
+        /// caller did not thread an id through (e.g. dev/browser path).
+        tool_call_id: Option<String>,
     },
     GitStatusChanged {
         status: GitStatus,

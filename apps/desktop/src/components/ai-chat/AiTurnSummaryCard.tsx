@@ -13,9 +13,11 @@ type AiTurnSummaryCardProps = {
   workspaceRoot: string | null;
   t: TranslateFn;
   onReview?: () => void;
+  /** Grey out (never hide) Review while a turn is running — a vanishing button reads as broken. */
+  reviewDisabled?: boolean;
 };
 
-export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onReview }: AiTurnSummaryCardProps) {
+export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onReview, reviewDisabled = false }: AiTurnSummaryCardProps) {
   const [filesExpanded, setFilesExpanded] = useState(false);
   const fileSummary = useMemo(() => buildTurnFileSummary(message, workspaceRoot), [message, workspaceRoot]);
   const usage = message.turnUsage;
@@ -49,6 +51,7 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
               type="button"
               className="ai-turn-summary-review"
               onClick={onReview}
+              disabled={reviewDisabled}
               title={t("aiChat.turnSummary.reviewHint")}
               aria-label={t("aiChat.turnSummary.review")}
             >

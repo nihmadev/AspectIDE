@@ -162,6 +162,12 @@ export async function clearAiUsageLog(): Promise<AiUsageLogEntry[]> {
   return [];
 }
 
+/** Drops the in-memory cache and re-reads the persisted log (manual refresh). */
+export async function reloadAiUsageLog(): Promise<AiUsageLogEntry[]> {
+  cache = null;
+  return loadAiUsageLog();
+}
+
 export type AiUsageProjectAggregate = {
   workspaceKey: string;
   workspaceName: string;

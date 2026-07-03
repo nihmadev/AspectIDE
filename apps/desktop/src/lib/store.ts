@@ -29,7 +29,7 @@ export type Activity = "explorer" | "search" | "git" | "runDebug" | "extensions"
 export type BottomPanelTab = "problems" | "output" | "terminal";
 export type AiIndexStatus = "disabled" | "idle" | "indexing" | "ready";
 export type WorkspaceMode = "agent" | "workspace";
-export type AiChatSessionStatus = "idle" | "thinking" | "streaming" | "running-tools" | "waiting-approval" | "error";
+export type AiChatSessionStatus = "idle" | "thinking" | "streaming" | "preparing" | "running-tools" | "waiting-approval" | "error";
 export type ProjectLoadStage = "idle" | "opening" | "files" | "services" | "indexing" | "ready" | "error";
 
 export type ProjectLoadState = {
@@ -109,7 +109,7 @@ export type CreateAiChatSessionResult = {
 };
 
 export function isAiChatSessionBusyStatus(status: AiChatSessionStatus) {
-  return status === "thinking" || status === "streaming" || status === "running-tools" || status === "waiting-approval";
+  return status === "thinking" || status === "streaming" || status === "preparing" || status === "running-tools" || status === "waiting-approval";
 }
 
 const DEFAULT_EDITOR_GROUP_ID = "editor-group-1";

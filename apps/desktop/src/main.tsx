@@ -41,7 +41,18 @@ if (isTauriRuntime()) {
   );
 }
 
+// Retire the inline boot splash (index.html) once React takes over: fade, then
+// remove after the transition so the splash never intercepts clicks.
+function dismissBootSplash() {
+  const splash = document.getElementById("boot-splash");
+  if (!splash) return;
+  splash.setAttribute("data-done", "true");
+  window.setTimeout(() => splash.remove(), 320);
+}
+
 const root = ReactDOM.createRoot(document.getElementById("root") as HTMLElement);
+
+requestAnimationFrame(() => requestAnimationFrame(dismissBootSplash));
 
 root.render(
   isTauriRuntime() || isBrowserPreviewRuntime()

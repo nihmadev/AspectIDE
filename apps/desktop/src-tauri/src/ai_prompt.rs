@@ -246,7 +246,7 @@ fn tool_capability_map(
             lines.push("- Interact: AskUser/PresentPlan never block — AskUser returns instantly (decide yourself); PresentPlan auto-starts.".to_string());
         }
         "plan" => {
-            lines.push("- Interact: PresentPlan(steps[, title, summary]) is your primary output — structured steps (title, optional detail/file), not prose; pins goal+tasks, user presses Start. AskUser(question[, options 0–10, multiSelect, allowCustom, htmlPreview]) for genuine decisions; options can be {label, description}; htmlPreview renders a sandboxed HTML5 doc for visual choices.".to_string());
+            lines.push("- Interact: PresentPlan(steps[, title, summary]) is your primary output — structured steps (title, optional detail/file), not prose; pins goal+tasks, user presses Start and execution hands off to Agent mode. Every Plan-mode turn MUST end with a PresentPlan call: never ask permission to plan and never reply with prose-only. AskUser(question[, options 0–10, multiSelect, allowCustom, htmlPreview]) only for genuine blocking decisions — and even then deliver the best-guess plan too; options can be {label, description}; htmlPreview renders a sandboxed HTML5 doc for visual choices.".to_string());
         }
         _ => {
             lines.push("- Interact: AskUser(question[, options 0–10, multiSelect, allowCustom, htmlPreview]) when a real decision can't be settled from evidence — give options ({label, description}) or an htmlPreview HTML5 doc for visual choices; user can type custom too. PresentPlan(steps[, title, summary]) to propose multi-step work first. Use sparingly.".to_string());

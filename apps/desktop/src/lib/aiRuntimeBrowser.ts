@@ -12,6 +12,7 @@ import {
   createBrowserActApproval,
   createBrowserChatApproval,
   createBrowserCloseApproval,
+  createBrowserDashboardApproval,
   createBrowserInstallApproval,
   createBrowserOpenApproval,
 } from "./aiRuntimeApprovals";
@@ -261,11 +262,17 @@ export async function browserChatTool(
 export async function browserDashboardTool(
   args: UnknownRecord,
   input: AiChatSendInput,
+  ui: BrowserApprovalUi,
 ): Promise<ToolResult> {
   ensureBrowserEnabled(input);
   const action = stringArg(args, "action", "status").trim().toLowerCase() || "status";
   const port = clamp(numberArg(args, "port", input.preferences.agentBrowserDashboardPort), 1024, 65_535);
   const openInBrowser = booleanArg(args, "openInBrowser", action === "start");
+  // Zero-listening-ports policy: "start" opens a local HTTP listener and "stop"
+  // mutates daemon state — both require consent; "status" is a read-only probe.
+  if (action !== "status") {
+    await ui.requireApproval(createBrowserDashboardApproval(input.locale, action, port));
+  }
   const response = await luxCommands.agentBrowserDashboard({
     action,
     port,

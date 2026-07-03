@@ -27,6 +27,7 @@ mod debug;
 mod editor;
 mod extensions;
 mod file_intel;
+mod fonts;
 mod git;
 mod lsp;
 mod lsp_install;
@@ -105,6 +106,7 @@ use file_intel::{
     file_asset_data, file_inspect, file_media_ai_context, file_open_external,
     file_supported_formats,
 };
+use fonts::list_system_font_families;
 use git::{
     git_branches, git_checkout_branch, git_commit, git_create_branch, git_diff, git_discard,
     git_file_diff, git_pull, git_push, git_stage, git_status, git_unstage,
@@ -303,11 +305,24 @@ async fn fs_read_text(
         }
 
         let size = metadata.len();
-        let limit = usize::try_from(max_bytes.min(size)).unwrap_or(usize::MAX);
-        let mut file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
-        let mut buffer = vec![0; limit];
-        let read = file.read(&mut buffer).map_err(|error| error.to_string())?;
-        buffer.truncate(read);
+        let limit = max_bytes.min(size);
+        let file = std::fs::File::open(&path).map_err(|error| error.to_string())?;
+        // Read the full requested range: a single `read()` call may legally return
+        // fewer bytes than asked (observed with large files), which silently
+        // truncated the text mid-file for every consumer of this command.
+        let mut buffer = Vec::with_capacity(usize::try_from(limit).unwrap_or(0));
+        file.take(limit)
+            .read_to_end(&mut buffer)
+            .map_err(|error| error.to_string())?;
+        // A byte cap can split a multi-byte UTF-8 sequence; drop a trailing
+        // incomplete sequence (only when truncated) so the text ends cleanly.
+        if limit < size {
+            if let Err(error) = std::str::from_utf8(&buffer) {
+                if error.error_len().is_none() {
+                    buffer.truncate(error.valid_up_to());
+                }
+            }
+        }
         let text = String::from_utf8_lossy(&buffer).into_owned();
 
         Ok(FsReadTextResponse {
@@ -599,6 +614,11 @@ pub fn run() {
                     let _ = terminal_handle
                         .emit("lux://event", LuxEvent::TerminalOutput { session_id, data });
                 })));
+            // Publish the app-data dir to the agent-browser resolver so it can find
+            // the managed install and managed Node without an AppHandle.
+            if let Ok(app_data) = handle.path().app_data_dir() {
+                agent_browser::set_app_data_dir(app_data);
+            }
             let settings_path = handle
                 .path()
                 .app_config_dir()
@@ -719,6 +739,12 @@ pub fn run() {
             memory::memory_list,
             memory::memory_stats,
             memory::memory_wipe,
+            memory::memory_prune,
+            memory::memory_relate,
+            memory::memory_unrelate,
+            memory::memory_relations,
+            memory::memory_related,
+            memory::memory_retention,
             skills::skills_list,
             skills::skills_get,
             skills::skills_match,
@@ -807,6 +833,7 @@ pub fn run() {
             lsp_servers,
             lsp_install::lsp_server_catalog,
             lsp_install::lsp_install_server,
+            lsp_install::lsp_uninstall_server,
             runtime_provision::runtime_catalog,
             runtime_provision::runtime_provision,
             diagnostics_snapshot,
@@ -828,6 +855,7 @@ pub fn run() {
             recent_workspace_forget,
             settings_get,
             settings_set,
+            list_system_font_families,
             set_scan_concurrency,
             keybindings_get,
             keybindings_set,

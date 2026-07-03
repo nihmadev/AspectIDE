@@ -11,7 +11,7 @@ import { captureFileTextSnapshot, registerPendingFileReview } from "./aiPendingF
 /** Tools whose completion produces a reviewable file change. */
 export const NATIVE_FILE_EDIT_TOOLS = new Set(["Write", "StrReplace", "PatchEngine"]);
 
-type BeforeSnapshot = { path: string; before: string };
+type BeforeSnapshot = { path: string; before: string; faithful: boolean };
 
 function looksAbsolute(path: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\") || path.startsWith("/");
@@ -76,8 +76,8 @@ export async function captureNativeEditBefore(
     if (seen.has(key)) continue;
     seen.add(key);
     const open = input.openDocuments.find((doc) => doc.path && normalizePath(doc.path) === key);
-    const before = await captureFileTextSnapshot(path, open?.text);
-    snapshots.push({ path, before });
+    const snapshot = await captureFileTextSnapshot(path, open?.text);
+    snapshots.push({ path, before: snapshot.text, faithful: snapshot.faithful });
   }
   return snapshots;
 }
@@ -110,11 +110,13 @@ export async function registerNativeEditReview(
   const workspaceRoot = input.workspace?.root ?? "";
 
   const reviewedPaths: string[] = [];
-  for (const { path, before: beforeText } of before) {
+  for (const { path, before: beforeText, faithful } of before) {
     const key = normalizePath(path);
     const editedText = editedDocuments.find((doc) => doc.path && normalizePath(doc.path) === key)?.text;
-    const afterText = typeof editedText === "string" ? editedText : await captureFileTextSnapshot(path);
-    if (afterText === beforeText) continue;
+    const after = typeof editedText === "string"
+      ? { text: editedText, faithful: true }
+      : await captureFileTextSnapshot(path);
+    if (after.text === beforeText) continue;
     registerPendingFileReview({
       sessionId: input.chatSessionId,
       path,
@@ -122,8 +124,12 @@ export async function registerNativeEditReview(
       toolName: tool,
       toolCallId,
       beforeText,
-      afterText,
+      afterText: after.text,
       previewOnly: !savedToDisk,
+      // An unfaithful snapshot (truncated / lossy non-UTF-8) is display-only:
+      // the existing textTruncated guards stop accept/reject from writing it
+      // back and corrupting or truncating the real file.
+      textTruncated: !faithful || !after.faithful || undefined,
     });
     reviewedPaths.push(path);
   }

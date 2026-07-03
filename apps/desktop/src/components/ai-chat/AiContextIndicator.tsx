@@ -147,17 +147,12 @@ function AiContextPopover({
               className="ai-context-panel-ring-svg"
               level={level}
               percent={contextUsage.percent}
-              size={44}
+              size={40}
             />
             <span className="ai-context-panel-ring-value">{contextUsage.percent}%</span>
           </div>
           <div className="ai-context-panel-stats">
-            <div className="ai-context-panel-title-row">
-              <span className="ai-context-panel-title">{t("aiChat.context.label")}</span>
-              <span className={`ai-context-panel-badge ai-context-panel-badge--${level}`}>
-                {t("aiChat.context.full", { percent: contextUsage.percent })}
-              </span>
-            </div>
+            <span className="ai-context-panel-title">{t("aiChat.context.label")}</span>
             <strong>{t("aiChat.context.tokenUsage", {
               totalTokens: formatCompactTokens(contextUsage.totalTokens),
               tokenBudget: formatCompactTokens(contextUsage.tokenBudget),
@@ -204,7 +199,7 @@ function AiContextPopover({
       {visibleRows.length > 0 ? (
         <ul className="ai-context-panel-rows">
           {visibleRows.map((row) => (
-            <ContextRow key={row.id} row={row} tokenBudget={contextUsage.tokenBudget} t={t} />
+            <ContextRow key={row.id} row={row} tokenBudget={contextUsage.tokenBudget} />
           ))}
         </ul>
       ) : (
@@ -255,40 +250,28 @@ function AiContextPopover({
   );
 }
 
+/**
+ * One distribution line, Codex-quiet: dot · label · tokens · share. The stacked
+ * meter above already visualizes proportions, so rows skip per-row bars; the
+ * long-form detail (file lists etc.) lives in the row tooltip.
+ */
 function ContextRow({
   row,
   tokenBudget,
-  t,
 }: {
   row: AiChatContextUsageRow;
   tokenBudget: number;
-  t: TranslateFn;
 }) {
   const budgetPercent = tokenBudget > 0 ? Math.min(100, Math.round((row.tokens / tokenBudget) * 100)) : 0;
-  const barWidth = tokenBudget > 0
-    ? Math.max(budgetPercent, row.tokens > 0 ? 2 : 0)
-    : Math.max(row.percent, row.tokens > 0 ? 2 : 0);
 
   return (
-    <li className="ai-context-panel-row">
-      <div className="ai-context-panel-row-head">
-        <span className="ai-context-panel-row-dot" style={{ background: row.color }} aria-hidden="true" />
-        <span className="ai-context-panel-row-label">{row.label}</span>
-        <span className="ai-context-panel-row-metrics">
-          <span className="ai-context-panel-row-value" title={row.detail || undefined}>
-            {formatCompactTokens(row.tokens)}
-          </span>
-          {budgetPercent > 0 ? (
-            <span className="ai-context-panel-row-percent">{budgetPercent}%</span>
-          ) : null}
-        </span>
-      </div>
-      {row.detail ? (
-        <p className="ai-context-panel-row-detail" title={row.detail}>{row.detail}</p>
-      ) : null}
-      <div className="ai-context-panel-row-bar" aria-hidden="true">
-        <span style={{ width: `${barWidth}%`, background: row.color }} />
-      </div>
+    <li className="ai-context-panel-row" title={row.detail || undefined}>
+      <span className="ai-context-panel-row-dot" style={{ background: row.color }} aria-hidden="true" />
+      <span className="ai-context-panel-row-label">{row.label}</span>
+      <span className="ai-context-panel-row-metrics">
+        <span className="ai-context-panel-row-value">{formatCompactTokens(row.tokens)}</span>
+        <span className="ai-context-panel-row-percent">{budgetPercent > 0 ? `${budgetPercent}%` : "·"}</span>
+      </span>
       <span className="sr-only">{formatAiChatContextValue(row)}</span>
     </li>
   );

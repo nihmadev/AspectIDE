@@ -144,7 +144,24 @@ pub fn workspace_debug_adapters(root: impl AsRef<Path>) -> AppResult<Vec<DebugAd
         });
     }
 
+    sort_adapters_by_selection_priority(&mut adapters);
+
     Ok(adapters)
+}
+
+/// Zero-listening-ports policy: the adapter list's order IS the selection
+/// priority (`workspace_debug_adapter_for_configuration` takes the first
+/// match), so rank installed adapters first, and within each availability tier
+/// prefer stdio transport over `TcpServer` — a stdio adapter never opens a
+/// local TCP listener, so when two adapters could serve the same configuration
+/// the portless one wins. Stable sort keeps the curated built-in order otherwise.
+fn sort_adapters_by_selection_priority(adapters: &mut [DebugAdapterInfo]) {
+    adapters.sort_by_key(|adapter| {
+        (
+            adapter.status != DebugAdapterStatus::Available,
+            adapter.transport == DebugAdapterTransport::TcpServer,
+        )
+    });
 }
 
 #[must_use]
@@ -557,6 +574,46 @@ mod tests {
         assert!(adapter_matches_configuration(debugpy, &configuration));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn selection_priority_prefers_available_then_stdio() {
+        let adapter = |id: &str, transport: DebugAdapterTransport, status: DebugAdapterStatus| {
+            DebugAdapterInfo {
+                id: id.to_string(),
+                name: id.to_string(),
+                command: id.to_string(),
+                args: Vec::new(),
+                configuration_types: vec!["shared-type".to_string()],
+                transport,
+                workspace_root: PathBuf::new(),
+                status,
+                error: None,
+            }
+        };
+        // Deliberately worst-case input order: missing stdio, available TCP,
+        // available stdio. Policy: available beats missing; within available,
+        // stdio (no local TCP listener) beats TcpServer.
+        let mut adapters = vec![
+            adapter(
+                "missing-stdio",
+                DebugAdapterTransport::Stdio,
+                DebugAdapterStatus::Missing,
+            ),
+            adapter(
+                "available-tcp",
+                DebugAdapterTransport::TcpServer,
+                DebugAdapterStatus::Available,
+            ),
+            adapter(
+                "available-stdio",
+                DebugAdapterTransport::Stdio,
+                DebugAdapterStatus::Available,
+            ),
+        ];
+        sort_adapters_by_selection_priority(&mut adapters);
+        let order: Vec<&str> = adapters.iter().map(|entry| entry.id.as_str()).collect();
+        assert_eq!(order, ["available-stdio", "available-tcp", "missing-stdio"]);
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

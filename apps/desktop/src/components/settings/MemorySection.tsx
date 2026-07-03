@@ -1,9 +1,11 @@
-import { Brain, Loader2, Pin, PinOff, Plus, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Brain, ChevronDown, ChevronRight, Flame, Link2, Loader2, Pin, PinOff, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 import {
   luxCommands,
   type MemoryRecord,
+  type MemoryRelation,
+  type MemoryRetentionReport,
   type MemorySortOrder,
   type MemoryStats,
 } from "../../lib/tauri";
@@ -16,12 +18,17 @@ const COMMON_CATEGORIES = ["core", "semantic", "episodic", "procedural"];
 export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | null; t: TranslateFn }) {
   const [records, setRecords] = useState<MemoryRecord[]>([]);
   const [stats, setStats] = useState<MemoryStats | null>(null);
+  const [retention, setRetention] = useState<MemoryRetentionReport | null>(null);
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState<string | null>(null);
   const [sort, setSort] = useState<MemorySortOrder>("relevance");
+  const [includeSuperseded, setIncludeSuperseded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [pruneResult, setPruneResult] = useState<string | null>(null);
+  const [pruning, setPruning] = useState(false);
 
   const seqRef = useRef(0);
   const refresh = useCallback(async () => {
@@ -32,15 +39,19 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
     try {
       // touch:false — browsing the manager must not inflate recall recency/usage;
       // only the agent's RecallMemory bumps access stats.
-      const options = { category, limit: 200, sort, touch: false };
+      const options = { category, limit: 200, sort, touch: false, includeSuperseded };
       const list = query.trim()
         ? await luxCommands.memorySearch(query.trim(), options)
         : await luxCommands.memoryList(options);
-      const nextStats = await luxCommands.memoryStats();
+      const [nextStats, nextRetention] = await Promise.all([
+        luxCommands.memoryStats(),
+        luxCommands.memoryRetention(),
+      ]);
       // Latest-wins: a newer refresh has superseded this one — drop its results.
       if (seq !== seqRef.current) return;
       setRecords(list);
       setStats(nextStats);
+      setRetention(nextRetention);
       // Clear a category filter whose last entry just disappeared, so the view
       // isn't a dead-end with no active chip left to deselect.
       if (category && !nextStats.byCategory.some((entry) => entry.category === category)) {
@@ -51,7 +62,7 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
     } finally {
       if (seq === seqRef.current) setLoading(false);
     }
-  }, [workspace, query, category, sort]);
+  }, [workspace, query, category, sort, includeSuperseded]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => void refresh(), query ? 180 : 0);
@@ -93,6 +104,20 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
     }
   }, [refresh, t, workspace]);
 
+  const pruneNow = useCallback(async () => {
+    setPruning(true);
+    setPruneResult(null);
+    try {
+      const count = await luxCommands.memoryPrune();
+      setPruneResult(t("settings.memory.pruneResult", { count }));
+      void refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPruning(false);
+    }
+  }, [refresh, t]);
+
   const categories = useMemo(() => stats?.byCategory ?? [], [stats]);
 
   if (!workspace) {
@@ -107,10 +132,33 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
           <span>{t("settings.memory.total", { count: stats?.total ?? 0 })}</span>
           {(stats?.pinned ?? 0) > 0 && <span className="lux-mem-pincount">{t("settings.memory.pinned", { count: stats?.pinned ?? 0 })}</span>}
         </div>
-        <button type="button" className="lux-mem-add-btn" onClick={() => setShowAdd((open) => !open)}>
-          <Plus size={14} /> {t("settings.memory.add")}
-        </button>
+        <div className="lux-mem-head-actions">
+          <button type="button" className="lux-mem-prune-btn" disabled={pruning} onClick={() => void pruneNow()} title={t("settings.memory.pruneHint")}>
+            {pruning ? <Loader2 size={13} className="lux-spin" /> : <Sparkles size={13} />} {t("settings.memory.prune")}
+          </button>
+          <button type="button" className="lux-mem-add-btn" onClick={() => setShowAdd((open) => !open)}>
+            <Plus size={14} /> {t("settings.memory.add")}
+          </button>
+        </div>
       </header>
+
+      {retention && (retention.hot + retention.warm + retention.cold + retention.evictable) > 0 && (
+        <div className="lux-mem-retention" role="group" aria-label={t("settings.memory.retention.label")}>
+          <span className="lux-mem-retention-chip" data-tier="hot" title={t("settings.memory.retention.hotHint")}>
+            <Flame size={11} /> {t("settings.memory.retention.hot", { count: retention.hot })}
+          </span>
+          <span className="lux-mem-retention-chip" data-tier="warm" title={t("settings.memory.retention.warmHint")}>
+            {t("settings.memory.retention.warm", { count: retention.warm })}
+          </span>
+          <span className="lux-mem-retention-chip" data-tier="cold" title={t("settings.memory.retention.coldHint")}>
+            {t("settings.memory.retention.cold", { count: retention.cold })}
+          </span>
+          <span className="lux-mem-retention-chip" data-tier="evictable" title={t("settings.memory.retention.evictableHint")}>
+            {t("settings.memory.retention.evictable", { count: retention.evictable })}
+          </span>
+        </div>
+      )}
+      {pruneResult && <p className="lux-mem-prune-result">{pruneResult}</p>}
 
       {showAdd && (
         <MemoryComposer
@@ -135,6 +183,10 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
           <option value="importance">{t("settings.memory.sort.importance")}</option>
           <option value="oldest">{t("settings.memory.sort.oldest")}</option>
         </select>
+        <label className="lux-mem-superseded-toggle">
+          <input type="checkbox" checked={includeSuperseded} onChange={(event) => setIncludeSuperseded(event.target.checked)} />
+          {t("settings.memory.showSuperseded")}
+        </label>
       </div>
 
       {categories.length > 0 && (
@@ -155,24 +207,16 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
 
       <ul className="lux-mem-list">
         {records.map((record) => (
-          <li key={record.id} className="lux-mem-row" data-pinned={record.pinned || undefined}>
-            <div className="lux-mem-row-main">
-              <p className="lux-mem-content">{record.content}</p>
-              <div className="lux-mem-meta">
-                <span className="lux-mem-badge">{record.category}</span>
-                <span className="lux-mem-imp" title={t("settings.memory.importance")}>{Math.round(record.importance * 100)}%</span>
-                {record.source && <span className="lux-mem-src">{record.source}</span>}
-              </div>
-            </div>
-            <div className="lux-mem-row-actions">
-              <button type="button" title={record.pinned ? t("settings.memory.unpin") : t("settings.memory.pin")} onClick={() => void togglePin(record)}>
-                {record.pinned ? <PinOff size={14} /> : <Pin size={14} />}
-              </button>
-              <button type="button" className="lux-mem-danger" title={t("settings.memory.delete")} onClick={() => void remove(record)}>
-                <Trash2 size={14} />
-              </button>
-            </div>
-          </li>
+          <MemoryRow
+            key={record.id}
+            record={record}
+            expanded={expandedId === record.id}
+            onToggleExpand={() => setExpandedId((current) => (current === record.id ? null : record.id))}
+            onTogglePin={() => void togglePin(record)}
+            onDelete={() => void remove(record)}
+            onChanged={refresh}
+            t={t}
+          />
         ))}
         {!loading && records.length === 0 && <li className="lux-mem-none">{t("settings.memory.none")}</li>}
       </ul>
@@ -185,6 +229,112 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
         </footer>
       )}
     </div>
+  );
+}
+
+/** One memory row; expands in place to show its knowledge-graph relations
+ *  (fetched lazily on first expand) with an unrelate action per edge. */
+function MemoryRow({
+  record,
+  expanded,
+  onToggleExpand,
+  onTogglePin,
+  onDelete,
+  onChanged,
+  t,
+}: {
+  record: MemoryRecord;
+  expanded: boolean;
+  onToggleExpand: () => void;
+  onTogglePin: () => void;
+  onDelete: () => void;
+  onChanged: () => void;
+  t: TranslateFn;
+}) {
+  const [relations, setRelations] = useState<MemoryRelation[] | null>(null);
+  const [relationsError, setRelationsError] = useState<string | null>(null);
+  const [loadingRelations, setLoadingRelations] = useState(false);
+
+  useEffect(() => {
+    if (!expanded || relations !== null) return;
+    let cancelled = false;
+    setLoadingRelations(true);
+    setRelationsError(null);
+    luxCommands.memoryRelations(record.id)
+      .then((list) => { if (!cancelled) setRelations(list); })
+      .catch((cause) => { if (!cancelled) setRelationsError(cause instanceof Error ? cause.message : String(cause)); })
+      .finally(() => { if (!cancelled) setLoadingRelations(false); });
+    return () => { cancelled = true; };
+  }, [expanded, relations, record.id]);
+
+  const unrelate = useCallback(async (relationId: string) => {
+    try {
+      await luxCommands.memoryUnrelate(relationId);
+      setRelations((current) => current?.filter((relation) => relation.id !== relationId) ?? current);
+    } catch (cause) {
+      setRelationsError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }, []);
+
+  return (
+    <li className="lux-mem-row" data-pinned={record.pinned || undefined} data-superseded={record.superseded || undefined}>
+      <div className="lux-mem-row-top">
+        <button type="button" className="lux-mem-expand" onClick={onToggleExpand} aria-label={t("settings.memory.relations.toggle")}>
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
+        <div className="lux-mem-row-main">
+          <p className="lux-mem-content">{record.content}</p>
+          <div className="lux-mem-meta">
+            <span className="lux-mem-badge">{record.category}</span>
+            <span className="lux-mem-imp" title={t("settings.memory.importance")}>{Math.round(record.importance * 100)}%</span>
+            {record.source && <span className="lux-mem-src">{record.source}</span>}
+            {record.superseded && <span className="lux-mem-superseded-pill">{t("settings.memory.superseded")}</span>}
+          </div>
+        </div>
+        <div className="lux-mem-row-actions">
+          <button type="button" title={record.pinned ? t("settings.memory.unpin") : t("settings.memory.pin")} onClick={onTogglePin}>
+            {record.pinned ? <PinOff size={14} /> : <Pin size={14} />}
+          </button>
+          <button type="button" className="lux-mem-danger" title={t("settings.memory.delete")} onClick={onDelete}>
+            <Trash2 size={14} />
+          </button>
+        </div>
+      </div>
+      {expanded && (
+        <div className="lux-mem-relations">
+          {loadingRelations && <p className="lux-mem-relations-loading"><Loader2 size={12} className="lux-spin" /> {t("settings.memory.loading")}</p>}
+          {relationsError && <p className="lux-mem-error" role="alert">{relationsError}</p>}
+          {!loadingRelations && relations && relations.length === 0 && (
+            <p className="lux-mem-relations-none">{t("settings.memory.relations.none")}</p>
+          )}
+          {!loadingRelations && relations && relations.length > 0 && (
+            <ul className="lux-mem-relations-list">
+              {relations.map((relation) => {
+                const otherId = relation.sourceId === record.id ? relation.targetId : relation.sourceId;
+                const direction = relation.sourceId === record.id ? "→" : "←";
+                return (
+                  <li key={relation.id} className="lux-mem-relation-row">
+                    <Link2 size={12} />
+                    <span className="lux-mem-relation-kind">{relation.relation}</span>
+                    <span className="lux-mem-relation-dir">{direction}</span>
+                    <span className="lux-mem-relation-target" title={otherId}>{otherId}</span>
+                    <span className="lux-mem-relation-confidence">{Math.round(relation.confidence * 100)}%</span>
+                    <button
+                      type="button"
+                      className="lux-mem-relation-unrelate"
+                      title={t("settings.memory.relations.unrelate")}
+                      onClick={() => { void unrelate(relation.id); void onChanged(); }}
+                    >
+                      <X size={12} />
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      )}
+    </li>
   );
 }
 
@@ -247,7 +397,16 @@ function MemoryComposer({
         </datalist>
         <label className="lux-mem-composer-imp">
           {t("settings.memory.importance")}
-          <input type="range" min={0} max={1} step={0.05} value={importance} onChange={(event) => setImportance(Number(event.target.value))} />
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.05}
+            value={importance}
+            // --range-progress drives the filled part of the modern slider track.
+            style={{ "--range-progress": `${Math.round(importance * 100)}%` } as CSSProperties}
+            onChange={(event) => setImportance(Number(event.target.value))}
+          />
           <span>{Math.round(importance * 100)}%</span>
         </label>
         <label className="lux-mem-composer-pin">

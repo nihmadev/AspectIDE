@@ -662,6 +662,7 @@ pub async fn ai_shell(
     command: String,
     cwd: Option<PathBuf>,
     timeout_secs: Option<u64>,
+    tool_call_id: Option<String>,
 ) -> Result<AiShellResponse, String> {
     let root = workspace_root(&state)?;
     let cwd = match cwd {
@@ -732,6 +733,7 @@ pub async fn ai_shell(
         &dunce::simplified(&cwd).to_string_lossy(),
         std::sync::Arc::clone(&shared_stdout),
         std::sync::Arc::clone(&shared_stderr),
+        tool_call_id,
     );
 
     // Own the child explicitly (rather than `process.output()`, which hides the
@@ -835,9 +837,9 @@ pub async fn ai_shell(
             let stdout_buf = shared_stdout.lock().await.clone();
             let stderr_buf = shared_stderr.lock().await.clone();
             let (stdout, stdout_truncated) =
-                truncate_shell_output_flagged(&String::from_utf8_lossy(&stdout_buf));
+                truncate_shell_output_flagged(&decode_console_bytes(&stdout_buf));
             let (stderr, stderr_truncated) =
-                truncate_shell_output_flagged(&String::from_utf8_lossy(&stderr_buf));
+                truncate_shell_output_flagged(&decode_console_bytes(&stderr_buf));
             mirror.finish(format!(
                 "\r\n\x1b[2m[exit {} in {duration_ms}ms]\x1b[0m\r\n",
                 status
@@ -875,11 +877,11 @@ pub async fn ai_shell(
             // Finding 5: preserve partial stdout/stderr captured before timeout.
             let partial_stdout = {
                 let buf = shared_stdout.lock().await;
-                String::from_utf8_lossy(&buf).to_string()
+                decode_console_bytes(&buf)
             };
             let partial_stderr = {
                 let buf = shared_stderr.lock().await;
-                String::from_utf8_lossy(&buf).to_string()
+                decode_console_bytes(&buf)
             };
             let (stdout, stdout_truncated) = truncate_shell_output_flagged(&partial_stdout);
             let (stderr_body, stderr_truncated) = truncate_shell_output_flagged(&partial_stderr);
@@ -933,6 +935,7 @@ fn spawn_shell_mirror(
     cwd_display: &str,
     stdout: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
     stderr: std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
+    tool_call_id: Option<String>,
 ) -> ShellMirror {
     use tauri::Emitter;
     let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<String>();
@@ -943,7 +946,10 @@ fn spawn_shell_mirror(
     tokio::spawn(async move {
         let _ = app.emit(
             "lux://event",
-            lux_core::LuxEvent::AiShellOutput { data: banner },
+            lux_core::LuxEvent::AiShellOutput {
+                data: banner,
+                tool_call_id: tool_call_id.clone(),
+            },
         );
         let mut sent_stdout = 0usize;
         let mut sent_stderr = 0usize;
@@ -952,13 +958,16 @@ fn spawn_shell_mirror(
                 status = &mut done_rx => Some(status.unwrap_or_default()),
                 () = tokio::time::sleep(std::time::Duration::from_millis(SHELL_MIRROR_POLL_MS)) => None,
             };
-            emit_shell_mirror_delta(&app, &stdout, &mut sent_stdout).await;
-            emit_shell_mirror_delta(&app, &stderr, &mut sent_stderr).await;
+            emit_shell_mirror_delta(&app, &stdout, &mut sent_stdout, tool_call_id.as_deref()).await;
+            emit_shell_mirror_delta(&app, &stderr, &mut sent_stderr, tool_call_id.as_deref()).await;
             if let Some(status_line) = status_line {
                 if !status_line.is_empty() {
                     let _ = app.emit(
                         "lux://event",
-                        lux_core::LuxEvent::AiShellOutput { data: status_line },
+                        lux_core::LuxEvent::AiShellOutput {
+                            data: status_line,
+                            tool_call_id: tool_call_id.clone(),
+                        },
                     );
                 }
                 break;
@@ -977,6 +986,7 @@ async fn emit_shell_mirror_delta(
     app: &tauri::AppHandle,
     sink: &std::sync::Arc<tokio::sync::Mutex<Vec<u8>>>,
     sent: &mut usize,
+    tool_call_id: Option<&str>,
 ) {
     use tauri::Emitter;
     let chunk = {
@@ -998,7 +1008,10 @@ async fn emit_shell_mirror_delta(
     };
     let _ = app.emit(
         "lux://event",
-        lux_core::LuxEvent::AiShellOutput { data: chunk },
+        lux_core::LuxEvent::AiShellOutput {
+            data: chunk,
+            tool_call_id: tool_call_id.map(str::to_string),
+        },
     );
 }
 
@@ -1922,7 +1935,15 @@ fn shell_command(command_line: &str) -> tokio::process::Command {
         // raw_arg so inner quotes survive (empirically verified:
         // `cmd /C "python -c "print(2+2)""` prints 4). raw_arg is tokio's inherent
         // Windows method, same family as creation_flags below — no extra `use`.
-        command.raw_arg(format!("/C \"{command_line}\""));
+        //
+        // Encoding: switch the (hidden) console to UTF-8 first. Without it, cmd's own
+        // messages and console-CP-aware tools emit the OEM code page (cp866 on RU
+        // Windows), which the UTF-8 capture renders as `���` mojibake. `chcp` needs a
+        // console — CREATE_NO_WINDOW hides the console but still allocates one, so
+        // this works from the GUI app. `>nul` keeps the "Active code page" banner out
+        // of the captured stdout. Legacy tools that hardcode ANSI/OEM output are
+        // handled by the decode fallback in `decode_console_bytes`.
+        command.raw_arg(format!("/C \"chcp 65001>nul & {command_line}\""));
         command.creation_flags(CREATE_NO_WINDOW);
         command
     }
@@ -1932,6 +1953,51 @@ fn shell_command(command_line: &str) -> tokio::process::Command {
         command.arg("-c").arg(command_line);
         command
     }
+}
+
+/// Decode captured console bytes to text. Valid UTF-8 passes through untouched.
+/// On Windows, invalid UTF-8 almost always means a legacy tool wrote the OEM or
+/// ANSI code page (cp866 / windows-1251 on Cyrillic systems) — try both and keep
+/// the decode that reads as real text instead of flattening everything to `�`.
+fn decode_console_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => text.to_string(),
+        Err(_) => {
+            #[cfg(windows)]
+            {
+                let (cp866, _, _) = encoding_rs::IBM866.decode(bytes);
+                let (cp1251, _, _) = encoding_rs::WINDOWS_1251.decode(bytes);
+                let best = if legacy_decode_score(&cp1251) >= legacy_decode_score(&cp866) {
+                    cp1251
+                } else {
+                    cp866
+                };
+                best.into_owned()
+            }
+            #[cfg(not(windows))]
+            {
+                String::from_utf8_lossy(bytes).into_owned()
+            }
+        }
+    }
+}
+
+/// Rank a legacy-codepage decode: letters (Cyrillic or Latin) score up, control
+/// garbage and replacement chars score down. Both candidate decodes always
+/// "succeed" (single-byte codepages decode anything), so pick by plausibility.
+#[cfg(windows)]
+fn legacy_decode_score(text: &str) -> i64 {
+    let mut score: i64 = 0;
+    for ch in text.chars() {
+        if ch.is_alphabetic() || ch.is_ascii_digit() || ch.is_ascii_whitespace() {
+            score += 1;
+        } else if ch == char::REPLACEMENT_CHARACTER
+            || (ch.is_control() && ch != '\n' && ch != '\r' && ch != '\t')
+        {
+            score -= 4;
+        }
+    }
+    score
 }
 
 pub fn truncate_shell_output(value: &str) -> String {

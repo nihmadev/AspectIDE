@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use lux_memory::{
-    Memory, MemoryPatch, MemoryStats, MemoryStore, NewMemory, ScoredMemory, SearchOptions,
+    CreateOutcome, Memory, MemoryPatch, MemoryRelation, MemoryStats, MemoryStore, NewMemory,
+    RelatedMemory, RelationKind, RetentionReport, ScoredMemory, SearchOptions,
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -83,14 +84,44 @@ async fn with_memory<T: Send + 'static>(
     .map_err(|error| error.to_string())?
 }
 
+/// Auto-forget defaults: keep the store bounded without a scheduler. Applied
+/// opportunistically after creates — cheap (two indexed DELETEs) and idempotent.
+const MEMORY_PRUNE_MAX_ENTRIES: usize = 4_000;
+const MEMORY_PRUNE_MAX_IDLE_DAYS: f64 = 120.0;
+const MEMORY_PRUNE_MIN_IMPORTANCE: f64 = 0.25;
+
 #[tauri::command]
 pub async fn memory_create(
     app: AppHandle,
     state: State<'_, SharedState>,
     input: NewMemory,
-) -> Result<Memory, String> {
+) -> Result<CreateOutcome, String> {
     with_memory(&app, &state, move |store| {
-        store.create(input).map_err(String::from)
+        let created = store.create_with_outcome(input).map_err(String::from)?;
+        // Lifecycle sweep (agentmemory-style auto-forget): stale weak memories and
+        // over-cap overflow are evicted here so the store can't grow unbounded.
+        // Best-effort — a failed sweep must never fail the create.
+        let _ = store.prune(
+            MEMORY_PRUNE_MAX_ENTRIES,
+            MEMORY_PRUNE_MAX_IDLE_DAYS,
+            MEMORY_PRUNE_MIN_IMPORTANCE,
+        );
+        Ok(created)
+    })
+    .await
+}
+
+/// Manual lifecycle sweep for the Settings UI; returns how many were evicted.
+#[tauri::command]
+pub async fn memory_prune(app: AppHandle, state: State<'_, SharedState>) -> Result<usize, String> {
+    with_memory(&app, &state, move |store| {
+        store
+            .prune(
+                MEMORY_PRUNE_MAX_ENTRIES,
+                MEMORY_PRUNE_MAX_IDLE_DAYS,
+                MEMORY_PRUNE_MIN_IMPORTANCE,
+            )
+            .map_err(String::from)
     })
     .await
 }
@@ -181,6 +212,88 @@ pub async fn memory_wipe(
             || store.wipe_all().map_err(String::from),
             |category| store.wipe_category(&category).map_err(String::from),
         )
+    })
+    .await
+}
+
+/// Link two memories in the knowledge-graph-lite (e.g. mark one as superseding,
+/// extending, or contradicting the other). `confidence` defaults to the store's
+/// heuristic (temporal co-occurrence + relation kind) when omitted.
+#[tauri::command]
+pub async fn memory_relate(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    source_id: String,
+    target_id: String,
+    relation: String,
+    confidence: Option<f64>,
+) -> Result<MemoryRelation, String> {
+    let kind: RelationKind = relation.parse()?;
+    with_memory(&app, &state, move |store| {
+        store
+            .relate(&source_id, &target_id, kind, confidence)
+            .map_err(String::from)
+    })
+    .await
+}
+
+/// Remove a relation edge by id; returns whether a row was removed.
+#[tauri::command]
+pub async fn memory_unrelate(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    relation_id: String,
+) -> Result<bool, String> {
+    with_memory(&app, &state, move |store| {
+        store.unrelate(&relation_id).map_err(String::from)
+    })
+    .await
+}
+
+/// All relation edges touching a memory (either as source or target).
+#[tauri::command]
+pub async fn memory_relations(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    memory_id: String,
+) -> Result<Vec<MemoryRelation>, String> {
+    with_memory(&app, &state, move |store| {
+        store.relations_of(&memory_id).map_err(String::from)
+    })
+    .await
+}
+
+/// Memories reachable from `memory_id` by BFS over the relation graph, up to
+/// `max_hops` (default 1) at or above `min_confidence` (default 0.0).
+#[tauri::command]
+pub async fn memory_related(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    memory_id: String,
+    max_hops: Option<usize>,
+    min_confidence: Option<f64>,
+) -> Result<Vec<RelatedMemory>, String> {
+    with_memory(&app, &state, move |store| {
+        store
+            .related(
+                &memory_id,
+                max_hops.unwrap_or(1),
+                min_confidence.unwrap_or(0.0),
+            )
+            .map_err(String::from)
+    })
+    .await
+}
+
+/// Aggregate retention-tier counts (hot/warm/cold/evictable) for the whole
+/// store, for a Settings UI health card.
+#[tauri::command]
+pub async fn memory_retention(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> Result<RetentionReport, String> {
+    with_memory(&app, &state, move |store| {
+        store.retention_report().map_err(String::from)
     })
     .await
 }

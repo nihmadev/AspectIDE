@@ -7,13 +7,17 @@ import type { DocumentSnapshot, TerminalSessionInfo, WorkspaceInfo } from "./typ
 export type AiChatRole = "system" | "user" | "assistant" | "tool";
 
 export type AiChatToolStatus = "approval" | "running" | "success" | "skipped" | "error";
-export type AiChatRuntimeStatus = "thinking" | "streaming" | "running-tools" | "waiting-approval";
+/** "preparing" = the model has finished thinking and is constructing a tool call
+ *  (Rust's "building-tools" phase, before toolCallStarted names the tool). Kept
+ *  distinct from "thinking"/"streaming" so the status chip and reasoning shimmer
+ *  never lie about there being live tokens once the model has moved on. */
+export type AiChatRuntimeStatus = "thinking" | "streaming" | "running-tools" | "waiting-approval" | "preparing";
 
 export type AiToolApprovalDecision = "approved" | "rejected";
 
 export type AiToolApprovalRequest = {
   id: string;
-  tool: "Write" | "StrReplace" | "Delete" | "Shell" | "TerminalWrite" | "PatchEngine" | "Checkpoint" | "BrowserOpen" | "BrowserAct" | "BrowserChat" | "BrowserInstall" | "SshConnect" | "SshExec" | "SshTransfer";
+  tool: "Write" | "StrReplace" | "Delete" | "Shell" | "TerminalWrite" | "PatchEngine" | "Checkpoint" | "BrowserOpen" | "BrowserAct" | "BrowserChat" | "BrowserDashboard" | "BrowserInstall" | "SshConnect" | "SshExec" | "SshTransfer";
   title: string;
   path: string;
   summary: string;

@@ -9,6 +9,8 @@ import { AiChatMessages } from "./ai-chat/AiChatMessages";
 import { AiAgentOrchestrationRail } from "./ai-chat/AiAgentOrchestrationRail";
 import { AiQuestionCard } from "./ai-chat/AiQuestionCard";
 import { AiPlanCard } from "./ai-chat/AiPlanCard";
+import { AiPlanRunCard, type ActivePlanRun } from "./ai-chat/AiPlanRunCard";
+import { AiSessionReviewBar } from "./ai-chat/AiSessionReviewBar";
 import { AiSubagentPanel } from "./ai-chat/AiSubagentPanel";
 import { AiAutomaticChecklist } from "./ai-chat/AiAutomaticChecklist";
 import { buildContextDropSummary } from "../lib/aiChatContextReport";
@@ -128,6 +130,7 @@ import {
   TURN_SUPERSEDED,
 } from "../lib/aiChatTurnRuntime";
 import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision } from "../lib/aiChatTypes";
+import { DEFAULT_UI_FONT_STACK, withFontFallback } from "../lib/editorPreferences";
 import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../lib/store";
 import { isTauriRuntime, luxCommands } from "../lib/tauri";
 import { getActiveTurnId } from "../lib/aiActiveTurns";
@@ -161,6 +164,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const activeDocumentId = useLuxStore((state) => state.activeDocumentId);
   const aiIndex = useLuxStore((state) => state.aiIndex);
   const aiPreferences = useLuxStore((state) => state.aiPreferences);
+  const chatFontFamily = useLuxStore((state) => state.editorPreferences.chatFontFamily);
   const aiChatSessions = useLuxStore((state) => state.aiChatSessions);
   const activeChatSession = useLuxStore(selectActiveAiChatSession);
   const activeAiChatSessionId = useLuxStore((state) => state.activeAiChatSessionId);
@@ -212,6 +216,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const [mentionNavigated, setMentionNavigated] = useState(false);
   const [mentionCandidates, setMentionCandidates] = useState<AiMentionCandidate[]>([]);
   const [compacting, setCompacting] = useState(false);
+  // Live "plan run" card shown after the user presses Start on a plan (#35). Set on
+  // handoff, cleared on dismiss or session switch. Its steps/progress are driven
+  // live by the session's todo store (see AiPlanRunCard), not by this state.
+  const [activePlanRun, setActivePlanRun] = useState<ActivePlanRun | null>(null);
   const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
   // Seconds left before the transient restore/status notice auto-dismisses.
   // null when no notice is showing. Reset to RESTORE_NOTICE_SECONDS whenever
@@ -250,11 +258,17 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const streamingMessageId = activeSessionBusy
     ? [...messages].reverse().find((entry) => entry.role === "assistant")?.id ?? null
     : null;
+  // Genuinely nothing to look at yet: no assistant shell at all (fresh send, still
+  // between the user turn and assistantCreated), or a shell that has produced no
+  // reasoning/tool/text segment. The moment any of those render, they carry their
+  // own live-state UI, so this standalone "..." must step aside instead of lingering
+  // for the rest of the turn (it used to invert this and stay lit long after real
+  // content — e.g. tool calls — was already on screen, reading as a stuck turn).
   const showStandaloneThinking = useMemo(() => {
     if (!activeSessionBusy) return false;
     const tailMessage = messages[messages.length - 1];
-    if (!tailMessage) return true;
-    return !isPendingAssistantShell(tailMessage, tailMessage.id === streamingMessageId);
+    if (!tailMessage || tailMessage.role !== "assistant") return true;
+    return isPendingAssistantShell(tailMessage, tailMessage.id === streamingMessageId);
   }, [activeSessionBusy, messages, streamingMessageId]);
   const isAgentHome = presentation === "agent" && visibleMessages.length === 0;
   const showOrchestrationRail = isFullExecutionAgentMode(aiPreferences.agentMode);
@@ -293,7 +307,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const runtimeInstructionText = [selectedAgent?.instructions ?? "", aiPreferences.globalInstructions, projectInstructions].filter((entry) => entry.trim()).join("\n");
   const modelSupportsEffort = Boolean(selectedModel?.effortLevels.length);
   const agentOptions = aiPreferences.agentProfiles.map((profile) => ({ label: profile.name, value: profile.id }));
-  const providerOptions = aiPreferences.providers.map((provider) => ({ label: provider.name, value: provider.id }));
   // Composite picker value separator. Newline never appears in a provider/model id,
   // so `providerId\nmodelId` round-trips unambiguously (split on the first newline).
   const MODEL_VALUE_SEP = "\n";
@@ -452,14 +465,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     void luxCommands.settingsSet("user", AI_PREFERENCES_KEY, nextPreferences).catch(() => undefined);
   }, [aiPreferences, setAiPreferences]);
 
-  const updateProvider = useCallback((selectedProviderId: string) => {
-    const provider = getAiProvider(aiPreferences.providers, selectedProviderId) ?? null;
-    const nextModelId = provider?.models.some((model) => model.id === aiPreferences.selectedModelId)
-      ? aiPreferences.selectedModelId
-      : provider?.models[0]?.id;
-    updateAiPreference(nextModelId ? { selectedProviderId, selectedModelId: nextModelId } : { selectedProviderId });
-  }, [aiPreferences.providers, aiPreferences.selectedModelId, updateAiPreference]);
-
   // Composite model selection: "providerId\nmodelId" → switch provider + model atomically.
   const selectComposedModel = useCallback((composite: string) => {
     const sep = composite.indexOf("\n");
@@ -512,6 +517,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   useEffect(() => {
     setSendError(null);
     setRestoreNotice(null);
+    setActivePlanRun(null);
   }, [activeAiChatSessionId]);
 
   // Auto-dismiss the transient notice with a visible per-second countdown.
@@ -1516,18 +1522,32 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     });
   }, [activeDocument, aiPreferences, locale, openDocuments, selectedModel, selectedProvider, workspace]);
 
-  const showRestoreSuccess = useCallback((result: { restoredFileCount: number; removedTurnCheckpoints: number }) => {
-    setRestoreNotice(t("aiChat.turnCheckpoint.restored", {
-      files: result.restoredFileCount,
-      turns: result.removedTurnCheckpoints,
-    }));
+  const showRestoreSuccess = useCallback((result: { restoredFileCount: number; removedTurnCheckpoints: number; snapshotFileCount: number }) => {
+    // Honest toast (#31c): "Restored 0 files" used to read as success even when no
+    // file snapshot existed at all for the turn. Distinguish the three real outcomes:
+    // files actually changed on disk; files matched already (checkpoint existed,
+    // nothing to do); no snapshot existed at all (files were never touched by design).
+    if (result.restoredFileCount > 0) {
+      setRestoreNotice(t("aiChat.turnCheckpoint.restored", {
+        files: result.restoredFileCount,
+        turns: result.removedTurnCheckpoints,
+      }));
+    } else if (result.snapshotFileCount === 0) {
+      setRestoreNotice(t("aiChat.turnCheckpoint.restoredNoSnapshot"));
+    } else {
+      setRestoreNotice(t("aiChat.turnCheckpoint.restoredClean"));
+    }
     setSendError(null);
   }, [t]);
 
   const handleEditUserMessage = useCallback(async (userMessageId: string, nextContent: string, options?: { skipConfirm?: boolean }) => {
     if (!activeChatSession || activeSessionClosed || !nextContent.trim()) return;
     const input = buildRestoreInput();
-    if (!input) return;
+    if (!input) {
+      // Was a silent no-op ("откаты не работают"): name the actual blocker.
+      setSendError(classifyAiChatError(new Error(t("aiChat.turnCheckpoint.agentNeedProject")), t));
+      return;
+    }
     if (!options?.skipConfirm) {
       const confirmed = window.confirm(t("aiChat.turnCheckpoint.editConfirm"));
       if (!confirmed) return;
@@ -1552,6 +1572,36 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       setRestoreNotice(null);
     }
   }, [activeChatSession, activeSessionClosed, buildRestoreInput, handleSend, replaceAiChatMessages, showRestoreSuccess, t]);
+
+  // Roll back to before a user message WITHOUT resending: files, tasks and goal
+  // return to the snapshot; the message text lands back in the composer so the
+  // user can tweak or discard it. This is the "откатиться" button next to Edit.
+  const handleRestoreUserMessage = useCallback(async (userMessageId: string) => {
+    if (!activeChatSession || activeSessionClosed) return;
+    const input = buildRestoreInput();
+    if (!input) {
+      setSendError(classifyAiChatError(new Error(t("aiChat.turnCheckpoint.agentNeedProject")), t));
+      return;
+    }
+    if (!window.confirm(t("aiChat.turnCheckpoint.restoreConfirm"))) return;
+    const original = activeChatSession.messages.find((message) => message.id === userMessageId)?.content ?? "";
+    abortAiChatTurn(activeChatSession.id);
+    try {
+      const result = await restoreChatBeforeUserMessage({
+        currentMessages: activeChatSession.messages,
+        input,
+        sessionId: activeChatSession.id,
+        userMessageId,
+      });
+      replaceAiChatMessages(activeChatSession.id, result.messages, { contextCompaction: null });
+      showRestoreSuccess(result);
+      saveChatCheckpointStore();
+      if (original.trim()) updateMessage(original);
+    } catch (error) {
+      setSendError(classifyAiChatError(error, t));
+      setRestoreNotice(null);
+    }
+  }, [activeChatSession, activeSessionClosed, buildRestoreInput, replaceAiChatMessages, showRestoreSuccess, t, updateMessage]);
 
   const canRestoreUserMessage = useCallback((userMessageId: string) => {
     if (!activeChatSession || !workspace) return false;
@@ -1657,7 +1707,8 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
   // Start a proposed plan: switch to Agent mode, clear the card, and hand the
   // plan to execution. Goal + task list were already pinned by the PresentPlan
-  // tool, so the rail already reflects it.
+  // tool, so the rail already reflects it. Also opens the live plan-run card
+  // (#35) so the handoff is followed by a visible checklist, not silence.
   const handlePlanStart = useCallback(() => {
     if (!pendingPlan || activeSessionBusy || activeSessionClosed) return;
     const sessionId = pendingPlan.sessionId;
@@ -1669,9 +1720,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         ?? aiPreferences.agentProfiles[0];
       if (agentProfile) updateAiPreference({ selectedAgentId: agentProfile.id, agentMode: "agent" });
     }
+    setActivePlanRun({ planId: pendingPlan.planId, sessionId, title: pendingPlan.title, stepCount: pendingPlan.steps.length });
     const handoffMessage = buildPlanHandoffUserMessage(pendingPlan.steps.map((step) => step.title));
     void handleSend(handoffMessage, undefined, { force: true });
-    void sessionId;
   }, [pendingPlan, activeSessionBusy, activeSessionClosed, aiPreferences.agentMode, aiPreferences.agentProfiles, updateAiPreference, handleSend]);
 
   // Automatic safety net: a plan must never strand execution in Automatic mode. If
@@ -1942,8 +1993,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           {t("aiChat.model.showHidden", { count: aiPreferences.hiddenModelIds.length })}
         </button>
       ) : undefined}
-      providerOptions={providerOptions}
-      selectedProviderId={selectedProvider?.id ?? aiPreferences.selectedProviderId}
       preferences={aiPreferences}
       removeAttachment={removeAttachment}
       selectedModelId={selectedModelValue}
@@ -1954,7 +2003,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       textareaRef={textareaRef}
       updateAiPreference={updateAiPreference}
       updateModel={selectComposedModel}
-      updateProvider={updateProvider}
       voiceInput={voiceInput}
       mentionMenuOpen={mentionMenuOpen}
       mentionCandidates={mentionCandidates}
@@ -1968,8 +2016,15 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     </>
   );
 
+  // Custom chat font: re-point --font-ui for the panel subtree only, so every
+  // chat surface (messages, composer, menus) follows while code spans keep mono.
+  const chatFontStyle = useMemo(
+    () => (chatFontFamily ? { "--font-ui": withFontFallback(chatFontFamily, DEFAULT_UI_FONT_STACK) } as CSSProperties : undefined),
+    [chatFontFamily],
+  );
+
   return (
-    <aside className="ai-chat-panel" aria-label={t("aiChat.panel.aria")} data-empty-home={isAgentHome} data-embedded={embedded} data-presentation={presentation} data-status={activeStatus}>
+    <aside className="ai-chat-panel" style={chatFontStyle} aria-label={t("aiChat.panel.aria")} data-empty-home={isAgentHome} data-embedded={embedded} data-presentation={presentation} data-status={activeStatus}>
       {isAgentHome ? (
         <header className="ai-chat-header ai-chat-header-minimal">
           <div className="ai-chat-title" aria-hidden="true" />
@@ -2038,10 +2093,12 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                 workspaceRoot={workspace?.root ?? null}
                 onApprovalDecision={resolveToolApproval}
                 onEditUserMessage={handleEditUserMessage}
+                onRestoreUserMessage={handleRestoreUserMessage}
                 onStopAfterTool={requestStopAfterToolRound}
                 canStopAfterTool={activeSessionBusy}
                 t={t}
                 onReviewAction={handleReviewAction}
+                reviewDisabled={activeSessionBusy || activeSessionClosed}
               />
               {pendingPlan && (
                 <AiPlanCard
@@ -2049,6 +2106,14 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                   onStart={handlePlanStart}
                   busy={activeSessionBusy || activeSessionClosed}
                   agentMode={aiPreferences.agentMode}
+                  t={t}
+                />
+              )}
+              {activePlanRun && activePlanRun.sessionId === activeAiChatSessionId && (
+                <AiPlanRunCard
+                  run={activePlanRun}
+                  turnSettled={!activeSessionBusy}
+                  onDismiss={() => setActivePlanRun(null)}
                   t={t}
                 />
               )}
@@ -2170,6 +2235,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
       {!isAgentHome && (
         <footer className="ai-chat-composer-shell">
+          <AiSessionReviewBar sessionId={activeAiChatSessionId} t={t} />
           {presentation === "agent" && !workspace && (
             <p className="ai-chat-checkpoint-agent-hint" role="note">{t("aiChat.turnCheckpoint.agentNeedProject")}</p>
           )}

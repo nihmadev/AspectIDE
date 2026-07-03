@@ -43,6 +43,7 @@ const provider: AiProviderConfig = {
   localPort: "",
   localPath: "",
   models: [model],
+  embeddingModel: "",
 };
 
 function makeMessages(count: number): AiChatMessage[] {

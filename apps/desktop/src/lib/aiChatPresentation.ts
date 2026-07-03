@@ -6,6 +6,7 @@ export function aiChatStatusLabel(status: AiChatSessionStatus, active: boolean, 
   switch (status) {
     case "thinking": return t("aiChat.status.thinking");
     case "streaming": return t("aiChat.status.streaming");
+    case "preparing": return t("aiChat.status.preparing");
     case "running-tools": return t("aiChat.status.tools");
     case "waiting-approval": return t("aiChat.status.approval");
     case "error": return t("aiChat.status.error");

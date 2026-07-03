@@ -1,11 +1,17 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { version as appVersion } from "./package.json";
 
 const host = process.env.TAURI_DEV_HOST ?? "127.0.0.1";
 
 export default defineConfig({
   plugins: [react()],
   clearScreen: false,
+  // Single version source (package.json, kept in lockstep with the Tauri crate by
+  // the release flow) — surfaced in the title bar next to the logo.
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion),
+  },
   server: {
     host,
     port: 5173,

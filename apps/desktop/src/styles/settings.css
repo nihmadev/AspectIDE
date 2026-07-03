@@ -421,6 +421,18 @@
   min-width: 0;
 }
 
+/* Selects in standard rows: right-aligned, capped — not a full-width bar. */
+.settings-field:not([data-wide="true"]) > .settings-select-control {
+  justify-self: end;
+  width: min(240px, 100%);
+}
+
+/* Short-value text inputs in standard rows follow the same compact rhythm. */
+.settings-field:not([data-wide="true"]) > .settings-input-control {
+  justify-self: end;
+  width: min(260px, 100%);
+}
+
 .settings-select-control select {
   appearance: none;
   padding-right: 28px;
@@ -435,17 +447,29 @@
   pointer-events: none;
 }
 
+/* Codex-style compact controls: value widgets hug their content and sit at the
+   row's right edge instead of stretching across the whole column — a full-width
+   −/13/+ bar or segmented strip is the "ancient settings" look. */
 .settings-segmented {
   display: inline-grid;
   grid-auto-flow: column;
   grid-auto-columns: minmax(0, 1fr);
   gap: 2px;
-  width: 100%;
+  width: auto;
   max-width: 100%;
   padding: 2px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   background: var(--bg-1);
+}
+
+.settings-field > .settings-segmented {
+  justify-self: end;
+}
+
+/* Inside the compound (segmented + stepper) row the segmented keeps its column. */
+.settings-compound-control .settings-segmented {
+  width: 100%;
 }
 
 .settings-segmented button {
@@ -495,6 +519,12 @@
   border-radius: var(--radius-sm);
   background: var(--bg-1);
   transition: border-color 100ms ease, background 100ms ease;
+}
+
+/* Standalone number rows: compact fixed-width stepper at the right edge. */
+.settings-field > .settings-stepper {
+  justify-self: end;
+  width: 132px;
 }
 
 /* The inner input has outline:0 — mirror the text-input focus treatment. */
@@ -560,43 +590,72 @@
   pointer-events: none;
 }
 
+/* Modern solid-fill switch (Cursor/Codex style): borderless pill track that
+   fills with the accent when on, white knob with a soft shadow. */
 .settings-switch {
   position: relative;
   justify-self: end;
-  width: 36px;
-  height: 20px;
-  border: 1px solid var(--border-strong);
+  flex-shrink: 0;
+  width: 38px;
+  height: 21px;
   border-radius: 999px;
-  background: var(--bg-1);
-  transition: border-color 100ms ease, background 100ms ease;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 1px var(--on-surface-faint);
+  transition: background 160ms ease, box-shadow 160ms ease;
 }
 
 .settings-switch::after {
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
-  height: 14px;
+  top: 2.5px;
+  left: 2.5px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: var(--text-3);
+  background: var(--text-1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   content: "";
-  transition: transform 100ms ease, background 100ms ease;
+  transition: transform 180ms cubic-bezier(0.3, 0.9, 0.4, 1), background 160ms ease, width 120ms ease;
+}
+
+.settings-toggle-field:hover .settings-switch {
+  background: var(--hover-strong);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
 /* The real checkbox is visually hidden, so surface keyboard focus on the switch. */
 .settings-toggle-field input:focus-visible + .settings-switch {
-  border-color: var(--accent-strong);
-  box-shadow: 0 0 0 2px var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--accent-strong), 0 0 0 2px var(--accent-soft);
 }
 
 .settings-toggle-field input:checked + .settings-switch {
-  border-color: var(--accent-strong);
-  background: var(--accent-soft);
+  background: var(--accent);
+  box-shadow: none;
+}
+
+.settings-toggle-field:hover input:checked + .settings-switch {
+  background: var(--accent-strong);
+  box-shadow: none;
 }
 
 .settings-toggle-field input:checked + .settings-switch::after {
-  background: var(--accent);
-  transform: translateX(16px);
+  background: #ffffff;
+  transform: translateX(17px);
+}
+
+/* A gentle press-stretch, like native mobile switches. */
+.settings-toggle-field:active .settings-switch::after {
+  width: 19px;
+}
+
+.settings-toggle-field:active input:checked + .settings-switch::after {
+  transform: translateX(14px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-switch,
+  .settings-switch::after {
+    transition: none;
+  }
 }
 
 .settings-toolbar {
@@ -732,6 +791,25 @@
   grid-column: 1 / -1;
 }
 
+/* Install progress / outcome note under the status card. Single-column: it's a
+   sentence, not a card with actions. */
+.agent-browser-install-note {
+  display: block;
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.agent-browser-install-note[data-state="ok"] {
+  color: var(--accent-success, #4ec98a);
+}
+
+.agent-browser-install-note[data-state="error"] {
+  color: var(--accent-danger, var(--danger));
+}
+
 /* Providers */
 .provider-create-row {
   display: grid;
@@ -784,8 +862,9 @@
   display: grid;
   gap: 0;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   overflow: hidden;
+  background: var(--bg-1);
 }
 
 .provider-tile {
@@ -813,8 +892,11 @@
   background: var(--list-hover);
 }
 
+/* Active provider: quiet fill + accent left edge — findable at a glance
+   without tinting the whole row. */
 .provider-tile[data-active="true"] {
   background: var(--list-active-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .provider-tile-avatar {
@@ -863,17 +945,18 @@
 
 .provider-status-pill {
   height: 18px;
-  padding: 0 7px;
+  padding: 0 8px;
   border-radius: 999px;
   background: var(--surface-1);
-  color: var(--text-3);
-  font-size: 10px;
+  color: var(--text-2);
+  font-size: 10.5px;
   font-weight: 600;
   line-height: 18px;
+  white-space: nowrap;
 }
 
 .provider-status-pill[data-active="true"] {
-  background: rgba(78, 201, 138, 0.12);
+  background: color-mix(in srgb, var(--success) 13%, transparent);
   color: var(--success);
 }
 
@@ -1267,25 +1350,30 @@
   gap: 8px;
 }
 
+/* Same card family as the AI Usage stat cards — one metric language app-wide. */
 .index-metric {
   display: grid;
-  gap: 2px;
-  padding: 8px 10px;
+  gap: 3px;
+  padding: 10px 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--bg-1);
 }
 
 .index-metric span {
   color: var(--text-3);
   font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
 .index-metric strong {
   color: var(--text-0);
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
 }
 
 .index-insights {
@@ -1365,6 +1453,15 @@
     grid-template-columns: minmax(0, 1fr) auto;
   }
 
+  /* Stacked layout: compact controls go back to full row width — a right-hugging
+     132px stepper under its own label reads unanchored on one column. */
+  .settings-field > .settings-stepper,
+  .settings-field:not([data-wide="true"]) > .settings-select-control,
+  .settings-field:not([data-wide="true"]) > .settings-input-control {
+    justify-self: stretch;
+    width: 100%;
+  }
+
   .provider-model-manager {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1421,50 +1518,259 @@
   white-space: nowrap;
 }
 
-.ai-usage-table {
+/* ── AI Usage console (observability-style: filters, stat cards, request log) ── */
+.ai-usage-console {
   display: grid;
-  gap: 1px;
-  overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: 8px;
-  background: var(--border-subtle);
+  gap: 12px;
 }
 
-.ai-usage-table-head,
-.ai-usage-table-row {
-  display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.9fr) minmax(0, 0.8fr);
-  gap: 10px;
+.ai-usage-toolbar {
+  display: flex;
   align-items: center;
-  padding: 7px 10px;
-  background: var(--bg-0);
+  justify-content: space-between;
+  gap: 10px;
 }
 
-.ai-usage-table-head {
+.ai-usage-filters {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
   background: var(--bg-1);
+}
+
+.ai-usage-filters button {
+  height: 24px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: calc(var(--radius-sm) - 2px);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+
+.ai-usage-filters button:hover {
+  color: var(--text-0);
+}
+
+.ai-usage-filters button[data-active] {
+  background: var(--surface-2);
+  color: var(--text-0);
+}
+
+.ai-usage-toolbar-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.ai-usage-toolbar-actions button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+
+.ai-usage-toolbar-actions button:hover {
+  background: var(--surface-1);
+  color: var(--text-0);
+}
+
+.ai-usage-toolbar-actions .ai-usage-clear:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.ai-usage-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.ai-usage-card {
+  display: grid;
+  gap: 3px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+}
+
+.ai-usage-card-label {
   color: var(--text-3);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
 
-.ai-usage-table-row {
-  font-size: 12px;
+.ai-usage-card-value {
+  color: var(--text-0);
+  font-size: 19px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.ai-usage-card-sub {
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.ai-usage-log {
+  display: grid;
+  gap: 6px;
+}
+
+.ai-usage-log-item {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+  overflow: hidden;
+  transition: border-color 120ms ease;
+}
+
+.ai-usage-log-item:hover {
+  border-color: var(--border-strong);
+}
+
+.ai-usage-log-item[data-open] {
+  border-color: var(--border-strong);
+  background: var(--surface-0);
+}
+
+.ai-usage-log-row {
+  display: grid;
+  grid-template-columns: 62px auto minmax(0, 1fr) auto 72px 16px;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 0;
+  background: transparent;
+  color: var(--text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-usage-log-time {
+  color: var(--text-3);
+  font: 11px/1 var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
-.ai-usage-table-row .ai-usage-model {
+.ai-usage-log-badge {
+  display: inline-flex;
+  align-items: center;
+  height: 17px;
+  padding: 0 7px;
+  border-radius: 999px;
+  font: 600 10px/1 var(--font-mono);
+}
+
+.ai-usage-log-badge[data-tone="ok"] {
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+  color: var(--success);
+}
+
+.ai-usage-log-model {
   overflow: hidden;
-  color: var(--text-1);
+  color: var(--text-0);
+  font-size: 12px;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ai-usage-actions {
-  display: flex;
-  justify-content: flex-end;
+.ai-usage-log-tokens {
+  display: inline-flex;
+  gap: 10px;
+  font: 11px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ai-usage-log-tokens [data-kind="in"] {
+  color: var(--text-2);
+}
+
+.ai-usage-log-tokens [data-kind="out"] {
+  color: var(--text-1);
+}
+
+.ai-usage-log-tokens [data-kind="cache"] {
+  color: var(--gold);
+}
+
+.ai-usage-log-duration {
+  color: var(--text-3);
+  font: 11px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.ai-usage-log-caret {
+  color: var(--text-3);
+  transition: transform 140ms ease;
+}
+
+.ai-usage-log-caret[data-open] {
+  transform: rotate(90deg);
+}
+
+.ai-usage-log-detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px 16px;
+  margin: 0;
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ai-usage-log-detail > div {
+  display: grid;
+  gap: 1px;
+}
+
+.ai-usage-log-detail dt {
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ai-usage-log-detail dd {
+  margin: 0;
+  color: var(--text-1);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.ai-usage-projects {
+  display: grid;
+  gap: 6px;
   padding-top: 4px;
+}
+
+.ai-usage-projects h4 {
+  margin: 0 0 2px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 /* ── Language Servers section ── */
@@ -1536,12 +1842,18 @@
   font-size: 12px;
 }
 
+/* One quiet container with hairline dividers — a stack of 12 individually
+   framed cards read as noise; a single table-like surface reads as one list. */
 .lsp-servers-list {
   margin: 0;
   padding: 0;
   list-style: none;
   display: grid;
-  gap: 6px;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
 }
 
 .lsp-server-row {
@@ -1549,10 +1861,17 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--bg-1);
+  min-height: 44px;
+  padding: 8px 12px;
+  transition: background 100ms ease;
+}
+
+.lsp-server-row + .lsp-server-row {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.lsp-server-row:hover {
+  background: var(--hover-soft);
 }
 
 .lsp-server-row-main {
@@ -1611,21 +1930,34 @@
   white-space: nowrap;
 }
 
+/* Status as a compact pill in the action column (single-line rows). */
 .lsp-server-status {
-  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface-1);
   color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .lsp-server-status[data-state="managed"],
 .lsp-server-status[data-state="path"] {
+  background: color-mix(in srgb, var(--success) 13%, transparent);
   color: var(--success, #3fb950);
 }
 
 .lsp-server-status[data-state="installing"] {
+  background: var(--accent-soft);
   color: var(--accent);
 }
 
 .lsp-server-status[data-state="error"] {
+  background: var(--danger-soft);
   color: var(--danger, #e5534b);
 }
 
@@ -1673,28 +2005,81 @@
   line-height: 1.4;
 }
 
+/* Transient result line after an uninstall (e.g. the npm shared-package note). */
+.lsp-server-row-note {
+  margin: 0;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .lsp-server-row-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
   flex-shrink: 0;
 }
 
 .lsp-server-install {
-  height: 28px;
-  padding: 0 14px;
+  height: 26px;
+  padding: 0 12px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  background: var(--surface-0);
-  color: var(--text-1);
-  font-size: 12px;
-  font-weight: 500;
+  background: var(--surface-1);
+  color: var(--text-0);
+  font-size: 11.5px;
+  font-weight: 550;
   cursor: pointer;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease, opacity 100ms ease;
 }
 
 .lsp-server-install:hover:not(:disabled) {
-  background: var(--surface-hover);
-  color: var(--text-0);
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+
+/* Installed servers: Reinstall is a rare action — ghost it until hover. */
+.lsp-server-install[data-installed] {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-3);
+}
+
+.lsp-server-install[data-installed]:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-1);
 }
 
 .lsp-server-install:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* Uninstall: ghosted like Reinstall (rare action, hidden until hover/focus) but
+   tints danger on hover — the row's only destructive affordance. Managed-only
+   (row omits the button entirely for PATH/system installs). */
+.lsp-server-uninstall {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease, opacity 100ms ease;
+}
+
+.lsp-server-uninstall:hover:not(:disabled) {
+  border-color: var(--danger, #e5534b);
+  background: var(--danger-soft);
+  color: var(--danger, #e5534b);
+}
+
+.lsp-server-uninstall:disabled {
   opacity: 0.55;
   cursor: default;
 }
@@ -1705,4 +2090,129 @@
   padding: 3px 8px;
   border: 1px dashed var(--border-strong);
   border-radius: 999px;
+}
+
+/* Agent-browser "Advanced" disclosure: the 11 rarely-touched fields collapse
+   behind one trigger row so the panel's default view is 4 toggles + the status
+   banner, not a 15-field wall. */
+.settings-advanced {
+  display: grid;
+  gap: 0;
+}
+
+.settings-advanced-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  margin-top: 2px;
+  padding: 0;
+  border: 0;
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-2);
+  font: 600 12px/1 var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+  transition: color 100ms ease;
+}
+
+.settings-advanced-toggle:hover {
+  color: var(--text-0);
+}
+
+.settings-advanced-caret {
+  flex: none;
+  color: var(--text-3);
+  transition: transform 150ms ease;
+}
+
+.settings-advanced-caret[data-open] {
+  transform: rotate(90deg);
+}
+
+.settings-advanced-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-advanced-badge {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 550;
+}
+
+.settings-advanced-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--gold);
+}
+
+/* grid-template-rows 0fr → 1fr gives a smooth height animation without measuring
+   the content; the inner wrapper clips overflow while collapsed. */
+.settings-advanced-content {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 180ms ease;
+}
+
+.settings-advanced-content[data-open] {
+  grid-template-rows: 1fr;
+}
+
+.settings-advanced-content-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-advanced-content,
+  .settings-advanced-caret {
+    transition: none;
+  }
+}
+/* Settings → Fonts: the searchable font pickers reuse CompactDropdown but must
+   read as standard 32px settings controls (input parity), not composer pills. */
+.settings-font-dropdown {
+  justify-self: end;
+  width: min(240px, 100%);
+  min-width: 0;
+}
+
+.settings-font-dropdown .compact-dropdown-trigger {
+  justify-content: space-between;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  color: var(--text-0);
+  font: 13px/1 var(--font-ui);
+  transition: border-color 100ms ease, background 100ms ease;
+}
+
+.settings-font-dropdown .compact-dropdown-trigger:hover,
+.settings-font-dropdown .compact-dropdown-trigger[aria-expanded="true"] {
+  border-color: var(--accent-strong);
+  background: var(--bg-0);
+}
+
+.settings-font-dropdown .compact-dropdown-value {
+  flex: 1;
+  text-align: left;
+}
+
+.settings-font-dropdown .compact-dropdown-trigger > svg {
+  flex: 0 0 auto;
+  color: var(--text-2);
 }

@@ -71,7 +71,13 @@ export const AiComposerSendControls = memo(function AiComposerSendControls({
         disabled={disabled || !voiceInput.canUseVoice || voiceInput.voiceMode === VOICE_MODE_TRANSCRIBING}
         onClick={voiceInput.toggleVoiceInput}
       >
-        <Mic size={14} />
+        <Mic size={14} className="ai-voice-icon" />
+        {/* Real mic-level bars, swapped in for the icon while capturing — driven
+            frame-by-frame from useVoiceInput's analyser via direct style writes,
+            never React state (see voiceBarsRef). */}
+        <span className="ai-voice-wave" ref={voiceInput.voiceBarsRef} aria-hidden="true">
+          <span /><span /><span /><span /><span />
+        </span>
       </button>
       <button
         className="ai-send-button"

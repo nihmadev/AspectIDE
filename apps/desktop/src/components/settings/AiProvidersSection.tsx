@@ -36,6 +36,28 @@ const PROVIDER_PRESET_DESCRIPTION_KEYS: Record<string, MessageKey> = {
   deepseek: "settings.providerPreset.deepseek.description",
   xai: "settings.providerPreset.xai.description",
   "azure-openai": "settings.providerPreset.azureOpenai.description",
+  together: "settings.providerPreset.together.description",
+  fireworks: "settings.providerPreset.fireworks.description",
+  cerebras: "settings.providerPreset.cerebras.description",
+  moonshot: "settings.providerPreset.moonshot.description",
+  zai: "settings.providerPreset.zai.description",
+  minimax: "settings.providerPreset.minimax.description",
+  alibaba: "settings.providerPreset.alibaba.description",
+  huggingface: "settings.providerPreset.huggingface.description",
+  "github-models": "settings.providerPreset.githubModels.description",
+  "github-copilot": "settings.providerPreset.githubCopilot.description",
+  "vercel-gateway": "settings.providerPreset.vercelGateway.description",
+  nvidia: "settings.providerPreset.nvidia.description",
+  deepinfra: "settings.providerPreset.deepinfra.description",
+  novita: "settings.providerPreset.novita.description",
+  perplexity: "settings.providerPreset.perplexity.description",
+  siliconflow: "settings.providerPreset.siliconflow.description",
+  nebius: "settings.providerPreset.nebius.description",
+  baseten: "settings.providerPreset.baseten.description",
+  venice: "settings.providerPreset.venice.description",
+  "cloudflare-workers-ai": "settings.providerPreset.cloudflareWorkersAi.description",
+  "meta-llama": "settings.providerPreset.metaLlama.description",
+  "ollama-cloud": "settings.providerPreset.ollamaCloud.description",
   ollama: "settings.providerPreset.ollama.description",
   "lm-studio": "settings.providerPreset.lmStudio.description",
   "local-proxy": "settings.providerPreset.localProxy.description",
@@ -397,6 +419,17 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
             <TextSetting label={t("settings.providers.baseUrl.label")} value={provider.baseUrl} commitOnBlur onChange={(baseUrl) => updateEditingProvider({ baseUrl })} wide />
           )}
           <TextSetting label={t("settings.providers.apiKey.label")} value={provider.apiKey} commitOnBlur onChange={(apiKey) => updateEditingProvider({ apiKey })} password wide />
+          {provider.protocol !== "anthropic" && (
+            <TextSetting
+              label={t("settings.providers.embeddingModel.label")}
+              detail={t("settings.providers.embeddingModel.detail")}
+              value={provider.embeddingModel}
+              placeholder="text-embedding-3-small"
+              commitOnBlur
+              onChange={(embeddingModel) => updateEditingProvider({ embeddingModel })}
+              wide
+            />
+          )}
         </SettingsGrid>
       </SettingsPanel>
 

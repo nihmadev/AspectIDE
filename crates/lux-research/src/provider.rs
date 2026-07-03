@@ -1,6 +1,7 @@
-//! Search-provider URL construction + result parsing for SearxNG (JSON API) and a
-//! keyless DuckDuckGo HTML fallback. Pure: callers do the HTTP and hand the body
-//! back here to parse.
+//! Search-provider URL construction + result parsing for SearxNG (JSON API) and
+//! the keyless HTML fallbacks (DuckDuckGo, then Brave Search when DuckDuckGo
+//! serves its anomaly/challenge page). Pure: callers do the HTTP and hand the
+//! body back here to parse.
 
 use std::net::{IpAddr, Ipv6Addr};
 
@@ -89,6 +90,101 @@ pub fn parse_duckduckgo_html(html: &str) -> Vec<SearchHit> {
     // DuckDuckGo redirect href instead, and pair it with the nearest following
     // `result-snippet` cell.
     hits.extend(parse_redirect_anchors(html, "result-snippet"));
+    let mut seen = std::collections::HashSet::new();
+    hits.retain(|hit| seen.insert(hit.url.clone()));
+    hits
+}
+
+/// Build a keyless Brave Search HTML URL for `query` (secondary fallback engine).
+#[must_use]
+pub fn brave_search_url(query: &str) -> String {
+    format!(
+        "https://search.brave.com/search?q={}&source=web",
+        percent_encode(query)
+    )
+}
+
+/// Parse a Brave Search results page. Brave's markup is Svelte-generated with
+/// hashed helper classes, but two tokens have stayed stable across redesigns and
+/// carry everything we need:
+///   * a result anchor whose `class` contains `svelte-` AND whose href is an
+///     external http(s) URL, immediately containing a `search-snippet-title`
+///     div (`title` attribute = full title, inner text = clamped title), and
+///   * a following `generic-snippet` content block with the description text.
+///
+/// The anchor pass keys off `search-snippet-title` (the stable semantic token)
+/// rather than the hashed classes, walking back to the enclosing `<a>` exactly
+/// like the DuckDuckGo parser does. Best-effort and defensive: malformed
+/// entries are skipped, thumbnails/duplicates dedupe by URL.
+#[must_use]
+pub fn parse_brave_html(html: &str) -> Vec<SearchHit> {
+    const TITLE_TOKEN: &str = "search-snippet-title";
+    const SNIPPET_TOKEN: &str = "generic-snippet";
+    let mut hits = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = html[cursor..].find(TITLE_TOKEN) {
+        let token_pos = cursor + relative;
+        // The title div lives INSIDE the result anchor: walk back to the nearest
+        // `<a` and read its href.
+        let Some(tag_start) = html[..token_pos].rfind("<a ") else {
+            cursor = token_pos + TITLE_TOKEN.len();
+            continue;
+        };
+        let Some(tag_rel_end) = html[tag_start..].find('>') else {
+            break;
+        };
+        let anchor_tag = &html[tag_start..tag_start + tag_rel_end];
+        let href = extract_attr(anchor_tag, "href").unwrap_or_default();
+
+        // Title: prefer the un-clamped `title` attribute on the token's own tag,
+        // fall back to the tag's inner text.
+        let Some(title_tag_end_rel) = html[token_pos..].find('>') else {
+            break;
+        };
+        let title_tag = &html[token_pos..token_pos + title_tag_end_rel];
+        let inner_start = token_pos + title_tag_end_rel + 1;
+        let inner_end = html[inner_start..]
+            .find('<')
+            .map_or(html.len(), |rel| inner_start + rel);
+        let title = extract_attr(&format!("<div {title_tag}"), "title")
+            .map(|value| strip_tags(&value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| strip_tags(&html[inner_start..inner_end]));
+        cursor = inner_end;
+
+        let Some(url) = validate_source_url(href.trim()) else {
+            continue;
+        };
+        // Brave-internal links (verticals, /ask, settings) are relative or on
+        // search.brave.com — the validate call above already dropped relative
+        // ones; drop same-engine absolute chrome links here.
+        if url.contains("://search.brave.com/") || title.is_empty() {
+            continue;
+        }
+        // Snippet: nearest following generic-snippet block, distance-bounded so a
+        // snippetless result doesn't steal a distant one.
+        let snippet = html[cursor..]
+            .find(SNIPPET_TOKEN)
+            .filter(|rel| *rel < 2_500)
+            .and_then(|rel| {
+                let snippet_pos = cursor + rel;
+                let open = html[snippet_pos..].find('>')?;
+                let start = snippet_pos + open + 1;
+                let end = html[start..]
+                    .find("</div>")
+                    .map_or(html.len(), |r| start + r);
+                Some(strip_tags(&html[start..end]))
+            })
+            .unwrap_or_default();
+
+        hits.push(SearchHit {
+            url,
+            title,
+            snippet,
+            engine: "brave".to_string(),
+            provider_score: 0.0,
+        });
+    }
     let mut seen = std::collections::HashSet::new();
     hits.retain(|hit| seen.insert(hit.url.clone()));
     hits
@@ -837,6 +933,72 @@ mod tests {
     fn drops_non_http_result_urls() {
         let html = r#"<a class="result__a" href="javascript:alert(1)">Evil</a>"#;
         assert!(parse_duckduckgo_html(html).is_empty());
+    }
+
+    #[test]
+    fn parses_brave_results_with_title_attr_and_snippet() {
+        // Shape observed live 2026-07: hashed svelte classes vary per deploy; the
+        // stable tokens are `search-snippet-title` and `generic-snippet`.
+        let html = r#"
+          <a href="https://example.com/eu-ai-act" target="_self" class="svelte-14r20fy l1">
+            <div class="site-name-wrapper svelte-on1hvy"><img class="favicon svelte-on1hvy" src="https://imgs.search.brave.com/x"></div>
+            <div class="title search-snippet-title line-clamp-1 svelte-14r20fy" title="The EU AI Act: A Quick &amp; Full Guide">The EU AI Act: A Quick…</div>
+          </a>
+          <div class="snippet-url desktop-small-regular svelte-on1hvy">example.com</div>
+          <div class="generic-snippet svelte-1cwdgg3"><div class="content desktop-default-regular svelte-1cwdgg3"><!--[--> Providers of high-risk systems face additional requirements. </div></div>
+          <a href="https://second.example/page" target="_self" class="svelte-14r20fy l1"><div class="title search-snippet-title svelte-14r20fy">Second Result Title</div></a>
+          <div class="generic-snippet svelte-1cwdgg3"><div class="content svelte-1cwdgg3">Second snippet.</div></div>
+        "#;
+        let hits = parse_brave_html(html);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://example.com/eu-ai-act");
+        // Full `title` attribute preferred over the clamped inner text.
+        assert_eq!(hits[0].title, "The EU AI Act: A Quick & Full Guide");
+        assert_eq!(
+            hits[0].snippet,
+            "Providers of high-risk systems face additional requirements."
+        );
+        assert_eq!(hits[0].engine, "brave");
+        // No title attr → inner text fallback.
+        assert_eq!(hits[1].title, "Second Result Title");
+        assert_eq!(hits[1].snippet, "Second snippet.");
+    }
+
+    #[test]
+    fn brave_parser_skips_internal_links_and_dedupes() {
+        let html = r#"
+          <a href="https://search.brave.com/news?q=x" class="svelte-a l1"><div class="search-snippet-title svelte-a">News vertical</div></a>
+          <a href="/settings" class="svelte-a"><div class="search-snippet-title svelte-a">Relative chrome</div></a>
+          <a href="https://dup.example/x" class="svelte-a l1"><div class="search-snippet-title svelte-a">Dup A</div></a>
+          <a href="https://dup.example/x" class="svelte-a l1"><div class="search-snippet-title svelte-a">Dup B</div></a>
+          <a href="http://127.0.0.1/x" class="svelte-a l1"><div class="search-snippet-title svelte-a">SSRF</div></a>
+        "#;
+        let hits = parse_brave_html(html);
+        assert_eq!(hits.len(), 1, "internal/relative/SSRF/dup anchors dropped");
+        assert_eq!(hits[0].url, "https://dup.example/x");
+    }
+
+    #[test]
+    fn brave_snippetless_result_does_not_steal_a_distant_snippet() {
+        // Distance bound: a result with no description nearby yields an empty
+        // snippet instead of adopting one thousands of bytes away.
+        let filler = "x".repeat(3_000);
+        let html = format!(
+            r#"<a href="https://a.example/one" class="svelte-a l1"><div class="search-snippet-title svelte-a">Result One</div></a>
+               <div>{filler}</div>
+               <div class="generic-snippet svelte-b"><div class="content svelte-b">Far away text.</div></div>"#
+        );
+        let hits = parse_brave_html(&html);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].snippet, "", "distant snippet must not be adopted");
+    }
+
+    #[test]
+    fn brave_search_url_encodes_query() {
+        assert_eq!(
+            brave_search_url("rust async runtime"),
+            "https://search.brave.com/search?q=rust%20async%20runtime&source=web"
+        );
     }
 
     #[test]

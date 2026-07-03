@@ -282,13 +282,26 @@ export async function rejectAllPendingFileReviews(sessionId?: string) {
   }
 }
 
-export async function captureFileTextSnapshot(path: string, openText?: string) {
-  if (typeof openText === "string") return openText;
+export type FileTextSnapshot = {
+  text: string;
+  /** False when the text is NOT byte-faithful to disk (truncated read or lossy
+   *  non-UTF-8 decode). An unfaithful snapshot must never be written back on
+   *  reject/partial-accept — that would corrupt or truncate the file. */
+  faithful: boolean;
+};
+
+export async function captureFileTextSnapshot(path: string, openText?: string): Promise<FileTextSnapshot> {
+  if (typeof openText === "string") return { text: openText, faithful: true };
   try {
     const response = await luxCommands.fsReadText(path, 500_000);
-    return response.text ?? "";
+    const text = response.text ?? "";
+    // U+FFFD marks a lossy decode of a non-UTF-8 file; `truncated` marks a
+    // partial read of a large file. Either way the snapshot is display-only.
+    const faithful = !response.truncated && !text.includes("�");
+    return { text, faithful };
   } catch {
-    return "";
+    // Unreadable path — treated as a new file; an empty BEFORE is faithful.
+    return { text: "", faithful: true };
   }
 }
 

@@ -15,7 +15,9 @@ mod search;
 mod store;
 
 pub use model::{
-    Memory, MemoryPatch, MemoryStats, NewMemory, ScoredMemory, SearchOptions, SortOrder,
+    CategoryCount, ContradictionHit, CreateOutcome, Memory, MemoryPatch, MemoryRelation,
+    MemoryStats, NewMemory, RelatedMemory, RelationKind, RetentionReport, RetentionTier,
+    ScoredMemory, SearchOptions, SortOrder,
 };
-pub use search::cosine_similarity;
+pub use search::{cosine_similarity, retention_score, retention_tier};
 pub use store::MemoryStore;

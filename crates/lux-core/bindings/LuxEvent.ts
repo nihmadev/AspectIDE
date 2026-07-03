@@ -7,4 +7,10 @@ import type { GitStatus } from "./GitStatus";
 import type { WorkspaceDiagnostic } from "./WorkspaceDiagnostic";
 import type { WorkspaceInfo } from "./WorkspaceInfo";
 
-export type LuxEvent = { "type": "workspaceChanged", workspace: WorkspaceInfo | null, } | { "type": "fsChanged", path: string, } | { "type": "editorDocumentClosed", document: DocumentSnapshot, } | { "type": "editorDocumentChanged", document: DocumentSnapshot, } | { "type": "editorDocumentsChanged", documents: Array<DocumentSnapshot>, } | { "type": "editorDocumentEdited", document: DocumentEditResult, } | { "type": "editorDiagnosticsChanged", path: string, diagnostics: Array<WorkspaceDiagnostic>, } | { "type": "searchProgress", query: string, indexed_files: number, } | { "type": "terminalOutput", session_id: string, data: string, } | { "type": "aiShellOutput", data: string, } | { "type": "gitStatusChanged", status: GitStatus, } | { "type": "debugSessionChanged", session: DebugSessionInfo, } | { "type": "debugBreakpointsChanged", update: DebugBreakpointsUpdate, } | { "type": "settingsChanged", key: string, };
+export type LuxEvent = { "type": "workspaceChanged", workspace: WorkspaceInfo | null, } | { "type": "fsChanged", path: string, } | { "type": "editorDocumentClosed", document: DocumentSnapshot, } | { "type": "editorDocumentChanged", document: DocumentSnapshot, } | { "type": "editorDocumentsChanged", documents: Array<DocumentSnapshot>, } | { "type": "editorDocumentEdited", document: DocumentEditResult, } | { "type": "editorDiagnosticsChanged", path: string, diagnostics: Array<WorkspaceDiagnostic>, } | { "type": "searchProgress", query: string, indexed_files: number, } | { "type": "terminalOutput", session_id: string, data: string, } | { "type": "aiShellOutput", data: string, 
+/**
+ * Tool-call id of the running Shell invocation, so the chat panel can
+ * attach the live stream to the matching tool-call row. None when the
+ * caller did not thread an id through (e.g. dev/browser path).
+ */
+tool_call_id: string | null, } | { "type": "gitStatusChanged", status: GitStatus, } | { "type": "debugSessionChanged", session: DebugSessionInfo, } | { "type": "debugBreakpointsChanged", update: DebugBreakpointsUpdate, } | { "type": "settingsChanged", key: string, };

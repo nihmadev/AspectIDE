@@ -10,8 +10,8 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
 use super::process::{list_sessions, read_version, run_json, session_invoke_options};
 use super::resolver::{
-    agent_browser_command, binary_source_label, desktop_package_dir, resolve_binary,
-    resolve_binary_with_source, resolve_package_manager, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS,
+    agent_browser_command, binary_source_label, desktop_package_dir, managed_install_dir,
+    resolve_binary, resolve_binary_with_source, DEFAULT_MAX_OUTPUT, DEFAULT_TIMEOUT_SECS,
     INSTALL_TIMEOUT_SECS, MAX_IMAGE_BYTES, MAX_OUTPUT_CAP, MAX_TIMEOUT_SECS,
 };
 use super::types::{
@@ -491,25 +491,115 @@ pub async fn skills(
 
 // ── Install (local-only) ──
 
+/// Resolve a host tool preferring the managed runtime over the system PATH
+/// (mirrors `lsp_install::resolve_tool`, which is private to that module).
+fn resolve_host_tool(app: &tauri::AppHandle, tool: &str) -> Option<PathBuf> {
+    for dir in crate::runtime_provision::runtime_bin_dirs(app) {
+        if let Some(path) = crate::lsp_install::resolve_in_dir(&dir, tool) {
+            return Some(path);
+        }
+    }
+    crate::lsp_install::resolve_on_path(tool)
+}
+
+/// The package-manager invocation for this machine, provisioning managed Node
+/// when nothing usable exists. Returns the program, its args, the working dir
+/// (None = npm --prefix mode), and any bootstrap steps already performed.
+async fn resolve_install_plan(
+    app: &tauri::AppHandle,
+    steps: &mut Vec<AgentBrowserInstallStep>,
+) -> Result<(PathBuf, Vec<String>, Option<PathBuf>), String> {
+    // Dev checkout: install into apps/desktop with its own workspace tooling so
+    // the bundled `node_modules/.bin` shim (highest-precedence resolution) updates.
+    if let Some(desktop_dir) = desktop_package_dir() {
+        if let Some(pnpm) = crate::lsp_install::resolve_on_path("pnpm") {
+            return Ok((
+                pnpm,
+                vec!["add".to_string(), "agent-browser@latest".to_string()],
+                Some(desktop_dir),
+            ));
+        }
+        if let Some(npm) = resolve_host_tool(app, "npm") {
+            return Ok((
+                npm,
+                vec!["install".to_string(), "agent-browser@latest".to_string()],
+                Some(desktop_dir),
+            ));
+        }
+    }
+
+    // End-user machine (or dev box with no package manager): install into the
+    // managed prefix with npm — provisioning managed Node first when missing.
+    // People have wildly different setups (no pnpm/npm/node at all); the install
+    // button must work on all of them, so Node comes from the same managed
+    // runtime system the LSP installers use.
+    let npm = if let Some(npm) = resolve_host_tool(app, "npm") {
+        npm
+    } else {
+        let started = Instant::now();
+        let result =
+            crate::runtime_provision::ensure_runtime(app, crate::runtime_provision::Runtime::Node)
+                .await;
+        steps.push(AgentBrowserInstallStep {
+            name: "node-runtime-setup".to_string(),
+            success: result.is_ok(),
+            output: match &result {
+                Ok(path) => format!("Managed Node.js ready at {path}"),
+                Err(error) => error.clone(),
+            },
+            elapsed_ms: started.elapsed().as_millis(),
+        });
+        result.map_err(|error| {
+            format!("agent-browser needs Node.js and automatic Node setup failed: {error}")
+        })?;
+        resolve_host_tool(app, "npm")
+            .ok_or_else(|| "Node.js was set up but npm is still not resolvable.".to_string())?
+    };
+
+    let prefix = managed_install_dir().ok_or_else(|| {
+        "App data directory is not available for the managed install.".to_string()
+    })?;
+    tokio::fs::create_dir_all(&prefix)
+        .await
+        .map_err(|error| format!("Could not create {}: {error}", prefix.display()))?;
+    Ok((
+        npm,
+        vec![
+            "install".to_string(),
+            "--prefix".to_string(),
+            prefix.to_string_lossy().to_string(),
+            "--no-audit".to_string(),
+            "--no-fund".to_string(),
+            "--loglevel".to_string(),
+            "error".to_string(),
+            "agent-browser@latest".to_string(),
+        ],
+        None,
+    ))
+}
+
 pub async fn install(
+    app: &tauri::AppHandle,
     request: AgentBrowserInstallRequest,
 ) -> Result<AgentBrowserInstallResponse, String> {
     let mut steps = Vec::new();
-    let desktop_dir = desktop_package_dir();
-    let (package_manager, install_args) = resolve_package_manager()?;
+    let (package_manager, install_args, working_dir) =
+        resolve_install_plan(app, &mut steps).await?;
+    // Managed runtime bins first on PATH so npm's own `node` (and any lifecycle
+    // scripts) resolve the managed Node on machines without a system install.
+    let env: Vec<(String, String)> = crate::runtime_provision::prepended_path(app)
+        .into_iter()
+        .collect();
     let local_install = run_install_step_in_dir(
         "package-install-latest",
         package_manager,
         install_args,
-        desktop_dir.as_deref(),
+        working_dir.as_deref(),
+        &env,
         INSTALL_TIMEOUT_SECS,
     )
     .await;
     steps.push(local_install);
-
-    // NOTE: Global npm install removed. All installs go through the local
-    // package manager (pnpm/npm in apps/desktop). If the local install fails,
-    // surface the error so the user can fix the project's dependency state.
 
     // After package install, try to find the CLI and run upgrade/Chrome install.
     let binary = resolve_binary().ok();
@@ -532,9 +622,13 @@ pub async fn install(
     }
 
     let command_path = resolve_binary().ok();
-    let success = steps.iter().all(|step| step.success);
+    let success = steps.iter().all(|step| step.success) && command_path.is_some();
     let detail = if success {
         "agent-browser installed successfully.".to_string()
+    } else if steps.iter().all(|step| step.success) {
+        "Install steps finished but the agent-browser CLI is still not resolvable. \
+         Re-run the install or check Settings -> Browser automation."
+            .to_string()
     } else {
         install_failure_detail(&steps)
     };
@@ -601,11 +695,15 @@ async fn run_install_step_in_dir(
     program: PathBuf,
     args: Vec<String>,
     working_dir: Option<&Path>,
+    env: &[(String, String)],
     timeout_secs: u64,
 ) -> AgentBrowserInstallStep {
     let started = Instant::now();
     let mut command = agent_browser_command(&program);
     command.args(&args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
     if let Some(dir) = working_dir {
         command.current_dir(dir);
     }
@@ -647,7 +745,7 @@ async fn run_install_step(
     args: Vec<String>,
     timeout_secs: u64,
 ) -> AgentBrowserInstallStep {
-    run_install_step_in_dir(name, program, args, None, timeout_secs).await
+    run_install_step_in_dir(name, program, args, None, &[], timeout_secs).await
 }
 
 #[cfg(test)]

@@ -353,6 +353,25 @@
   color: #e2c47e;
 }
 
+/* Live tail of a running Shell command: accent edge + subtle pulse make it read
+   as streaming, not a frozen result. */
+.ai-tool-call-body[data-live] pre {
+  border-color: var(--accent-soft, rgba(126, 168, 216, 0.35));
+  border-left-width: 2px;
+  animation: ai-tool-live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes ai-tool-live-pulse {
+  0%, 100% { border-left-color: var(--accent-soft, rgba(126, 168, 216, 0.35)); }
+  50% { border-left-color: var(--accent, #7ea8d8); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-tool-call-body[data-live] pre {
+    animation: none;
+  }
+}
+
 /* ---- Approval (always expanded — user must act) ---- */
 
 .ai-tool-approval {

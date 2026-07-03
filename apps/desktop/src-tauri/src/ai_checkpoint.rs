@@ -324,11 +324,18 @@ pub async fn ai_checkpoint(
                     current_read_errors.join("; ")
                 ));
             }
+            // snapshotFileCount distinguishes "nothing captured" (0 — the checkpoint
+            // held no file snapshots at all, e.g. created against an empty selection)
+            // from "captured but identical" (>0 but operations.is_empty() below) so
+            // the frontend can show an honest toast instead of a blanket "nothing to
+            // restore" for both very different situations.
+            let snapshot_file_count = cp.files.len();
             if operations.is_empty() {
                 return Ok(serde_json::json!({
                     "status": "unchanged",
                     "changed": false,
                     "checkpoint": summarize(&cp),
+                    "snapshotFileCount": snapshot_file_count,
                     "message": "All snapshotted files already match the checkpoint; nothing to restore.",
                 }));
             }
@@ -341,98 +348,122 @@ pub async fn ai_checkpoint(
                 Some(dry),
             )
             .await?;
-            Ok(
-                serde_json::json!({ "status": if dry { "preview" } else { "restored" }, "changed": true, "operations": op_count, "result": result }),
-            )
+            Ok(serde_json::json!({
+                "status": if dry { "preview" } else { "restored" },
+                "changed": true,
+                "operations": op_count,
+                "snapshotFileCount": snapshot_file_count,
+                "result": result,
+            }))
         }
         "augment" => {
-            // Capture pre-edit snapshots for files the model is about to create/edit that were not
-            // open at turn start and are not already in this checkpoint, so a later restore can
-            // revert the edit or delete the newly created file. snapshot_file is async, so we read
-            // the checkpoint's metadata under the lock, snapshot without holding it, then re-acquire.
             let want_id = id
                 .as_ref()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| "Checkpoint augment requires an id.".to_string())?;
-            let requested = paths.unwrap_or_default();
-            let (max_bytes, max_files_cap, existing, current_count) = {
-                let guard = store().lock().map_err(lock_error)?;
-                let key = store_key(&root_str, session_id.as_deref());
-                let cp = guard
-                    .get(&key)
-                    .and_then(|list| list.iter().find(|c| c.id == want_id))
-                    .ok_or_else(|| format!("Checkpoint not found: {want_id}"))?;
-                let existing: std::collections::HashSet<String> = cp
-                    .files
-                    .iter()
-                    .map(|f| ai_semantic::normalize_slashes_pub(&f.path).to_lowercase())
-                    .collect();
-                (
-                    cp.max_bytes_per_file,
-                    cp.max_files,
-                    existing,
-                    cp.files.len(),
-                )
-            };
-            let mut missing: Vec<String> = Vec::new();
-            for raw in &requested {
-                if let Some(resolved) = resolve_in_workspace(raw, &root_str) {
-                    let key = resolved.to_lowercase();
-                    if !existing.contains(&key)
-                        && !missing.iter().any(|m: &String| m.to_lowercase() == key)
-                    {
-                        missing.push(resolved);
-                    }
-                }
-            }
-            // Enforce the per-checkpoint file cap to prevent unbounded growth.
-            let remaining = max_files_cap.saturating_sub(current_count);
-            let will_snapshot = missing.len().min(remaining);
-            let pre_skipped = missing.len().saturating_sub(will_snapshot);
-            missing.truncate(will_snapshot);
-
-            let mut snapshots = Vec::with_capacity(missing.len());
-            for path in &missing {
-                snapshots.push(snapshot_file(&state, &root_str, path, max_bytes).await);
-            }
-
-            let mut guard = store().lock().map_err(lock_error)?;
-            let key = store_key(&root_str, session_id.as_deref());
-            let cp = guard
-                .get_mut(&key)
-                .and_then(|list| list.iter_mut().find(|c| c.id == want_id))
-                .ok_or_else(|| format!("Checkpoint not found: {want_id}"))?;
-            let mut added = 0usize;
-            let mut dedup_skipped = 0usize;
-            for snap in snapshots {
-                let key = ai_semantic::normalize_slashes_pub(&snap.path).to_lowercase();
-                if cp
-                    .files
-                    .iter()
-                    .any(|f| ai_semantic::normalize_slashes_pub(&f.path).to_lowercase() == key)
-                {
-                    dedup_skipped += 1;
-                    continue;
-                }
-                if cp.files.len() >= max_files_cap {
-                    dedup_skipped += 1;
-                    continue;
-                }
-                cp.files.push(snap);
-                added += 1;
-            }
-            let summary = summarize(cp);
-            let total_skipped = pre_skipped + dedup_skipped;
-            Ok(serde_json::json!({
-                "status": "augmented",
-                "added": added,
-                "skipped": total_skipped,
-                "checkpoint": summary,
-            }))
+            augment_checkpoint(
+                &state,
+                &root_str,
+                &want_id,
+                session_id.as_deref(),
+                paths.unwrap_or_default(),
+            )
+            .await
         }
         _ => unreachable!(),
     }
+}
+
+/// Capture pre-edit snapshots for files a tool is about to create/edit that were
+/// not open at turn start and are not already in the named checkpoint, so a later
+/// restore can revert the edit or delete a newly-created file. Shared by the
+/// `ai_checkpoint("augment", …)` Tauri command (thin wrapper above) and native
+/// tool handlers in `ai_turn::execute_tool`, which call this directly before a
+/// Write/StrReplace/Delete/PatchEngine mutation so files the model never
+/// explicitly ran the `Checkpoint` tool on still land in the pre-edit snapshot.
+pub async fn augment_checkpoint(
+    state: &State<'_, SharedState>,
+    root_str: &str,
+    checkpoint_id: &str,
+    session_id: Option<&str>,
+    requested: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    // snapshot_file is async, so read the checkpoint's metadata under the lock,
+    // snapshot without holding it, then re-acquire.
+    let (max_bytes, max_files_cap, existing, current_count) = {
+        let guard = store().lock().map_err(lock_error)?;
+        let key = store_key(root_str, session_id);
+        let cp = guard
+            .get(&key)
+            .and_then(|list| list.iter().find(|c| c.id == checkpoint_id))
+            .ok_or_else(|| format!("Checkpoint not found: {checkpoint_id}"))?;
+        let existing: std::collections::HashSet<String> = cp
+            .files
+            .iter()
+            .map(|f| ai_semantic::normalize_slashes_pub(&f.path).to_lowercase())
+            .collect();
+        (
+            cp.max_bytes_per_file,
+            cp.max_files,
+            existing,
+            cp.files.len(),
+        )
+    };
+    let mut missing: Vec<String> = Vec::new();
+    for raw in &requested {
+        if let Some(resolved) = resolve_in_workspace(raw, root_str) {
+            let key = resolved.to_lowercase();
+            if !existing.contains(&key) && !missing.iter().any(|m: &String| m.to_lowercase() == key)
+            {
+                missing.push(resolved);
+            }
+        }
+    }
+    // Enforce the per-checkpoint file cap to prevent unbounded growth.
+    let remaining = max_files_cap.saturating_sub(current_count);
+    let will_snapshot = missing.len().min(remaining);
+    let pre_skipped = missing.len().saturating_sub(will_snapshot);
+    missing.truncate(will_snapshot);
+
+    let mut snapshots = Vec::with_capacity(missing.len());
+    for path in &missing {
+        snapshots.push(snapshot_file(state, root_str, path, max_bytes).await);
+    }
+
+    let mut guard = store().lock().map_err(lock_error)?;
+    let key = store_key(root_str, session_id);
+    let cp = guard
+        .get_mut(&key)
+        .and_then(|list| list.iter_mut().find(|c| c.id == checkpoint_id))
+        .ok_or_else(|| format!("Checkpoint not found: {checkpoint_id}"))?;
+    let mut added = 0usize;
+    let mut dedup_skipped = 0usize;
+    for snap in snapshots {
+        let key = ai_semantic::normalize_slashes_pub(&snap.path).to_lowercase();
+        if cp
+            .files
+            .iter()
+            .any(|f| ai_semantic::normalize_slashes_pub(&f.path).to_lowercase() == key)
+        {
+            dedup_skipped += 1;
+            continue;
+        }
+        if cp.files.len() >= max_files_cap {
+            dedup_skipped += 1;
+            continue;
+        }
+        cp.files.push(snap);
+        added += 1;
+    }
+    let summary = summarize(cp);
+    let total_skipped = pre_skipped + dedup_skipped;
+    Ok(serde_json::json!({
+        "status": "augmented",
+        "added": added,
+        "skipped": total_skipped,
+        "checkpoint": summary,
+    }))
 }
 
 fn select_checkpoint(

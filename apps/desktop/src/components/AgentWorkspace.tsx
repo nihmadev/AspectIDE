@@ -1,4 +1,4 @@
-import { Archive, Edit3, FolderOpen, Globe, History, MessageSquare, MessageSquarePlus, Plus, Settings, Trash2 } from "lucide-react";
+import { Archive, Edit3, FolderOpen, Globe, History, MessageSquare, MessageSquarePlus, Plus, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { LazyAiChatPanel } from "./LazyAiChatPanel";
@@ -30,7 +30,6 @@ export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspacePro
   const renameChatSession = useLuxStore((state) => state.renameAiChatSession);
   const restoreChatSession = useLuxStore((state) => state.restoreAiChatSession);
   const setActiveChatSession = useLuxStore((state) => state.setActiveAiChatSession);
-  const setSettingsOpen = useLuxStore((state) => state.setSettingsOpen);
   const workspace = useLuxStore((state) => state.workspace);
   const agentBrowserEnabled = useLuxStore((state) => state.aiPreferences.agentBrowserEnabled);
   const sortedChatSessions = [...chatSessions].sort(compareAgentChatSessions);
@@ -122,11 +121,6 @@ export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspacePro
           )}
 
         </div>
-
-        <button className="agent-settings-link" type="button" onClick={() => setSettingsOpen(true)}>
-          <Settings size={15} />
-          <span>{t("agent.settings")}</span>
-        </button>
       </aside>
 
       <section className="agent-chat-home">

@@ -20,7 +20,13 @@ export function resetLspAutoInstallAttempts() {
   attemptedRuntimes.clear();
 }
 
-/** LSP install method → the host runtime it depends on. */
+/**
+ * LSP install method → the host runtime it depends on. `"github"` (lua,
+ * clangd) is deliberately absent: those install straight from a GitHub
+ * Releases zip/tarball with no host toolchain at all, so
+ * `ensureRuntimesForMethods` below naturally skips them (the `.filter(Boolean)`
+ * drops the `undefined` lookup) — zero-conflict auto-provisioning.
+ */
 const METHOD_TO_RUNTIME: Record<string, string> = {
   npm: "node",
   rustup: "rust",

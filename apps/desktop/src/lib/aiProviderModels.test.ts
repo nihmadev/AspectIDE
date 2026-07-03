@@ -56,6 +56,7 @@ describe("mergeRefreshedModels", () => {
     localPort: "",
     localPath: "",
     models,
+    embeddingModel: "",
   });
 
   it("keeps user manual prices but takes the freshly-fetched name/context", () => {

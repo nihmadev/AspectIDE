@@ -46,8 +46,10 @@ const initialState: UpdaterState = {
 
 /** How often to auto-check in the background (6h). Kept long to avoid endpoint spam. */
 const AUTO_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-/** Delay before the first auto-check so startup stays snappy. */
-const INITIAL_CHECK_DELAY_MS = 30 * 1000;
+/** Delay before the first auto-check. Short and off the critical path: the check
+ *  is a background HTTP request that can't block boot, and an available update
+ *  should be visible right after launch — not 30 seconds in. */
+const INITIAL_CHECK_DELAY_MS = 1_500;
 
 // ── Shared singleton store ──
 // One updater drives the whole app, so the corner UpdateNotice and the Settings

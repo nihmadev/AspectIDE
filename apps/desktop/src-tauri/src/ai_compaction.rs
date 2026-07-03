@@ -127,7 +127,8 @@ pub async fn ai_compaction_summary(input: CompactionSummaryInput) -> Result<Stri
     // freezing. The summary itself isn't surfaced token-by-token, so on_delta is a
     // no-op.
     let response =
-        crate::ai_chat_backend::completion_streaming(request, |_, _| {}, || false, |_| {}).await?;
+        crate::ai_chat_backend::completion_streaming(request, |_, _| {}, || false, |_| {}, |_| {})
+            .await?;
     let content = response
         .body
         .pointer("/choices/0/message/content")

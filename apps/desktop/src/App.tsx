@@ -14,10 +14,11 @@ import { loadAiChatHistory, resetAiChatPersistDigest, saveAiChatHistory } from "
 import { ensureBundledAgentBrowserLatest } from "./lib/agentBrowserAutoUpdate";
 import { AI_PREFERENCES_KEY, normalizeAiPreferences } from "./lib/aiPreferences";
 import { buildAiProjectIndexSnapshot } from "./lib/aiProjectIndex";
+import { appendAiShellLiveOutput } from "./lib/aiShellLiveOutput";
 import { closedDocumentIdsForAllDocuments, closedDocumentIdsForDocumentInGroup } from "./lib/editorCloseTargets";
 import { loadDictionary, normalizeLocale, UI_LOCALE_KEY } from "./lib/i18n";
 import { resetEditorFontZoom, toggleEditorMinimap, toggleEditorWordWrap, zoomEditorFontIn, zoomEditorFontOut } from "./lib/editorPreferenceCommands";
-import { EDITOR_PREFERENCES_KEY, normalizeEditorPreferences } from "./lib/editorPreferences";
+import { DEFAULT_UI_FONT_STACK, EDITOR_PREFERENCES_KEY, normalizeEditorPreferences, withFontFallback } from "./lib/editorPreferences";
 import { buildFileTreeDirectories, normalizePath } from "./lib/fileTree";
 import { createKeybindingDispatcher, KEYBINDINGS_SETTINGS_KEY } from "./lib/keybindings";
 import { buildProjectLoadSummary } from "./lib/projectLoadPresentation";
@@ -307,6 +308,15 @@ export function App() {
     document.documentElement.lang = locale;
   }, [locale]);
 
+  // Custom interface font: override the --font-ui token at the root so every
+  // `var(--font-ui)` consumer follows. Unset restores the stylesheet default.
+  const uiFontFamily = useLuxStore((state) => state.editorPreferences.uiFontFamily);
+  useEffect(() => {
+    const rootStyle = document.documentElement.style;
+    if (uiFontFamily) rootStyle.setProperty("--font-ui", withFontFallback(uiFontFamily, DEFAULT_UI_FONT_STACK));
+    else rootStyle.removeProperty("--font-ui");
+  }, [uiFontFamily]);
+
   useEffect(() => {
     const scanLimit = aiIndexScanLimit(aiPreferences.maxIndexedFiles);
     if (!workspace) {
@@ -572,6 +582,9 @@ export function App() {
           );
         }
         appendTerminalOutput(AI_MIRROR_TERMINAL_ID, event.data);
+        // Same stream, second consumer: the chat panel's tool-call row shows a
+        // live tail for the running Shell call it belongs to.
+        if (event.tool_call_id) appendAiShellLiveOutput(event.tool_call_id, event.data);
       }
       if (event.type === "settingsChanged" && event.key === KEYBINDINGS_SETTINGS_KEY) {
         void luxCommands.keybindingsGet().then(setKeybindingProfile).catch(() => undefined);

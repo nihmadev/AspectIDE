@@ -1,4 +1,4 @@
-import { Brain, ChevronRight, Copy, SearchCheck } from "lucide-react";
+import { ChevronRight, Copy, SearchCheck } from "lucide-react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import { createContext, Fragment, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -42,6 +42,7 @@ type AiChatMessagesProps = {
   messages: AiChatMessage[];
   onApprovalDecision: (approvalId: string, decision: AiToolApprovalDecision) => void;
   onEditUserMessage: (messageId: string, nextContent: string) => void;
+  onRestoreUserMessage?: (messageId: string) => void;
   onStopAfterTool?: () => void;
   canStopAfterTool?: boolean;
   parentRef: RefObject<HTMLDivElement | null>;
@@ -52,6 +53,8 @@ type AiChatMessagesProps = {
   sessionStatus: AiChatSessionStatus;
   t: TranslateFn;
   onReviewAction?: (messageId: string) => void;
+  /** Disable (not hide) Review buttons while a turn is running or the session is closed. */
+  reviewDisabled?: boolean;
 };
 
 export function AiChatMessages({
@@ -60,6 +63,7 @@ export function AiChatMessages({
   messages,
   onApprovalDecision,
   onEditUserMessage,
+  onRestoreUserMessage,
   onStopAfterTool,
   canStopAfterTool = false,
   parentRef,
@@ -70,6 +74,7 @@ export function AiChatMessages({
   sessionStatus,
   t,
   onReviewAction,
+  reviewDisabled = false,
 }: AiChatMessagesProps) {
   // Streaming only ever lands on the last message. We render that single row in
   // normal document flow (below the virtual window) instead of as an absolutely
@@ -93,15 +98,12 @@ export function AiChatMessages({
   });
   const virtualItems = virtualizer.getVirtualItems();
 
-  const lastAssistantId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i]?.role === "assistant") return messages[i].id;
-    }
-    return null;
-  }, [messages]);
-
+  // Every assistant turn keeps its Review affordance — the review prompt is
+  // scoped to the clicked message id, so reviewing an older turn is valid. The
+  // old "last assistant only" rule made the button vanish forever the moment a
+  // review (or any new turn) was sent, which read as a broken button.
   const getOnReviewFor = (id: string) =>
-    onReviewAction && id === lastAssistantId ? () => onReviewAction(id) : undefined;
+    onReviewAction ? () => onReviewAction(id) : undefined;
 
   const renderRow = (chatMessage: AiChatMessage) => (
     <AiChatMessageView
@@ -115,11 +117,13 @@ export function AiChatMessages({
       canRestoreUserMessage={canRestoreUserMessage}
       onApprovalDecision={onApprovalDecision}
       onEditUserMessage={onEditUserMessage}
+      onRestoreUserMessage={onRestoreUserMessage}
       onStopAfterTool={onStopAfterTool}
       canStopAfterTool={canStopAfterTool}
       sessionStatus={sessionStatus}
       t={t}
       onReview={getOnReviewFor(chatMessage.id)}
+      reviewDisabled={reviewDisabled}
     />
   );
 
@@ -161,6 +165,7 @@ const AiChatMessageView = memo(function AiChatMessageView({
   message,
   onApprovalDecision,
   onEditUserMessage,
+  onRestoreUserMessage,
   onStopAfterTool,
   canStopAfterTool,
   showResponseDuration,
@@ -170,12 +175,14 @@ const AiChatMessageView = memo(function AiChatMessageView({
   sessionStatus,
   t,
   onReview,
+  reviewDisabled = false,
 }: {
   canMutateHistory: boolean;
   canRestoreUserMessage: (userMessageId: string) => boolean;
   message: AiChatMessage;
   onApprovalDecision: (approvalId: string, decision: AiToolApprovalDecision) => void;
   onEditUserMessage: (messageId: string, nextContent: string) => void;
+  onRestoreUserMessage?: (messageId: string) => void;
   onStopAfterTool?: () => void;
   canStopAfterTool?: boolean;
   showResponseDuration: boolean;
@@ -185,7 +192,11 @@ const AiChatMessageView = memo(function AiChatMessageView({
   sessionStatus: AiChatSessionStatus;
   t: TranslateFn;
   onReview?: () => void;
+  reviewDisabled?: boolean;
 }) {
+  // In-place edit of a checkpointed user message: the bubble text itself becomes
+  // the editor (no separate framed textarea below the message).
+  const [editingUser, setEditingUser] = useState(false);
   const pendingShell = isPendingAssistantShell(message, streaming);
   if (isReviewRequestMessage(message)) {
     return (
@@ -232,20 +243,35 @@ const AiChatMessageView = memo(function AiChatMessageView({
             <span>{message.role === "user" ? t("aiChat.role.user") : t("aiChat.role.assistant")}</span>
             <time>{formatMessageTime(message.timestamp)}</time>
           </div>
-          <AiMessageBody
-            message={message}
-            streaming={streaming}
-            onApprovalDecision={onApprovalDecision}
-            t={t}
-          />
+          {message.role === "user" && editingUser ? (
+            <AiUserInlineEdit
+              initial={message.content}
+              onCancel={() => setEditingUser(false)}
+              onSubmit={(text) => {
+                setEditingUser(false);
+                onEditUserMessage(message.id, text);
+              }}
+              t={t}
+            />
+          ) : (
+            <AiMessageBody
+              message={message}
+              streaming={streaming}
+              sessionStatus={sessionStatus}
+              onApprovalDecision={onApprovalDecision}
+              t={t}
+            />
+          )}
         </>
       )}
       {!pendingShell && message.role === "user" ? (
         <AiChatMessageActions
           canMutate={canMutateHistory}
           canRestoreUser={canRestoreUserMessage(message.id)}
+          editing={editingUser}
           message={message}
-          onEditUserMessage={onEditUserMessage}
+          onStartEdit={() => setEditingUser(true)}
+          onRestore={() => onRestoreUserMessage?.(message.id)}
           t={t}
         />
       ) : !pendingShell ? (
@@ -260,7 +286,7 @@ const AiChatMessageView = memo(function AiChatMessageView({
         <AiPathEvidenceNotice message={message} streaming={streaming} t={t} />
       )}
       {!pendingShell && message.role === "assistant" && !streaming && (
-        <AiTurnSummaryCard message={message} compaction={contextCompaction} workspaceRoot={workspaceRoot} t={t} onReview={onReview} />
+        <AiTurnSummaryCard message={message} compaction={contextCompaction} workspaceRoot={workspaceRoot} t={t} onReview={onReview} reviewDisabled={reviewDisabled} />
       )}
       {message.role === "assistant" && showResponseDuration && typeof message.responseDurationMs === "number" && !message.responseTiming && !message.turnUsage && (
         <div className="ai-chat-response-duration" title={formatResponseTimingTitle(message, t)}>{formatResponseDuration(message.responseDurationMs, t)}</div>
@@ -277,8 +303,8 @@ const AiChatMessageView = memo(function AiChatMessageView({
 // while tokens arrive. Handler props are intentionally excluded: they are behavior-stable
 // (same effect regardless of closure identity).
 function areMessageViewPropsEqual(
-  prev: Readonly<{ message: AiChatMessage; streaming: boolean; showResponseDuration: boolean; canMutateHistory: boolean; canRestoreUserMessage: (id: string) => boolean; canStopAfterTool?: boolean; sessionStatus: AiChatSessionStatus; contextCompaction?: ContextCompactionState | null; workspaceRoot: string | null; t: TranslateFn; onReview?: () => void }>,
-  next: Readonly<{ message: AiChatMessage; streaming: boolean; showResponseDuration: boolean; canMutateHistory: boolean; canRestoreUserMessage: (id: string) => boolean; canStopAfterTool?: boolean; sessionStatus: AiChatSessionStatus; contextCompaction?: ContextCompactionState | null; workspaceRoot: string | null; t: TranslateFn; onReview?: () => void }>,
+  prev: Readonly<{ message: AiChatMessage; streaming: boolean; showResponseDuration: boolean; canMutateHistory: boolean; canRestoreUserMessage: (id: string) => boolean; canStopAfterTool?: boolean; sessionStatus: AiChatSessionStatus; contextCompaction?: ContextCompactionState | null; workspaceRoot: string | null; t: TranslateFn; onReview?: () => void; reviewDisabled?: boolean }>,
+  next: Readonly<{ message: AiChatMessage; streaming: boolean; showResponseDuration: boolean; canMutateHistory: boolean; canRestoreUserMessage: (id: string) => boolean; canStopAfterTool?: boolean; sessionStatus: AiChatSessionStatus; contextCompaction?: ContextCompactionState | null; workspaceRoot: string | null; t: TranslateFn; onReview?: () => void; reviewDisabled?: boolean }>,
 ) {
   return (
     prev.message === next.message
@@ -294,8 +320,75 @@ function areMessageViewPropsEqual(
     && prev.contextCompaction === next.contextCompaction
     && prev.workspaceRoot === next.workspaceRoot
     && prev.t === next.t
-    // onReview only affects the last assistant row; presence (not identity) is what matters.
+    // Presence (not identity) is what matters for onReview; disabled state must
+    // refresh rows so buttons re-enable when the running turn finishes.
     && Boolean(prev.onReview) === Boolean(next.onReview)
+    && prev.reviewDisabled === next.reviewDisabled
+  );
+}
+
+/**
+ * In-place editor for a checkpointed user message: replaces the bubble body
+ * with a textarea styled like the bubble itself. Enter resends (rolling back
+ * the turn first), Shift+Enter inserts a newline, Escape cancels.
+ */
+function AiUserInlineEdit({ initial, onCancel, onSubmit, t }: {
+  initial: string;
+  onCancel: () => void;
+  onSubmit: (text: string) => void;
+  t: TranslateFn;
+}) {
+  const [draft, setDraft] = useState(initial);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+
+  // Grow with content; focus at the end like an editor, not a form field.
+  useEffect(() => {
+    const node = textareaRef.current;
+    if (!node) return;
+    node.focus();
+    node.setSelectionRange(node.value.length, node.value.length);
+    node.style.height = "auto";
+    node.style.height = `${node.scrollHeight}px`;
+  }, []);
+
+  const submit = () => {
+    if (draft.trim()) onSubmit(draft.trim());
+  };
+
+  return (
+    <div className="ai-chat-user-inline-edit">
+      <textarea
+        ref={textareaRef}
+        value={draft}
+        rows={1}
+        spellCheck={false}
+        onChange={(event) => {
+          setDraft(event.target.value);
+          event.currentTarget.style.height = "auto";
+          event.currentTarget.style.height = `${event.currentTarget.scrollHeight}px`;
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+            return;
+          }
+          if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault();
+            submit();
+          }
+        }}
+      />
+      <div className="ai-chat-user-inline-edit-foot">
+        <span>{t("aiChat.turnCheckpoint.editInlineHint")}</span>
+        <div className="ai-chat-user-inline-edit-actions">
+          <button type="button" onClick={onCancel}>{t("common.cancel")}</button>
+          <button type="button" className="primary" disabled={!draft.trim()} onClick={submit}>
+            {t("aiChat.turnCheckpoint.editResend")}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -338,9 +431,10 @@ function formatTimingMs(value: number, t: TranslateFn) {
 // code until the turn settles (a half-written <script> would thrash the iframe).
 const MarkdownStreamingContext = createContext(false);
 
-function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
+function AiMessageBody({ message, streaming, sessionStatus, onApprovalDecision, t }: {
   message: AiChatMessage;
   streaming: boolean;
+  sessionStatus: AiChatSessionStatus;
   onApprovalDecision: (approvalId: string, decision: AiToolApprovalDecision) => void;
   t: TranslateFn;
 }) {
@@ -348,12 +442,18 @@ function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
     <AiMessageAttachmentGallery attachments={message.attachments} t={t} />
   ) : null;
   const segments = message.segments;
+  // Defensive floor under the reasoning shimmer: the model can finish its last
+  // token and move on to building a tool call (status leaves thinking/streaming)
+  // a beat before toolCallStarted actually appends the tool segment that would
+  // otherwise flip `isLast` to false. Without this the header kept shimmering
+  // "Thinking…" into a phase that is no longer thinking.
+  const reasoningLive = streaming && (sessionStatus === "thinking" || sessionStatus === "streaming");
 
   const flowNodes: ReactNode[] = [];
   if (!segments || segments.length === 0) {
     if (message.reasoning && message.reasoning.trim().length > 0) {
       flowNodes.push(
-        <AiReasoningBlock key="reasoning" text={coerceChatMessageText(message.reasoning)} streaming={streaming} t={t} />,
+        <AiReasoningBlock key="reasoning" text={coerceChatMessageText(message.reasoning)} streaming={reasoningLive} t={t} />,
       );
     }
     if (message.toolCalls && message.toolCalls.length > 0) {
@@ -386,7 +486,7 @@ function AiMessageBody({ message, streaming, onApprovalDecision, t }: {
       if (segment.kind === "reasoning") {
         const isLast = index === segments.length - 1;
         flowNodes.push(
-          <AiReasoningBlock key={segment.id} text={coerceChatMessageText(segment.text)} streaming={streaming && isLast} t={t} />,
+          <AiReasoningBlock key={segment.id} text={coerceChatMessageText(segment.text)} streaming={reasoningLive && isLast} t={t} />,
         );
         return;
       }
@@ -463,15 +563,22 @@ function AiReasoningBlock({ text, streaming, t }: {
 }) {
   const [userToggled, setUserToggled] = useState<boolean | null>(null);
   // Open only while this block is actively thinking. Once thinking finishes it
-  // auto-collapses (a finished thought shouldn't stay expanded just because the
-  // final answer hasn't arrived yet — e.g. while tools are still running).
+  // auto-collapses to a single quiet "Thought for Ns" line (a finished thought
+  // shouldn't stay expanded just because the final answer hasn't arrived yet —
+  // e.g. while tools are still running).
   const autoOpen = streaming;
   const open = userToggled ?? autoOpen;
-  const label = streaming ? t("aiChat.reasoning.thinking") : t("aiChat.reasoning.thought");
   // Live thinking timer: counts up while this block streams, freezes the total when
   // thinking ends ("thought for Ns"). Self-contained, so the row's memo bail-out
-  // doesn't stop the tick.
+  // doesn't stop the tick. A block loaded from history (never streamed in this
+  // session) has no timing data — it falls back to the generic "Thought process".
   const elapsedMs = useElapsedSeconds(streaming);
+  const hasElapsed = streaming || elapsedMs > 0;
+  const label = streaming
+    ? t("aiChat.reasoning.thinking")
+    : hasElapsed
+      ? t("aiChat.reasoning.thoughtFor", { seconds: formatThinkingElapsed(elapsedMs) })
+      : t("aiChat.reasoning.thought");
   useEffect(() => {
     if (streaming) setUserToggled(null);
   }, [streaming]);
@@ -479,10 +586,9 @@ function AiReasoningBlock({ text, streaming, t }: {
     <div className="ai-reasoning" data-open={open} data-streaming={streaming}>
       <button type="button" className="ai-reasoning-header" onClick={() => setUserToggled(!open)} aria-expanded={open}>
         <ChevronRight className="ai-reasoning-caret" size={13} />
-        <Brain size={13} />
-        <span>{label}</span>
-        {(streaming || elapsedMs > 0) && (
-          <span className="ai-reasoning-elapsed" data-streaming={streaming || undefined}>
+        <span className="ai-reasoning-label">{label}</span>
+        {streaming && (
+          <span className="ai-reasoning-elapsed" data-streaming="true">
             {t("aiChat.reasoning.elapsed", { seconds: formatThinkingElapsed(elapsedMs) })}
           </span>
         )}

@@ -2,13 +2,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { ArrowUpCircle, BarChart3, Bot, Brain, Code2, Cpu, Database, FileText, Globe, Languages, Loader2, Plug, Plus, RefreshCw, RotateCcw, Search, Server, Settings, Share2, Trash2, Wand2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
+import { FontSelectSetting, NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
 import { SkillsSection } from "./settings/SkillsSection";
 import { MemorySection } from "./settings/MemorySection";
-import { WebResearchSection } from "./settings/WebResearchSection";
 import { SshSection } from "./settings/SshSection";
 import { McpSection } from "./settings/McpSection";
 import { AiProvidersSection } from "./settings/AiProvidersSection";
+import { AgentBrowserSection } from "./settings/AgentBrowserSection";
 import {
   AI_PREFERENCES_KEY,
   aiToolRoundLimitMax,
@@ -32,7 +32,7 @@ import {
   type AiScanConcurrency,
 } from "../lib/aiPreferences";
 import { AI_VISION_IMAGE_FORMATS } from "../lib/aiVisionFormat";
-import { aggregateUsageByProject, clearAiUsageLog, loadAiUsageLog, usageEntryTokensPerSecond, type AiUsageLogEntry } from "../lib/aiUsageLog";
+import { AiUsageSection } from "./settings/AiUsageSection";
 
 const AI_SCAN_CONCURRENCY_OPTIONS: readonly AiScanConcurrency[] = ["auto", "all", "half"];
 import { formatCompactTokens } from "../lib/aiChatContextUsage";
@@ -41,6 +41,7 @@ import {
   ensureLspInstallSubscription,
   getLspInstallProgressSnapshot,
   onLspInstallFinished,
+  setLspUninstallIntent,
   subscribeLspInstallProgress,
   type LspInstallProgress,
 } from "../lib/lspInstallStore";
@@ -74,7 +75,7 @@ import { loadDictionary, LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } 
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
 import { useLuxStore } from "../lib/store";
-import { isTauriRuntime, luxCommands, type AgentBrowserStatusResponse, type LspCatalogEntry, type RuntimeCatalogEntry } from "../lib/tauri";
+import { isTauriRuntime, luxCommands, type LspCatalogEntry, type RuntimeCatalogEntry } from "../lib/tauri";
 import { useUpdater } from "../lib/useUpdater";
 import type { FsEntry, WorkspaceInfo } from "../lib/types";
 
@@ -82,7 +83,7 @@ const scope = "user" as const;
 
 // AI configuration is split into focused sections so runtime, instructions,
 // providers, and indexing do not compete in one mixed settings list.
-type SettingsSectionId = "general" | "editor" | "lsp" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-skills" | "ai-memory" | "ai-research" | "ai-ssh" | "ai-mcp" | "ai-providers" | "ai-indexing" | "ai-usage";
+type SettingsSectionId = "general" | "editor" | "lsp" | "ai-runtime" | "ai-browser" | "ai-instructions" | "ai-skills" | "ai-memory" | "ai-ssh" | "ai-mcp" | "ai-providers" | "ai-indexing" | "ai-usage";
 
 type SettingsSection = {
   id: SettingsSectionId;
@@ -95,7 +96,7 @@ type SettingsSection = {
 const settingsNavGroups: Array<{ labelKey: MessageKey; sectionIds: SettingsSectionId[] }> = [
   { labelKey: "settings.group.workspace", sectionIds: ["general"] },
   { labelKey: "settings.group.editor", sectionIds: ["editor", "lsp"] },
-  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-skills", "ai-memory", "ai-research", "ai-ssh", "ai-mcp", "ai-providers", "ai-indexing", "ai-usage"] },
+  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-skills", "ai-memory", "ai-ssh", "ai-mcp", "ai-providers", "ai-indexing", "ai-usage"] },
 ];
 
 const settingsSections: SettingsSection[] = [
@@ -154,13 +155,6 @@ const settingsSections: SettingsSection[] = [
     descriptionKey: "settings.memory.description",
     icon: <Brain size={16} />,
     keywords: ["memory", "memories", "remember", "recall", "durable", "context", "память", "запомнить"],
-  },
-  {
-    id: "ai-research",
-    titleKey: "settings.research.title",
-    descriptionKey: "settings.research.description",
-    icon: <Globe size={16} />,
-    keywords: ["web", "research", "search", "searxng", "duckduckgo", "perplexica", "sources", "поиск", "исследование"],
   },
   {
     id: "ai-ssh",
@@ -319,7 +313,16 @@ export function SettingsDialog() {
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Portal>
         <Dialog.Overlay className="settings-overlay" />
-        <Dialog.Content className="settings-dialog" aria-describedby={undefined}>
+        <Dialog.Content
+          className="settings-dialog"
+          aria-describedby={undefined}
+          // Radix handles Escape on the document in the capture phase, before an
+          // open dropdown menu can claim it — an open menu owns Escape (it closes
+          // itself), so the settings dialog must stay put.
+          onEscapeKeyDown={(event) => {
+            if (document.querySelector(".compact-dropdown-menu")) event.preventDefault();
+          }}
+        >
           <div className="settings-shell">
             <header className="settings-header">
               <div className="settings-title">
@@ -346,7 +349,7 @@ export function SettingsDialog() {
                   <h2>{t(activeSection.titleKey)}</h2>
                   <p>{t(activeSection.descriptionKey)}</p>
                 </div>
-                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && activeSectionId !== "ai-usage" && activeSectionId !== "ai-skills" && activeSectionId !== "ai-memory" && activeSectionId !== "ai-research" && activeSectionId !== "ai-ssh" && activeSectionId !== "ai-mcp" && (
+                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && activeSectionId !== "ai-usage" && activeSectionId !== "ai-skills" && activeSectionId !== "ai-memory" && activeSectionId !== "ai-ssh" && activeSectionId !== "ai-mcp" && (
                   <button className="settings-reset-button" type="button" onClick={() => resetSection(activeSectionId, persistEditorPreferences, persistAiPreferences, aiPreferences)}>
                     <RotateCcw size={14} /> {t("settings.reset", { group: t(activeSection.titleKey) })}
                   </button>
@@ -357,6 +360,7 @@ export function SettingsDialog() {
                 {activeSectionId === "general" && <GeneralSection locale={locale} onChangeLocale={persistLocale} t={t} />}
                 {activeSectionId === "editor" && (
                   <div className="settings-section-stack">
+                    <FontsSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
                     <EditorAppearanceSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
                     <EditorBehaviorSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
                   </div>
@@ -373,7 +377,6 @@ export function SettingsDialog() {
                 {activeSectionId === "ai-indexing" && <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
                 {activeSectionId === "ai-skills" && <SkillsSection workspace={workspace} t={t} />}
                 {activeSectionId === "ai-memory" && <MemorySection workspace={workspace} t={t} />}
-                {activeSectionId === "ai-research" && <WebResearchSection t={t} />}
                 {activeSectionId === "ai-ssh" && <SshSection t={t} />}
                 {activeSectionId === "ai-mcp" && <McpSection t={t} />}
                 {activeSectionId === "ai-usage" && <AiUsageSection workspace={workspace} t={t} />}
@@ -541,6 +544,71 @@ function UpdatesSection({ t }: { t: TranslateFn }) {
   );
 }
 
+// System font list is loaded once per app session — the scan result is cached on
+// the Rust side too, so reopening Settings never re-walks the font directories.
+let systemFontFamiliesCache: string[] | null = null;
+let systemFontFamiliesPromise: Promise<string[]> | null = null;
+
+function useSystemFontFamilies(): string[] {
+  const [fonts, setFonts] = useState<string[]>(() => systemFontFamiliesCache ?? []);
+  useEffect(() => {
+    if (systemFontFamiliesCache) return;
+    systemFontFamiliesPromise ??= luxCommands.listSystemFontFamilies().then((families) => {
+      systemFontFamiliesCache = families;
+      return families;
+    }).catch(() => {
+      systemFontFamiliesPromise = null; // allow a retry on next mount
+      return [] as string[];
+    });
+    let cancelled = false;
+    void systemFontFamiliesPromise.then((families) => {
+      if (!cancelled && families.length > 0) setFonts(families);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  return fonts;
+}
+
+function FontsSection({ onChange, preferences, t }: { onChange: (patch: Partial<EditorPreferences>) => void; preferences: EditorPreferences; t: TranslateFn }) {
+  const fonts = useSystemFontFamilies();
+  return (
+    <SettingsPanel title={t("settings.fonts.title")} description={t("settings.fonts.description")}>
+      <SettingsGrid>
+        <FontSelectSetting
+          label={t("settings.fonts.ui.label")}
+          detail={t("settings.fonts.ui.detail")}
+          value={preferences.uiFontFamily}
+          fonts={fonts}
+          defaultLabel={t("settings.fonts.default")}
+          searchPlaceholder={t("settings.fonts.searchPlaceholder")}
+          searchEmptyLabel={t("settings.fonts.searchEmpty")}
+          onChange={(uiFontFamily) => onChange({ uiFontFamily })}
+        />
+        <FontSelectSetting
+          label={t("settings.fonts.editor.label")}
+          detail={t("settings.fonts.editor.detail")}
+          value={preferences.fontFamily}
+          fonts={fonts}
+          defaultLabel={t("settings.fonts.default")}
+          searchPlaceholder={t("settings.fonts.searchPlaceholder")}
+          searchEmptyLabel={t("settings.fonts.searchEmpty")}
+          onChange={(fontFamily) => onChange({ fontFamily })}
+        />
+        <FontSelectSetting
+          label={t("settings.fonts.chat.label")}
+          detail={t("settings.fonts.chat.detail")}
+          value={preferences.chatFontFamily}
+          fonts={fonts}
+          defaultLabel={t("settings.fonts.default")}
+          searchPlaceholder={t("settings.fonts.searchPlaceholder")}
+          searchEmptyLabel={t("settings.fonts.searchEmpty")}
+          onChange={(chatFontFamily) => onChange({ chatFontFamily })}
+        />
+      </SettingsGrid>
+    </SettingsPanel>
+  );
+}
+
 function EditorAppearanceSection({ onChange, preferences, t }: { onChange: (patch: Partial<EditorPreferences>) => void; preferences: EditorPreferences; t: TranslateFn }) {
   return (
     <SettingsPanel title={t("settings.appearance.title")} description={t("settings.appearance.description")}>
@@ -581,6 +649,9 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
   const [catalog, setCatalog] = useState<LspCatalogEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Record<string, LspInstallProgress>>(getLspInstallProgressSnapshot);
+  // Transient result line under a row after an uninstall finishes (e.g. the
+  // npm shared-package note) — keyed by languageId, cleared on the next action.
+  const [uninstallNotes, setUninstallNotes] = useState<Record<string, string>>({});
 
   const refreshCatalog = useCallback(() => {
     luxCommands.lspServerCatalog()
@@ -592,15 +663,31 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
     ensureLspInstallSubscription();
     refreshCatalog();
     const stopProgress = subscribeLspInstallProgress(() => setProgress({ ...getLspInstallProgressSnapshot() }));
-    // Re-pull the catalog whenever an install finishes so the badge flips to Installed.
+    // Re-pull the catalog whenever an install (or uninstall) finishes so the
+    // badge flips to Installed / Not installed.
     const stopFinish = onLspInstallFinished(() => refreshCatalog());
     return () => { stopProgress(); stopFinish(); };
   }, [refreshCatalog]);
 
   const installServer = (languageId: string) => {
     clearLspInstallError(languageId);
+    setUninstallNotes((notes) => (languageId in notes ? withoutKey(notes, languageId) : notes));
     setProgress({ ...getLspInstallProgressSnapshot(), [languageId]: { status: "installing", percent: 0, step: "Starting" } });
     void luxCommands.lspInstallServer(languageId).catch(() => undefined);
+  };
+
+  const uninstallServer = (languageId: string, name: string) => {
+    if (!window.confirm(t("settings.lsp.uninstallConfirm", { name }))) return;
+    clearLspInstallError(languageId);
+    setUninstallNotes((notes) => (languageId in notes ? withoutKey(notes, languageId) : notes));
+    // Seed the intent into the STORE (not just local state): the store's own
+    // "started" handler reads its module map to preserve the uninstalling flag,
+    // and the subscription then mirrors it back into `progress` here.
+    setLspUninstallIntent(languageId);
+    setProgress({ ...getLspInstallProgressSnapshot() });
+    void luxCommands.lspUninstallServer(languageId)
+      .then((result) => setUninstallNotes((notes) => ({ ...notes, [languageId]: result })))
+      .catch(() => undefined);
   };
 
   const installedCount = catalog?.filter((entry) => entry.installed).length ?? 0;
@@ -649,7 +736,9 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
                 key={entry.languageId}
                 entry={entry}
                 progress={live}
+                note={uninstallNotes[entry.languageId] ?? null}
                 onInstall={() => installServer(entry.languageId)}
+                onUninstall={() => uninstallServer(entry.languageId, entry.name)}
                 t={t}
               />
             );
@@ -660,25 +749,40 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
   );
 }
 
-function LanguageServerRow({ entry, progress, onInstall, t }: {
+/** Shallow-clone an object without one key (small, allocation-free at this scale). */
+function withoutKey<T extends Record<string, string>>(obj: T, key: string): T {
+  const { [key]: _removed, ...rest } = obj;
+  return rest as T;
+}
+
+function LanguageServerRow({ entry, progress, note, onInstall, onUninstall, t }: {
   entry: LspCatalogEntry;
   progress: LspInstallProgress | null;
+  note: string | null;
   onInstall: () => void;
+  onUninstall: () => void;
   t: TranslateFn;
 }) {
-  const installing = progress?.status === "installing";
+  const installing = progress?.status === "installing" && !progress.uninstalling;
+  const uninstalling = progress?.status === "installing" && progress.uninstalling === true;
+  const busy = installing || uninstalling;
   const errored = progress?.status === "error";
-  // Status precedence: installing > error > installed(managed/PATH) > missing.
-  const state = installing ? "installing" : errored ? "error" : entry.installed ? (entry.managed ? "managed" : "path") : "missing";
+  // Status precedence: busy > error > installed(managed/PATH) > missing.
+  const state = busy ? "installing" : errored ? "error" : entry.installed ? (entry.managed ? "managed" : "path") : "missing";
   const isManual = entry.installMethod === "manual";
+  // Managed installs are the only ones Lux can safely remove — a PATH/system
+  // install is never touched (mirrors the Rust-side managed-only guard).
+  const canUninstall = entry.managed && entry.installed && !isManual;
 
-  const statusLabel = installing
-    ? t("settings.lsp.status.installing", { percent: progress?.percent ?? 0 })
-    : errored
-      ? t("settings.lsp.status.error")
-      : entry.installed
-        ? entry.managed ? t("settings.lsp.status.installed") : t("settings.lsp.status.onPath")
-        : isManual ? t("settings.lsp.status.manual") : t("settings.lsp.status.missing");
+  const statusLabel = uninstalling
+    ? t("settings.lsp.uninstalling")
+    : installing
+      ? t("settings.lsp.status.installing", { percent: progress?.percent ?? 0 })
+      : errored
+        ? t("settings.lsp.status.error")
+        : entry.installed
+          ? entry.managed ? t("settings.lsp.status.installed") : t("settings.lsp.status.onPath")
+          : isManual ? t("settings.lsp.status.manual") : t("settings.lsp.status.missing");
 
   return (
     <li className="lsp-server-row" data-state={state}>
@@ -688,27 +792,35 @@ function LanguageServerRow({ entry, progress, onInstall, t }: {
           <strong>{entry.name}</strong>
           <code className="lsp-server-ext">{entry.extensions.slice(0, 4).map((e) => `.${e}`).join(" ")}</code>
         </div>
-        <span className="lsp-server-status" data-state={state}>{statusLabel}</span>
-        {installing && (
+        {busy && (
           <div className="lsp-server-progress" role="progressbar" aria-valuenow={progress?.percent ?? 0} aria-valuemin={0} aria-valuemax={100}>
             <div className="lsp-server-progress-fill" style={{ width: `${progress?.percent ?? 0}%` }} />
             <span className="lsp-server-progress-step">{progress?.step}</span>
           </div>
         )}
         {errored && <p className="lsp-server-row-error" title={progress?.error}>{progress?.error}</p>}
-        {isManual && !entry.installed && !installing && <p className="lsp-server-row-hint">{entry.manualHint}</p>}
+        {isManual && !entry.installed && !busy && <p className="lsp-server-row-hint">{entry.manualHint}</p>}
+        {!busy && !errored && note && <p className="lsp-server-row-note">{note}</p>}
       </div>
       <div className="lsp-server-row-action">
+        <span className="lsp-server-status" data-state={state}>{statusLabel}</span>
         {isManual ? (
           <span className="lsp-server-manual-tag">{t("settings.lsp.manualTag")}</span>
         ) : (
-          <button type="button" className="lsp-server-install" onClick={onInstall} disabled={installing}>
-            {installing
-              ? t("settings.lsp.installing")
-              : entry.installed
-                ? t("settings.lsp.reinstall")
-                : t("settings.lsp.install")}
-          </button>
+          <>
+            {canUninstall && (
+              <button type="button" className="lsp-server-uninstall" onClick={onUninstall} disabled={busy}>
+                {uninstalling ? t("settings.lsp.uninstalling") : t("settings.lsp.uninstall")}
+              </button>
+            )}
+            <button type="button" className="lsp-server-install" data-installed={entry.installed || undefined} onClick={onInstall} disabled={busy}>
+              {installing
+                ? t("settings.lsp.installing")
+                : entry.installed
+                  ? t("settings.lsp.reinstall")
+                  : t("settings.lsp.install")}
+            </button>
+          </>
         )}
       </div>
     </li>
@@ -793,7 +905,6 @@ function RuntimeRow({ entry, progress, onProvision, t }: {
           <span className="lsp-server-dot" data-state={state} aria-hidden="true" />
           <strong>{entry.name}</strong>
         </div>
-        <span className="lsp-server-status" data-state={state}>{statusLabel}</span>
         {installing && (
           <div className="lsp-server-progress" role="progressbar" aria-valuenow={progress?.percent ?? 0} aria-valuemin={0} aria-valuemax={100}>
             <div className="lsp-server-progress-fill" style={{ width: `${progress?.percent ?? 0}%` }} />
@@ -804,8 +915,9 @@ function RuntimeRow({ entry, progress, onProvision, t }: {
         {!entry.canAuto && !entry.installed && !installing && <p className="lsp-server-row-hint">{entry.manualHint}</p>}
       </div>
       <div className="lsp-server-row-action">
+        <span className="lsp-server-status" data-state={state}>{statusLabel}</span>
         {entry.canAuto ? (
-          <button type="button" className="lsp-server-install" onClick={onProvision} disabled={installing}>
+          <button type="button" className="lsp-server-install" data-installed={entry.installed || undefined} onClick={onProvision} disabled={installing}>
             {installing
               ? t("settings.lsp.installing")
               : entry.installed
@@ -825,217 +937,6 @@ function RuntimeRow({ entry, progress, onProvision, t }: {
 // management itself lives in the Providers section, so nothing is configured in two places.
 const AI_TOOL_APPROVAL_MODES: AiToolApprovalMode[] = ["default", "full-access"];
 const AI_FILE_EDIT_TRUST_MODES: AiFileEditTrustMode[] = ["preview-before-apply", "apply-immediately"];
-
-function AgentBrowserSection({ onChange, preferences, t }: { onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
-  const [status, setStatus] = useState<AgentBrowserStatusResponse | null>(null);
-  const [checking, setChecking] = useState(false);
-
-  const refreshStatus = useCallback(async (options: { full?: boolean } = {}) => {
-    setChecking(true);
-    try {
-      const response = await luxCommands.agentBrowserStatus({
-        commandPath: preferences.agentBrowserCommand.trim() || undefined,
-        skipAutoUpdate: true,
-        lightweight: options.full ? false : true,
-      });
-      if (response.updatePerformed) {
-        void import("../lib/agentBrowserSkillsCache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
-      }
-      setStatus(response);
-    } catch (error) {
-      setStatus({
-        available: false,
-        commandPath: null,
-        version: null,
-        latestVersion: null,
-        updatePerformed: false,
-        updateDetail: null,
-        detail: error instanceof Error ? error.message : String(error),
-        sessions: [],
-        doctor: null,
-      });
-    } finally {
-      setChecking(false);
-    }
-  }, [preferences.agentBrowserCommand]);
-
-  // Sync the real install/version state the moment the section opens, so the card
-  // reflects what's actually installed instead of sitting on "unavailable" until the
-  // user clicks Refresh. Lightweight: resolves CLI + version only, never launches Chromium.
-  useEffect(() => {
-    void refreshStatus();
-  }, [refreshStatus]);
-
-  const diagnosticState = checking
-    ? "checking"
-    : status?.available
-      ? "ok"
-      : status
-        ? "error"
-        : "idle";
-  const statusLabel = checking
-    ? t("settings.agentBrowser.status.checking")
-    : status?.available
-      ? t("settings.agentBrowser.status.ready", { version: status.version ?? "agent-browser" })
-      : status
-        ? t("settings.agentBrowser.status.issue")
-        : t("settings.agentBrowser.status.unavailable");
-
-  return (
-    // Title omitted: it would repeat the section header directly above. The
-    // description stays — it explains the agent-browser runtime, not the nav.
-    <SettingsPanel description={t("settings.agentBrowser.description")}>
-      <section className="settings-banner agent-browser-status-card" data-state={diagnosticState}>
-        <div className="settings-banner-main">
-          <strong>{statusLabel}</strong>
-          {status && <span>{t("settings.agentBrowser.status.detail", { detail: status.detail })}</span>}
-          {status && status.sessions.length > 0 && (
-            <span>{t("settings.agentBrowser.status.sessions", { count: status.sessions.length })}</span>
-          )}
-          <span className="agent-browser-install-hint">{t("settings.agentBrowser.install.hint")}</span>
-        </div>
-        <div className="settings-banner-actions">
-          <button type="button" disabled={checking} onClick={() => void refreshStatus()}>
-            {t("settings.agentBrowser.status.refresh")}
-          </button>
-          <button type="button" disabled={checking} onClick={() => void refreshStatus({ full: true })}>
-            {t("settings.agentBrowser.status.fullCheck")}
-          </button>
-          <button
-            type="button"
-            disabled={checking}
-            onClick={() => {
-              setChecking(true);
-              void luxCommands.agentBrowserInstall({
-                commandPath: preferences.agentBrowserCommand.trim() || null,
-                withDeps: false,
-              }).then(() => {
-                void import("../lib/agentBrowserSkillsCache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
-              }).catch(() => undefined).finally(() => {
-                // refreshStatus resets `checking` and surfaces success/error state,
-                // so it covers both the resolved and rejected install paths. The
-                // .catch clears the rejection (finally alone would re-throw it).
-                void refreshStatus();
-              });
-            }}
-          >
-            {t("settings.agentBrowser.install.action")}
-          </button>
-        </div>
-      </section>
-      <SettingsGrid>
-        <ToggleSetting
-          label={t("settings.agentBrowser.enabled.label")}
-          detail={t("settings.agentBrowser.enabled.detail")}
-          checked={preferences.agentBrowserEnabled}
-          onChange={(agentBrowserEnabled) => onChange({ agentBrowserEnabled })}
-        />
-        <ToggleSetting
-          label={t("settings.agentBrowser.headed.label")}
-          detail={t("settings.agentBrowser.headed.detail")}
-          checked={preferences.agentBrowserHeaded}
-          onChange={(agentBrowserHeaded) => onChange({ agentBrowserHeaded })}
-        />
-        <ToggleSetting
-          label={t("settings.agentBrowser.autoStream.label")}
-          detail={t("settings.agentBrowser.autoStream.detail")}
-          checked={preferences.agentBrowserAutoStreamPreview}
-          onChange={(agentBrowserAutoStreamPreview) => onChange({ agentBrowserAutoStreamPreview })}
-        />
-        <ToggleSetting
-          label={t("settings.agentBrowser.persistSession.label")}
-          detail={t("settings.agentBrowser.persistSession.detail")}
-          checked={preferences.agentBrowserPersistSession}
-          onChange={(agentBrowserPersistSession) => onChange({ agentBrowserPersistSession })}
-        />
-        <ToggleSetting
-          label={t("settings.agentBrowser.contentBoundaries.label")}
-          detail={t("settings.agentBrowser.contentBoundaries.detail")}
-          checked={preferences.agentBrowserContentBoundaries}
-          onChange={(agentBrowserContentBoundaries) => onChange({ agentBrowserContentBoundaries })}
-        />
-        <ToggleSetting
-          label={t("settings.agentBrowser.allowFileAccess.label")}
-          detail={t("settings.agentBrowser.allowFileAccess.detail")}
-          checked={preferences.agentBrowserAllowFileAccess}
-          onChange={(agentBrowserAllowFileAccess) => onChange({ agentBrowserAllowFileAccess })}
-        />
-        <ToggleSetting
-          label={t("settings.agentBrowser.ignoreHttps.label")}
-          detail={t("settings.agentBrowser.ignoreHttps.detail")}
-          checked={preferences.agentBrowserIgnoreHttpsErrors}
-          onChange={(agentBrowserIgnoreHttpsErrors) => onChange({ agentBrowserIgnoreHttpsErrors })}
-        />
-        <NumberSetting
-          label={t("settings.agentBrowser.dashboardPort.label")}
-          detail={t("settings.agentBrowser.dashboardPort.detail")}
-          value={preferences.agentBrowserDashboardPort}
-          min={1024}
-          max={65_535}
-          step={1}
-          onChange={(agentBrowserDashboardPort) => onChange({ agentBrowserDashboardPort })}
-        />
-        <TextSetting
-          label={t("settings.agentBrowser.command.label")}
-          detail={t("settings.agentBrowser.command.detail")}
-          value={preferences.agentBrowserCommand}
-          placeholder={t("settings.agentBrowser.command.placeholder")}
-          onChange={(agentBrowserCommand) => onChange({ agentBrowserCommand })}
-          wide
-        />
-        <TextSetting
-          label={t("settings.agentBrowser.allowedDomains.label")}
-          detail={t("settings.agentBrowser.allowedDomains.detail")}
-          value={preferences.agentBrowserAllowedDomains}
-          placeholder={t("settings.agentBrowser.allowedDomains.placeholder")}
-          onChange={(agentBrowserAllowedDomains) => onChange({ agentBrowserAllowedDomains })}
-          wide
-        />
-        <NumberSetting
-          label={t("settings.agentBrowser.maxOutput.label")}
-          detail={t("settings.agentBrowser.maxOutput.detail")}
-          value={preferences.agentBrowserMaxOutput}
-          min={4_000}
-          max={120_000}
-          step={1_000}
-          onChange={(agentBrowserMaxOutput) => onChange({ agentBrowserMaxOutput })}
-        />
-        <TextSetting
-          label={t("settings.agentBrowser.profile.label")}
-          detail={t("settings.agentBrowser.profile.detail")}
-          value={preferences.agentBrowserProfile}
-          placeholder={t("settings.agentBrowser.profile.placeholder")}
-          onChange={(agentBrowserProfile) => onChange({ agentBrowserProfile })}
-          wide
-        />
-        <TextSetting
-          label={t("settings.agentBrowser.statePath.label")}
-          detail={t("settings.agentBrowser.statePath.detail")}
-          value={preferences.agentBrowserStatePath}
-          placeholder={t("settings.agentBrowser.statePath.placeholder")}
-          onChange={(agentBrowserStatePath) => onChange({ agentBrowserStatePath })}
-          wide
-        />
-        <TextSetting
-          label={t("settings.agentBrowser.provider.label")}
-          detail={t("settings.agentBrowser.provider.detail")}
-          value={preferences.agentBrowserProvider}
-          placeholder={t("settings.agentBrowser.provider.placeholder")}
-          onChange={(agentBrowserProvider) => onChange({ agentBrowserProvider })}
-          wide
-        />
-        <TextSetting
-          label={t("settings.agentBrowser.proxy.label")}
-          detail={t("settings.agentBrowser.proxy.detail")}
-          value={preferences.agentBrowserProxy}
-          placeholder={t("settings.agentBrowser.proxy.placeholder")}
-          onChange={(agentBrowserProxy) => onChange({ agentBrowserProxy })}
-          wide
-        />
-      </SettingsGrid>
-    </SettingsPanel>
-  );
-}
 
 function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
   const selectedAgent = getAiAgentProfile(preferences.agentProfiles, preferences.selectedAgentId) ?? preferences.agentProfiles[0];
@@ -1423,134 +1324,8 @@ function IndexMetric({ label, value }: { label: string; value: string }) {
 
 const maxRecentUsageRows = 60;
 
-// AI Usage: persisted per-request history (model, project, speed, tokens, cost).
-// Read-only review surface backed by aiUsageLog; supports clearing the log.
-function AiUsageSection({ t, workspace }: { t: TranslateFn; workspace: WorkspaceInfo | null }) {
-  const [entries, setEntries] = useState<AiUsageLogEntry[] | null>(null);
-  const currentKey = workspaceInstructionsKey(workspace?.root);
-
-  useEffect(() => {
-    let active = true;
-    void loadAiUsageLog().then((loaded) => { if (active) setEntries(loaded); });
-    return () => { active = false; };
-  }, []);
-
-  const projects = useMemo(() => entries ? aggregateUsageByProject(entries) : [], [entries]);
-  const recent = useMemo(() => entries ? entries.slice(-maxRecentUsageRows).reverse() : [], [entries]);
-  const totals = useMemo(() => projects.reduce((sum, project) => ({
-    requestCount: sum.requestCount + project.requestCount,
-    totalTokens: sum.totalTokens + project.totalTokens,
-    estimatedCostUsd: sum.estimatedCostUsd + project.estimatedCostUsd,
-    totalDurationMs: sum.totalDurationMs + project.totalDurationMs,
-  }), { requestCount: 0, totalTokens: 0, estimatedCostUsd: 0, totalDurationMs: 0 }), [projects]);
-
-  const clearLog = () => { void clearAiUsageLog().then(setEntries); };
-
-  if (entries === null) {
-    return <div className="settings-empty-note">{t("settings.usage.loading")}</div>;
-  }
-  if (entries.length === 0) {
-    return (
-      <div className="settings-section-stack">
-        <div className="settings-empty-note">{t("settings.usage.empty")}</div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="settings-section-stack ai-usage-section">
-      <SettingsPanel title={t("settings.usage.totals.title")} description={t("settings.usage.totals.description")}>
-        <div className="index-metrics">
-          <IndexMetric label={t("settings.usage.metric.requests")} value={formatInteger(totals.requestCount)} />
-          <IndexMetric label={t("settings.usage.metric.tokens")} value={formatCompactTokens(totals.totalTokens)} />
-          <IndexMetric label={t("settings.usage.metric.cost")} value={formatUsageCost(totals.estimatedCostUsd, t)} />
-          <IndexMetric label={t("settings.usage.metric.time")} value={formatUsageDuration(totals.totalDurationMs)} />
-        </div>
-      </SettingsPanel>
-
-      <SettingsPanel title={t("settings.usage.byProject.title")} description={t("settings.usage.byProject.description")}>
-        <div className="ai-usage-project-list">
-          {projects.map((project) => (
-            <div className="ai-usage-project-row" key={project.workspaceKey || "__none__"} data-active={project.workspaceKey === currentKey}>
-              <div className="ai-usage-project-main">
-                <strong>{project.workspaceName || projectKeyLabel(project.workspaceKey, t)}</strong>
-                <small>{t("settings.usage.byProject.requests", { count: project.requestCount })}</small>
-              </div>
-              <div className="ai-usage-project-stats">
-                <span>{formatCompactTokens(project.totalTokens)} {t("settings.usage.tok")}</span>
-                <span>{formatUsageCost(project.estimatedCostUsd, t)}</span>
-                <span>{formatUsageDuration(project.totalDurationMs)}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </SettingsPanel>
-
-      <SettingsPanel title={t("settings.usage.recent.title")} description={t("settings.usage.recent.description", { count: recent.length })}>
-        <div className="ai-usage-table" role="table" aria-label={t("settings.usage.recent.title")}>
-          <div className="ai-usage-table-head" role="row">
-            <span role="columnheader">{t("settings.usage.col.when")}</span>
-            <span role="columnheader">{t("settings.usage.col.model")}</span>
-            <span role="columnheader">{t("settings.usage.col.tokens")}</span>
-            <span role="columnheader">{t("settings.usage.col.speed")}</span>
-            <span role="columnheader">{t("settings.usage.col.cost")}</span>
-          </div>
-          {recent.map((entry) => (
-            <div className="ai-usage-table-row" role="row" key={entry.id} title={`${entry.provider} · ${entry.agentMode}`}>
-              <span role="cell">{formatUsageTimestamp(entry.timestamp)}</span>
-              <span role="cell" className="ai-usage-model" title={entry.model}>{entry.model}</span>
-              <span role="cell">{formatCompactTokens(entry.totalTokens)}</span>
-              <span role="cell">{formatUsageSpeed(usageEntryTokensPerSecond(entry), t)}</span>
-              <span role="cell">{formatUsageCost(entry.estimatedCostUsd, t)}</span>
-            </div>
-          ))}
-        </div>
-      </SettingsPanel>
-
-      <div className="ai-usage-actions">
-        <button type="button" className="settings-reset-button" onClick={clearLog}>
-          <Trash2 size={14} /> {t("settings.usage.clear")}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function projectKeyLabel(key: string, t: TranslateFn) {
-  if (!key) return t("settings.usage.noProject");
-  const segments = key.split("/").filter(Boolean);
-  return segments[segments.length - 1] || key;
-}
-
-function formatUsageCost(usd: number | null, t: TranslateFn) {
-  if (usd === null || usd <= 0) return t("settings.usage.costUnknown");
-  if (usd < 0.01) return "<$0.01";
-  return `$${usd.toFixed(usd < 1 ? 3 : 2)}`;
-}
-
-function formatUsageDuration(ms: number) {
-  if (ms <= 0) return "—";
-  const seconds = ms / 1000;
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${Math.round(seconds % 60)}s`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours}h ${minutes % 60}m`;
-}
-
-function formatUsageSpeed(tokensPerSecond: number, t: TranslateFn) {
-  if (tokensPerSecond <= 0) return "—";
-  return t("settings.usage.tokPerSec", { value: tokensPerSecond < 10 ? tokensPerSecond.toFixed(1) : String(Math.round(tokensPerSecond)) });
-}
-
-function formatUsageTimestamp(timestamp: number) {
-  const date = new Date(timestamp);
-  const now = new Date();
-  const sameDay = date.toDateString() === now.toDateString();
-  const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
-  if (sameDay) return time;
-  return `${date.toLocaleDateString(undefined, { month: "short", day: "numeric" })} ${time}`;
-}
+// AI Usage moved to ./settings/AiUsageSection — a request-log console with
+// time-window filters, stat cards, and expandable per-request rows.
 
 function IndexBucketList({ buckets, emptyLabel, title }: { buckets: Array<{ count: number; label: string }>; emptyLabel: string; title: string }) {
   return (

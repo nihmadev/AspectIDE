@@ -2,6 +2,7 @@ export type AiTurnActivityPhase =
   | "idle"
   | "thinking"
   | "streaming"
+  | "preparing"
   | "running-tools"
   | "waiting-approval"
   | "subagent";

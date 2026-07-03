@@ -32,7 +32,7 @@ export function recordAiUsageLogEntry(assistant: AiChatMessage | null | undefine
 }
 
 export function statusToSessionStatus(
-  status: "thinking" | "streaming" | "running-tools" | "waiting-approval",
+  status: "thinking" | "streaming" | "preparing" | "running-tools" | "waiting-approval",
 ): AiChatSessionStatus {
   return status;
 }

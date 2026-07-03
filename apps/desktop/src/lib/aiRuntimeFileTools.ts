@@ -1,6 +1,6 @@
 import type { AiChatSendInput } from "./aiChatTypes";
 import { recordTurnCheckpointFileChanges } from "./aiChatTurnCheckpoints";
-import { captureFileTextSnapshot, registerPendingFileReview } from "./aiPendingFileReview";
+import { captureFileTextSnapshot, registerPendingFileReview, type FileTextSnapshot } from "./aiPendingFileReview";
 import { createDeleteApproval, createPatchApproval, createStrReplaceApproval, createWriteApproval } from "./aiRuntimeApprovals";
 import { ensurePathsInFileCheckpoint } from "./aiRuntimeCheckpoints";
 import { patchOperationsArg } from "./aiRuntimePatch";
@@ -39,9 +39,9 @@ export async function writeFileTool(args: UnknownRecord, input: AiChatSendInput,
   const approval = createWriteApproval(input.locale, path, text, overwrite, saveToDisk);
   await requireToolApproval(input, ui, approval);
   await guardTurnFilePaths(input, [path]);
-  const beforeText = await snapshotPathBeforeEdit(input, path);
+  const before = await snapshotPathBeforeEdit(input, path);
   const result = await luxCommands.aiFileWrite(path, text, overwrite, saveToDisk);
-  registerReviewFromFileOperation("Write", path, input, beforeText, result, ui.toolCallId, !saveToDisk);
+  registerReviewFromFileOperation("Write", path, input, before, result, ui.toolCallId, !saveToDisk);
   notifyFilePathsEdited(input, result.changedPaths);
   return toolResultFromFileOperation("Write", result);
 }
@@ -55,9 +55,9 @@ export async function strReplaceTool(args: UnknownRecord, input: AiChatSendInput
   const approval = createStrReplaceApproval(input.locale, path, oldText, newText, expectedReplacements, saveToDisk);
   await requireToolApproval(input, ui, approval);
   await guardTurnFilePaths(input, [path]);
-  const beforeText = await snapshotPathBeforeEdit(input, path);
+  const before = await snapshotPathBeforeEdit(input, path);
   const result = await luxCommands.aiFileStrReplace(path, oldText, newText, expectedReplacements, saveToDisk);
-  registerReviewFromFileOperation("StrReplace", path, input, beforeText, result, ui.toolCallId, !saveToDisk);
+  registerReviewFromFileOperation("StrReplace", path, input, before, result, ui.toolCallId, !saveToDisk);
   notifyFilePathsEdited(input, result.changedPaths);
   return toolResultFromFileOperation("StrReplace", result);
 }
@@ -70,13 +70,13 @@ export async function patchEngineTool(args: UnknownRecord, input: AiChatSendInpu
   await requireToolApproval(input, ui, approval);
   await guardTurnFilePaths(input, operations.map((operation) => operation.path));
   const paths = [...new Set(operations.map((operation) => operation.path))];
-  const beforeByPath = new Map<string, string>();
+  const beforeByPath = new Map<string, FileTextSnapshot>();
   for (const path of paths) {
     beforeByPath.set(path, await snapshotPathBeforeEdit(input, path));
   }
   const result = await luxCommands.aiFilePatch(operations, saveToDisk, dryRun);
   for (const path of result.changedPaths) {
-    registerReviewFromFileOperation("PatchEngine", path, input, beforeByPath.get(path) ?? "", result, ui.toolCallId, !saveToDisk);
+    registerReviewFromFileOperation("PatchEngine", path, input, beforeByPath.get(path) ?? { text: "", faithful: true }, result, ui.toolCallId, !saveToDisk);
   }
   notifyFilePathsEdited(input, result.changedPaths);
   return toolResultFromFileOperation("PatchEngine", result);
@@ -118,7 +118,7 @@ function registerReviewFromFileOperation(
   toolName: string,
   path: string,
   input: AiChatSendInput,
-  beforeText: string,
+  before: FileTextSnapshot,
   result: FileToolResult,
   toolCallId: string,
   previewOnly: boolean,
@@ -129,17 +129,20 @@ function registerReviewFromFileOperation(
   // unactionable entries. Turn checkpoints still cover rollback. Skip registration.
   if (input.preferences.agentMode === "automatic") return;
   const edited = result.editedDocuments.find((document) => document.path && normalizePathForCompare(document.path) === normalizePathForCompare(path));
-  const afterText = edited?.text ?? beforeText;
-  if (beforeText === afterText) return;
+  const afterText = edited?.text ?? before.text;
+  if (before.text === afterText) return;
   registerPendingFileReview({
     sessionId: input.chatSessionId,
     path,
     relativePath: path,
     toolName,
     toolCallId,
-    beforeText,
+    beforeText: before.text,
     afterText,
     previewOnly,
+    // Unfaithful snapshot (truncated / lossy decode): display the diff but let the
+    // textTruncated guards refuse to write it back on reject/partial-accept.
+    textTruncated: !before.faithful || undefined,
   });
 }
 

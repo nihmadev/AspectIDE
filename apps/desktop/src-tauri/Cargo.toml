@@ -1,6 +1,6 @@
 [package]
 name = "lux-desktop"
-version = "1.0.13"
+version = "1.0.14"
 description = "Lux IDE desktop shell"
 edition.workspace = true
 license.workspace = true
@@ -60,3 +60,9 @@ tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 which = "7.0"
+# Legacy console-codepage decode fallback for AI Shell output (cp866/cp1251
+# mojibake on Windows); pinned minor to match the existing transitive version.
+encoding_rs = "0.8"
+# System font-family enumeration for Settings → Fonts. fs+memmap only: we list
+# family names for the pickers, never rasterize or shape text.
+fontdb = { version = "0.23.0", default-features = false, features = ["fs", "memmap"] }

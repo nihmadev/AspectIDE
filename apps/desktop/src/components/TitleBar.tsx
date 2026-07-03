@@ -198,7 +198,10 @@ export function TitleBar() {
     <header className="title-bar" onPointerDown={handleTitleBarPointerDown}>
       <div className="title-drag-surface" aria-hidden="true" />
       <div className="title-left">
-        <span className="app-cube">L</span>
+        <span className="app-cube">
+          <img src="/lux-mark.svg" alt="Lux IDE" draggable={false} />
+        </span>
+        <span className="app-version" title={`Lux IDE v${__APP_VERSION__}`}>v{__APP_VERSION__}</span>
         <nav className="top-menu" aria-label={t("titlebar.applicationMenu")} ref={menuRef}>
           {menus.map((menu) => (
             <div className="top-menu-item" key={menu.id}>
@@ -275,9 +278,12 @@ export function TitleBar() {
         <div className="title-center" data-agent-mode="false">{workspace.name}</div>
       )}
       <div className="title-actions" data-agent-mode={workspaceMode === "agent"}>
+        {/* Editor-layout toggles are IDE-view controls — hidden in Agent view
+            (data-ide-only). Settings and the update badge stay in every view. */}
         <button
           className="title-tool-button"
           type="button"
+          data-ide-only="true"
           aria-label={t("titlebar.action.toggleChat")}
           title={t("titlebar.action.toggleChat")}
           data-active={aiChatOpen}
@@ -288,6 +294,7 @@ export function TitleBar() {
         <button
           className="title-tool-button"
           type="button"
+          data-ide-only="true"
           aria-label={t("titlebar.action.toggleBottomPanel")}
           title={t("titlebar.action.toggleBottomPanel")}
           data-active={bottomPanelOpen}
@@ -298,6 +305,7 @@ export function TitleBar() {
         <button
           className="title-tool-button"
           type="button"
+          data-ide-only="true"
           aria-label={t("titlebar.action.toggleSidebar")}
           title={t("titlebar.action.toggleSidebar")}
           data-active={sidebarVisible}

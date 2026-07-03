@@ -147,6 +147,28 @@ export type AiProviderPresetId =
   | "deepseek"
   | "xai"
   | "azure-openai"
+  | "together"
+  | "fireworks"
+  | "cerebras"
+  | "moonshot"
+  | "zai"
+  | "minimax"
+  | "alibaba"
+  | "huggingface"
+  | "github-models"
+  | "github-copilot"
+  | "vercel-gateway"
+  | "nvidia"
+  | "deepinfra"
+  | "novita"
+  | "perplexity"
+  | "siliconflow"
+  | "nebius"
+  | "baseten"
+  | "venice"
+  | "cloudflare-workers-ai"
+  | "meta-llama"
+  | "ollama-cloud"
   | "ollama"
   | "lm-studio"
   | "local-proxy"
@@ -172,6 +194,10 @@ export type AiProviderConfig = {
   localPort: string;
   localPath: string;
   models: AiModelConfig[];
+  /** Optional embeddings model id for this provider's `/embeddings` endpoint
+   *  (semantic memory search). Empty when unset — best-effort, never blocks a
+   *  turn, and is never used for `anthropic`-protocol providers (no endpoint). */
+  embeddingModel: string;
 };
 
 export type AiModelConfig = {
@@ -374,6 +400,265 @@ export const AI_PROVIDER_PRESETS = [
       { id: "llama3.1", name: "Llama 3.1", alias: "llama3.1" },
       { id: "qwen2.5-coder", name: "Qwen 2.5 Coder", alias: "qwen2.5-coder" },
       { id: "mistral", name: "Mistral", alias: "mistral" },
+    ],
+  },
+  {
+    id: "together",
+    name: "Together AI",
+    description: "Together AI serverless inference (OpenAI-compatible).",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.together.xyz/v1",
+    models: [
+      { id: "together-kimi-k2", name: "Kimi K2 Instruct", alias: "moonshotai/Kimi-K2-Instruct" },
+      { id: "together-qwen3-coder", name: "Qwen3 Coder 480B", alias: "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8" },
+      { id: "together-deepseek-v3", name: "DeepSeek V3.1", alias: "deepseek-ai/DeepSeek-V3.1" },
+    ],
+  },
+  {
+    id: "fireworks",
+    name: "Fireworks AI",
+    description: "Fireworks AI fast open-model inference.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.fireworks.ai/inference/v1",
+    models: [
+      { id: "fireworks-kimi-k2", name: "Kimi K2 Instruct", alias: "accounts/fireworks/models/kimi-k2-instruct" },
+      { id: "fireworks-deepseek-v3", name: "DeepSeek V3.1", alias: "accounts/fireworks/models/deepseek-v3p1" },
+      { id: "fireworks-qwen3-coder", name: "Qwen3 Coder 480B", alias: "accounts/fireworks/models/qwen3-coder-480b-a35b-instruct" },
+    ],
+  },
+  {
+    id: "cerebras",
+    name: "Cerebras",
+    description: "Cerebras ultra-fast wafer-scale inference.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.cerebras.ai/v1",
+    models: [
+      { id: "cerebras-qwen3-coder", name: "Qwen3 Coder 480B", alias: "qwen-3-coder-480b" },
+      { id: "cerebras-gpt-oss", name: "GPT OSS 120B", alias: "gpt-oss-120b" },
+      { id: "cerebras-llama33", name: "Llama 3.3 70B", alias: "llama-3.3-70b" },
+    ],
+  },
+  {
+    id: "moonshot",
+    name: "Moonshot AI (Kimi)",
+    description: "Moonshot AI Kimi models (global endpoint).",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.moonshot.ai/v1",
+    models: [
+      { id: "kimi-k2-0905", name: "Kimi K2", alias: "kimi-k2-0905-preview" },
+      { id: "kimi-k2-turbo", name: "Kimi K2 Turbo", alias: "kimi-k2-turbo-preview" },
+      { id: "kimi-latest", name: "Kimi Latest", alias: "kimi-latest" },
+    ],
+  },
+  {
+    id: "zai",
+    name: "Z.AI (GLM)",
+    description: "Z.AI GLM models (Zhipu global endpoint).",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.z.ai/api/paas/v4",
+    models: [
+      { id: "glm-4.6", name: "GLM-4.6", alias: "glm-4.6", effortLevels: reasoningEfforts },
+      { id: "glm-4.5", name: "GLM-4.5", alias: "glm-4.5" },
+      { id: "glm-4.5-air", name: "GLM-4.5 Air", alias: "glm-4.5-air" },
+    ],
+  },
+  {
+    id: "minimax",
+    name: "MiniMax",
+    description: "MiniMax M2 through the Anthropic-compatible endpoint (matches opencode).",
+    protocol: "anthropic",
+    baseUrl: "https://api.minimax.io/anthropic/v1",
+    models: [
+      { id: "minimax-m2", name: "MiniMax M2", alias: "MiniMax-M2" },
+      { id: "minimax-m1", name: "MiniMax M1", alias: "MiniMax-M1" },
+    ],
+  },
+  {
+    id: "alibaba",
+    name: "Alibaba Qwen",
+    description: "Alibaba Cloud DashScope international endpoint (Qwen models).",
+    protocol: "openai-compatible",
+    baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    models: [
+      { id: "qwen3-coder-plus", name: "Qwen3 Coder Plus", alias: "qwen3-coder-plus" },
+      { id: "qwen3-max", name: "Qwen3 Max", alias: "qwen3-max" },
+      { id: "qwen-plus", name: "Qwen Plus", alias: "qwen-plus" },
+    ],
+  },
+  {
+    id: "huggingface",
+    name: "Hugging Face",
+    description: "Hugging Face Inference Providers router.",
+    protocol: "openai-compatible",
+    baseUrl: "https://router.huggingface.co/v1",
+    models: [
+      { id: "hf-kimi-k2", name: "Kimi K2 Instruct", alias: "moonshotai/Kimi-K2-Instruct" },
+      { id: "hf-deepseek-v3", name: "DeepSeek V3.1", alias: "deepseek-ai/DeepSeek-V3.1" },
+      { id: "hf-qwen3-coder", name: "Qwen3 Coder 480B", alias: "Qwen/Qwen3-Coder-480B-A35B-Instruct" },
+    ],
+  },
+  {
+    id: "github-models",
+    name: "GitHub Models",
+    description: "GitHub Models inference endpoint (use a GitHub PAT as the API key).",
+    protocol: "openai-compatible",
+    baseUrl: "https://models.github.ai/inference",
+    models: [
+      { id: "gh-gpt-5", name: "GPT-5", alias: "openai/gpt-5", effortLevels: reasoningEfforts },
+      { id: "gh-gpt-4.1", name: "GPT-4.1", alias: "openai/gpt-4.1" },
+      { id: "gh-deepseek-v3", name: "DeepSeek V3", alias: "deepseek/DeepSeek-V3-0324" },
+    ],
+  },
+  {
+    id: "github-copilot",
+    name: "GitHub Copilot",
+    description: "GitHub Copilot API (requires a Copilot bearer token as the API key).",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.githubcopilot.com",
+    models: [
+      { id: "copilot-gpt-5", name: "GPT-5", alias: "gpt-5", effortLevels: reasoningEfforts },
+      { id: "copilot-claude-sonnet", name: "Claude Sonnet 4.5", alias: "claude-sonnet-4.5" },
+    ],
+  },
+  {
+    id: "vercel-gateway",
+    name: "Vercel AI Gateway",
+    description: "Vercel AI Gateway — one key for hundreds of routed models.",
+    protocol: "openai-compatible",
+    baseUrl: "https://ai-gateway.vercel.sh/v1",
+    models: [
+      { id: "vercel-claude-sonnet", name: "Claude Sonnet 4.5", alias: "anthropic/claude-sonnet-4.5" },
+      { id: "vercel-gpt-5", name: "GPT-5", alias: "openai/gpt-5", effortLevels: reasoningEfforts },
+      { id: "vercel-gemini-pro", name: "Gemini 2.5 Pro", alias: "google/gemini-2.5-pro" },
+    ],
+  },
+  {
+    id: "nvidia",
+    name: "NVIDIA NIM",
+    description: "NVIDIA NIM hosted inference (integrate.api.nvidia.com).",
+    protocol: "openai-compatible",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    models: [
+      { id: "nvidia-deepseek-v3", name: "DeepSeek V3.1", alias: "deepseek-ai/deepseek-v3.1" },
+      { id: "nvidia-kimi-k2", name: "Kimi K2 Instruct", alias: "moonshotai/kimi-k2-instruct" },
+      { id: "nvidia-llama4", name: "Llama 4 Maverick", alias: "meta/llama-4-maverick-17b-128e-instruct" },
+    ],
+  },
+  {
+    id: "deepinfra",
+    name: "DeepInfra",
+    description: "DeepInfra pay-per-token open-model hosting.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.deepinfra.com/v1/openai",
+    models: [
+      { id: "deepinfra-deepseek-v3", name: "DeepSeek V3.1", alias: "deepseek-ai/DeepSeek-V3.1" },
+      { id: "deepinfra-kimi-k2", name: "Kimi K2 Instruct", alias: "moonshotai/Kimi-K2-Instruct" },
+      { id: "deepinfra-qwen3-coder", name: "Qwen3 Coder 480B", alias: "Qwen/Qwen3-Coder-480B-A35B-Instruct" },
+    ],
+  },
+  {
+    id: "novita",
+    name: "Novita AI",
+    description: "Novita AI open-model inference.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.novita.ai/openai",
+    models: [
+      { id: "novita-deepseek-v3", name: "DeepSeek V3.1", alias: "deepseek/deepseek-v3.1" },
+      { id: "novita-qwen3-coder", name: "Qwen3 Coder 480B", alias: "qwen/qwen3-coder-480b-a35b-instruct" },
+      { id: "novita-glm-4.6", name: "GLM-4.6", alias: "zai-org/glm-4.6" },
+    ],
+  },
+  {
+    id: "perplexity",
+    name: "Perplexity",
+    description: "Perplexity Sonar models with built-in web search.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.perplexity.ai",
+    models: [
+      { id: "sonar-pro", name: "Sonar Pro", alias: "sonar-pro" },
+      { id: "sonar", name: "Sonar", alias: "sonar" },
+      { id: "sonar-reasoning-pro", name: "Sonar Reasoning Pro", alias: "sonar-reasoning-pro", effortLevels: reasoningEfforts },
+    ],
+  },
+  {
+    id: "siliconflow",
+    name: "SiliconFlow",
+    description: "SiliconFlow international open-model endpoint.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.siliconflow.com/v1",
+    models: [
+      { id: "sf-deepseek-v3", name: "DeepSeek V3.1", alias: "deepseek-ai/DeepSeek-V3.1" },
+      { id: "sf-kimi-k2", name: "Kimi K2 Instruct", alias: "moonshotai/Kimi-K2-Instruct" },
+      { id: "sf-qwen3-coder", name: "Qwen3 Coder 480B", alias: "Qwen/Qwen3-Coder-480B-A35B-Instruct" },
+    ],
+  },
+  {
+    id: "nebius",
+    name: "Nebius Token Factory",
+    description: "Nebius Token Factory (studio) inference.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.tokenfactory.nebius.com/v1",
+    models: [
+      { id: "nebius-deepseek-v3", name: "DeepSeek V3.1", alias: "deepseek-ai/DeepSeek-V3.1" },
+      { id: "nebius-qwen3-coder", name: "Qwen3 Coder 480B", alias: "Qwen/Qwen3-Coder-480B-A35B-Instruct" },
+      { id: "nebius-gpt-oss", name: "GPT OSS 120B", alias: "openai/gpt-oss-120b" },
+    ],
+  },
+  {
+    id: "baseten",
+    name: "Baseten",
+    description: "Baseten model APIs (OpenAI-compatible).",
+    protocol: "openai-compatible",
+    baseUrl: "https://inference.baseten.co/v1",
+    models: [
+      { id: "baseten-deepseek-v3", name: "DeepSeek V3.1", alias: "deepseek-ai/DeepSeek-V3.1" },
+      { id: "baseten-kimi-k2", name: "Kimi K2 Instruct", alias: "moonshotai/Kimi-K2-Instruct" },
+    ],
+  },
+  {
+    id: "venice",
+    name: "Venice AI",
+    description: "Venice AI privacy-first inference.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.venice.ai/api/v1",
+    models: [
+      { id: "venice-large", name: "Venice Large (Qwen3 235B)", alias: "qwen3-235b" },
+      { id: "venice-llama33", name: "Llama 3.3 70B", alias: "llama-3.3-70b" },
+    ],
+  },
+  {
+    id: "cloudflare-workers-ai",
+    name: "Cloudflare Workers AI",
+    description: "Cloudflare Workers AI; replace the account id in the URL.",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.cloudflare.com/client/v4/accounts/YOUR-ACCOUNT-ID/ai/v1",
+    models: [
+      { id: "cf-llama33", name: "Llama 3.3 70B Fast", alias: "@cf/meta/llama-3.3-70b-instruct-fp8-fast" },
+      { id: "cf-qwen-coder", name: "Qwen 2.5 Coder 32B", alias: "@cf/qwen/qwen2.5-coder-32b-instruct" },
+    ],
+  },
+  {
+    id: "meta-llama",
+    name: "Meta Llama API",
+    description: "Meta's official Llama API (OpenAI-compatible endpoint).",
+    protocol: "openai-compatible",
+    baseUrl: "https://api.llama.com/compat/v1",
+    models: [
+      { id: "llama4-maverick", name: "Llama 4 Maverick", alias: "Llama-4-Maverick-17B-128E-Instruct-FP8" },
+      { id: "llama4-scout", name: "Llama 4 Scout", alias: "Llama-4-Scout-17B-16E-Instruct-FP8" },
+      { id: "llama33-70b", name: "Llama 3.3 70B", alias: "Llama-3.3-70B-Instruct" },
+    ],
+  },
+  {
+    id: "ollama-cloud",
+    name: "Ollama Cloud",
+    description: "Ollama's hosted cloud models (ollama.com API key).",
+    protocol: "openai-compatible",
+    baseUrl: "https://ollama.com/v1",
+    models: [
+      { id: "ollama-cloud-qwen3-coder", name: "Qwen3 Coder 480B", alias: "qwen3-coder:480b" },
+      { id: "ollama-cloud-gpt-oss", name: "GPT OSS 120B", alias: "gpt-oss:120b" },
+      { id: "ollama-cloud-deepseek-v3", name: "DeepSeek V3.1 671B", alias: "deepseek-v3.1:671b" },
     ],
   },
   {
@@ -700,6 +985,7 @@ function createProviderFromPreset(preset: AiProviderPreset, existingProviders: A
     localPort,
     localPath,
     models: cloneModelTemplates(preset.models),
+    embeddingModel: "",
   };
 }
 
@@ -784,6 +1070,7 @@ function normalizeProvider(value: unknown, preserveText: boolean): AiProviderCon
     localPort: localEndpoint.localPort,
     localPath: localEndpoint.localPath,
     models: normalizeModels(value.models, preserveText, preset.models),
+    embeddingModel: normalizeEditableText(value.embeddingModel, "", preserveText),
   };
 }
 

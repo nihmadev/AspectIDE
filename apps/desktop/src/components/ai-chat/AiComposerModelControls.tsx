@@ -1,4 +1,4 @@
-import { Bot, Brain, Paperclip, Server, Sparkles } from "lucide-react";
+import { Bot, Brain, Paperclip, Sparkles } from "lucide-react";
 import { memo } from "react";
 import type { ReactNode, RefObject } from "react";
 import { CompactDropdown } from "../CompactDropdown";
@@ -11,9 +11,6 @@ type AiComposerModelControlsProps = {
   fileInputRef: RefObject<HTMLInputElement | null>;
   attachFiles: (files: FileList | File[] | null) => void;
   attachmentCount: number;
-  providerOptions: AiComposerSelectOption[];
-  selectedProviderId: string;
-  updateProvider: (selectedProviderId: string) => void;
   agentOptions: AiComposerSelectOption[];
   modelOptions: AiComposerSelectOption[];
   selectedModelId: string;
@@ -30,15 +27,13 @@ type AiComposerModelControlsProps = {
   t: TranslateFn;
 };
 
-/** Left composer actions: attach + provider/agent/model/effort selection. */
+/** Left composer actions: attach + agent/model/effort selection. Provider choice
+ *  lives inside the unified model picker (models are grouped per provider). */
 export const AiComposerModelControls = memo(function AiComposerModelControls({
   disabled,
   fileInputRef,
   attachFiles,
   attachmentCount,
-  providerOptions,
-  selectedProviderId,
-  updateProvider,
   agentOptions,
   modelOptions,
   selectedModelId,
@@ -77,16 +72,6 @@ export const AiComposerModelControls = memo(function AiComposerModelControls({
       >
         <Paperclip size={15} />
       </button>
-      {providerOptions.length > 1 && (
-        <CompactDropdown
-          className="ai-composer-select ai-composer-select-provider"
-          icon={<Server size={13} />}
-          label={t("aiChat.provider.label")}
-          value={selectedProviderId}
-          options={providerOptions}
-          onChange={updateProvider}
-        />
-      )}
       <CompactDropdown
         className="ai-composer-select"
         icon={<Bot size={13} />}

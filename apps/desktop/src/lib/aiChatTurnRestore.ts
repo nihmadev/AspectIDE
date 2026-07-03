@@ -3,8 +3,10 @@ import { findTurnCheckpointForUserMessage } from "./aiChatTurnCheckpoints";
 import { restoreFileCheckpointById } from "./aiRuntimeCheckpoints";
 import { normalizePathSlashes, readErrorMessage } from "./aiRuntimeShared";
 import { isPathInsideWorkspace, resolveWorkspacePath } from "./aiRuntimeFileContext";
+import { setAiSessionGoal } from "./aiSessionGoal";
+import { hydrateAiSessionTodos, type AiSessionTodo } from "./aiSessionTodos";
 import type { AiChatMessage, AiChatSendInput } from "./aiChatTypes";
-import { luxCommands } from "./tauri";
+import { isTauriRuntime, luxCommands } from "./tauri";
 import { useLuxStore } from "./store";
 import { loadTurnCheckpointMessages, pruneTurnCheckpointsFromIndex } from "./aiChatTurnCheckpoints";
 
@@ -14,6 +16,10 @@ export type RestoreChatTurnResult = {
   messages: AiChatMessage[];
   restoredFileCount: number;
   removedTurnCheckpoints: number;
+  /** Files actually captured in the file checkpoint (0 = no snapshot ever existed
+   *  for this turn — distinct from "captured but already matched disk"). Lets the
+   *  caller show an honest toast instead of a blanket "Restored 0 files" success. */
+  snapshotFileCount: number;
 };
 
 export async function restoreChatToTurnCheckpoint(params: {
@@ -44,6 +50,7 @@ export async function restoreChatToTurnCheckpoint(params: {
 
   const restore = await restoreFileCheckpointById(workspaceRoot, turn.fileCheckpointId, params.input, applyPatch);
   await reloadOpenDocumentsFromPaths(workspaceRoot, restore.restoredPaths);
+  restoreTurnSessionState(params.sessionId, turn.sessionGoal ?? "", turn.sessionTodos ?? []);
 
   const allTurns = listTurnCheckpoints(params.sessionId);
   const checkpointIndex = allTurns.findIndex((entry) => entry.id === turn.id);
@@ -54,6 +61,7 @@ export async function restoreChatToTurnCheckpoint(params: {
     messages: nextMessages,
     restoredFileCount: restore.restoredPaths.length,
     removedTurnCheckpoints,
+    snapshotFileCount: restore.snapshotFileCount,
   };
 }
 
@@ -104,6 +112,37 @@ export async function undoLastAgentTurn(params: {
     sessionId: params.sessionId,
     turnCheckpointId: target.turn.id,
   });
+}
+
+/**
+ * Roll back the session's orchestration state (pinned goal + task list) to what
+ * the checkpoint captured. Without this a restore rewound messages and files but
+ * left the goal rail and TodoWrite tasks from the rolled-back turn in place.
+ * The native (Rust) session store is mirrored too, otherwise the next turn's
+ * FastContext would re-inject the stale goal/tasks from Rust.
+ */
+function restoreTurnSessionState(sessionId: string, goal: string, todos: unknown[]) {
+  const normalizedTodos = todos.filter(isPersistedTodo).map((todo) => ({ ...todo }));
+  setAiSessionGoal(sessionId, goal);
+  hydrateAiSessionTodos(sessionId, normalizedTodos);
+  if (isTauriRuntime()) {
+    void luxCommands.aiSessionGoalSet(sessionId, goal).catch(() => undefined);
+    void luxCommands
+      .aiSessionTodosSet(sessionId, normalizedTodos.map((todo) => ({
+        id: todo.id,
+        content: todo.content,
+        status: todo.status,
+        priority: todo.priority,
+        notes: todo.notes,
+      })))
+      .catch(() => undefined);
+  }
+}
+
+function isPersistedTodo(value: unknown): value is AiSessionTodo {
+  if (!value || typeof value !== "object") return false;
+  const todo = value as Partial<AiSessionTodo>;
+  return typeof todo.id === "string" && typeof todo.content === "string" && typeof todo.status === "string";
 }
 
 async function reloadOpenDocumentsFromPaths(workspaceRoot: string, paths: string[]) {

@@ -183,7 +183,7 @@ export async function runRuntimeTool(
     case "BrowserChat":
       return browserChatTool(args, input, browserApprovalUi(input, ui));
     case "BrowserDashboard":
-      return browserDashboardTool(args, input);
+      return browserDashboardTool(args, input, browserApprovalUi(input, ui));
     case "BrowserInstall":
       return browserInstallTool(args, input, browserApprovalUi(input, ui));
     case "BrowserHelp":

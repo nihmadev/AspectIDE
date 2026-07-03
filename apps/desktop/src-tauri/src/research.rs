@@ -11,10 +11,11 @@
 use std::collections::HashMap;
 
 use lux_research::{
-    canonical_url_key, duckduckgo_lite_search_url, duckduckgo_search_url, expand_queries,
-    extract_result_links, focus_biased_query, parse_duckduckgo_html, parse_searxng_json, rerank,
-    rerank_deep, rerank_multi, searxng_search_url, FocusMode, MultiResearchResponse, ResearchDepth,
-    ResearchOptions, ResearchResponse, SearchHit,
+    brave_search_url, canonical_url_key, duckduckgo_lite_search_url, duckduckgo_search_url,
+    expand_queries, extract_result_links, focus_biased_query, parse_brave_html,
+    parse_duckduckgo_html, parse_searxng_json, rerank, rerank_deep, rerank_multi,
+    searxng_search_url, FocusMode, MultiResearchResponse, ResearchDepth, ResearchOptions,
+    ResearchResponse, SearchHit,
 };
 use tauri::State;
 
@@ -70,7 +71,7 @@ pub async fn web_research(
     let mut notes = Vec::new();
     if searxng.is_none() {
         notes.push(
-            "Using the keyless DuckDuckGo fallback. Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
+            "Using the keyless search fallback (DuckDuckGo, then Brave). Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
         );
     }
 
@@ -141,17 +142,17 @@ pub async fn web_research(
     // Backend answered but parsed to nothing: a search-backend issue, not "no results".
     if merged.is_empty() && backend_responded {
         notes.push(
-            "The DuckDuckGo search backend responded but no results could be parsed (it likely served an anomaly/challenge page, or its markup changed). This is a search-backend issue, not an absence of results — retry shortly, rephrase the query, or configure a SearxNG instance in Settings → AI → Web Research.".to_string(),
+            "The keyless search engines (DuckDuckGo, then Brave) responded but no results could be parsed (a challenge/anomaly page, or markup drift). This is a search-backend issue, not an absence of results — retry shortly, rephrase the query, or configure a SearxNG instance in Settings → AI → Web Research.".to_string(),
         );
     }
 
-    // `focus` maps to SearxNG categories only; the DuckDuckGo fallback has no
+    // `focus` maps to SearxNG categories only; the keyless engines have no
     // category knob, so it is approximated there by biasing the query text
     // (see [`focus_biased_query`]). Tell the model which mechanism applied.
     let effective_focus = options.focus;
-    if provider == "duckduckgo" && options.focus != FocusMode::Web {
+    if provider != "searxng" && options.focus != FocusMode::Web {
         notes.push(format!(
-            "focus '{}' has no native DuckDuckGo category; it was approximated by biasing the search query. Configure a SearxNG instance in Settings → AI → Web Research for true focus categories.",
+            "focus '{}' has no native {provider} category; it was approximated by biasing the search query. Configure a SearxNG instance in Settings → AI → Web Research for true focus categories.",
             options.focus.searxng_category(),
         ));
     }
@@ -315,7 +316,7 @@ pub async fn multi_web_research(
     let searxng = configured_searxng_url(&state);
     if searxng.is_none() {
         notes.push(
-            "Using the keyless DuckDuckGo fallback. Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
+            "Using the keyless search fallback (DuckDuckGo, then Brave). Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
         );
     }
 
@@ -403,9 +404,9 @@ pub async fn multi_web_research(
     pool.truncate(MULTI_MAX_FETCHES);
     surfaced_by.truncate(MULTI_MAX_FETCHES);
 
-    if provider == "duckduckgo" && options.focus != FocusMode::Web {
+    if provider != "searxng" && options.focus != FocusMode::Web {
         notes.push(format!(
-            "focus '{}' has no native DuckDuckGo category; it was approximated by biasing the search queries.",
+            "focus '{}' has no native {provider} category; it was approximated by biasing the search queries.",
             options.focus.searxng_category(),
         ));
     }
@@ -487,36 +488,51 @@ async fn search_provider(
                 fallback_note: None,
             }),
             Ok(_) => {
-                let outcome = search_duckduckgo(query, options.focus).await?;
+                let outcome = search_keyless(query, options.focus).await?;
                 Ok(ProviderSearch {
-                    provider: "duckduckgo",
+                    provider: keyless_provider_name(&outcome),
                     hits: outcome.hits,
                     backend_responded: outcome.backend_responded,
                     fallback_note: Some(
-                        "SearxNG returned no results; fell back to DuckDuckGo.".to_string(),
+                        "SearxNG returned no results; fell back to the keyless engines."
+                            .to_string(),
                     ),
                 })
             }
             Err(error) => {
-                let outcome = search_duckduckgo(query, options.focus).await?;
+                let outcome = search_keyless(query, options.focus).await?;
                 Ok(ProviderSearch {
-                    provider: "duckduckgo",
+                    provider: keyless_provider_name(&outcome),
                     hits: outcome.hits,
                     backend_responded: outcome.backend_responded,
                     fallback_note: Some(format!(
-                        "SearxNG search failed ({error}); fell back to DuckDuckGo."
+                        "SearxNG search failed ({error}); fell back to the keyless engines."
                     )),
                 })
             }
         }
     } else {
-        let outcome = search_duckduckgo(query, options.focus).await?;
+        let outcome = search_keyless(query, options.focus).await?;
         Ok(ProviderSearch {
-            provider: "duckduckgo",
+            provider: keyless_provider_name(&outcome),
             hits: outcome.hits,
             backend_responded: outcome.backend_responded,
             fallback_note: None,
         })
+    }
+}
+
+/// Which keyless engine actually produced the hits ("brave" when the Brave
+/// fallback rescued a DDG failure, else "duckduckgo").
+fn keyless_provider_name(outcome: &DuckDuckGoOutcome) -> &'static str {
+    if outcome
+        .hits
+        .first()
+        .is_some_and(|hit| hit.engine == "brave")
+    {
+        "brave"
+    } else {
+        "duckduckgo"
     }
 }
 
@@ -621,6 +637,51 @@ async fn search_searxng(
 struct DuckDuckGoOutcome {
     hits: Vec<SearchHit>,
     backend_responded: bool,
+}
+
+/// Keyless search: `DuckDuckGo` first (best markup for scraping when it answers),
+/// then Brave Search when DDG errors on every endpoint or serves its
+/// anomaly/challenge page (which currently 403s the html/lite endpoints for
+/// non-browser TLS/UA fingerprints). Engine name in the hits records which one
+/// actually produced results.
+async fn search_keyless(query: &str, focus: FocusMode) -> Result<DuckDuckGoOutcome, String> {
+    let ddg = search_duckduckgo(query, focus).await;
+    match ddg {
+        Ok(outcome) if !outcome.hits.is_empty() => Ok(outcome),
+        // DDG responded-but-empty (challenge page) or hard-failed → try Brave.
+        Ok(empty_outcome) => match search_brave(query, focus).await {
+            Ok(outcome) if !outcome.hits.is_empty() => Ok(outcome),
+            // Brave also empty/failed: keep DDG's outcome so the caller's
+            // "backend responded but unparseable" note stays accurate.
+            _ => Ok(empty_outcome),
+        },
+        Err(ddg_error) => match search_brave(query, focus).await {
+            Ok(outcome) => Ok(outcome),
+            Err(brave_error) => Err(format!(
+                "keyless search failed — DuckDuckGo: {ddg_error}; Brave: {brave_error}"
+            )),
+        },
+    }
+}
+
+/// Brave Search HTML fallback (keyless, GET). One stable endpoint; the parser
+/// keys off Brave's stable semantic tokens rather than its hashed classes.
+async fn search_brave(query: &str, focus: FocusMode) -> Result<DuckDuckGoOutcome, String> {
+    let biased = focus_biased_query(query, focus);
+    let query = biased.as_deref().unwrap_or(query);
+    let url = brave_search_url(query);
+    let body = web_fetch::fetch_text(
+        &url,
+        "text/html",
+        SEARCH_TIMEOUT_SECS,
+        SEARCH_MAX_BYTES,
+        false,
+    )
+    .await?;
+    Ok(DuckDuckGoOutcome {
+        hits: parse_brave_html(&body),
+        backend_responded: true,
+    })
 }
 
 async fn search_duckduckgo(query: &str, focus: FocusMode) -> Result<DuckDuckGoOutcome, String> {

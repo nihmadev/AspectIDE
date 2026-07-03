@@ -14,6 +14,14 @@ export type LspInstallProgress = {
   step: string;
   /** Populated when status === "error". */
   error?: string;
+  /**
+   * True once the "Uninstalling" step has arrived on this flow. Install and
+   * uninstall share the same `status: "installing"` shape (and the same
+   * lux://lsp-install channel) — this is the only way row UI can tell which
+   * operation is actually in flight, e.g. to swap "Installing…" for
+   * "Uninstalling…" on the buttons.
+   */
+  uninstalling?: boolean;
 };
 
 type Listener = () => void;
@@ -66,18 +74,33 @@ function setProgress(languageId: string, value: LspInstallProgress | null) {
 function handleEvent(event: LspInstallEvent) {
   switch (event.kind) {
     case "started":
-      setProgress(event.languageId, { status: "installing", percent: 0, step: "Starting" });
+      // `intent` is set separately by the caller (installServer/uninstallServer)
+      // right before invoking, so a fast "started" arriving first doesn't briefly
+      // show "Installing…" for what's actually an uninstall; preserve it here.
+      setProgress(event.languageId, {
+        status: "installing",
+        percent: 0,
+        step: "Starting",
+        uninstalling: progressByLanguage[event.languageId]?.uninstalling,
+      });
       break;
-    case "progress":
+    case "progress": {
+      // The "Uninstalling" step is the one signal shared between install and
+      // uninstall on this channel — once seen, stick with it even if a later
+      // step label doesn't repeat the word (defensive; current recipes always do).
+      const wasUninstalling = progressByLanguage[event.languageId]?.uninstalling;
       setProgress(event.languageId, {
         status: "installing",
         percent: Math.max(0, Math.min(100, Math.round(event.percent))),
         step: event.step,
+        uninstalling: wasUninstalling || event.step === "Uninstalling",
       });
       break;
+    }
     case "finished":
       if (event.success) {
-        // Clear progress on success; the catalog refresh will flip it to "installed".
+        // Clear progress on success; the catalog refresh will flip it to
+        // "installed" (install) or "not installed" (uninstall, path: null).
         setProgress(event.languageId, null);
       } else {
         setProgress(event.languageId, {
@@ -85,6 +108,7 @@ function handleEvent(event: LspInstallEvent) {
           percent: 0,
           step: "Failed",
           error: event.error ?? "Install failed",
+          uninstalling: progressByLanguage[event.languageId]?.uninstalling,
         });
       }
       for (const handler of finishListeners) handler(event.languageId, event.success);
@@ -114,4 +138,19 @@ export function ensureLspInstallSubscription() {
 export function clearLspInstallError(languageId: string) {
   const current = progressByLanguage[languageId];
   if (current?.status === "error") setProgress(languageId, null);
+}
+
+/**
+ * Seed the uninstall intent into THIS store before invoking the Tauri command,
+ * so the "started" event (which carries no operation kind) preserves it and the
+ * row never flashes "Installing…" for an uninstall. Callers must set this —
+ * component-local state can't reach the module map the event handler reads.
+ */
+export function setLspUninstallIntent(languageId: string) {
+  setProgress(languageId, {
+    status: "installing",
+    percent: 0,
+    step: "Starting",
+    uninstalling: true,
+  });
 }

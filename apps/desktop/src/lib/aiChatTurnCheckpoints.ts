@@ -7,6 +7,8 @@ import {
   type PersistedTurnCheckpoint,
 } from "./aiChatCheckpointStore";
 import { createFileCheckpointForTurn } from "./aiRuntimeCheckpoints";
+import { getAiSessionGoal } from "./aiSessionGoal";
+import { listAiSessionTodos } from "./aiSessionTodos";
 import type { AiChatMessage, AiChatSendInput } from "./aiChatTypes";
 
 export type TurnCheckpointSummary = {
@@ -37,6 +39,10 @@ export async function createTurnCheckpointBeforeSend(params: {
     fileCheckpointId: fileCheckpoint.id,
     changedPaths: [],
     messages: params.messages.map(cloneMessageForCheckpoint),
+    // Orchestration state travels with the turn so a rollback also restores the
+    // pinned goal and task list — not just messages and files.
+    sessionGoal: getAiSessionGoal(params.sessionId),
+    sessionTodos: listAiSessionTodos(params.sessionId).map((todo) => ({ ...todo })),
   };
   upsertTurnCheckpoint(turn);
   return summarizeTurnCheckpoint(turn);

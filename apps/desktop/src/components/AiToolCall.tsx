@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import {
   Activity,
@@ -33,6 +33,7 @@ import {
 import type { LucideIcon } from "lucide-react";
 import type { AiToolApprovalDecision, AiToolApprovalState } from "../lib/aiChatTypes";
 import { extractReviewPathFromToolInput, requestFileReviewFocus } from "../lib/aiFileReviewBridge";
+import { getAiShellLiveOutput, getAiShellLiveOutputVersion, subscribeAiShellLiveOutput } from "../lib/aiShellLiveOutput";
 import type { TranslateFn } from "../lib/i18n/useTranslation";
 
 /** How long a manual expand/collapse of a tool-call group survives before the
@@ -179,10 +180,24 @@ export function AiToolCall({ onApprovalDecision, t, toolCall }: AiToolCallProps)
   const duration = toolCall.endTime ? toolCall.endTime - toolCall.startTime : Date.now() - toolCall.startTime;
   const durationText = duration < 1000 ? t("aiTools.duration.ms", { duration }) : t("aiTools.duration.s", { duration: (duration / 1000).toFixed(1) });
   const isApproval = toolCall.status === "approval";
-  const detail = toolCall.status === "error" ? toolCall.error : toolCall.status === "skipped" ? toolCall.error : toolCall.output;
+  // Live tail for a RUNNING Shell: the Rust mirror streams output keyed by tool-call
+  // id, so the row is expandable while the command runs — not only after completion.
+  const isRunning = toolCall.status === "running";
+  useSyncExternalStore(subscribeAiShellLiveOutput, getAiShellLiveOutputVersion, getAiShellLiveOutputVersion);
+  const liveOutput = isRunning ? getAiShellLiveOutput(toolCall.id) : "";
+  const finalDetail = toolCall.status === "error" ? toolCall.error : toolCall.status === "skipped" ? toolCall.error : toolCall.output;
+  const detail = finalDetail?.trim() ? finalDetail : liveOutput;
+  const isLiveDetail = Boolean(isRunning && !finalDetail?.trim() && liveOutput);
   const hasDetail = Boolean(detail && detail.trim());
   const collapsible = !isApproval && hasDetail;
   const [expanded, setExpanded] = useState(false);
+  // Auto-follow: keep the live tail pinned to the newest output while expanded.
+  const liveTailRef = useRef<HTMLPreElement | null>(null);
+  useEffect(() => {
+    if (!expanded || !isLiveDetail) return;
+    const node = liveTailRef.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [expanded, isLiveDetail, liveOutput]);
 
   const stats = toolCall.stats;
   const hasStats = Boolean(stats && (stats.linesAdded || stats.linesRemoved || stats.filesChanged || stats.filesCreated || stats.filesDeleted));
@@ -259,12 +274,13 @@ export function AiToolCall({ onApprovalDecision, t, toolCall }: AiToolCallProps)
           <motion.div
             className="ai-tool-call-body"
             data-kind={toolCall.status}
+            data-live={isLiveDetail || undefined}
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
             transition={{ duration: 0.18, ease: [0.4, 0, 0.2, 1] }}
           >
-            <pre>{detail}</pre>
+            <pre ref={liveTailRef}>{detail}</pre>
           </motion.div>
         )}
       </AnimatePresence>

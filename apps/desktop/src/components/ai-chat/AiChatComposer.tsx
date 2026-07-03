@@ -61,8 +61,6 @@ type AiChatComposerProps = {
   onHideModel?: (value: string) => void;
   hideModelLabel?: string;
   modelFooter?: ReactNode;
-  providerOptions: AiComposerSelectOption[];
-  selectedProviderId: string;
   preferences: AiPreferences;
   removeAttachment: (id: string) => void;
   selectedModelId: string;
@@ -73,7 +71,6 @@ type AiChatComposerProps = {
   textareaRef: RefObject<HTMLTextAreaElement | null>;
   updateAiPreference: (patch: Partial<AiPreferences>) => void;
   updateModel: (selectedModelId: string) => void;
-  updateProvider: (selectedProviderId: string) => void;
   voiceInput: AiComposerVoiceState;
 };
 
@@ -128,8 +125,6 @@ export function AiChatComposer({
   onHideModel,
   hideModelLabel,
   modelFooter,
-  providerOptions,
-  selectedProviderId,
   preferences,
   removeAttachment,
   selectedModelId,
@@ -140,7 +135,6 @@ export function AiChatComposer({
   textareaRef,
   updateAiPreference,
   updateModel,
-  updateProvider,
   voiceInput,
 }: AiChatComposerProps) {
   return (
@@ -193,9 +187,6 @@ export function AiChatComposer({
           fileInputRef={fileInputRef}
           attachFiles={attachFiles}
           attachmentCount={attachments.length}
-          providerOptions={providerOptions}
-          selectedProviderId={selectedProviderId}
-          updateProvider={updateProvider}
           agentOptions={agentOptions}
           modelOptions={modelOptions}
           selectedModelId={selectedModelId}

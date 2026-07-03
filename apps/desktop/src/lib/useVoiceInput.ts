@@ -35,9 +35,18 @@ type WindowWithSpeech = Window & {
   SpeechRecognition?: SpeechRecognitionConstructor;
   webkitSpeechRecognition?: SpeechRecognitionConstructor;
   MediaRecorder?: typeof MediaRecorder & { isTypeSupported?: (mimeType: string) => boolean };
+  webkitAudioContext?: typeof AudioContext;
 };
 
 type VoiceInputMode = "idle" | "recording" | "transcribing";
+
+// Slim vertical bars in the mic button's live wave meter — kept in sync with the
+// CSS (.ai-voice-wave renders exactly this many <span> bars).
+const VOICE_METER_BAR_COUNT = 5;
+
+function prefersReducedMotion() {
+  return typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+}
 
 type UseVoiceInputOptions = {
   message: string;
@@ -62,6 +71,92 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
   const voiceBaseMessageRef = useRef("");
   const voiceFinalTranscriptRef = useRef("");
   const voiceInterimTranscriptRef = useRef("");
+  // Live mic-level wave bars on the button — driven entirely off the rAF loop below
+  // (no React state) so a token stream of level updates never re-renders the panel.
+  const voiceBarsRef = useRef<HTMLSpanElement | null>(null);
+  const micLevelAudioCtxRef = useRef<AudioContext | null>(null);
+  const micLevelAnalyserRef = useRef<AnalyserNode | null>(null);
+  const micLevelSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const micLevelDataRef = useRef<Uint8Array<ArrayBuffer> | null>(null);
+  const micLevelRafRef = useRef<number | null>(null);
+  // Only set when the meter opened its OWN stream (native/webkit provider — Web
+  // Speech exposes no audio access, so its permission warm-up stream is repurposed
+  // as the meter's source instead of discarding it). Local STT's MediaRecorder
+  // stream is borrowed read-only here and stays owned/stopped by that flow.
+  const micLevelOwnedStreamRef = useRef<MediaStream | null>(null);
+  // Invalidates an in-flight warm-up getUserMedia promise if listening already
+  // stopped by the time it resolves (fast toggle), so its stream isn't adopted late.
+  const micLevelTokenRef = useRef(0);
+
+  const stopMicLevelMeter = useCallback(() => {
+    if (micLevelRafRef.current !== null) {
+      cancelAnimationFrame(micLevelRafRef.current);
+      micLevelRafRef.current = null;
+    }
+    try {
+      micLevelSourceRef.current?.disconnect();
+    } catch {
+      undefined;
+    }
+    micLevelSourceRef.current = null;
+    micLevelAnalyserRef.current = null;
+    micLevelDataRef.current = null;
+    const ctx = micLevelAudioCtxRef.current;
+    micLevelAudioCtxRef.current = null;
+    if (ctx && ctx.state !== "closed") void ctx.close().catch(() => undefined);
+    // Only stop tracks on a stream WE opened solely for metering (native/webkit's
+    // reused warm-up stream) — never touch a stream owned by MediaRecorder/local STT.
+    micLevelOwnedStreamRef.current?.getTracks().forEach((track) => track.stop());
+    micLevelOwnedStreamRef.current = null;
+    const container = voiceBarsRef.current;
+    if (container) {
+      for (const bar of Array.from(container.children)) {
+        (bar as HTMLElement).style.removeProperty("--voice-level");
+      }
+    }
+  }, []);
+
+  const startMicLevelMeter = useCallback((stream: MediaStream) => {
+    // Reduced motion: no rAF loop at all (CPU/battery neutral) — CSS hides the bars
+    // and leaves the button's existing static recording tint as the only cue.
+    if (prefersReducedMotion()) return;
+    const AudioCtx = window.AudioContext ?? (window as WindowWithSpeech).webkitAudioContext;
+    if (!AudioCtx) return;
+    try {
+      const ctx = new AudioCtx();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.75;
+      source.connect(analyser);
+      micLevelAudioCtxRef.current = ctx;
+      micLevelAnalyserRef.current = analyser;
+      micLevelSourceRef.current = source;
+      micLevelDataRef.current = new Uint8Array(analyser.frequencyBinCount);
+      const tick = () => {
+        const container = voiceBarsRef.current;
+        const liveAnalyser = micLevelAnalyserRef.current;
+        const buffer = micLevelDataRef.current;
+        if (container && liveAnalyser && buffer) {
+          const bars = container.children;
+          const levels = computeVoiceBarLevels(liveAnalyser, buffer, bars.length || VOICE_METER_BAR_COUNT);
+          for (let index = 0; index < bars.length; index += 1) {
+            // A gentle floor keeps the bars visibly "alive" while listening in
+            // silence, per spec ("idle-but-listening: gentle low bars").
+            const level = Math.min(1, Math.max(0.14, levels[index] ?? 0));
+            (bars[index] as HTMLElement).style.setProperty("--voice-level", level.toFixed(3));
+          }
+        }
+        micLevelRafRef.current = requestAnimationFrame(tick);
+      };
+      micLevelRafRef.current = requestAnimationFrame(tick);
+    } catch {
+      // Unsupported/blocked AudioContext: leave the bars at rest — no error surfaced,
+      // no regression to the existing recording UI (mirrors the pre-existing
+      // best-effort warm-up stream handling below).
+      stopMicLevelMeter();
+    }
+  }, [stopMicLevelMeter]);
 
   const voiceSelectedProvider = preferences.voiceInputProvider;
   const canUseVoice = preferences.voiceInputEnabled
@@ -139,6 +234,8 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
         undefined;
       }
       recognitionRef.current = null;
+      micLevelTokenRef.current += 1;
+      stopMicLevelMeter();
       stopLocalVoiceRecording(false);
     };
   }, []);
@@ -197,15 +294,27 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
       return;
     }
 
-    // Warm-up mic so the permission dialog appears before SpeechRecognition fails silently.
+    setVoiceError(null);
+    resetLiveTranscript(latestMessageRef.current);
+    const levelToken = (micLevelTokenRef.current += 1);
+    // Warm-up mic so the permission dialog appears before SpeechRecognition fails
+    // silently. SpeechRecognition manages its own internal capture and exposes no
+    // stream/analyser access, so this warm-up stream — kept alive instead of
+    // stopped immediately — doubles as the wave meter's only audio source (never a
+    // second, redundant getUserMedia call).
     if (navigator.mediaDevices?.getUserMedia) {
       navigator.mediaDevices.getUserMedia({ audio: true })
-        .then((stream) => stream.getTracks().forEach((track) => track.stop()))
+        .then((stream) => {
+          if (levelToken !== micLevelTokenRef.current) {
+            stream.getTracks().forEach((track) => track.stop());
+            return;
+          }
+          micLevelOwnedStreamRef.current = stream;
+          startMicLevelMeter(stream);
+        })
         .catch(() => undefined);
     }
 
-    setVoiceError(null);
-    resetLiveTranscript(latestMessageRef.current);
     try {
       const recognition = new Recognition();
       recognition.continuous = true;
@@ -233,12 +342,16 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
       recognition.onerror = (event) => {
         setVoiceError(formatVoiceError(t, event));
         recognitionRef.current = null;
+        micLevelTokenRef.current += 1;
+        stopMicLevelMeter();
         setListening(false);
       };
       recognition.onend = () => {
         voiceInterimTranscriptRef.current = "";
         renderLiveTranscript();
         recognitionRef.current = null;
+        micLevelTokenRef.current += 1;
+        stopMicLevelMeter();
         setListening(false);
       };
       recognitionRef.current = recognition;
@@ -246,12 +359,16 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
       setListening(true);
     } catch (error) {
       recognitionRef.current = null;
+      micLevelTokenRef.current += 1;
+      stopMicLevelMeter();
       setListening(false);
       setVoiceError(readErrorMessage(t, error));
     }
   };
 
   function stopNativeRecognition() {
+    micLevelTokenRef.current += 1;
+    stopMicLevelMeter();
     const recognition = recognitionRef.current;
     recognitionRef.current = null;
     if (!recognition) return;
@@ -311,6 +428,9 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
       recorder.start();
       setListening(true);
       setVoiceMode("recording");
+      // Reuse the exact stream MediaRecorder is already capturing — no second
+      // getUserMedia call for the meter.
+      startMicLevelMeter(stream);
     } catch (error) {
       cleanupLocalRecording();
       setListening(false);
@@ -365,6 +485,7 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
   }
 
   function cleanupLocalRecording() {
+    stopMicLevelMeter();
     mediaRecorderRef.current = null;
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
     mediaStreamRef.current = null;
@@ -374,11 +495,36 @@ export function useVoiceInput({ message, preferences, updateMessage }: UseVoiceI
     canUseVoice,
     listening,
     toggleVoiceInput,
+    voiceBarsRef,
     voiceError,
     voiceLabel,
     voiceMode,
     voiceTitle,
   };
+}
+
+/** Splits the analyser's frequency spectrum into `barCount` groups (skipping the
+ *  near-DC bin, which mostly carries mic self-noise) and averages each into 0..1 —
+ *  gives each bar a distinct, audio-driven height instead of one flat pulse. */
+function computeVoiceBarLevels(analyser: AnalyserNode, buffer: Uint8Array<ArrayBuffer>, barCount: number): number[] {
+  analyser.getByteFrequencyData(buffer);
+  const start = 1;
+  const end = Math.max(start + barCount, Math.floor(buffer.length * 0.5));
+  const span = end - start;
+  const bucketSize = Math.max(1, Math.floor(span / barCount));
+  const levels: number[] = [];
+  for (let bar = 0; bar < barCount; bar += 1) {
+    const bucketStart = start + bar * bucketSize;
+    const bucketEnd = bar === barCount - 1 ? end : bucketStart + bucketSize;
+    let sum = 0;
+    let count = 0;
+    for (let index = bucketStart; index < bucketEnd && index < buffer.length; index += 1) {
+      sum += buffer[index];
+      count += 1;
+    }
+    levels.push(count > 0 ? sum / count / 255 : 0);
+  }
+  return levels;
 }
 
 function resolveVoiceLanguage(language: AiVoiceInputLanguage) {

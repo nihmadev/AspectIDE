@@ -147,6 +147,97 @@ button {
   color: inherit;
 }
 
+/* Native form widgets (checkboxes, radios, progress, date pickers) pick up the
+   product accent instead of the OS default blue. */
+:root {
+  accent-color: var(--accent);
+}
+
+/* One keyboard-focus language for the whole app: custom controls widely set
+   `outline: 0`, which left keyboard users with no focus indicator at all in
+   many surfaces. :focus-visible fires only for keyboard/assistive navigation,
+   so mouse clicks stay clean while Tab shows a consistent accent ring. */
+button:focus-visible,
+a:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible,
+[role="tab"]:focus-visible,
+[tabindex]:focus-visible {
+  /* outline follows the element's own border-radius in Chromium/WebView2. */
+  outline: 2px solid var(--accent-strong);
+  outline-offset: 1px;
+}
+
+/* ----------------------------------------------------------------
+   Range slider — modern accent slider with a filled progress track.
+   Components set `--range-progress` (0-100%) inline for the fill;
+   without it the track falls back to a neutral, still-polished bar.
+   ---------------------------------------------------------------- */
+input[type="range"] {
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background:
+    linear-gradient(var(--accent), var(--accent)) 0 / var(--range-progress, 0%) 100% no-repeat,
+    var(--surface-2);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 0;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+input[type="range"]:hover::-webkit-slider-thumb {
+  transform: scale(1.15);
+}
+
+input[type="range"]:focus-visible {
+  outline: none;
+}
+
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 0 0 3px var(--accent-soft);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+
+input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
 ::selection {
   background: rgba(59, 158, 255, 0.30);
 }

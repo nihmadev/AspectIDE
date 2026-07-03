@@ -30,6 +30,11 @@ export type PersistedTurnCheckpoint = {
   fileCheckpointId: string;
   changedPaths: string[];
   messages: unknown[];
+  /** Pinned session goal captured before this turn ran; restored on rollback. */
+  sessionGoal?: string;
+  /** Session task list captured before this turn ran; restored on rollback.
+   *  Untyped to keep the store schema-agnostic — hydration normalizes. */
+  sessionTodos?: unknown[];
 };
 
 type CheckpointStoreDocument = {

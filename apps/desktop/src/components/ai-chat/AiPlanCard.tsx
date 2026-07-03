@@ -1,5 +1,7 @@
 import {
   AlertTriangle,
+  ArrowRight,
+  Bot,
   CheckCircle2,
   ChevronRight,
   FileCode,
@@ -7,6 +9,7 @@ import {
   Gauge,
   ListChecks,
   Loader2,
+  NotebookPen,
   Play,
   Sparkles,
 } from "lucide-react";
@@ -189,6 +192,20 @@ export function AiPlanCard({ plan, onStart, busy, agentMode, t }: AiPlanCardProp
         ) : (
           <>
             <span className="ai-plan-card-tip">{t("aiChat.plan.startHint")}</span>
+            {/* Mode-transition chip: starting a plan visibly hands the chat from
+                Plan (read-only) to Agent (execution) — the switch used to be
+                invisible until the user noticed the mode selector had changed. */}
+            <span className="ai-plan-mode-switch" title={t("aiChat.plan.modeSwitch")}>
+              <span className="ai-plan-mode" data-mode="plan">
+                <NotebookPen size={11} aria-hidden="true" />
+                Plan
+              </span>
+              <ArrowRight size={11} aria-hidden="true" className="ai-plan-mode-arrow" />
+              <span className="ai-plan-mode" data-mode="agent">
+                <Bot size={11} aria-hidden="true" />
+                Agent
+              </span>
+            </span>
             <button type="button" className="ai-plan-start" onClick={onStart} disabled={busy}>
               <Play size={12} />
               {t("aiChat.plan.start")}

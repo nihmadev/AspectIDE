@@ -340,12 +340,24 @@ export async function createFileCheckpointForTurn(
   const workspaceRoot = requireWorkspaceRoot(input);
   const maxFiles = defaultCheckpointMaxFiles;
   const maxBytesPerFile = defaultCheckpointMaxBytesPerFile;
+  const hasOpenEditorTabs = input.openDocuments.some((document) => Boolean(document.path?.trim()));
+  // Union of open editor tabs + git-modified files — bounded by maxFiles. Best-effort
+  // and fast: checkpointTargetPaths already swallows a git failure (non-repo
+  // workspace) and falls back to whatever it collected from open documents.
+  const paths = await checkpointTargetPaths({
+    includeOpenDocuments: hasOpenEditorTabs,
+    includeGitChanges: true,
+  }, input, maxFiles);
 
-  // Native Rust path: file snapshot store lives in ai_checkpoint.
+  // Native Rust path: file snapshot store lives in ai_checkpoint. Pass the same
+  // broadened path set so the initial turn snapshot covers git-modified files too,
+  // not just whatever tabs happen to be open — without this, a Rollback could not
+  // restore a file the agent edited that was never opened in the editor.
   if (isTauriRuntime()) {
     try {
       const result = await luxCommands.aiCheckpoint("create", {
         label,
+        paths: paths.length > 0 ? paths : undefined,
         maxFiles,
         maxBytesPerFile,
         nowMs: Date.now(),
@@ -359,11 +371,6 @@ export async function createFileCheckpointForTurn(
     }
   }
 
-  const hasOpenEditorTabs = input.openDocuments.some((document) => Boolean(document.path?.trim()));
-  const paths = await checkpointTargetPaths({
-    includeOpenDocuments: hasOpenEditorTabs,
-    includeGitChanges: true,
-  }, input, maxFiles);
   const openByPath = openDocumentByAbsolutePath(input, workspaceRoot);
   const files = await Promise.all(paths.map((path) => snapshotCheckpointFile(path, workspaceRoot, openByPath, maxBytesPerFile)));
   const checkpoint: RuntimeCheckpoint = {
@@ -447,9 +454,17 @@ export async function restoreFileCheckpointById(
       saveToDisk: true,
       dryRun: false,
       nowMs: Date.now(),
-    })) as { status?: string; operations?: number; result?: { changedPaths?: string[] } };
+    })) as { status?: string; operations?: number; snapshotFileCount?: number; result?: { changedPaths?: string[] } };
     const restoredPaths = (response.result?.changedPaths ?? []).map((path) => normalizePathSlashes(path));
-    return { restoredPaths, operations: response.operations ?? restoredPaths.length, result: response.result };
+    return {
+      restoredPaths,
+      operations: response.operations ?? restoredPaths.length,
+      // Distinguishes "nothing captured for this turn" (0) from "captured but the
+      // checkpoint's files already matched disk" (>0, operations 0) — the restore
+      // toast reads this to avoid lying about what "0 files restored" means.
+      snapshotFileCount: response.snapshotFileCount ?? restoredPaths.length,
+      result: response.result,
+    };
   }
 
   const checkpoint = selectCheckpointById(workspaceRoot, checkpointId);
@@ -461,10 +476,10 @@ export async function restoreFileCheckpointById(
   }
   const current = await Promise.all(files.map((file) => diffCheckpointFile(file, workspaceRoot, openByPath, checkpoint.maxBytesPerFile)));
   const operations = checkpointRestoreOperations(files, current);
-  if (operations.length === 0) return { restoredPaths: [] as string[], operations: 0 };
+  if (operations.length === 0) return { restoredPaths: [] as string[], operations: 0, snapshotFileCount: files.length };
   const result = await applyPatch(operations, true, false);
   const restoredPaths = operations.map((operation) => operation.path);
-  return { restoredPaths, operations: operations.length, result };
+  return { restoredPaths, operations: operations.length, snapshotFileCount: files.length, result };
 }
 
 function checkpointStore(workspaceRoot: string) {

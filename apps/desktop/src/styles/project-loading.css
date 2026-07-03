@@ -36,13 +36,13 @@
   background: var(--bg-0);
 }
 
+/* Monochrome progress line — Codex lineage: no accent gradient, no glow. */
 .project-load-topbar::before {
   content: "";
   position: absolute;
   inset: 0;
   width: var(--load-progress, 0%);
-  background: linear-gradient(90deg, var(--accent-strong) 0%, var(--accent) 60%, #6eb6ff 100%);
-  box-shadow: 0 0 8px var(--accent-soft);
+  background: rgba(255, 255, 255, 0.38);
   transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -52,7 +52,7 @@
   top: 0;
   bottom: 0;
   width: 35%;
-  background: linear-gradient(90deg, transparent, rgb(110 182 255 / 70%), transparent);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
   transform: translateX(-120%);
   animation: project-load-topbar-slide 1.25s ease-in-out infinite;
 }
@@ -187,60 +187,58 @@
   100% { background-position: -80% 0; }
 }
 
+/* Compact, quiet card — the skeleton behind it carries the "app is forming"
+   story; the card only reports facts. Codex lineage: monochrome, tight. */
 .project-load-card {
   position: relative;
   z-index: 1;
   display: grid;
-  gap: 22px;
-  width: min(420px, calc(100vw - 60px));
-  padding: 22px 24px 20px;
+  gap: 12px;
+  width: min(360px, calc(100vw - 60px));
+  padding: 16px 18px 14px;
   border: 1px solid var(--border-subtle);
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--surface-0);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-md);
   animation: project-load-card-in 400ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .project-load-header {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 14px;
-  align-items: start;
+  gap: 11px;
+  align-items: center;
   min-width: 0;
 }
 
 .project-load-icon {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
+  width: 34px;
+  height: 34px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
   background: linear-gradient(160deg, var(--surface-1), var(--surface-0));
   box-shadow: inset 0 1px 0 var(--on-surface-faint);
-  color: var(--accent);
+  color: var(--icon-strong);
 }
 
 .project-load-header-copy {
   display: grid;
-  gap: 3px;
+  gap: 1px;
   min-width: 0;
 }
 
 .project-load-eyebrow {
-  color: var(--text-2);
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  display: none; /* the folder icon + name already say it — no label shouting */
 }
 
 .project-load-title {
   margin: 0;
   color: var(--text-0);
-  font-size: 16px;
-  font-weight: 650;
-  line-height: 1.2;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.25;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -257,31 +255,27 @@
 
 .project-load-steps {
   display: grid;
-  gap: 2px;
+  gap: 0;
   margin: 0;
-  padding: 12px 0 4px;
+  padding: 8px 0 2px;
   list-style: none;
   border-top: 1px solid var(--border-subtle);
 }
 
+/* Quiet checklist rows: no fills, no pulses — state lives in the glyph and the
+   text weight alone (only the done-check keeps a tinted glyph, turn-summary
+   style). */
 .project-load-step {
   display: grid;
-  grid-template-columns: 28px 1fr;
-  gap: 10px;
+  grid-template-columns: 20px 1fr;
+  gap: 8px;
   align-items: center;
-  min-height: 30px;
-  padding: 3px 8px;
-  border-radius: var(--radius-sm);
-  transition: background 180ms ease, color 180ms ease;
-}
-
-.project-load-step[data-state="active"] {
-  background: var(--hover-soft);
-  animation: project-load-step-pulse 1.6s ease-in-out infinite;
+  min-height: 25px;
+  transition: color 180ms ease;
 }
 
 .project-load-step[data-state="done"] .project-load-step-label {
-  color: var(--text-1);
+  color: var(--text-2);
 }
 
 .project-load-step[data-state="pending"] .project-load-step-label {
@@ -291,19 +285,14 @@
 .project-load-step-marker {
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
-  border-radius: 999px;
-  color: var(--accent);
+  width: 18px;
+  height: 18px;
+  color: var(--text-1);
 }
 
 .project-load-step[data-state="done"] .project-load-step-marker {
   color: var(--success);
-  background: rgba(91, 201, 138, 0.14);
-}
-
-.project-load-step[data-state="active"] .project-load-step-marker {
-  background: var(--accent-soft);
+  opacity: 0.85;
 }
 
 .project-load-step[data-state="pending"] .project-load-step-marker {
@@ -311,16 +300,16 @@
 }
 
 .project-load-step-dot {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   border-radius: 999px;
   background: var(--border-strong);
 }
 
 .project-load-step-label {
   color: var(--text-1);
-  font-size: 12.5px;
-  font-weight: 520;
+  font-size: 12px;
+  font-weight: 500;
   line-height: 1.3;
 }
 
@@ -369,32 +358,24 @@
 }
 
 .project-load-bar-track {
-  height: 5px;
+  height: 3px;
   border-radius: 999px;
-  background: var(--bg-0);
+  background: var(--surface-2);
   overflow: hidden;
 }
 
+/* Monochrome fill — a quiet light bar, no gradient, no glow. Indeterminate
+   breathes via opacity instead of a moving white sweep. */
 .project-load-bar {
   position: relative;
   height: 100%;
   border-radius: inherit;
-  background: linear-gradient(90deg, var(--accent-strong) 0%, var(--accent) 60%, #6eb6ff 100%);
+  background: var(--icon-strong);
   transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.project-load-bar[data-indeterminate="true"]::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    rgb(255 255 255 / 28%) 45%,
-    transparent 100%
-  );
-  transform: translateX(-120%);
-  animation: project-load-bar-shimmer 1.35s ease-in-out infinite;
+.project-load-bar[data-indeterminate="true"] {
+  animation: project-load-bar-breathe 1.6s ease-in-out infinite;
 }
 
 .project-load-overlay[data-stage="error"] .project-load-bar {
@@ -469,13 +450,9 @@
   to { transform: rotate(360deg); }
 }
 
-@keyframes project-load-step-pulse {
-  0%, 100% { background: var(--hover-soft); }
-  50% { background: var(--selected); }
-}
-
-@keyframes project-load-bar-shimmer {
-  to { transform: translateX(220%); }
+@keyframes project-load-bar-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
 }
 
 .project-load-overlay[data-exiting] {

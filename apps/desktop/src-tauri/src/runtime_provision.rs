@@ -871,7 +871,13 @@ fn finalize_marker(app: &AppHandle, runtime: Runtime) -> Result<String, String> 
     }
 }
 
-fn http_client() -> Result<reqwest::Client, String> {
+// `pub` (not `pub(crate)`): consistent with the rest of this module's cross-module
+// helpers (`is_managed_path`, `prepended_path`, …) — `runtime_provision` is itself a
+// private module, so `pub` here already stops at the crate boundary. Reused by
+// `lsp_install`'s GitHub-release installer (`http_client`/`extract_archive`/
+// `single_child_dir`/`replace_runtime_dir`/`unique_scratch_path`), which needs no
+// runtime and so has no download/extract/tombstone-swap machinery of its own.
+pub fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .user_agent("Lux-IDE")
@@ -1058,7 +1064,7 @@ fn lone_sha256(body: &str) -> Result<String, String> {
 
 /// Extract a `.zip` or `.tar.gz` archive into `dest` (created fresh). Runs on a
 /// blocking thread — the zip/tar crates are synchronous.
-async fn extract_archive(archive: &Path, dest: &Path, ext: &str) -> Result<(), String> {
+pub async fn extract_archive(archive: &Path, dest: &Path, ext: &str) -> Result<(), String> {
     tokio::fs::create_dir_all(dest)
         .await
         .map_err(|e| e.to_string())?;
@@ -1114,7 +1120,7 @@ fn extract_tar_gz(archive: &Path, dest: &Path) -> Result<(), String> {
 
 /// If `dir` contains exactly one entry and it is a directory, return it (used to
 /// strip the single top-level folder inside Node archives).
-async fn single_child_dir(dir: &Path) -> Result<Option<PathBuf>, String> {
+pub async fn single_child_dir(dir: &Path) -> Result<Option<PathBuf>, String> {
     let mut entries = tokio::fs::read_dir(dir).await.map_err(|e| e.to_string())?;
     let mut found: Option<PathBuf> = None;
     while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
@@ -1141,7 +1147,7 @@ async fn single_child_dir(dir: &Path) -> Result<Option<PathBuf>, String> {
 /// any existing `dest` aside to a unique tombstone (with retry/backoff), failing with
 /// an actionable error if it is locked, and only then move `staged` into place. The
 /// tombstone is best-effort deleted; survivors are swept on the next provision.
-async fn replace_runtime_dir(staged: &Path, dest: &Path) -> Result<(), String> {
+pub async fn replace_runtime_dir(staged: &Path, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent)
             .await
@@ -1180,7 +1186,7 @@ fn tombstone_path(dest: &Path) -> PathBuf {
 /// [`replace_runtime_dir`] still guarantees only one fully-staged tree wins the dest.
 /// A full advisory lock file across the whole download→finalize sequence is tracked
 /// as a followup.
-fn unique_scratch_path(root: &Path, stem: &str, suffix: &str) -> PathBuf {
+pub fn unique_scratch_path(root: &Path, stem: &str, suffix: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
@@ -1225,6 +1231,22 @@ async fn sweep_tombstones(root: &Path) {
             let _ = tokio::fs::remove_dir_all(entry.path()).await;
         }
     }
+}
+
+/// Tombstone-safe recursive removal: moves `dir` aside first (retrying through
+/// transient Windows locks, exactly like [`replace_runtime_dir`]) rather than calling
+/// `remove_dir_all` on it directly, which can partially fail on a locked file and
+/// leave a half-deleted tree behind. No-op if `dir` does not exist. Used by
+/// `lsp_install`'s GitHub-release uninstall (`<lsp>/gh/<command>/`).
+pub async fn remove_dir_tombstoned(dir: &Path) -> Result<(), String> {
+    if tokio::fs::metadata(dir).await.is_err() {
+        return Ok(());
+    }
+    let tombstone = tombstone_path(dir);
+    move_aside_with_retry(dir, &tombstone).await?;
+    // Best-effort: a still-locked tombstone is cleaned by `sweep_tombstones`.
+    let _ = tokio::fs::remove_dir_all(&tombstone).await;
+    Ok(())
 }
 
 /// Verify the MANAGED Python has a working `pip`, repairing it if not.

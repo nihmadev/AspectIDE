@@ -20,9 +20,57 @@ use serde_json::{json, Map, Value};
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// Anthropic requires `max_tokens`; the `OpenAI` turn payload usually omits it. This
-/// is the universal-safe ceiling for the Claude models shipped in the presets
-/// (Sonnet/Opus 4.x and 3.5 Haiku all allow ≥ 8192 output tokens).
+/// is the conservative fallback for older/unrecognized Claude models; see
+/// `default_max_tokens_for_model` for the model-aware ceiling actually used.
 const DEFAULT_MAX_TOKENS: u64 = 8192;
+
+/// Output-token ceiling for a Claude model id when the caller didn't set an
+/// explicit `max_tokens`/`max_completion_tokens`. `DEFAULT_MAX_TOKENS` (8192)
+/// previously applied to every model, which truncates a large tool call (e.g.
+/// writing a whole file) mid-JSON on the Sonnet/Opus 4.x family, which allows a
+/// much larger output window.
+fn default_max_tokens_for_model(model: &str) -> u64 {
+    if model.starts_with("claude-3-5") {
+        DEFAULT_MAX_TOKENS
+    } else if model.starts_with("claude-sonnet-4")
+        || model.starts_with("claude-opus-4")
+        || model.contains("-4-")
+    {
+        32_000
+    } else {
+        DEFAULT_MAX_TOKENS
+    }
+}
+
+/// Extended-thinking token budget for a reasoning-effort level, mirroring the
+/// low/medium/high tiers the rest of the stack already uses for reasoning models.
+fn thinking_budget_for_effort(effort: &str) -> Option<u64> {
+    match effort {
+        "low" => Some(4096),
+        "medium" => Some(8192),
+        "high" => Some(16384),
+        _ => None,
+    }
+}
+
+/// Read the reasoning-effort string `merge_reasoning` folded into the outgoing
+/// payload, tolerating both shapes it inserts: a top-level `reasoning_effort`
+/// string, or a `reasoning: { effort }` object.
+fn reasoning_effort(openai: &Value) -> Option<&str> {
+    openai
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .or_else(|| openai.pointer("/reasoning/effort").and_then(Value::as_str))
+}
+
+/// Anthropic `stop_reason` values that must be surfaced to the caller even though
+/// `finish_reason` normalizes them to `OpenAI`'s "stop" for model-agnostic
+/// consumers. Currently just `refusal` (Anthropic's safety-refusal signal) —
+/// silently normalizing it away would hide a distinction a caller may want to log
+/// or act on.
+pub fn stop_reason_needs_marker(stop_reason: Option<&str>) -> bool {
+    stop_reason == Some("refusal")
+}
 
 /// True when a provider's protocol selects the Anthropic Messages API.
 pub const fn is_anthropic(protocol: &str) -> bool {
@@ -89,7 +137,15 @@ pub fn to_anthropic_request(openai: &Value) -> Value {
                     }
                 }
                 "tool" => messages.push(convert_tool_result(msg)),
-                _ => messages.push(convert_user(msg)),
+                // An all-empty user message (e.g. a staged injection whose text was
+                // blank) would otherwise become a `{"content":[]}` block Anthropic
+                // rejects — `convert_user` already yields `None` for it; simply
+                // don't push it rather than sending an empty content array.
+                _ => {
+                    if let Some(message) = convert_user(msg) {
+                        messages.push(message);
+                    }
+                }
             }
         }
     }
@@ -101,16 +157,46 @@ pub fn to_anthropic_request(openai: &Value) -> Value {
         out.insert("system".to_string(), Value::Array(system_blocks));
     }
 
-    // max_tokens is required by Anthropic; honor an explicit cap, else the default.
-    let max_tokens = openai
+    // max_tokens is required by Anthropic; honor an explicit cap, else the
+    // model-aware default (a flat 8192 truncates a large tool call mid-JSON on
+    // the Sonnet/Opus 4.x family, which allows a much larger output window).
+    let model = openai.get("model").and_then(Value::as_str).unwrap_or("");
+    let mut max_tokens = openai
         .get("max_tokens")
         .or_else(|| openai.get("max_completion_tokens"))
         .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_MAX_TOKENS);
+        .unwrap_or_else(|| default_max_tokens_for_model(model));
+
+    // Extended thinking: the frontend's selected reasoning effort (folded into the
+    // payload by `merge_reasoning` as `reasoning_effort` / `reasoning.effort`) maps
+    // to a thinking token budget. The API requires `max_tokens > budget_tokens` and
+    // rejects an explicit `temperature`/`top_p` while thinking is enabled, so both
+    // are enforced here instead of at every call site.
+    // The API also rejects thinking combined with a FORCING tool_choice
+    // ("required"/named tool → Anthropic "any"/"tool"); the native loop only ever
+    // sends auto/none, but this translator serves arbitrary callers.
+    let thinking_budget = reasoning_effort(openai)
+        .and_then(thinking_budget_for_effort)
+        .filter(|_| !tool_choice_forces_tool_use(openai.get("tool_choice")))
+        .filter(|_| max_tokens > 1024)
+        .map(|budget| budget.min(max_tokens.saturating_sub(1024)))
+        .filter(|budget| *budget >= 1024);
+    if let Some(budget_tokens) = thinking_budget {
+        out.insert(
+            "thinking".to_string(),
+            json!({ "type": "enabled", "budget_tokens": budget_tokens }),
+        );
+        max_tokens = max_tokens.max(budget_tokens + 1024);
+    }
     out.insert("max_tokens".to_string(), json!(max_tokens));
 
-    if let Some(temperature) = openai.get("temperature") {
-        out.insert("temperature".to_string(), temperature.clone());
+    if thinking_budget.is_none() {
+        if let Some(temperature) = openai.get("temperature") {
+            out.insert("temperature".to_string(), temperature.clone());
+        }
+        if let Some(top_p) = openai.get("top_p") {
+            out.insert("top_p".to_string(), top_p.clone());
+        }
     }
 
     // Tools + tool choice. `tool_choice: "none"` maps to Anthropic's
@@ -148,17 +234,39 @@ pub fn from_anthropic_response(body: &Value) -> Value {
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut tool_calls: Vec<Value> = Vec::new();
+    // The exact block sequence, preserved verbatim (including thinking signatures
+    // and redacted_thinking blobs the flattened fields above don't carry) so a
+    // later replay of this turn can reconstruct it — see `convert_assistant`.
+    let mut anthropic_content: Vec<Value> = Vec::new();
     if let Some(blocks) = body.get("content").and_then(Value::as_array) {
         for block in blocks {
             match block.get("type").and_then(Value::as_str) {
                 Some("text") => {
                     if let Some(text) = block.get("text").and_then(Value::as_str) {
                         content.push_str(text);
+                        if !text.is_empty() {
+                            anthropic_content.push(json!({ "type": "text", "text": text }));
+                        }
                     }
                 }
                 Some("thinking") => {
-                    if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                        reasoning.push_str(text);
+                    let text = block.get("thinking").and_then(Value::as_str).unwrap_or("");
+                    reasoning.push_str(text);
+                    let signature = block.get("signature").and_then(Value::as_str).unwrap_or("");
+                    // Drop a broken thinking block (missing text or signature) from the
+                    // replay-able sequence rather than round-tripping a partial one.
+                    if !text.is_empty() && !signature.is_empty() {
+                        anthropic_content.push(json!({
+                            "type": "thinking", "thinking": text, "signature": signature,
+                        }));
+                    }
+                }
+                Some("redacted_thinking") => {
+                    if let Some(data) = block.get("data").and_then(Value::as_str) {
+                        if !data.is_empty() {
+                            anthropic_content
+                                .push(json!({ "type": "redacted_thinking", "data": data }));
+                        }
                     }
                 }
                 Some("tool_use") => {
@@ -170,6 +278,9 @@ pub fn from_anthropic_response(body: &Value) -> Value {
                         "type": "function",
                         "function": { "name": name, "arguments": input.to_string() },
                     }));
+                    anthropic_content.push(
+                        json!({ "type": "tool_use", "id": id, "name": name, "input": input }),
+                    );
                 }
                 _ => {}
             }
@@ -184,6 +295,9 @@ pub fn from_anthropic_response(body: &Value) -> Value {
     if has_tools {
         message["tool_calls"] = Value::Array(tool_calls);
     }
+    if !anthropic_content.is_empty() {
+        message["anthropic_content"] = Value::Array(anthropic_content);
+    }
 
     let usage = body.get("usage");
     let input_tokens = usage
@@ -195,18 +309,29 @@ pub fn from_anthropic_response(body: &Value) -> Value {
         .and_then(Value::as_u64)
         .unwrap_or(0);
 
-    json!({
+    let stop_reason = body.get("stop_reason").and_then(Value::as_str);
+    let mut out = json!({
         "choices": [{
             "index": 0,
             "message": message,
-            "finish_reason": finish_reason(body.get("stop_reason").and_then(Value::as_str), has_tools),
+            "finish_reason": finish_reason(stop_reason, has_tools),
         }],
         "usage": anthropic_usage(input_tokens, output_tokens, usage),
-    })
+    });
+    if stop_reason_needs_marker(stop_reason) {
+        out["anthropic_stop_reason"] = json!(stop_reason.unwrap_or_default());
+    }
+    out
 }
 
 /// Map an Anthropic `stop_reason` (plus whether tool calls were emitted) onto an
-/// `OpenAI` `finish_reason`.
+/// `OpenAI` `finish_reason`. `refusal` (the model declined on safety grounds) and
+/// `pause_turn` (a long-running server-side tool call was paused mid-turn, not a
+/// real end) both normalize to `"stop"` here for model-agnostic callers — the
+/// distinct Anthropic value survives separately via `anthropic_stop_reason`
+/// (`stop_reason_needs_marker`) so a caller that cares can still see it.
+/// `stop_sequence` (a caller-supplied stop string was hit) is treated the same as
+/// a normal end-of-turn; `OpenAI` has no closer equivalent than `"stop"`.
 pub fn finish_reason(stop_reason: Option<&str>, has_tools: bool) -> &'static str {
     match stop_reason {
         Some("tool_use") => "tool_calls",
@@ -266,14 +391,37 @@ fn append_system(content: Option<&Value>, blocks: &mut Vec<Value>) {
     }
 }
 
-fn convert_user(msg: &Value) -> Value {
-    json!({ "role": "user", "content": Value::Array(content_blocks(msg.get("content"))) })
+/// Convert an `OpenAI` user message into an Anthropic one. Returns `None` for an
+/// all-empty message (empty/absent string content) instead of producing an
+/// invalid `{"content":[]}` block — the Messages API rejects empty content arrays.
+fn convert_user(msg: &Value) -> Option<Value> {
+    let blocks = content_blocks(msg.get("content"));
+    if blocks.is_empty() {
+        return None;
+    }
+    Some(json!({ "role": "user", "content": Value::Array(blocks) }))
 }
 
 /// Convert an assistant message (text + `tool_calls`) into an Anthropic assistant
 /// message with text and `tool_use` blocks. Returns `None` for an empty message so
 /// it is dropped instead of producing an invalid empty-content block.
 fn convert_assistant(msg: &Value) -> Option<Value> {
+    // Replayed history carries the exact original Anthropic block sequence — thinking
+    // (with signature) / redacted_thinking, then text, then tool_use — in the
+    // `anthropic_content` vendor field. Reconstructing FROM it (rather than the
+    // flattened `content`/`tool_calls` fields) is what fixes the 400 "Expected
+    // thinking or redacted_thinking block" error the Messages API raises when a
+    // thinking-enabled turn that also used tools is replayed without its thinking
+    // blocks reappearing first.
+    if let Some(anthropic_blocks) = msg.get("anthropic_content").and_then(Value::as_array) {
+        if let Some(reconstructed) = convert_assistant_from_anthropic_content(anthropic_blocks) {
+            return Some(reconstructed);
+        }
+        // Every captured block was empty/broken (e.g. a thinking block that never
+        // got a signature) — fall through to the plain text/tool_calls path so a
+        // turn that still has real content isn't dropped outright.
+    }
+
     let mut blocks: Vec<Value> = Vec::new();
     match msg.get("content") {
         // Plain string content → a single text block (the common case).
@@ -316,6 +464,61 @@ fn convert_assistant(msg: &Value) -> Option<Value> {
     Some(json!({ "role": "assistant", "content": Value::Array(blocks) }))
 }
 
+/// Reconstruct an assistant message's Anthropic content blocks from the
+/// `anthropic_content` vendor field, restoring the exact block sequence the API
+/// requires: `thinking`/`redacted_thinking` blocks first, then `text`, then `tool_use`.
+/// A `thinking` block missing its text or signature is dropped entirely — the API
+/// rejects a broken/partial thinking block, whereas dropping ALL thinking blocks
+/// for a turn is valid. Returns `None` when nothing survives the filter.
+fn convert_assistant_from_anthropic_content(blocks: &[Value]) -> Option<Value> {
+    let mut thinking_blocks: Vec<Value> = Vec::new();
+    let mut text_blocks: Vec<Value> = Vec::new();
+    let mut tool_blocks: Vec<Value> = Vec::new();
+    for block in blocks {
+        match block.get("type").and_then(Value::as_str) {
+            Some("thinking") => {
+                let thinking = block.get("thinking").and_then(Value::as_str).unwrap_or("");
+                let signature = block.get("signature").and_then(Value::as_str).unwrap_or("");
+                if !thinking.is_empty() && !signature.is_empty() {
+                    thinking_blocks.push(json!({
+                        "type": "thinking", "thinking": thinking, "signature": signature,
+                    }));
+                }
+            }
+            Some("redacted_thinking") => {
+                if let Some(data) = block.get("data").and_then(Value::as_str) {
+                    if !data.is_empty() {
+                        thinking_blocks.push(json!({ "type": "redacted_thinking", "data": data }));
+                    }
+                }
+            }
+            Some("text") => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        text_blocks.push(json!({ "type": "text", "text": text }));
+                    }
+                }
+            }
+            Some("tool_use") => {
+                let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                tool_blocks
+                    .push(json!({ "type": "tool_use", "id": id, "name": name, "input": input }));
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::with_capacity(thinking_blocks.len() + text_blocks.len() + tool_blocks.len());
+    out.extend(thinking_blocks);
+    out.extend(text_blocks);
+    out.extend(tool_blocks);
+    if out.is_empty() {
+        return None;
+    }
+    Some(json!({ "role": "assistant", "content": Value::Array(out) }))
+}
+
 /// Convert an `OpenAI` `tool` result message into an Anthropic user message carrying a
 /// `tool_result` block. Consecutive tool results are merged later by `coalesce`.
 fn convert_tool_result(msg: &Value) -> Value {
@@ -328,20 +531,33 @@ fn convert_tool_result(msg: &Value) -> Value {
         Some(other) => other.to_string(),
         None => String::new(),
     };
-    json!({
-        "role": "user",
-        "content": [{ "type": "tool_result", "tool_use_id": id, "content": content }],
-    })
+    // ai_turn.rs pushes a failed tool call as a JSON object string with a
+    // top-level "error" key (`{"error": "..."}`). Surface that as Anthropic's
+    // `is_error` flag on the tool_result block so the model is told the call
+    // failed instead of reading the error text as an ordinary result.
+    let is_error = serde_json::from_str::<Value>(&content)
+        .ok()
+        .is_some_and(|value| value.get("error").is_some());
+    let mut block = json!({ "type": "tool_result", "tool_use_id": id, "content": content });
+    if is_error {
+        block["is_error"] = Value::Bool(true);
+    }
+    json!({ "role": "user", "content": [block] })
 }
 
 /// Translate `OpenAI` message content into Anthropic content blocks. A string becomes
-/// one text block; a content-part array maps text parts and `image_url` parts
-/// (data-URL → base64 source, otherwise a URL source).
+/// one text block (dropped if empty); a content-part array maps text parts and
+/// `image_url` parts (data-URL → base64 source, otherwise a URL source). Absent or
+/// empty content yields an EMPTY vec rather than a synthetic empty text block — the
+/// Messages API rejects an empty `content` array, so callers must skip the whole
+/// message rather than send one.
 fn content_blocks(content: Option<&Value>) -> Vec<Value> {
     match content {
-        Some(Value::String(text)) => vec![json!({ "type": "text", "text": text })],
+        Some(Value::String(text)) if !text.is_empty() => {
+            vec![json!({ "type": "text", "text": text })]
+        }
         Some(Value::Array(parts)) => parts.iter().filter_map(convert_content_part).collect(),
-        _ => vec![json!({ "type": "text", "text": "" })],
+        _ => vec![],
     }
 }
 
@@ -405,8 +621,13 @@ fn convert_tool(tool: &Value) -> Option<Value> {
     if let Some(description) = function.get("description").and_then(Value::as_str) {
         out["description"] = json!(description);
     }
+    // An explicit `"parameters": null` (some callers send this for a no-arg tool)
+    // must fall back to the empty-object schema exactly like a missing field —
+    // `.get()` returns `Some(Value::Null)` for it, which would otherwise pass
+    // `null` straight through as `input_schema` and 400 the request.
     out["input_schema"] = function
         .get("parameters")
+        .filter(|value| !value.is_null())
         .cloned()
         .unwrap_or_else(|| json!({ "type": "object" }));
     Some(out)
@@ -418,6 +639,20 @@ fn convert_tool(tool: &Value) -> Option<Value> {
 /// adds `disable_parallel_tool_use: true` so the caller's one-tool-per-turn
 /// constraint survives the protocol hop — except on `none`, which accepts no
 /// extra fields.
+/// True when the OpenAI-shaped `tool_choice` would translate to Anthropic's
+/// `any`/`tool` (forcing) shapes, which the API rejects alongside `thinking`.
+fn tool_choice_forces_tool_use(choice: Option<&Value>) -> bool {
+    match choice {
+        Some(Value::String(value)) => value == "required" || value == "any",
+        Some(Value::Object(object)) => object
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+            .is_some(),
+        _ => false,
+    }
+}
+
 fn convert_tool_choice(choice: Option<&Value>, disable_parallel: bool) -> Value {
     let mut out = match choice {
         Some(Value::String(value)) if value == "none" => {
@@ -487,7 +722,9 @@ mod tests {
         });
         let out = to_anthropic_request(&openai);
         assert_eq!(out["model"], "claude-sonnet-4-5");
-        assert_eq!(out["max_tokens"], json!(DEFAULT_MAX_TOKENS));
+        // claude-sonnet-4-5 gets the model-aware 32000 default, not the flat
+        // legacy 8192 ceiling (see `model_aware_max_tokens_table`).
+        assert_eq!(out["max_tokens"], json!(32_000));
         assert_eq!(out["temperature"], json!(0.2));
         assert_eq!(out["system"][0]["type"], "text");
         assert_eq!(out["system"][0]["text"], "You are helpful.");
@@ -696,5 +933,389 @@ mod tests {
         assert_eq!(out["usage"]["prompt_tokens"], 12);
         assert_eq!(out["usage"]["completion_tokens"], 5);
         assert_eq!(out["usage"]["total_tokens"], 17);
+    }
+
+    // ── Extended thinking (Cluster 2a/2d) ──
+
+    #[test]
+    fn thinking_effort_maps_to_budget_and_strips_temperature() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+            "temperature": 0.7,
+            "top_p": 0.9,
+            "reasoning_effort": "high",
+        });
+        let out = to_anthropic_request(&openai);
+        assert_eq!(out["thinking"]["type"], "enabled");
+        assert_eq!(out["thinking"]["budget_tokens"], 16384);
+        // Thinking requires temperature/top_p unset (API mandates default/1).
+        assert!(out.get("temperature").is_none());
+        assert!(out.get("top_p").is_none());
+        // budget_tokens must stay below max_tokens.
+        assert!(out["max_tokens"].as_u64().unwrap() > 16384);
+    }
+
+    #[test]
+    fn thinking_effort_via_reasoning_object_shape() {
+        // merge_reasoning also folds in a `reasoning: { effort }` object shape.
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+            "reasoning": { "effort": "low" },
+        });
+        let out = to_anthropic_request(&openai);
+        assert_eq!(out["thinking"]["budget_tokens"], 4096);
+    }
+
+    #[test]
+    fn thinking_is_skipped_when_tool_choice_forces_tool_use() {
+        // The API rejects thinking + tool_choice any/tool; the translator must
+        // drop thinking (and keep temperature passthrough) for such callers.
+        for choice in [
+            json!("required"),
+            json!({ "type": "function", "function": { "name": "Write" } }),
+        ] {
+            let openai = json!({
+                "model": "claude-sonnet-4-5",
+                "messages": [{ "role": "user", "content": "go" }],
+                "reasoning_effort": "high",
+                "temperature": 0.4,
+                "tools": [{ "type": "function", "function": { "name": "Write", "parameters": { "type": "object" } } }],
+                "tool_choice": choice,
+            });
+            let out = to_anthropic_request(&openai);
+            assert!(out.get("thinking").is_none());
+            assert_eq!(out["temperature"], 0.4);
+        }
+    }
+
+    #[test]
+    fn thinking_budget_medium_effort() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+            "reasoning_effort": "medium",
+        });
+        let out = to_anthropic_request(&openai);
+        assert_eq!(out["thinking"]["budget_tokens"], 8192);
+    }
+
+    #[test]
+    fn thinking_budget_is_capped_below_an_explicit_small_max_tokens() {
+        // An explicit small max_tokens must still leave the API-required headroom
+        // (budget_tokens < max_tokens) rather than requesting an impossible budget.
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+            "max_tokens": 2048,
+            "reasoning_effort": "high",
+        });
+        let out = to_anthropic_request(&openai);
+        let budget = out["thinking"]["budget_tokens"].as_u64().unwrap();
+        let max_tokens = out["max_tokens"].as_u64().unwrap();
+        assert!(budget < max_tokens);
+        assert_eq!(budget, 1024, "capped to max_tokens(2048) - 1024");
+    }
+
+    #[test]
+    fn no_reasoning_effort_leaves_temperature_and_thinking_absent() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+            "temperature": 0.5,
+        });
+        let out = to_anthropic_request(&openai);
+        assert!(out.get("thinking").is_none());
+        assert_eq!(out["temperature"], 0.5);
+    }
+
+    // ── Model-aware max_tokens (Cluster 2d) ──
+
+    #[test]
+    fn model_aware_max_tokens_table() {
+        assert_eq!(
+            default_max_tokens_for_model("claude-3-5-sonnet-20241022"),
+            8192
+        );
+        assert_eq!(
+            default_max_tokens_for_model("claude-3-5-haiku-20241022"),
+            8192
+        );
+        assert_eq!(default_max_tokens_for_model("claude-sonnet-4-5"), 32_000);
+        assert_eq!(default_max_tokens_for_model("claude-opus-4-1"), 32_000);
+        assert_eq!(default_max_tokens_for_model("claude-haiku-4-5"), 32_000);
+        assert_eq!(default_max_tokens_for_model("claude-2.1"), 8192);
+        assert_eq!(default_max_tokens_for_model("claude-instant-1.2"), 8192);
+    }
+
+    #[test]
+    fn to_anthropic_request_uses_model_aware_default_max_tokens() {
+        let sonnet4 = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+        });
+        assert_eq!(to_anthropic_request(&sonnet4)["max_tokens"], 32_000);
+
+        let haiku35 = json!({
+            "model": "claude-3-5-haiku-20241022",
+            "messages": [{ "role": "user", "content": "go" }],
+        });
+        assert_eq!(to_anthropic_request(&haiku35)["max_tokens"], 8192);
+
+        // An explicit max_tokens always wins over the model-aware default.
+        let explicit = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+            "max_tokens": 4096,
+        });
+        assert_eq!(to_anthropic_request(&explicit)["max_tokens"], 4096);
+    }
+
+    // ── anthropic_content replay reconstruction (Cluster 2c) ──
+
+    #[test]
+    fn convert_assistant_reconstructs_thinking_then_text_then_tool_use() {
+        // Deliberately out-of-order in the source array — the API requires
+        // thinking/redacted_thinking FIRST regardless of capture order.
+        let msg = json!({
+            "role": "assistant",
+            "content": null,
+            "anthropic_content": [
+                { "type": "tool_use", "id": "tu1", "name": "Read", "input": { "path": "a.rs" } },
+                { "type": "thinking", "thinking": "let me plan", "signature": "sig-1" },
+                { "type": "text", "text": "Reading now." },
+            ],
+        });
+        let out = convert_assistant(&msg).expect("message should convert");
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["type"], "thinking");
+        assert_eq!(blocks[0]["thinking"], "let me plan");
+        assert_eq!(blocks[0]["signature"], "sig-1");
+        assert_eq!(blocks[1]["type"], "text");
+        assert_eq!(blocks[1]["text"], "Reading now.");
+        assert_eq!(blocks[2]["type"], "tool_use");
+        assert_eq!(blocks[2]["id"], "tu1");
+    }
+
+    #[test]
+    fn convert_assistant_preserves_redacted_thinking_before_tool_use() {
+        let msg = json!({
+            "role": "assistant",
+            "content": null,
+            "anthropic_content": [
+                { "type": "redacted_thinking", "data": "opaque-blob" },
+                { "type": "tool_use", "id": "tu1", "name": "Read", "input": {} },
+            ],
+        });
+        let out = convert_assistant(&msg).expect("message should convert");
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "redacted_thinking");
+        assert_eq!(blocks[0]["data"], "opaque-blob");
+        assert_eq!(blocks[1]["type"], "tool_use");
+    }
+
+    #[test]
+    fn convert_assistant_drops_thinking_block_missing_signature() {
+        // Replaying a thinking block without its signature 400s — dropping it
+        // (while keeping the rest of the turn) is the only valid recovery.
+        let msg = json!({
+            "role": "assistant",
+            "content": null,
+            "anthropic_content": [
+                { "type": "thinking", "thinking": "no signature" },
+                { "type": "text", "text": "answer" },
+            ],
+        });
+        let out = convert_assistant(&msg).expect("message should convert");
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1, "the broken thinking block must be dropped");
+        assert_eq!(blocks[0]["type"], "text");
+    }
+
+    #[test]
+    fn convert_assistant_falls_back_when_anthropic_content_all_empty() {
+        // Every captured block is broken/empty — fall back to the flattened
+        // content/tool_calls fields instead of dropping the message outright.
+        let msg = json!({
+            "role": "assistant",
+            "content": "plain answer",
+            "anthropic_content": [
+                { "type": "thinking", "thinking": "no signature" },
+            ],
+        });
+        let out = convert_assistant(&msg).expect("message should convert via fallback");
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[0]["text"], "plain answer");
+    }
+
+    #[test]
+    fn convert_assistant_without_anthropic_content_uses_legacy_path() {
+        // Older history (or cross-provider) with no vendor field still works via
+        // the pre-existing text + tool_calls conversion.
+        let msg = json!({
+            "role": "assistant",
+            "content": "hello",
+            "tool_calls": [
+                { "id": "c1", "type": "function", "function": { "name": "Read", "arguments": "{}" } },
+            ],
+        });
+        let out = convert_assistant(&msg).expect("message should convert");
+        let blocks = out["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "text");
+        assert_eq!(blocks[1]["type"], "tool_use");
+    }
+
+    // ── Empty-content filtering (Cluster 2e) ──
+
+    #[test]
+    fn content_blocks_filters_empty_or_absent_text() {
+        assert!(content_blocks(Some(&json!(""))).is_empty());
+        assert!(content_blocks(None).is_empty());
+        assert!(content_blocks(Some(&Value::Null)).is_empty());
+        assert_eq!(content_blocks(Some(&json!("hi"))).len(), 1);
+    }
+
+    #[test]
+    fn to_anthropic_request_drops_all_empty_user_message() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                { "role": "user", "content": "" },
+                { "role": "user", "content": "real question" },
+            ],
+        });
+        let out = to_anthropic_request(&openai);
+        let messages = out["messages"].as_array().unwrap();
+        // The empty message is dropped entirely rather than sent as `content: []`.
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"][0]["text"], "real question");
+    }
+
+    // ── convert_tool parameters:null (Cluster 2f) ──
+
+    #[test]
+    fn convert_tool_treats_null_parameters_like_missing() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "go" }],
+            "tools": [{
+                "type": "function",
+                "function": { "name": "NoArgs", "parameters": Value::Null },
+            }],
+        });
+        let out = to_anthropic_request(&openai);
+        assert_eq!(out["tools"][0]["input_schema"], json!({ "type": "object" }));
+    }
+
+    // ── tool_result is_error propagation (Cluster 2g) ──
+
+    #[test]
+    fn convert_tool_result_sets_is_error_for_error_object_content() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "c1", "type": "function", "function": { "name": "Read", "arguments": "{}" } },
+                ]},
+                { "role": "tool", "tool_call_id": "c1", "content": "{\"error\":\"file not found\"}" },
+            ],
+        });
+        let out = to_anthropic_request(&openai);
+        let messages = out["messages"].as_array().unwrap();
+        let tool_result = &messages[2]["content"][0];
+        assert_eq!(tool_result["type"], "tool_result");
+        assert_eq!(tool_result["is_error"], true);
+    }
+
+    #[test]
+    fn convert_tool_result_omits_is_error_for_success_content() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": null, "tool_calls": [
+                    { "id": "c1", "type": "function", "function": { "name": "Read", "arguments": "{}" } },
+                ]},
+                { "role": "tool", "tool_call_id": "c1", "content": "file contents here" },
+            ],
+        });
+        let out = to_anthropic_request(&openai);
+        let messages = out["messages"].as_array().unwrap();
+        let tool_result = &messages[2]["content"][0];
+        assert!(tool_result.get("is_error").is_none());
+    }
+
+    // ── finish_reason / anthropic_stop_reason marker (Cluster 2h) ──
+
+    #[test]
+    fn refusal_maps_to_stop_and_surfaces_marker() {
+        assert_eq!(finish_reason(Some("refusal"), false), "stop");
+        assert!(stop_reason_needs_marker(Some("refusal")));
+        assert!(!stop_reason_needs_marker(Some("end_turn")));
+        assert!(!stop_reason_needs_marker(None));
+
+        let body = json!({
+            "content": [{ "type": "text", "text": "I can't help with that." }],
+            "stop_reason": "refusal",
+        });
+        let out = from_anthropic_response(&body);
+        assert_eq!(out["choices"][0]["finish_reason"], "stop");
+        assert_eq!(out["anthropic_stop_reason"], "refusal");
+    }
+
+    #[test]
+    fn non_refusal_stop_reasons_carry_no_marker() {
+        let body = json!({
+            "content": [{ "type": "text", "text": "done" }],
+            "stop_reason": "end_turn",
+        });
+        let out = from_anthropic_response(&body);
+        assert!(out.get("anthropic_stop_reason").is_none());
+    }
+
+    // ── non-stream anthropic_content assembly ──
+
+    #[test]
+    fn from_anthropic_response_assembles_ordered_anthropic_content() {
+        let body = json!({
+            "content": [
+                { "type": "thinking", "thinking": "plan", "signature": "sig" },
+                { "type": "text", "text": "Reading now." },
+                { "type": "tool_use", "id": "tu1", "name": "Read", "input": { "path": "a.rs" } },
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 1, "output_tokens": 1 },
+        });
+        let out = from_anthropic_response(&body);
+        let anthropic_content = out["choices"][0]["message"]["anthropic_content"]
+            .as_array()
+            .expect("anthropic_content array");
+        assert_eq!(anthropic_content.len(), 3);
+        assert_eq!(anthropic_content[0]["type"], "thinking");
+        assert_eq!(anthropic_content[0]["signature"], "sig");
+        assert_eq!(anthropic_content[1]["type"], "text");
+        assert_eq!(anthropic_content[2]["type"], "tool_use");
+    }
+
+    #[test]
+    fn from_anthropic_response_drops_broken_thinking_from_anthropic_content() {
+        let body = json!({
+            "content": [
+                { "type": "thinking", "thinking": "plan" },
+                { "type": "text", "text": "answer" },
+            ],
+            "stop_reason": "end_turn",
+        });
+        let out = from_anthropic_response(&body);
+        let anthropic_content = out["choices"][0]["message"]["anthropic_content"]
+            .as_array()
+            .expect("anthropic_content array");
+        assert_eq!(anthropic_content.len(), 1);
+        assert_eq!(anthropic_content[0]["type"], "text");
     }
 }

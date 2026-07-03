@@ -165,6 +165,22 @@ export function createBrowserInstallApproval(locale: Locale, withDeps: boolean):
   };
 }
 
+/** Dashboard "start" opens a local HTTP listener; "stop" mutates daemon state.
+ *  Both need explicit user consent — only "status" stays approval-free. */
+export function createBrowserDashboardApproval(locale: Locale, action: string, port: number): AiToolApprovalRequest {
+  return {
+    id: crypto.randomUUID(),
+    tool: "BrowserDashboard",
+    title: approvalText(locale, "aiApproval.browserDashboard.title"),
+    path: `127.0.0.1:${port}`,
+    summary: approvalText(locale, action === "start" ? "aiApproval.browserDashboard.summaryStart" : "aiApproval.browserDashboard.summaryStop"),
+    preview: `agent-browser dashboard ${action} --port ${port}`,
+    risk: "execute",
+    approveLabel: approvalText(locale, "aiApproval.browserDashboard.approve"),
+    rejectLabel: approvalText(locale, "aiApproval.reject"),
+  };
+}
+
 export function createBrowserCloseApproval(locale: Locale, all: boolean, session: string): AiToolApprovalRequest {
   return {
     id: crypto.randomUUID(),
