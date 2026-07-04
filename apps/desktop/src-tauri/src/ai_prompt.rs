@@ -423,11 +423,12 @@ mod tests {
     fn prompt_length_within_budget() {
         // Ceilings carry headroom for the progress-narration guidance, the
         // CodeGraph tool-map line, the WebResearch deep-research guidance, the
-        // TodoWrite task-hygiene line, and the subagent fan-out guidance
-        // (deliberate features), while still guarding against an unbounded prompt.
+        // TodoWrite task-hygiene line, the subagent fan-out guidance, and the
+        // design-quality standard (deliberate features), while still guarding
+        // against an unbounded prompt.
         let prompt = build_system_prompt(&test_input());
         assert!(
-            prompt.len() <= 18_800,
+            prompt.len() <= 20_300,
             "agent prompt too long: {}",
             prompt.len()
         );
@@ -436,7 +437,7 @@ mod tests {
         auto_input.agent_mode = "automatic".to_string();
         let auto_prompt = build_system_prompt(&auto_input);
         assert!(
-            auto_prompt.len() <= 20_300,
+            auto_prompt.len() <= 21_800,
             "automatic prompt too long: {}",
             auto_prompt.len()
         );

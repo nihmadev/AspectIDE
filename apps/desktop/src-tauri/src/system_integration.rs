@@ -43,6 +43,7 @@ pub fn startup_open_path() -> Option<String> {
 /// Always-on shell integration: applied on every launch of an installed build.
 /// Idempotent (PATH entry is deduped, registry writes are upserts), so this also
 /// self-heals after the install location changes or a registry cleanup.
+#[cfg(windows)]
 pub fn apply_default_integration() {
     if cfg!(debug_assertions) {
         // Dev builds would register target/debug/lux-desktop.exe — never do that.
@@ -51,6 +52,10 @@ pub fn apply_default_integration() {
     let _ = imp::set_path(true);
     let _ = imp::set_context_menu(true);
 }
+
+/// Shell integration is Windows-only; other platforms get a no-op.
+#[cfg(not(windows))]
+pub const fn apply_default_integration() {}
 
 #[cfg(windows)]
 mod imp {
@@ -230,16 +235,5 @@ mod imp {
                 &raw mut result,
             );
         }
-    }
-}
-
-#[cfg(not(windows))]
-mod imp {
-    pub fn set_path(_enable: bool) -> Result<(), String> {
-        Ok(())
-    }
-
-    pub fn set_context_menu(_enable: bool) -> Result<(), String> {
-        Ok(())
     }
 }
