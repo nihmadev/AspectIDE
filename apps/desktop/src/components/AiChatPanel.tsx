@@ -1383,9 +1383,33 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
             delayMs,
           });
           const retrySessionId = sessionId;
-          const handle = window.setTimeout(() => {
-            if (goalContinuationTimersRef.current.get(retrySessionId) !== handle) return;
-            goalContinuationTimersRef.current.delete(retrySessionId);
+          // Offline-aware backoff: while the OS reports no network, firing the
+          // retry is guaranteed to fail — it would just burn the finite ladder
+          // (manual/plan give up after 10). Hold THIS attempt instead: keep
+          // re-checking every few seconds, show a "waiting for network" notice,
+          // and fire ~immediately once connectivity returns. The attempt number
+          // is not re-consumed while holding.
+          const OFFLINE_RECHECK_MS = 3_000;
+          const scheduleRetryFire = (delay: number) => {
+            const handle = window.setTimeout(() => {
+              if (goalContinuationTimersRef.current.get(retrySessionId) !== handle) return;
+              if (typeof navigator !== "undefined" && navigator.onLine === false) {
+                setAiRetryNotice(retrySessionId, {
+                  attempt,
+                  maxAttempts,
+                  reason: "offline",
+                  detail: "",
+                  delayMs: OFFLINE_RECHECK_MS,
+                });
+                scheduleRetryFire(OFFLINE_RECHECK_MS);
+                return;
+              }
+              goalContinuationTimersRef.current.delete(retrySessionId);
+              fireRetry();
+            }, delay);
+            goalContinuationTimersRef.current.set(retrySessionId, handle);
+          };
+          const fireRetry = () => {
             // Skip if another turn is already running or the session went away. A mode
             // switch mid-backoff no longer cancels the retry — the ladder is bounded in
             // manual/plan and the task should still reach a valid result.
@@ -1415,8 +1439,14 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
               replaceAiChatMessages(retrySessionId, nextHistory);
               void handleSendRef.current(draft, nextHistory, { force: true, internalSend: true, sessionId: retrySessionId });
             }
-          }, delayMs);
-          goalContinuationTimersRef.current.set(retrySessionId, handle);
+          };
+          // Already offline right now? Skip the pointless ladder wait — go
+          // straight into the cheap online-recheck loop.
+          const offlineNow = typeof navigator !== "undefined" && navigator.onLine === false;
+          if (offlineNow) {
+            setAiRetryNotice(sessionId, { attempt, maxAttempts, reason: "offline", detail: "", delayMs: OFFLINE_RECHECK_MS });
+          }
+          scheduleRetryFire(offlineNow ? OFFLINE_RECHECK_MS : delayMs);
         } else if (turnFailed) {
           // Non-retryable error, or the manual/plan retry budget is exhausted: the error
           // bubble is already shown; clear the backoff streak and stop any goal run.

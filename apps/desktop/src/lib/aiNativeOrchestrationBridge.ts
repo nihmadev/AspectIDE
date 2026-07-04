@@ -69,7 +69,7 @@ export function bridgeNativeToolStarted(sessionId: string, callId: string, tool:
  */
 export function bridgeNativeSubagentProgress(
   callId: string,
-  stage: "text" | "tool" | "done" | "error",
+  stage: "text" | "tool" | "done" | "error" | "cancelled",
   content: string,
   tool: string,
 ) {
@@ -96,6 +96,12 @@ export function bridgeNativeSubagentProgress(
   }
   if (stage === "error") {
     completeSubagentRun(callId, content.trim() || "Failed", "failed");
+    return;
+  }
+  // A whole-turn Stop (or a per-row Stop the UI hasn't applied yet) settled the
+  // subagent on the Rust side — mirror it as cancelled, not completed.
+  if (stage === "cancelled") {
+    completeSubagentRun(callId, content.trim() || "Cancelled", "cancelled");
   }
 }
 
@@ -162,6 +168,13 @@ function normalizeTodoStatus(value: unknown): AiSessionTodo["status"] {
     case "in-progress":
     case "active":
       return "in_progress";
+    case "blocked":
+    case "waiting":
+      return "blocked";
+    case "cancelled":
+    case "canceled":
+    case "skipped":
+      return "cancelled";
     default:
       return "pending";
   }

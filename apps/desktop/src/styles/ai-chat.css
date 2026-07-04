@@ -509,6 +509,92 @@
   }
 }
 
+/* Detached island: dragged off the right-wall dock, free-floating inside
+   .ai-chat-main (inline top/left set by the drag hook). Full rounded frame +
+   right border since no edge is glued to the wall; the dock-in animation is
+   keyed to the docked transform, so it must not replay here. */
+.ai-agent-orchestration-rail[data-floating] {
+  animation: none;
+  border-radius: var(--radius-lg);
+  border-right: 1px solid var(--border-subtle);
+}
+
+/* Drag grip — slim strip across the island top. Dragging it detaches the card
+   from the dock and moves it (clamped to the chat area). */
+.ai-agent-rail-grip {
+  flex: none;
+  display: grid;
+  place-items: center;
+  height: 14px;
+  color: var(--icon-muted);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.ai-agent-rail-grip:hover {
+  background: var(--hover);
+  color: var(--text-0);
+}
+
+.ai-agent-rail-grip:active {
+  cursor: grabbing;
+}
+
+/* Keyboard focus ring — the grip is a role="button" (Enter/Space detaches or
+   redocks, arrows nudge), so its focus must be visible for keyboard users. */
+.ai-agent-rail-grip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  color: var(--text-0);
+}
+
+/* Pin-back button — appears only while detached, sits left of the collapse
+   button and snaps the island back to its right-wall dock. */
+.ai-agent-rail-redock {
+  position: absolute;
+  top: 8px;
+  right: 32px;
+  z-index: 10;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--icon-muted);
+  cursor: pointer;
+  padding: 0;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.ai-agent-rail-redock:hover {
+  background: var(--hover);
+  color: var(--text-0);
+}
+
+/* Inside the subagent window's header the redock button flows with the other
+   header controls instead of overlaying the corner. */
+.ai-subagent-window-head .ai-agent-rail-redock {
+  position: static;
+  flex: none;
+}
+
+/* The subagent window's header doubles as its drag surface. */
+.ai-subagent-window-head {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ai-subagent-window-head:active {
+  cursor: grabbing;
+}
+
 .ai-agent-rail-collapse {
   position: absolute;
   top: 8px;
@@ -674,6 +760,12 @@
   border-radius: var(--radius-lg) 0 0 0;
 }
 
+/* While floating, the Pin (redock) button joins Collapse in the top-right
+   corner — reserve its width too, or the status text runs underneath it. */
+.ai-agent-orchestration-rail[data-floating] .ai-agent-now-bar {
+  padding-right: 58px;
+}
+
 .ai-agent-now-bar .spin-icon {
   color: var(--accent);
 }
@@ -723,43 +815,6 @@
 .ai-agent-rail-task-file:hover {
   color: var(--text-0);
   text-decoration: underline;
-}
-
-.ai-agent-rail-reviews {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.ai-agent-rail-reviews button {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  width: 100%;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-sm);
-  background: var(--surface-1);
-  color: var(--text-1);
-  font-size: 11px;
-  padding: 6px 8px;
-  cursor: pointer;
-  text-align: left;
-  transition: border-color 110ms ease, background 110ms ease, color 110ms ease;
-}
-
-.ai-agent-rail-reviews button:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-2);
-  color: var(--text-0);
-}
-
-.ai-agent-rail-reviews small {
-  color: var(--text-3);
-  font-size: 10px;
 }
 
 .ai-subagent-panel-row-button {
@@ -841,7 +896,8 @@
 
 /* Inline stop button (rows + subagent window head) */
 .ai-agent-rail-subagents .ai-subagent-cancel,
-.ai-subagent-window .ai-subagent-cancel {
+.ai-subagent-window .ai-subagent-cancel,
+.ai-subagent-modal .ai-subagent-cancel {
   flex: none;
   display: grid;
   place-items: center;
@@ -857,12 +913,82 @@
 }
 
 .ai-agent-rail-subagents .ai-subagent-cancel:hover,
-.ai-subagent-window .ai-subagent-cancel:hover {
+.ai-subagent-window .ai-subagent-cancel:hover,
+.ai-subagent-modal .ai-subagent-cancel:hover {
   color: #e5694b;
   background: color-mix(in srgb, #e5694b 14%, transparent);
 }
 
+/* Per-row delete (finished runs) + the history broom: same chrome as the stop
+   button but a neutral hover — removing a row is tidy-up, not destruction. */
+.ai-agent-rail-subagents .ai-subagent-remove:hover,
+.ai-agent-rail-history-head .ai-subagent-remove:hover {
+  color: var(--text-0);
+  background: var(--hover);
+}
+
+.ai-agent-rail-history-head .ai-subagent-remove {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--icon-muted);
+  cursor: pointer;
+  transition: color 110ms ease, background 110ms ease;
+}
+
+/* Mini live console under a running row: the newest transcript line (tool
+   start or streamed thinking snapshot), clamped to two lines, quietly mono for
+   tool lines. Clicking it drills into the run window. */
+.ai-subagent-row-tail {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  width: 100%;
+  margin: 2px 0 0;
+  padding: 3px 6px 3px 14px;
+  border: 0;
+  border-left: 2px solid var(--border-subtle);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: transparent;
+  color: var(--text-3);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.45;
+  text-align: left;
+  word-break: break-word;
+  cursor: pointer;
+  transition: color 110ms ease, border-color 110ms ease;
+}
+
+.ai-subagent-row-tail[data-role="system"] {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+}
+
+.ai-subagent-row-tail:hover {
+  color: var(--text-1);
+  border-left-color: var(--accent);
+}
+
 /* History section: quiet collapsible header in the block-header style */
+.ai-agent-rail-history-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ai-agent-rail-history-head .ai-agent-rail-history-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .ai-agent-rail-history-toggle {
   display: flex;
   align-items: center;
@@ -1021,6 +1147,53 @@
 .ai-subagent-window-empty {
   margin: 0;
   color: var(--text-3);
+  font-size: 11px;
+}
+
+/* ── Expanded subagent observer: the same live transcript in a large centered
+   modal (portal to <body> so it escapes the island's clamped geometry). ── */
+
+.ai-subagent-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 340;
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background: color-mix(in srgb, var(--surface-0, #0d0f13) 62%, transparent);
+  backdrop-filter: blur(3px);
+}
+
+.ai-subagent-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 100%);
+  height: min(78vh, 720px);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md, 10px);
+  background: var(--surface-1);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+/* The modal head is not a drag surface — normal cursor, close button on the right. */
+.ai-subagent-modal-head {
+  cursor: default;
+}
+
+.ai-subagent-modal-head .ai-subagent-window-back {
+  margin-left: 6px;
+}
+
+.ai-subagent-modal .ai-subagent-window-transcript {
+  padding: 12px 16px 14px;
+}
+
+.ai-subagent-modal .ai-subagent-window-transcript article p {
+  font-size: 12px;
+}
+
+.ai-subagent-modal .ai-subagent-window-transcript article[data-role="system"] p {
   font-size: 11px;
 }
 
@@ -1279,26 +1452,17 @@
   font-size: 10px;
 }
 
-.ai-agent-rail-tasks-compact {
+/* Compound selector (two classes) so the compact density outranks the base
+   `.ai-agent-rail-tasks` rules declared later in this file — a single-class
+   selector would tie on specificity and lose the source-order tie-break. */
+.ai-agent-rail-tasks.ai-agent-rail-tasks-compact {
   gap: 4px;
 }
 
-.ai-agent-rail-tasks-compact li {
+.ai-agent-rail-tasks.ai-agent-rail-tasks-compact li {
   grid-template-columns: 14px minmax(0, 1fr);
   gap: 6px;
   font-size: 11px;
-}
-
-.ai-agent-rail-task-text {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.ai-agent-rail-reviews-compact button {
-  padding: 4px 6px;
-  font-size: 10px;
 }
 
 .ai-agent-rail-block header {
@@ -1371,7 +1535,34 @@
   color: var(--accent);
 }
 
+.ai-agent-rail-tasks li[data-status="blocked"] > svg {
+  color: var(--gold, #e2b341);
+}
+
+.ai-agent-rail-tasks li[data-status="cancelled"] > svg {
+  color: var(--text-3);
+}
+
+/* Text + notes + file chip stack in one column beside the status glyph. */
+.ai-agent-rail-task-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* First line of the row: priority dot + task text. The dot is a SIBLING of the
+   text (not nested inside it) so the completed/cancelled strikethrough — which
+   is painted on the text span — never skips over the dot's atomic inline box. */
+.ai-agent-rail-task-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 0;
+}
+
 .ai-agent-rail-task-text {
+  min-width: 0;
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -1379,13 +1570,76 @@
   word-break: break-word;
 }
 
-.ai-agent-rail-tasks li[data-status="completed"] span:last-child {
+/* Small dot leading a high-priority task — a distinct violet accent (its own
+   axis, kept clear of the green/amber/blue status palette) that draws the eye
+   without a loud badge. */
+.ai-agent-rail-task-prio {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  margin-top: 5px;
+  border-radius: 999px;
+  background: var(--violet, #b49dff);
+}
+
+/* Once a task is done or dropped its priority is no longer actionable — mute the
+   dot in step with the greyed/struck row so it doesn't read as stale emphasis. */
+.ai-agent-rail-tasks li[data-status="completed"] .ai-agent-rail-task-prio,
+.ai-agent-rail-tasks li[data-status="cancelled"] .ai-agent-rail-task-prio {
+  background: var(--text-3);
+  opacity: 0.6;
+}
+
+.ai-agent-rail-task-notes {
+  color: var(--text-3);
+  font-size: 10px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-agent-rail-tasks li[data-status="completed"] .ai-agent-rail-task-text {
   color: var(--text-3);
   text-decoration: line-through;
 }
 
+.ai-agent-rail-tasks li[data-status="cancelled"] .ai-agent-rail-task-text {
+  color: var(--text-3);
+  text-decoration: line-through;
+  opacity: 0.75;
+}
+
+.ai-agent-rail-tasks li[data-status="blocked"] .ai-agent-rail-task-text {
+  color: var(--text-2);
+}
+
 .ai-agent-rail-tasks li[data-status="in_progress"] {
   color: var(--text-0);
+}
+
+/* Overall task progress — a two-tone meter (done = success, active = accent)
+   mirroring the goal meter so the Tasks block reads as "how far along". */
+.ai-agent-task-progress {
+  display: flex;
+  height: 3px;
+  margin: 2px 0 7px;
+  border-radius: 999px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.08));
+  overflow: hidden;
+}
+
+.ai-agent-task-progress-done {
+  height: 100%;
+  background: var(--success);
+  transition: width 280ms ease;
+}
+
+.ai-agent-task-progress-active {
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.7;
+  transition: width 280ms ease;
 }
 
 .ai-agent-rail-subagents {

@@ -3,6 +3,7 @@ import { resolveAssistantTurnUsage } from "./aiTurnUsage";
 import {
   buildGoalObjectiveBlock,
   extractGoalBlockedReason,
+  formatGoalTokenBudget,
   isExploratoryGoalRun,
   mergeGoalRunLimits,
   resolveDefaultGoalRunLimits,
@@ -138,7 +139,7 @@ export function formatGoalRunStatusText(run: GoalRunState) {
     `Phase: ${run.phase}`,
     `Rounds: ${run.round}/${run.limits.maxRounds}`,
     `Progress: ${run.progress}%`,
-    `Tokens: ${tokens.toLocaleString()}/${run.limits.maxTokens.toLocaleString()}`,
+    `Tokens: ${tokens.toLocaleString()}/${formatGoalTokenBudget(run.limits.maxTokens)}`,
     `Elapsed: ${elapsed}s/${maxSeconds}s`,
     run.lastCheckpoint ? `Checkpoint: ${run.lastCheckpoint.summary}` : "Checkpoint: none yet",
     run.lastEvaluatorReason ? `Next: ${run.lastEvaluatorReason}` : null,
@@ -232,7 +233,7 @@ export function startGoalRun(
   pushGoalHistory(
     run,
     "set",
-    `Limits: ${limits.maxRounds} rounds, ${Math.round(limits.maxDurationMs / 1000)}s, ${limits.maxTokens.toLocaleString()} tokens.`,
+    `Limits: ${limits.maxRounds} rounds, ${Math.round(limits.maxDurationMs / 1000)}s, ${formatGoalTokenBudget(limits.maxTokens)} tokens.`,
   );
   stallSignals.delete(`${sessionId}:stall`);
   resetToolLoopDetector(sessionId);

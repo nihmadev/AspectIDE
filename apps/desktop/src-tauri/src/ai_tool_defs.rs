@@ -90,7 +90,7 @@ fn todo_item_schema() -> serde_json::Value {
         "properties": {
             "content": { "type": "string", "description": "The task text" },
             "id": { "type": "string", "description": "Stable id (optional; auto-assigned if omitted)" },
-            "status": { "type": "string", "enum": ["pending", "in_progress", "completed"], "description": "Task status (default pending)" },
+            "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "blocked", "cancelled"], "description": "Task status (default pending). Use 'blocked' when the task cannot proceed until something is resolved, 'cancelled' when it is no longer needed." },
             "priority": { "type": "string", "enum": ["low", "medium", "high"], "description": "Task priority (default medium)" },
             "notes": { "type": "string", "description": "Optional notes" }
         },

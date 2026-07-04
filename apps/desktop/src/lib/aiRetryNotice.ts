@@ -12,6 +12,7 @@ export type AiRetryReason =
   | "timeout"
   | "network"
   | "stream"
+  | "offline"
   | "generic";
 
 export type AiRetryNotice = {
@@ -60,6 +61,7 @@ const KNOWN_REASONS = new Set<AiRetryReason>([
   "timeout",
   "network",
   "stream",
+  "offline",
   "generic",
 ]);
 

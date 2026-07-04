@@ -92,6 +92,48 @@ fn clear_turn_cancelled(turn_id: &str) {
     }
 }
 
+/// Registry of Task call ids the UI has asked to cancel INDIVIDUALLY (the
+/// per-row Stop button on a subagent), separate from whole-turn cancellation.
+/// `run_subagent` checks it at every round boundary, inside the streaming
+/// `should_cancel` hook and between tool calls, so stopping one subagent halts
+/// that subagent only — the parent turn and sibling subagents keep running.
+fn cancelled_subagents() -> &'static Mutex<CancelRegistry> {
+    static CANCELLED: OnceLock<Mutex<CancelRegistry>> = OnceLock::new();
+    CANCELLED.get_or_init(|| Mutex::new(CancelRegistry::default()))
+}
+
+/// Mark one subagent (Task call id) cancelled so its loop stops ASAP.
+fn mark_subagent_cancelled(call_id: &str) {
+    const CAP: usize = 256;
+    if let Ok(mut reg) = cancelled_subagents().lock() {
+        if reg.ids.insert(call_id.to_string()) {
+            reg.order.push_back(call_id.to_string());
+        }
+        while reg.order.len() > CAP {
+            if let Some(oldest) = reg.order.pop_front() {
+                reg.ids.remove(&oldest);
+            }
+        }
+    }
+}
+
+/// True if this specific subagent run has been cancelled from the UI.
+fn is_subagent_cancelled(call_id: &str) -> bool {
+    cancelled_subagents()
+        .lock()
+        .is_ok_and(|reg| reg.ids.contains(call_id))
+}
+
+/// Drop the flag once the subagent exits so the registry never grows unbounded
+/// and a future run reusing the id starts clean.
+fn clear_subagent_cancelled(call_id: &str) {
+    if let Ok(mut reg) = cancelled_subagents().lock() {
+        if reg.ids.remove(call_id) {
+            reg.order.retain(|id| id != call_id);
+        }
+    }
+}
+
 /// Messages the UI staged WHILE a turn was running, keyed by `session_id:turn_id`.
 /// Keying by `turn_id` prevents a restarted or concurrent turn draining messages
 /// that were staged for a different (earlier) turn (F5 — misrouting live input).
@@ -320,9 +362,11 @@ pub enum TurnEvent {
     /// the Agent rail can stream the subagent's work while it runs instead of
     /// showing a silent "running…" row. `stage` is "text" (throttled snapshot of
     /// the subagent's streamed answer in `content`), "tool" (the subagent started
-    /// the tool named in `tool`; `content` carries a short argument preview) or
-    /// "done" (`content` is the final summary). Named `stage` because `kind` is
-    /// this enum's serde tag.
+    /// the tool named in `tool`; `content` carries a short argument preview),
+    /// "done" (`content` is the final summary), "error", or "cancelled" (a
+    /// whole-turn Stop or per-row `ai_cancel_subagent` halted the run — the UI
+    /// settles the row as cancelled). Named `stage` because `kind` is this
+    /// enum's serde tag.
     #[serde(rename_all = "camelCase")]
     SubagentProgress {
         turn_id: String,
@@ -1373,13 +1417,14 @@ pub async fn ai_run_turn(
             reads_in_batch
         };
 
-        // ── Parallel subagent fan-out ──
-        // When the model issues 2+ Task calls in ONE response, run them
-        // CONCURRENTLY instead of one-after-another: each subagent is an
-        // isolated context (own messages, own model loop), so they cannot race
-        // each other's conversation state — the wall-clock win is ~N× for an
-        // N-agent fan-out. Started/Completed events are emitted inside each
-        // future (live, as each subagent starts/finishes); the sequential loop
+        // ── Parallel fan-out: subagents + read-only batches ──
+        // When the model issues 2+ Task calls OR 2+ parallel-safe read-only
+        // calls (`is_parallel_safe_read_tool`) in ONE response, run them
+        // CONCURRENTLY instead of one-after-another: subagents are isolated
+        // contexts and the whitelisted read tools are pure local queries, so
+        // neither can race conversation or file state — the wall-clock win is
+        // ~N× for an N-call batch. Started/Completed events are emitted inside
+        // each future (live, as each call starts/finishes); the sequential loop
         // below consumes the stored results so tool-message ordering and
         // cancellation semantics stay identical to the sequential path.
         //
@@ -1925,6 +1970,15 @@ pub fn ai_cancel_turn(turn_id: String) {
     mark_turn_cancelled(&turn_id);
     cancel_approvals_for_turn(&turn_id);
     cancel_questions_for_turn(&turn_id);
+}
+
+/// Cancel ONE running subagent (Task tool call) by its call id — the per-row
+/// Stop button. The parent turn and sibling subagents are unaffected; the
+/// subagent's loop observes the flag at its next cancellation checkpoint
+/// (mid-stream via `should_cancel`, between tools, or at the round boundary).
+#[tauri::command]
+pub fn ai_cancel_subagent(call_id: String) {
+    mark_subagent_cancelled(&call_id);
 }
 
 /// Stage a user message for injection into a specific running turn.
@@ -4489,60 +4543,111 @@ async fn execute_tool(
 
         "FastContext" => {
             let query = json_str(&args, "query");
-            // FastContext composes multiple tools — call them sequentially in Rust.
+            // FastContext composes ~10 independent read-only sources. Gathering them
+            // concurrently (single task, `tokio::join!` — no Send/spawn requirements)
+            // makes the wall-clock the slowest source instead of the sum of all.
+            // Section order in the output stays identical to the old sequential code.
+            let workspace_index_fut =
+                crate::ai_workspace::ai_workspace_index(state.clone(), Some(24), Some(2500));
+            let repo_map_fut = crate::ai_workspace::ai_repo_map(state.clone(), Some(48));
+            let code_graph_fut = crate::code_graph::fast_context_part(state.inner(), &query);
+            let rules_fut = crate::ai_context_sources::ai_rules_context(
+                state.clone(),
+                Some(query.clone()),
+                Some(8),
+                None,
+            );
+            let memory_context_fut = crate::ai_context_sources::ai_memory_context(
+                state.clone(),
+                Some(query.clone()),
+                Some(8),
+                None,
+            );
+            let memory_recall_fut = crate::memory::memory_search(
+                app.clone(),
+                state.clone(),
+                query.clone(),
+                Some(lux_memory::SearchOptions {
+                    limit: 6,
+                    ..Default::default()
+                }),
+            );
+            let git_fut = crate::git::git_status(state.clone());
+            let related_fut = crate::ai_related::ai_related_files(
+                state.clone(),
+                input.active_document_path.clone(),
+                Some(query.clone()),
+                Some(24),
+                Some(5000),
+            );
+            let search_fut = async {
+                if query.is_empty() {
+                    return None;
+                }
+                crate::search::search_query(
+                    state.clone(),
+                    query.clone(),
+                    lux_core::SearchOptions {
+                        max_results: 20,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .ok()
+            };
+            let (
+                workspace_index,
+                repo_map,
+                code_graph_part,
+                rules,
+                memory_context,
+                memory_hits,
+                git,
+                related,
+                search,
+            ) = tokio::join!(
+                workspace_index_fut,
+                repo_map_fut,
+                code_graph_fut,
+                rules_fut,
+                memory_context_fut,
+                memory_recall_fut,
+                git_fut,
+                related_fut,
+                search_fut,
+            );
+
             let mut parts = Vec::new();
             parts.push(format!(
                 "Active document: {}",
                 input.active_document_path.as_deref().unwrap_or("none")
             ));
-
-            // WorkspaceIndex
-            if let Ok(wi) =
-                crate::ai_workspace::ai_workspace_index(state.clone(), Some(24), Some(2500)).await
+            if let Some(json) = workspace_index
+                .ok()
+                .and_then(|wi| serde_json::to_string(&wi).ok())
             {
-                if let Ok(json) = serde_json::to_string(&wi) {
-                    parts.push(format!("WorkspaceIndex: {json}"));
-                }
+                parts.push(format!("WorkspaceIndex: {json}"));
             }
-            // RepoMap
-            if let Ok(rm) = crate::ai_workspace::ai_repo_map(state.clone(), Some(48)).await {
-                if let Ok(json) = serde_json::to_string(&rm) {
-                    parts.push(format!("RepoMap: {json}"));
-                }
+            if let Some(json) = repo_map.ok().and_then(|rm| serde_json::to_string(&rm).ok()) {
+                parts.push(format!("RepoMap: {json}"));
             }
             // CodeGraph — readiness + the query's own symbols resolved through the
             // graph. Seeing the graph answer its own question is the strongest nudge
             // to reach for CodeGraph* tools instead of grepping relationships.
-            if let Some(part) = crate::code_graph::fast_context_part(state.inner(), &query).await {
+            if let Some(part) = code_graph_part {
                 parts.push(part);
             }
-            // RulesContext
-            if let Ok(rc) = crate::ai_context_sources::ai_rules_context(
-                state.clone(),
-                Some(query.clone()),
-                Some(8),
-                None,
-            )
-            .await
-            {
-                if let Ok(json) = serde_json::to_string(&rc) {
-                    parts.push(format!("RulesContext: {json}"));
-                }
+            if let Some(json) = rules.ok().and_then(|rc| serde_json::to_string(&rc).ok()) {
+                parts.push(format!("RulesContext: {json}"));
             }
-            // MemoryContext
-            if let Ok(mc) = crate::ai_context_sources::ai_memory_context(
-                state.clone(),
-                Some(query.clone()),
-                Some(8),
-                None,
-            )
-            .await
+            if let Some(json) = memory_context
+                .ok()
+                .and_then(|mc| serde_json::to_string(&mc).ok())
             {
-                if let Ok(json) = serde_json::to_string(&mc) {
-                    parts.push(format!("MemoryContext: {json}"));
-                }
+                parts.push(format!("MemoryContext: {json}"));
             }
             // SkillsCatalog — reusable instruction modules relevant to the task.
+            // (Synchronous scan; runs after the concurrent gather.)
             if let Ok(skills) =
                 crate::skills::skills_match(app.clone(), state.clone(), query.clone(), Some(12))
             {
@@ -4565,39 +4670,26 @@ async fn execute_tool(
                 }
             }
             // MemoryRecall — salient durable memories from the structured store.
-            {
-                let options = lux_memory::SearchOptions {
-                    limit: 6,
-                    ..Default::default()
-                };
-                if let Ok(hits) = crate::memory::memory_search(
-                    app.clone(),
-                    state.clone(),
-                    query.clone(),
-                    Some(options),
-                )
-                .await
-                {
-                    if !hits.is_empty() {
-                        let items: Vec<_> = hits
-                            .iter()
-                            .map(|hit| {
-                                serde_json::json!({
-                                    "content": hit.memory.content,
-                                    "category": hit.memory.category,
-                                    "importance": hit.memory.importance,
-                                })
+            if let Ok(hits) = memory_hits {
+                if !hits.is_empty() {
+                    let items: Vec<_> = hits
+                        .iter()
+                        .map(|hit| {
+                            serde_json::json!({
+                                "content": hit.memory.content,
+                                "category": hit.memory.category,
+                                "importance": hit.memory.importance,
                             })
-                            .collect();
-                        if let Ok(json) =
-                            serde_json::to_string(&serde_json::json!({ "memories": items }))
-                        {
-                            parts.push(format!("MemoryRecall: {json}"));
-                        }
+                        })
+                        .collect();
+                    if let Ok(json) =
+                        serde_json::to_string(&serde_json::json!({ "memories": items }))
+                    {
+                        parts.push(format!("MemoryRecall: {json}"));
                     }
                 }
             }
-            // DiagnosticsContext
+            // DiagnosticsContext (synchronous snapshot).
             if let Ok(diag) = crate::lsp::diagnostics_snapshot(state.clone()) {
                 let count = diag.len();
                 let truncated: Vec<_> = diag.into_iter().take(40).collect();
@@ -4606,42 +4698,14 @@ async fn execute_tool(
                     serde_json::to_string(&truncated).unwrap_or_default()
                 ));
             }
-            // GitContext
-            if let Ok(git) = crate::git::git_status(state.clone()).await {
-                if let Ok(json) = serde_json::to_string(&git) {
-                    parts.push(format!("GitContext: {json}"));
-                }
+            if let Some(json) = git.ok().and_then(|g| serde_json::to_string(&g).ok()) {
+                parts.push(format!("GitContext: {json}"));
             }
-            // RelatedFiles
-            if let Ok(rf) = crate::ai_related::ai_related_files(
-                state.clone(),
-                input.active_document_path.clone(),
-                Some(query.clone()),
-                Some(24),
-                Some(5000),
-            )
-            .await
-            {
-                if let Ok(json) = serde_json::to_string(&rf) {
-                    parts.push(format!("RelatedFiles: {json}"));
-                }
+            if let Some(json) = related.ok().and_then(|rf| serde_json::to_string(&rf).ok()) {
+                parts.push(format!("RelatedFiles: {json}"));
             }
-            // Grep/Glob
-            if !query.is_empty() {
-                if let Ok(search) = crate::search::search_query(
-                    state.clone(),
-                    query.clone(),
-                    lux_core::SearchOptions {
-                        max_results: 20,
-                        ..Default::default()
-                    },
-                )
-                .await
-                {
-                    if let Ok(json) = serde_json::to_string(&search) {
-                        parts.push(format!("Search: {json}"));
-                    }
-                }
+            if let Some(json) = search.and_then(|s| serde_json::to_string(&s).ok()) {
+                parts.push(format!("Search: {json}"));
             }
 
             Ok(serde_json::json!({ "query": query, "context": parts.join("\n\n") }).to_string())
@@ -5637,25 +5701,73 @@ fn file_edit_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// Ids of the Task calls that should fan out concurrently: only when the model's
-/// response contains two or more Task calls. A single Task (or none) returns an
-/// empty list so the plain sequential path — identical to the pre-fan-out
-/// behavior — handles it. Duplicate call ids (a malformed/hostile provider
-/// response) also fall back to sequential: the fan-out stores results in a map
-/// keyed by call id, where a duplicate would silently drop one subagent's
-/// result and re-execute the call.
+/// Tools that are safe to execute CONCURRENTLY within one response batch:
+/// pure local reads/queries with no file mutation, no shell execution, no
+/// approval gate, and no cross-call ordering dependency. Network tools
+/// (`WebFetch`/`WebResearch`), Shell, edits, and stateful tools (Goal,
+/// `TodoWrite`, Checkpoint, `AgentMessage`, `TerminalWrite`, …) are excluded.
+fn is_parallel_safe_read_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "Read"
+            | "Grep"
+            | "Glob"
+            | "InspectFile"
+            | "SymbolContext"
+            | "SemanticSearch"
+            | "RelatedFiles"
+            | "RepoMap"
+            | "WorkspaceIndex"
+            | "GitContext"
+            | "DiagnosticsContext"
+            | "ReadLints"
+            | "RulesContext"
+            | "DocsContext"
+            | "MemoryContext"
+            | "RecallMemory"
+            | "ListSkills"
+            | "ActiveContext"
+            | "CodeGraphDefinition"
+            | "CodeGraphCallers"
+            | "CodeGraphCallees"
+            | "CodeGraphExplain"
+            | "CodeGraphOverview"
+    )
+}
+
+/// Ids of the calls that should fan out concurrently: the model's response must
+/// contain two or more Task calls (subagent fan-out) OR two or more
+/// parallel-safe read-only calls ([`is_parallel_safe_read_tool`]) — each group
+/// fans out independently of the other; a group of one runs sequentially.
+/// A single eligible call (or none) returns an empty list so the plain
+/// sequential path — identical to the pre-fan-out behavior — handles it.
+/// Duplicate call ids anywhere in the batch (a malformed/hostile provider
+/// response) fall back fully to sequential: the fan-out stores results in a map
+/// keyed by call id, where a duplicate would silently drop one call's result
+/// and re-execute it.
 fn parallel_task_call_ids(calls: &[ParsedToolCall]) -> Vec<String> {
-    let ids: Vec<String> = calls
+    let all_ids: std::collections::HashSet<&String> = calls.iter().map(|tc| &tc.id).collect();
+    if all_ids.len() != calls.len() {
+        return Vec::new();
+    }
+    let task_ids: Vec<String> = calls
         .iter()
         .filter(|tc| tc.name == "Task")
         .map(|tc| tc.id.clone())
         .collect();
-    let unique: std::collections::HashSet<&String> = ids.iter().collect();
-    if ids.len() >= 2 && unique.len() == ids.len() {
-        ids
-    } else {
-        Vec::new()
+    let read_ids: Vec<String> = calls
+        .iter()
+        .filter(|tc| is_parallel_safe_read_tool(&tc.name))
+        .map(|tc| tc.id.clone())
+        .collect();
+    let mut ids = Vec::new();
+    if task_ids.len() >= 2 {
+        ids.extend(task_ids);
     }
+    if read_ids.len() >= 2 {
+        ids.extend(read_ids);
+    }
+    ids
 }
 
 /// Build a subagent's board/UI identity: `<type>-<8 hex chars>`, e.g.
@@ -5836,18 +5948,26 @@ async fn run_subagent(
 
     let mut final_content = String::new();
     for _round in 0..max_rounds {
-        // A Stop on the parent turn must halt the subagent immediately instead of
-        // burning up to max_rounds model calls + running side-effecting tools.
-        // The parent loop is blocked awaiting this Task, so this is the only
-        // place the cancellation can be observed mid-subagent. Do NOT clear the
-        // flag here — the parent's post-tool check still needs to see it to
-        // abort the parent turn afterward.
-        if is_turn_cancelled(parent_turn_id) {
-            return Ok(if final_content.is_empty() {
+        // A Stop on the parent turn — or the per-row Stop on THIS subagent —
+        // must halt the loop immediately instead of burning up to max_rounds
+        // model calls + running side-effecting tools. The parent loop is blocked
+        // awaiting this Task, so this is the only place the cancellation can be
+        // observed mid-subagent. Do NOT clear the turn flag here — the parent's
+        // post-tool check still needs to see it to abort the parent turn
+        // afterward; the per-subagent flag is cleared on exit below.
+        if is_turn_cancelled(parent_turn_id) || is_subagent_cancelled(call_id) {
+            clear_subagent_cancelled(call_id);
+            let summary = if final_content.is_empty() {
                 "Subagent cancelled.".to_string()
             } else {
                 clamp_subagent_summary(final_content)
-            });
+            };
+            // Settle the UI row too: the per-turn listener may already be gone
+            // (Stop rejects the turn promise immediately), but the app-lifetime
+            // subagent-progress bridge still routes this — without it the row
+            // spins "running" forever. A row the user cancelled ignores it.
+            emit_progress("cancelled", summary.clone(), String::new());
+            return Ok(summary);
         }
         let mut payload = serde_json::json!({
             "model": subagent_model,
@@ -5875,6 +5995,7 @@ async fn run_subagent(
         // into the parent chat, but throttled snapshots stream to the Agent rail via
         // SubagentProgress so the run is observable while it works.
         let cancel_turn = parent_turn_id.to_string();
+        let cancel_call = call_id.to_string();
         let mut round_text = String::new();
         let mut last_progress = std::time::Instant::now();
         let mut emitted_len = 0usize;
@@ -5894,7 +6015,7 @@ async fn run_subagent(
                     emit_progress("text", round_text.clone(), String::new());
                 }
             },
-            move || is_turn_cancelled(&cancel_turn),
+            move || is_turn_cancelled(&cancel_turn) || is_subagent_cancelled(&cancel_call),
             // Subagents run in an isolated context with no retry UI to notify.
             |_notice| {},
             // Tool starts are emitted at execution time below (with an argument
@@ -5902,7 +6023,24 @@ async fn run_subagent(
             // the round's final text snapshot and split it into two entries.
             |_tool_name| {},
         )
-        .await?;
+        .await
+        .inspect_err(|_| {
+            // A per-row Stop aborts the in-flight stream, which surfaces as a
+            // transport error here — don't leak the flag on that early exit.
+            clear_subagent_cancelled(call_id);
+        })?;
+        // The mid-stream abort usually returns a truncated-but-Ok body: settle
+        // as a clean cancellation instead of parsing the partial round.
+        if is_subagent_cancelled(call_id) {
+            clear_subagent_cancelled(call_id);
+            let summary = if final_content.is_empty() {
+                "Subagent cancelled.".to_string()
+            } else {
+                clamp_subagent_summary(final_content)
+            };
+            emit_progress("cancelled", summary.clone(), String::new());
+            return Ok(summary);
+        }
         // Flush the round's final text snapshot so the rail shows the complete
         // narration even when the tail arrived inside the throttle window.
         if round_text.len() > emitted_len {
@@ -5965,16 +6103,22 @@ async fn run_subagent(
             }));
             // Stop the subagent between tools too, so a Stop mid-round doesn't
             // keep running the remaining (possibly side-effecting) tool calls.
-            if is_turn_cancelled(parent_turn_id) {
-                return Ok(if final_content.is_empty() {
+            if is_turn_cancelled(parent_turn_id) || is_subagent_cancelled(call_id) {
+                clear_subagent_cancelled(call_id);
+                let summary = if final_content.is_empty() {
                     "Subagent cancelled.".to_string()
                 } else {
                     clamp_subagent_summary(final_content)
-                });
+                };
+                emit_progress("cancelled", summary.clone(), String::new());
+                return Ok(summary);
             }
         }
     }
 
+    // Normal exit: drop any per-subagent cancel flag that raced the finish so a
+    // future run reusing the registry slot starts clean.
+    clear_subagent_cancelled(call_id);
     let summary = if final_content.is_empty() {
         "Subagent finished without a summary.".to_string()
     } else {
@@ -6672,7 +6816,7 @@ mod tests {
         assert!(parallel_task_call_ids(&[call("a", "Task")]).is_empty());
         assert!(parallel_task_call_ids(&[call("a", "Read"), call("b", "Task")]).is_empty());
 
-        // 2+ Tasks → exactly the Task ids, in order; other tools excluded.
+        // 2+ Tasks → the Task ids, in order; a lone read stays sequential.
         let batch = [
             call("a", "Task"),
             call("b", "Read"),
@@ -6684,6 +6828,44 @@ mod tests {
         // Duplicate call ids (malformed/hostile response) → sequential fallback:
         // the result map is keyed by id, a duplicate would drop one result.
         let dup = [call("a", "Task"), call("a", "Task"), call("b", "Task")];
+        assert!(parallel_task_call_ids(&dup).is_empty());
+    }
+
+    #[test]
+    fn parallel_fanout_batches_read_only_tools() {
+        // 2+ parallel-safe read tools fan out; a mutating tool in the same
+        // batch stays sequential and does NOT poison the read group.
+        let batch = [
+            call("a", "Read"),
+            call("b", "Grep"),
+            call("c", "StrReplace"),
+            call("d", "CodeGraphCallers"),
+        ];
+        assert_eq!(parallel_task_call_ids(&batch), vec!["a", "b", "d"]);
+
+        // A single read-only call → sequential (no fan-out for one).
+        assert!(parallel_task_call_ids(&[call("a", "Read"), call("b", "Write")]).is_empty());
+
+        // Mixed groups: 2 Tasks + 2 reads → both groups fan out.
+        let mixed = [
+            call("a", "Task"),
+            call("b", "Task"),
+            call("c", "Read"),
+            call("d", "Glob"),
+            call("e", "Shell"),
+        ];
+        assert_eq!(parallel_task_call_ids(&mixed), vec!["a", "b", "c", "d"]);
+
+        // Excluded-by-design tools never batch: network, shell, edits, state.
+        for name in ["WebFetch", "WebResearch", "Shell", "Write", "TodoWrite"] {
+            assert!(
+                parallel_task_call_ids(&[call("a", name), call("b", name)]).is_empty(),
+                "{name} must not fan out"
+            );
+        }
+
+        // Duplicate ids poison the WHOLE batch, including the read group.
+        let dup = [call("a", "Read"), call("a", "Grep")];
         assert!(parallel_task_call_ids(&dup).is_empty());
     }
 

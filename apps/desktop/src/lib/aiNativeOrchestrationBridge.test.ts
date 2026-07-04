@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { bridgeNativeSubagentProgress, bridgeNativeToolCompleted } from "./aiNativeOrchestrationBridge";
-import { getSubagentRun, registerSubagentRun } from "./aiSubagentRuns";
+import { clearFinishedSubagentRuns, getSubagentRun, registerSubagentRun, removeSubagentRun } from "./aiSubagentRuns";
 
 let seq = 0;
 function freshRun(): string {
@@ -76,6 +76,48 @@ describe("bridgeNativeSubagentProgress", () => {
     bridgeNativeSubagentProgress(failed, "error", "provider exploded", "");
     expect(getSubagentRun(failed)?.status).toBe("failed");
     expect(getSubagentRun(failed)?.summary).toBe("provider exploded");
+  });
+
+  it("settles a run as cancelled on the cancelled stage (whole-turn Stop path)", () => {
+    const id = freshRun();
+    bridgeNativeSubagentProgress(id, "cancelled", "Subagent cancelled.", "");
+    expect(getSubagentRun(id)?.status).toBe("cancelled");
+    expect(getSubagentRun(id)?.summary).toBe("Subagent cancelled.");
+    // A late done must not flip a cancelled row back to completed.
+    bridgeNativeSubagentProgress(id, "done", "late summary", "");
+    expect(getSubagentRun(id)?.status).toBe("cancelled");
+  });
+
+  it("removes finished runs manually and clears a session's finished history", () => {
+    const finished = freshRun();
+    const sessionId = getSubagentRun(finished)!.sessionId;
+    bridgeNativeSubagentProgress(finished, "done", "ok", "");
+    removeSubagentRun(finished);
+    expect(getSubagentRun(finished)).toBeNull();
+
+    // clearFinished drops finished rows but leaves running ones alone.
+    registerSubagentRun({
+      id: `${finished}-b`,
+      sessionId,
+      description: "still running",
+      subagentType: "explorer",
+      depth: 1,
+      parentAgentId: null,
+      abortController: new AbortController(),
+    });
+    registerSubagentRun({
+      id: `${finished}-c`,
+      sessionId,
+      description: "already done",
+      subagentType: "explorer",
+      depth: 1,
+      parentAgentId: null,
+      abortController: new AbortController(),
+    });
+    bridgeNativeSubagentProgress(`${finished}-c`, "done", "ok", "");
+    clearFinishedSubagentRuns(sessionId);
+    expect(getSubagentRun(`${finished}-b`)?.status).toBe("running");
+    expect(getSubagentRun(`${finished}-c`)).toBeNull();
   });
 
   it("keeps a background Task's run row streaming when the tool call returns started", () => {

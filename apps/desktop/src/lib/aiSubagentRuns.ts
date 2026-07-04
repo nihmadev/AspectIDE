@@ -153,12 +153,44 @@ function pruneSubagentRuns(sessionId: string) {
 export function cancelSubagentRun(id: string) {
   const controller = abortControllers.get(id);
   controller?.abort();
+  // Native (Rust) subagents don't listen to the TS AbortController — the one
+  // registered for them is a placeholder. Signal the Rust loop too so the
+  // subagent actually STOPS (model stream aborted, remaining tools skipped)
+  // instead of just flipping the UI row to "cancelled" while it keeps working.
+  // Dynamic import keeps this store free of a static tauri.ts dependency
+  // (vitest / non-Tauri runtimes); best-effort — the UI state settles either way.
+  void import("./tauri")
+    .then((m) => m.luxCommands.aiCancelSubagent(id))
+    .catch(() => {});
   const run = runs.get(id);
   if (run) {
     runs.set(id, { ...run, status: "cancelled", endedAt: Date.now(), summary: "Cancelled", revision: run.revision + 1 });
   }
   abortControllers.delete(id);
   emit();
+}
+
+/** Manually remove a FINISHED run row (per-row delete in the rail). A running
+ *  run is cancelled first so the native loop stops before the row disappears. */
+export function removeSubagentRun(id: string) {
+  const run = runs.get(id);
+  if (!run) return;
+  if (run.status === "running") cancelSubagentRun(id);
+  runs.delete(id);
+  abortControllers.delete(id);
+  emit();
+}
+
+/** Clear every finished (non-running) run for a session — the history broom. */
+export function clearFinishedSubagentRuns(sessionId: string) {
+  let changed = false;
+  for (const run of listSubagentRunsForSession(sessionId)) {
+    if (run.status === "running") continue;
+    runs.delete(run.id);
+    abortControllers.delete(run.id);
+    changed = true;
+  }
+  if (changed) emit();
 }
 
 export function cancelAllSubagentRuns(sessionId: string) {

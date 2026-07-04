@@ -1,6 +1,7 @@
 import type { AiChatSendInput } from "./aiChatTypes";
 import { normalizePath } from "./fileTree";
 import { captureFileTextSnapshot, registerPendingFileReview } from "./aiPendingFileReview";
+import { shouldSkipEditReview } from "./aiFileReviewPolicy";
 
 // Bridges native-turn file edits into the Cursor-style pending-review system
 // (green/red editor diff + Accept/Reject bar). The TS browser runtime registers
@@ -85,7 +86,8 @@ export async function captureNativeEditBefore(
 /**
  * Register a pending review for each changed file once the native edit completes,
  * pairing the captured BEFORE text with the AFTER text from the tool result.
- * No-op in Automatic mode (full autonomy: nothing to accept/reject).
+ * No-op when nobody will act on a review (Automatic mode, or apply-immediately
+ * trust for edits already on disk — see aiFileReviewPolicy).
  */
 export async function registerNativeEditReview(
   tool: string,
@@ -94,7 +96,7 @@ export async function registerNativeEditReview(
   before: BeforeSnapshot[],
   input: AiChatSendInput,
 ): Promise<void> {
-  if (input.preferences.agentMode === "automatic" || before.length === 0) return;
+  if (before.length === 0) return;
   let parsed: Record<string, unknown> = {};
   try {
     parsed = JSON.parse(resultJson || "{}") as Record<string, unknown>;
@@ -107,9 +109,12 @@ export async function registerNativeEditReview(
   // savedToDisk defaults true (the native tools persist unless explicitly staged);
   // previewOnly is its inverse — a staged edit must be written on Accept.
   const savedToDisk = parsed.savedToDisk !== false;
+  // Only the review REGISTRATION is policy-gated; the edited file still opens
+  // below, mirroring the TS runtime where notifyFilePathsEdited is unconditional.
+  const skipReview = shouldSkipEditReview(input.preferences, !savedToDisk);
   const workspaceRoot = input.workspace?.root ?? "";
 
-  const reviewedPaths: string[] = [];
+  const changedPaths: string[] = [];
   for (const { path, before: beforeText, faithful } of before) {
     const key = normalizePath(path);
     const editedText = editedDocuments.find((doc) => doc.path && normalizePath(doc.path) === key)?.text;
@@ -117,23 +122,25 @@ export async function registerNativeEditReview(
       ? { text: editedText, faithful: true }
       : await captureFileTextSnapshot(path);
     if (after.text === beforeText) continue;
-    registerPendingFileReview({
-      sessionId: input.chatSessionId,
-      path,
-      relativePath: relativeTo(workspaceRoot, path),
-      toolName: tool,
-      toolCallId,
-      beforeText,
-      afterText: after.text,
-      previewOnly: !savedToDisk,
-      // An unfaithful snapshot (truncated / lossy non-UTF-8) is display-only:
-      // the existing textTruncated guards stop accept/reject from writing it
-      // back and corrupting or truncating the real file.
-      textTruncated: !faithful || !after.faithful || undefined,
-    });
-    reviewedPaths.push(path);
+    if (!skipReview) {
+      registerPendingFileReview({
+        sessionId: input.chatSessionId,
+        path,
+        relativePath: relativeTo(workspaceRoot, path),
+        toolName: tool,
+        toolCallId,
+        beforeText,
+        afterText: after.text,
+        previewOnly: !savedToDisk,
+        // An unfaithful snapshot (truncated / lossy non-UTF-8) is display-only:
+        // the existing textTruncated guards stop accept/reject from writing it
+        // back and corrupting or truncating the real file.
+        textTruncated: !faithful || !after.faithful || undefined,
+      });
+    }
+    changedPaths.push(path);
   }
-  // Open an edited file so its green/red diff + Accept/Reject bar are visible
-  // (the bar is keyed to the active document), mirroring the TS runtime.
-  if (reviewedPaths.length > 0) input.onFilePathsEdited?.(reviewedPaths);
+  // Open an edited file so the change is visible in the editor (with the
+  // green/red diff + Accept/Reject bar when a review was registered).
+  if (changedPaths.length > 0) input.onFilePathsEdited?.(changedPaths);
 }

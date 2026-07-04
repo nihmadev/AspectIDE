@@ -978,7 +978,7 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
           max={500_000}
           step={10_000}
           fallbackLimitedValue={200_000}
-          unlimitedLabel={t("settings.aiRuntime.limit.default")}
+          unlimitedLabel={t("settings.aiRuntime.limit.off")}
           limitedLabel={t("settings.aiRuntime.limit.custom")}
           onChange={(goalRunMaxTokens) => onChange({ goalRunMaxTokens })}
         />

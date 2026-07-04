@@ -149,10 +149,9 @@ pub fn to_anthropic_request(openai: &Value) -> Value {
             }
         }
     }
-    out.insert(
-        "messages".to_string(),
-        Value::Array(coalesce_messages(messages)),
-    );
+    let mut messages = coalesce_messages(messages);
+    apply_conversation_cache_breakpoints(&mut messages);
+    out.insert("messages".to_string(), Value::Array(messages));
     if !system_blocks.is_empty() {
         out.insert("system".to_string(), Value::Array(system_blocks));
     }
@@ -586,6 +585,49 @@ fn image_block(url: &str) -> Value {
         }
     }
     json!({ "type": "image", "source": { "type": "url", "url": url } })
+}
+
+/// Number of trailing messages that receive a rolling `cache_control` breakpoint.
+/// Two (not one) so that when the newest message changes next round, the lookup
+/// still hits the breakpoint that was on the previous round's tail — the whole
+/// conversation prefix is then a cache READ instead of being re-billed at full
+/// input price on every tool round. With the system-prompt breakpoint this uses
+/// 3 of Anthropic's 4 allowed `cache_control` blocks.
+const CONVERSATION_CACHE_BREAKPOINTS: usize = 2;
+
+/// Block types `cache_control` may be attached to; a `thinking`/
+/// `redacted_thinking` block rejects it, so the marker goes on the last
+/// cacheable block of a message instead.
+fn block_accepts_cache_control(block: &Value) -> bool {
+    matches!(
+        block.get("type").and_then(Value::as_str),
+        Some("text" | "image" | "tool_use" | "tool_result")
+    )
+}
+
+/// Attach rolling `cache_control: ephemeral` breakpoints to the last cacheable
+/// content block of the final [`CONVERSATION_CACHE_BREAKPOINTS`] messages, so
+/// each round's request caches the conversation built so far (see the constant
+/// for why two). Existing caller-set markers are respected, not duplicated.
+fn apply_conversation_cache_breakpoints(messages: &mut [Value]) {
+    for message in messages
+        .iter_mut()
+        .rev()
+        .take(CONVERSATION_CACHE_BREAKPOINTS)
+    {
+        let Some(blocks) = message.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        if let Some(block) = blocks
+            .iter_mut()
+            .rev()
+            .find(|block| block_accepts_cache_control(block))
+        {
+            if block.get("cache_control").is_none() {
+                block["cache_control"] = json!({ "type": "ephemeral" });
+            }
+        }
+    }
 }
 
 /// Merge adjacent same-role messages by concatenating their content blocks.
@@ -1276,6 +1318,77 @@ mod tests {
         });
         let out = from_anthropic_response(&body);
         assert!(out.get("anthropic_stop_reason").is_none());
+    }
+
+    // ── Conversation prompt caching (rolling breakpoints) ──
+
+    #[test]
+    fn rolling_cache_breakpoints_on_last_two_messages() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                { "role": "user", "content": "round 1" },
+                { "role": "assistant", "content": "answer 1" },
+                { "role": "user", "content": "round 2" },
+            ],
+        });
+        let out = to_anthropic_request(&openai);
+        let messages = out["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        // Oldest message: no marker (only the trailing two carry breakpoints).
+        assert!(messages[0]["content"][0].get("cache_control").is_none());
+        assert_eq!(
+            messages[1]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoint_lands_on_last_cacheable_block_of_each_message() {
+        // A trailing tool round: assistant(thinking+tool_use) then user(tool_result).
+        // thinking rejects cache_control → the assistant marker must land on the
+        // tool_use block; the tool_result user message takes the second marker.
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [
+                { "role": "user", "content": "go" },
+                { "role": "assistant", "content": null,
+                  "anthropic_content": [
+                    { "type": "thinking", "thinking": "plan", "signature": "sig" },
+                    { "type": "tool_use", "id": "c1", "name": "Read", "input": {} },
+                  ]},
+                { "role": "tool", "tool_call_id": "c1", "content": "file body" },
+            ],
+        });
+        let out = to_anthropic_request(&openai);
+        let messages = out["messages"].as_array().unwrap();
+        let assistant = messages[1]["content"].as_array().unwrap();
+        assert!(
+            assistant[0].get("cache_control").is_none(),
+            "not on thinking"
+        );
+        assert_eq!(assistant[1]["cache_control"]["type"], "ephemeral");
+        assert_eq!(
+            messages[2]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[test]
+    fn cache_breakpoint_single_message_conversation() {
+        let openai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{ "role": "user", "content": "hello" }],
+        });
+        let out = to_anthropic_request(&openai);
+        assert_eq!(
+            out["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 
     // ── non-stream anthropic_content assembly ──

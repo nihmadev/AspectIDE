@@ -265,24 +265,58 @@ fn run_git_capture(command: &mut Command) -> AppResult<Vec<u8>> {
 /// remote can never freeze the AI turn loop indefinitely.
 fn run_git_output(command: &mut Command) -> AppResult<std::process::Output> {
     command.stdin(Stdio::null());
+    // Both streams MUST be piped: without it `wait_with_output` returns empty
+    // buffers (status/diff/branches all look blank) and, in a GUI app with no
+    // console, git's real error text is lost entirely.
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
     let mut child = command.spawn()?;
+    // Drain both pipes on background threads while we poll for the deadline.
+    // Draining concurrently is required for correctness, not just latency: a
+    // child that fills a full pipe buffer blocks on write and would never exit,
+    // turning every large `git status`/`diff` into a guaranteed timeout+kill.
+    let mut stdout_reader = child.stdout.take().map(spawn_pipe_drain);
+    let mut stderr_reader = child.stderr.take().map(spawn_pipe_drain);
     let deadline = Instant::now() + GIT_TIMEOUT;
     loop {
         // The child has exited: collect its full output.
-        if child.try_wait()?.is_some() {
-            return Ok(child.wait_with_output()?);
+        if let Some(status) = child.try_wait()? {
+            return Ok(std::process::Output {
+                status,
+                stdout: stdout_reader.take().map_or_else(Vec::new, join_pipe_drain),
+                stderr: stderr_reader.take().map_or_else(Vec::new, join_pipe_drain),
+            });
         }
         // Still running: kill it once the deadline passes so a credential/SSH prompt
         // or a slow remote can never freeze the AI turn loop indefinitely.
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
+            // Killing the child closes its pipe ends, so the drain threads
+            // finish promptly; join them to avoid leaking threads per timeout.
+            let _ = stdout_reader.take().map(join_pipe_drain);
+            let _ = stderr_reader.take().map(join_pipe_drain);
             return Err(AppError::Service(format!(
                 "git command timed out after {GIT_TIMEOUT:?} (a prompt or slow remote may be blocking)"
             )));
         }
         std::thread::sleep(GIT_POLL_INTERVAL);
     }
+}
+
+/// Read a child's pipe to the end on a background thread (see [`run_git_output`]
+/// for why draining must happen while the child is still running).
+fn spawn_pipe_drain<R: Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        buffer
+    })
+}
+
+/// Join a drain thread, treating a panicked reader as empty output.
+fn join_pipe_drain(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
+    handle.join().unwrap_or_default()
 }
 
 /// How often [`run_git_output`] polls a running child while waiting for the deadline.
@@ -758,6 +792,21 @@ fn parse_name_status(raw: &str) -> std::collections::BTreeMap<String, (String, O
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: `run_git_output` must pipe stdout/stderr — without piping,
+    /// `git status`/`diff`/`branches` all silently return empty buffers.
+    #[test]
+    fn run_git_captures_real_stdout() {
+        let mut command = Command::new("git");
+        command.arg("--version");
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let text = run_git(&mut command).expect("git --version should run");
+        assert!(
+            text.contains("git version"),
+            "stdout was not captured: {text:?}"
+        );
+    }
 
     #[test]
     fn parses_branch_and_files() {

@@ -788,6 +788,7 @@ pub fn run() {
             ai_turn::ai_resolve_turn_approval,
             ai_turn::ai_resolve_turn_question,
             ai_turn::ai_cancel_turn,
+            ai_turn::ai_cancel_subagent,
             ai_turn::ai_inject_message,
             ai_workspace::ai_repo_map,
             ai_workspace::ai_workspace_index,

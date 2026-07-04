@@ -1,5 +1,6 @@
 import type { AiChatSendInput } from "./aiChatTypes";
 import { recordTurnCheckpointFileChanges } from "./aiChatTurnCheckpoints";
+import { shouldSkipEditReview } from "./aiFileReviewPolicy";
 import { captureFileTextSnapshot, registerPendingFileReview, type FileTextSnapshot } from "./aiPendingFileReview";
 import { createDeleteApproval, createPatchApproval, createStrReplaceApproval, createWriteApproval } from "./aiRuntimeApprovals";
 import { ensurePathsInFileCheckpoint } from "./aiRuntimeCheckpoints";
@@ -124,10 +125,10 @@ function registerReviewFromFileOperation(
   previewOnly: boolean,
 ) {
   if (!path || !result.changedPaths.includes(path)) return;
-  // Automatic mode is full autonomy: edits are already written to disk and there is
-  // no user to Accept/Reject, so a pending-review queue would only accumulate
-  // unactionable entries. Turn checkpoints still cover rollback. Skip registration.
-  if (input.preferences.agentMode === "automatic") return;
+  // Automatic mode and apply-immediately trust both mean nobody will act on an
+  // Accept/Reject bar (see aiFileReviewPolicy) — except staged previewOnly
+  // edits, which only Accept can persist. Turn checkpoints still cover rollback.
+  if (shouldSkipEditReview(input.preferences, previewOnly)) return;
   const edited = result.editedDocuments.find((document) => document.path && normalizePathForCompare(document.path) === normalizePathForCompare(path));
   const afterText = edited?.text ?? before.text;
   if (before.text === afterText) return;

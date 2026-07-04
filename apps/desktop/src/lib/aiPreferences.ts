@@ -755,7 +755,11 @@ export const defaultAiPreferences: AiPreferences = {
   contextAutoCompactThreshold: DEFAULT_CONTEXT_AUTO_COMPACT_THRESHOLD,
   toolRoundLimit: defaultAiToolRoundLimit,
   maxParallelSubagents: defaultMaxParallelSubagents,
-  goalRunMaxTokens: null,
+  // A finite token budget is ON by default (safety); null is an explicit "Off"
+  // chosen in Settings — matching toolRoundLimit / automaticModeHardStop, where
+  // null means unlimited. Off disables the budget meter and token-based stop;
+  // the round + time limits still bound the run.
+  goalRunMaxTokens: 200_000,
   goalRunMaxRounds: null,
   // Ship 60-minute hard stop by default — unlimited execution is an explicit opt-in
   // (set to null via Settings). Prevents runaway autonomous runs from burning tokens

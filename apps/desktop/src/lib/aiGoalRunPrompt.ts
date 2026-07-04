@@ -1,4 +1,4 @@
-import { buildGoalLimitWarning, buildGoalObjectiveBlock } from "./aiGoalRunLimits";
+import { buildGoalLimitWarning, buildGoalObjectiveBlock, formatGoalTokenBudget } from "./aiGoalRunLimits";
 import { getActiveGoalRun } from "./aiSessionGoalRun";
 import { listAiSessionTodos } from "./aiSessionTodos";
 
@@ -19,7 +19,7 @@ export function buildGoalRunPromptSection(chatSessionId: string) {
     buildGoalObjectiveBlock(run.goal),
     `- Reported progress: ${run.progress}% — reach 100% only when the condition truly holds.`,
     `- Orchestration round ${run.round + 1} of ${run.limits.maxRounds} (silent follow-ups — no extra user chat messages).`,
-    `- Budget: ${(run.promptTokens + run.completionTokens).toLocaleString()}/${run.limits.maxTokens.toLocaleString()} tokens · ${Math.round((Date.now() - run.startedAt) / 1000)}s elapsed.`,
+    `- Budget: ${(run.promptTokens + run.completionTokens).toLocaleString()}/${formatGoalTokenBudget(run.limits.maxTokens)} tokens · ${Math.round((Date.now() - run.startedAt) / 1000)}s elapsed.`,
     evaluatorNote ? `- Evaluator note: ${evaluatorNote}` : null,
     checkpoint ? `- Latest checkpoint: ${checkpoint}` : null,
     todoHint,

@@ -942,6 +942,10 @@ export const luxCommands = {
   aiResolveTurnQuestion: (turnId: string, requestId: string, answer: { answer: string; cancelled: boolean }) =>
     invokeRequired<null>("ai_resolve_turn_question", { turnId, requestId, answer }),
   aiCancelTurn: (turnId: string) => invokeRequired<null>("ai_cancel_turn", { turnId }),
+  /** Stop ONE running native subagent (Task tool call) without touching the
+   *  parent turn or sibling subagents. `callId` is the Task tool call id — the
+   *  same id the subagent run row is registered under. */
+  aiCancelSubagent: (callId: string) => invokeRequired<null>("ai_cancel_subagent", { callId }),
   /** Stage a user message into a running turn. Scoped by session+turn so a
    *  restarted turn can't drain input meant for an earlier one (must match the
    *  `ai_inject_message` handler signature: session_id, turn_id, text). */
@@ -1337,7 +1341,7 @@ export type AiTurnEvent =
    *  subagent started the named tool (content = short argument preview), "done" =
    *  final summary. callId matches the Task toolCallStarted event (the id the
    *  subagent-run store registered). */
-  | { kind: "subagentProgress"; turnId: string; callId: string; agentId: string; stage: "text" | "tool" | "done" | "error"; content: string; tool: string }
+  | { kind: "subagentProgress"; turnId: string; callId: string; agentId: string; stage: "text" | "tool" | "done" | "error" | "cancelled"; content: string; tool: string }
   | { kind: "approvalRequired"; turnId: string; requestId: string; tool: string; title: string; summary: string; preview: string; risk: string }
   | { kind: "questionRequired"; turnId: string; requestId: string; question: string; detail: string; options: AiTurnQuestionOption[]; multiSelect: boolean; allowCustom: boolean; htmlPreview: string }
   | { kind: "planProposed"; turnId: string; planId: string; title: string; summary: string; steps: AiTurnPlanStep[]; alternatives: AiPlanDecision[]; risks: string[]; verification: string[]; quality: number; coaching: string[]; autoStart: boolean }

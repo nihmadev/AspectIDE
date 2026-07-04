@@ -1,11 +1,12 @@
 import type { GoalRunState } from "./aiSessionGoalRun";
-import { buildGoalLimitWarning, buildGoalObjectiveBlock } from "./aiGoalRunLimits";
+import { buildGoalLimitWarning, buildGoalObjectiveBlock, isGoalTokenBudgetEnabled } from "./aiGoalRunLimits";
 
 export function buildGoalContinuationOrchestrationBlock(
   run: GoalRunState,
   options: { evaluatorNote?: string; budgetWrapup?: boolean } = {},
 ) {
   const usedTokens = run.promptTokens + run.completionTokens;
+  const budgetOn = isGoalTokenBudgetEnabled(run.limits);
   const remainingTokens = Math.max(0, run.limits.maxTokens - usedTokens);
   const remainingTurns = Math.max(0, run.limits.maxRounds - run.round);
   const elapsedSeconds = Math.round((Date.now() - run.startedAt) / 1000);
@@ -19,7 +20,7 @@ export function buildGoalContinuationOrchestrationBlock(
     `rounds_used: ${run.round}`,
     `rounds_remaining: ${remainingTurns}`,
     `tracked_tokens_used: ${usedTokens}`,
-    `tracked_tokens_remaining: ${remainingTokens}`,
+    `tracked_tokens_remaining: ${budgetOn ? remainingTokens : "unlimited"}`,
     `elapsed_seconds: ${elapsedSeconds}`,
     `progress_percent: ${run.progress}`,
     "</progress_budget>",

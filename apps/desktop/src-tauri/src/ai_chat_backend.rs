@@ -11,6 +11,14 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::{sync::oneshot, time::timeout};
 
 const CHAT_TIMEOUT_SECS: u64 = 180;
+/// Streaming connect deadline. A healthy TCP+TLS connect finishes in seconds;
+/// a blackholed route hangs — failing fast hands the failure to the retry
+/// ladder instead of freezing the turn for minutes.
+const STREAM_CONNECT_TIMEOUT_SECS: u64 = 30;
+/// OS-level keepalive probe interval so a silently-dead socket (network path
+/// gone, NAT entry dropped) errors out quickly instead of idling until the
+/// per-chunk stall deadline.
+const TCP_KEEPALIVE_SECS: u64 = 30;
 const HISTORY_FILE: &str = "ai-chat-history.json";
 const HISTORY_SCHEMA_VERSION: u32 = 1;
 /// Hard ceiling on automatic transient retries (so up to 10 total attempts for the
@@ -24,6 +32,9 @@ const MAX_RETRY_DELAY_SECS: u64 = 30;
 /// Retries worth attempting for a transient HTTP status. Rate limits and server/
 /// overload errors recover by waiting, so they get the full budget; an edge 403 or
 /// request-timeout status clears less often, so it gets only a few before surfacing.
+/// Note: the streaming path shares ONE attempt counter across failure kinds, so a
+/// mixed sequence (403 → stream drop) can show the notice ladder jump from "of 5"
+/// to "of 10" — cosmetic and accepted; each ceiling reflects that failure's budget.
 const fn retry_budget_for_status(status: u16) -> u32 {
     match status {
         429 | 500 | 502 | 503 | 504 => MAX_TRANSIENT_RETRIES,
@@ -519,6 +530,7 @@ where
     };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
+        .tcp_keepalive(Duration::from_secs(TCP_KEEPALIVE_SECS))
         .build()
         .map_err(|error| error.to_string())?;
     let api_key = request
@@ -671,8 +683,13 @@ where
     // Use connect_timeout only — not a whole-request timeout — so a long but
     // actively-streaming agent turn is never killed by a per-request deadline.
     // Genuine idle stalls are caught per-chunk below via tokio::select!.
+    // connect_timeout is short (a healthy connect finishes in seconds; a
+    // blackholed one would otherwise burn minutes before the retry ladder even
+    // starts) and tcp_keepalive probes the socket so a silently-dead network
+    // path surfaces as an error instead of a CHAT_TIMEOUT_SECS idle stall.
     let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(CHAT_TIMEOUT_SECS))
+        .connect_timeout(Duration::from_secs(STREAM_CONNECT_TIMEOUT_SECS))
+        .tcp_keepalive(Duration::from_secs(TCP_KEEPALIVE_SECS))
         .build()
         .map_err(|error| error.to_string())?;
     let stream_ready = stream_payload(request.payload);
@@ -688,196 +705,293 @@ where
         .filter(|key| !key.is_empty())
         .map(ToString::to_string);
 
-    // Connection phase (retryable until the first byte streams).
-    let response = {
-        let mut attempt: u32 = 0;
-        loop {
-            let builder = client
-                .post(endpoint.as_str())
-                .header(reqwest::header::CONTENT_TYPE, "application/json")
-                .header(reqwest::header::ACCEPT, "text/event-stream")
-                .json(&payload);
-            let builder = apply_auth(builder, anthropic, api_key.as_deref());
-            // Race the connect/send against the cancel flag so a Stop pressed while
-            // connecting to a slow/stalled provider interrupts within one poll tick
-            // instead of waiting out the full send deadline.
-            let send = match race_cancel(
-                builder.send(),
-                Duration::from_secs(CHAT_TIMEOUT_SECS + 5),
+    // One shared attempt budget across connection AND early-stream failures, so
+    // a flaky network that alternates "connects, then drops before the first
+    // token" doesn't get a fresh ladder per phase.
+    let mut attempt: u32 = 0;
+    // Whether any token/tool-start was surfaced to the caller. Until then a
+    // dropped or stalled stream is transparently RECONNECTED here (re-sending
+    // the identical request duplicates nothing); after the first emission a
+    // replay would duplicate UI output, so the failure surfaces to the caller's
+    // turn-level recovery instead. Atomic (not Cell) purely so the future stays
+    // Send for spawned callers — access is single-task, Relaxed suffices.
+    let emitted_any = std::sync::atomic::AtomicBool::new(false);
+    'request: loop {
+        // Connection phase (retryable until the first byte streams).
+        let response = {
+            loop {
+                let builder = client
+                    .post(endpoint.as_str())
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .header(reqwest::header::ACCEPT, "text/event-stream")
+                    .json(&payload);
+                let builder = apply_auth(builder, anthropic, api_key.as_deref());
+                // Race the connect/send against the cancel flag so a Stop pressed while
+                // connecting to a slow/stalled provider interrupts within one poll tick
+                // instead of waiting out the full send deadline.
+                let send = match race_cancel(
+                    builder.send(),
+                    Duration::from_secs(CHAT_TIMEOUT_SECS + 5),
+                    &should_cancel,
+                )
+                .await
+                {
+                    CancelRace::Ready(result) => Ok(result),
+                    CancelRace::Cancelled => return Err("cancelled".to_string()),
+                    CancelRace::TimedOut => Err(()),
+                };
+                let response = match send {
+                    Err(()) => {
+                        if attempt < NETWORK_RETRY_BUDGET {
+                            let delay = backoff_delay(attempt);
+                            emit_retry(
+                                &mut on_retry,
+                                attempt,
+                                NETWORK_RETRY_BUDGET,
+                                "timeout",
+                                "request timed out",
+                                delay,
+                            );
+                            // Cancellable sleep: a Stop during retry backoff exits immediately.
+                            if sleep_backoff_cancelable(attempt, &should_cancel).await {
+                                return Err("cancelled".to_string());
+                            }
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err("AI stream request timed out".to_string());
+                    }
+                    Ok(Err(error)) => {
+                        if attempt < NETWORK_RETRY_BUDGET && is_transient_reqwest_error(&error) {
+                            let delay = backoff_delay(attempt);
+                            emit_retry(
+                                &mut on_retry,
+                                attempt,
+                                NETWORK_RETRY_BUDGET,
+                                retry_reason_for_error(&error),
+                                "connection failed",
+                                delay,
+                            );
+                            if sleep_backoff_cancelable(attempt, &should_cancel).await {
+                                return Err("cancelled".to_string());
+                            }
+                            attempt += 1;
+                            continue;
+                        }
+                        return Err(error.to_string());
+                    }
+                    Ok(Ok(response)) => response,
+                };
+                let status = response.status().as_u16();
+                if status >= 400 {
+                    let budget = retry_budget_for_status(status);
+                    if attempt < budget && is_transient_status(status) {
+                        let delay = transient_retry_delay(status, response.headers(), attempt);
+                        emit_retry(
+                            &mut on_retry,
+                            attempt,
+                            budget,
+                            retry_reason_for_status(status),
+                            format!("HTTP {status}"),
+                            delay,
+                        );
+                        if sleep_backoff_cancelable(attempt, &should_cancel).await {
+                            return Err("cancelled".to_string());
+                        }
+                        attempt += 1;
+                        continue;
+                    }
+                    // Bounded + cancellable: a proxy that sends error headers then
+                    // stalls without a body would otherwise pin the turn forever —
+                    // this is the only await here not already raced against Stop.
+                    let text =
+                        match race_cancel(response.text(), Duration::from_secs(15), &should_cancel)
+                            .await
+                        {
+                            CancelRace::Ready(result) => result.unwrap_or_default(),
+                            CancelRace::Cancelled => return Err("cancelled".to_string()),
+                            CancelRace::TimedOut => String::new(),
+                        };
+                    return Err(stream_response_error(status, &text));
+                }
+                break response;
+            }
+        };
+
+        // Per-attempt emission wrappers: flip `emitted_any` the moment the caller
+        // sees a token or a tool start, disabling transparent reconnects from then on.
+        let mut delta_emit = |content: &str, reasoning: &str| {
+            if !content.is_empty() || !reasoning.is_empty() {
+                emitted_any.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            on_delta(content, reasoning);
+        };
+        let mut tool_emit = |name: &str| {
+            emitted_any.store(true, std::sync::atomic::Ordering::Relaxed);
+            on_tool_start(name);
+        };
+
+        let mut accumulator = if anthropic {
+            StreamMode::Anthropic(AnthropicStreamAccumulator::default())
+        } else {
+            StreamMode::OpenAi(StreamAccumulator::default())
+        };
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        // Full raw body BYTES, kept so a provider that ignores `stream:true` and returns
+        // a single non-SSE JSON object (some gateways do) can still be parsed below — the
+        // SSE loop would otherwise find no `data:` events and finalize an empty answer.
+        // Bytes, not per-chunk lossy decode: chunk boundaries split multibyte code points
+        // (Cyrillic/CJK/emoji) and per-chunk from_utf8_lossy would bake U+FFFD into them.
+        let mut raw_bytes: Vec<u8> = Vec::new();
+        // Whether any SSE `data:` event was actually ingested. If not, raw_body is parsed
+        // as a complete (non-streamed) response.
+        let mut ingested_event = false;
+        // Carry an incomplete trailing UTF-8 sequence across chunks: bytes_stream()
+        // splits on arbitrary byte boundaries, so decoding each chunk independently
+        // would mangle multibyte code points (Cyrillic/CJK/emoji) into U+FFFD.
+        let mut byte_tail: Vec<u8> = Vec::new();
+        'outer: loop {
+            // Per-chunk wait that honours both the idle deadline AND a Stop. `race_cancel`
+            // polls `should_cancel` while awaiting the next chunk, so a Stop pressed during
+            // a *silent* stall (provider sending no bytes) interrupts within one poll tick
+            // instead of being noticed only after a chunk finally arrives — or never, until
+            // the CHAT_TIMEOUT_SECS idle deadline. Aborts only true stalls (no bytes for
+            // CHAT_TIMEOUT_SECS), never long-but-actively-streaming generations. Matches the
+            // intent of the Tauri event-streaming path (`stream_completion`).
+            let chunk = match race_cancel(
+                stream.next(),
+                Duration::from_secs(CHAT_TIMEOUT_SECS),
                 &should_cancel,
             )
             .await
             {
-                CancelRace::Ready(result) => Ok(result),
-                CancelRace::Cancelled => return Err("cancelled".to_string()),
-                CancelRace::TimedOut => Err(()),
-            };
-            let response = match send {
-                Err(()) => {
-                    if attempt < NETWORK_RETRY_BUDGET {
-                        let delay = backoff_delay(attempt);
-                        emit_retry(
-                            &mut on_retry,
-                            attempt,
-                            NETWORK_RETRY_BUDGET,
-                            "timeout",
-                            "request timed out",
-                            delay,
-                        );
-                        // Cancellable sleep: a Stop during retry backoff exits immediately.
-                        if sleep_backoff_cancelable(attempt, &should_cancel).await {
-                            return Err("cancelled".to_string());
-                        }
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err("AI stream request timed out".to_string());
-                }
-                Ok(Err(error)) => {
-                    if attempt < NETWORK_RETRY_BUDGET && is_transient_reqwest_error(&error) {
-                        let delay = backoff_delay(attempt);
-                        emit_retry(
-                            &mut on_retry,
-                            attempt,
-                            NETWORK_RETRY_BUDGET,
-                            retry_reason_for_error(&error),
-                            "connection failed",
-                            delay,
-                        );
-                        if sleep_backoff_cancelable(attempt, &should_cancel).await {
-                            return Err("cancelled".to_string());
-                        }
-                        attempt += 1;
-                        continue;
-                    }
-                    return Err(error.to_string());
-                }
-                Ok(Ok(response)) => response,
-            };
-            let status = response.status().as_u16();
-            if status >= 400 {
-                let budget = retry_budget_for_status(status);
-                if attempt < budget && is_transient_status(status) {
-                    let delay = transient_retry_delay(status, response.headers(), attempt);
-                    emit_retry(
-                        &mut on_retry,
-                        attempt,
-                        budget,
-                        retry_reason_for_status(status),
-                        format!("HTTP {status}"),
-                        delay,
-                    );
-                    if sleep_backoff_cancelable(attempt, &should_cancel).await {
-                        return Err("cancelled".to_string());
-                    }
-                    attempt += 1;
-                    continue;
-                }
-                // Bounded + cancellable: a proxy that sends error headers then
-                // stalls without a body would otherwise pin the turn forever —
-                // this is the only await here not already raced against Stop.
-                let text =
-                    match race_cancel(response.text(), Duration::from_secs(15), &should_cancel)
-                        .await
+                CancelRace::Ready(chunk) => chunk,
+                // The in-flight response (and its socket) is dropped on return; the caller's
+                // post-stream cancellation check finalizes the accumulated-so-far body.
+                CancelRace::Cancelled => break 'outer,
+                CancelRace::TimedOut => {
+                    // Idle stall before any token reached the caller: reconnect
+                    // transparently on the shared ladder instead of failing the turn.
+                    if !emitted_any.load(std::sync::atomic::Ordering::Relaxed)
+                        && attempt < NETWORK_RETRY_BUDGET
                     {
-                        CancelRace::Ready(result) => result.unwrap_or_default(),
-                        CancelRace::Cancelled => return Err("cancelled".to_string()),
-                        CancelRace::TimedOut => String::new(),
-                    };
-                return Err(stream_response_error(status, &text));
+                        let delay = backoff_delay(attempt);
+                        emit_retry(
+                            &mut on_retry,
+                            attempt,
+                            NETWORK_RETRY_BUDGET,
+                            "stream",
+                            "stream stalled",
+                            delay,
+                        );
+                        if sleep_backoff_cancelable(attempt, &should_cancel).await {
+                            return Err("cancelled".to_string());
+                        }
+                        attempt += 1;
+                        continue 'request;
+                    }
+                    return Err("AI stream stalled".to_string());
+                }
+            };
+            let Some(chunk) = chunk else { break 'outer };
+
+            // A Stop that landed while this chunk was already in flight (arriving faster
+            // than one poll tick): bail before processing it so the model's remaining
+            // generation isn't drained. The next iteration's race_cancel entry check would
+            // also catch it, but this keeps the original zero-latency per-chunk guarantee.
+            if should_cancel() {
+                break 'outer;
             }
-            break response;
-        }
-    };
-
-    let mut accumulator = if anthropic {
-        StreamMode::Anthropic(AnthropicStreamAccumulator::default())
-    } else {
-        StreamMode::OpenAi(StreamAccumulator::default())
-    };
-    let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
-    // Full raw body BYTES, kept so a provider that ignores `stream:true` and returns
-    // a single non-SSE JSON object (some gateways do) can still be parsed below — the
-    // SSE loop would otherwise find no `data:` events and finalize an empty answer.
-    // Bytes, not per-chunk lossy decode: chunk boundaries split multibyte code points
-    // (Cyrillic/CJK/emoji) and per-chunk from_utf8_lossy would bake U+FFFD into them.
-    let mut raw_bytes: Vec<u8> = Vec::new();
-    // Whether any SSE `data:` event was actually ingested. If not, raw_body is parsed
-    // as a complete (non-streamed) response.
-    let mut ingested_event = false;
-    // Carry an incomplete trailing UTF-8 sequence across chunks: bytes_stream()
-    // splits on arbitrary byte boundaries, so decoding each chunk independently
-    // would mangle multibyte code points (Cyrillic/CJK/emoji) into U+FFFD.
-    let mut byte_tail: Vec<u8> = Vec::new();
-    'outer: loop {
-        // Per-chunk wait that honours both the idle deadline AND a Stop. `race_cancel`
-        // polls `should_cancel` while awaiting the next chunk, so a Stop pressed during
-        // a *silent* stall (provider sending no bytes) interrupts within one poll tick
-        // instead of being noticed only after a chunk finally arrives — or never, until
-        // the CHAT_TIMEOUT_SECS idle deadline. Aborts only true stalls (no bytes for
-        // CHAT_TIMEOUT_SECS), never long-but-actively-streaming generations. Matches the
-        // intent of the Tauri event-streaming path (`stream_completion`).
-        let chunk = match race_cancel(
-            stream.next(),
-            Duration::from_secs(CHAT_TIMEOUT_SECS),
-            &should_cancel,
-        )
-        .await
-        {
-            CancelRace::Ready(chunk) => chunk,
-            // The in-flight response (and its socket) is dropped on return; the caller's
-            // post-stream cancellation check finalizes the accumulated-so-far body.
-            CancelRace::Cancelled => break 'outer,
-            CancelRace::TimedOut => return Err("AI stream stalled".to_string()),
-        };
-        let Some(chunk) = chunk else { break 'outer };
-
-        // A Stop that landed while this chunk was already in flight (arriving faster
-        // than one poll tick): bail before processing it so the model's remaining
-        // generation isn't drained. The next iteration's race_cancel entry check would
-        // also catch it, but this keeps the original zero-latency per-chunk guarantee.
-        if should_cancel() {
-            break 'outer;
-        }
-        let bytes = chunk.map_err(|error| stream_chunk_error(&error))?;
-        // Keep a bounded copy of the raw body for the non-SSE fallback below.
-        if raw_bytes.len() < MAX_SSE_BUFFER {
-            raw_bytes.extend_from_slice(&bytes);
-        }
-        byte_tail.extend_from_slice(&bytes);
-        // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
-        // invalid byte (e.g. a stray 0xFF from a misbehaving provider) is replaced
-        // with U+FFFD like the old from_utf8_lossy and skipped, instead of pinning
-        // valid_up_to at 0 forever (which would stall emission and grow byte_tail
-        // without bound past MAX_SSE_BUFFER). Looping means valid content *after*
-        // an invalid byte is appended to `buffer` now rather than deferred a chunk
-        // or dropped at end-of-stream, so byte_tail only ever retains an incomplete
-        // trailing code point (<= 3 bytes) carried to the next chunk.
-        loop {
-            let (valid_up_to, invalid_len) = match std::str::from_utf8(&byte_tail) {
-                Ok(text) => {
-                    buffer.push_str(text);
-                    byte_tail.clear();
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    // Connection dropped mid-response but BEFORE any token was
+                    // surfaced (common on flaky networks during a long time-to-
+                    // first-token): reconnect here instead of tearing down the
+                    // whole turn — re-sending the identical request duplicates
+                    // nothing the caller has seen.
+                    if !emitted_any.load(std::sync::atomic::Ordering::Relaxed)
+                        && attempt < NETWORK_RETRY_BUDGET
+                    {
+                        let delay = backoff_delay(attempt);
+                        emit_retry(
+                            &mut on_retry,
+                            attempt,
+                            NETWORK_RETRY_BUDGET,
+                            "stream",
+                            "connection dropped",
+                            delay,
+                        );
+                        if sleep_backoff_cancelable(attempt, &should_cancel).await {
+                            return Err("cancelled".to_string());
+                        }
+                        attempt += 1;
+                        continue 'request;
+                    }
+                    return Err(stream_chunk_error(&error));
+                }
+            };
+            // Keep a bounded copy of the raw body for the non-SSE fallback below.
+            if raw_bytes.len() < MAX_SSE_BUFFER {
+                raw_bytes.extend_from_slice(&bytes);
+            }
+            byte_tail.extend_from_slice(&bytes);
+            // Drain byte_tail fully each chunk. Branch on error_len(): a genuinely
+            // invalid byte (e.g. a stray 0xFF from a misbehaving provider) is replaced
+            // with U+FFFD like the old from_utf8_lossy and skipped, instead of pinning
+            // valid_up_to at 0 forever (which would stall emission and grow byte_tail
+            // without bound past MAX_SSE_BUFFER). Looping means valid content *after*
+            // an invalid byte is appended to `buffer` now rather than deferred a chunk
+            // or dropped at end-of-stream, so byte_tail only ever retains an incomplete
+            // trailing code point (<= 3 bytes) carried to the next chunk.
+            loop {
+                let (valid_up_to, invalid_len) = match std::str::from_utf8(&byte_tail) {
+                    Ok(text) => {
+                        buffer.push_str(text);
+                        byte_tail.clear();
+                        break;
+                    }
+                    Err(error) => (error.valid_up_to(), error.error_len()),
+                };
+                if valid_up_to > 0 {
+                    buffer.push_str(std::str::from_utf8(&byte_tail[..valid_up_to]).unwrap());
+                }
+                if let Some(invalid_len) = invalid_len {
+                    buffer.push('\u{FFFD}');
+                    byte_tail.drain(..valid_up_to + invalid_len);
+                } else {
+                    byte_tail.drain(..valid_up_to);
                     break;
                 }
-                Err(error) => (error.valid_up_to(), error.error_len()),
-            };
-            if valid_up_to > 0 {
-                buffer.push_str(std::str::from_utf8(&byte_tail[..valid_up_to]).unwrap());
             }
-            if let Some(invalid_len) = invalid_len {
-                buffer.push('\u{FFFD}');
-                byte_tail.drain(..valid_up_to + invalid_len);
-            } else {
-                byte_tail.drain(..valid_up_to);
-                break;
+            normalize_sse_buffer_newlines(&mut buffer);
+            if buffer.len() > MAX_SSE_BUFFER {
+                return Err("AI stream buffer exceeded limit".to_string());
             }
+            while let Some(index) = buffer.find("\n\n") {
+                let event = buffer[..index].to_string();
+                buffer.drain(..index + 2);
+                let Some(data) = sse_event_data(&event) else {
+                    continue;
+                };
+                if data.trim() == "[DONE]" {
+                    break 'outer;
+                }
+                if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                    ingested_event = true;
+                    accumulator.ingest(&value, &mut delta_emit, &mut tool_emit);
+                }
+            }
+        }
+
+        // Flush any trailing bytes (a truncated final code point becomes U+FFFD) so a
+        // final event that ends without a `\n\n` delimiter is still processed below,
+        // instead of being silently dropped when the accumulator is returned.
+        if !byte_tail.is_empty() {
+            buffer.push_str(&String::from_utf8_lossy(&byte_tail));
         }
         normalize_sse_buffer_newlines(&mut buffer);
-        if buffer.len() > MAX_SSE_BUFFER {
-            return Err("AI stream buffer exceeded limit".to_string());
-        }
         while let Some(index) = buffer.find("\n\n") {
             let event = buffer[..index].to_string();
             buffer.drain(..index + 2);
@@ -885,103 +999,81 @@ where
                 continue;
             };
             if data.trim() == "[DONE]" {
-                break 'outer;
+                break;
             }
             if let Ok(value) = serde_json::from_str::<Value>(&data) {
                 ingested_event = true;
-                accumulator.ingest(&value, &mut on_delta, &mut on_tool_start);
+                accumulator.ingest(&value, &mut delta_emit, &mut tool_emit);
             }
         }
-    }
-
-    // Flush any trailing bytes (a truncated final code point becomes U+FFFD) so a
-    // final event that ends without a `\n\n` delimiter is still processed below,
-    // instead of being silently dropped when the accumulator is returned.
-    if !byte_tail.is_empty() {
-        buffer.push_str(&String::from_utf8_lossy(&byte_tail));
-    }
-    normalize_sse_buffer_newlines(&mut buffer);
-    while let Some(index) = buffer.find("\n\n") {
-        let event = buffer[..index].to_string();
-        buffer.drain(..index + 2);
-        let Some(data) = sse_event_data(&event) else {
-            continue;
-        };
-        if data.trim() == "[DONE]" {
-            break;
-        }
-        if let Ok(value) = serde_json::from_str::<Value>(&data) {
-            ingested_event = true;
-            accumulator.ingest(&value, &mut on_delta, &mut on_tool_start);
-        }
-    }
-    // A stream that closes right after `data: {...}\n` (no blank-line terminator)
-    // leaves its final frame — often the finish_reason/usage frame, or the last
-    // content token — in `buffer`. Ingest it too (matches stream_completion);
-    // a truncated partial-JSON remainder simply fails the parse and is ignored.
-    if !buffer.trim().is_empty() {
-        if let Some(data) = sse_event_data(buffer.trim()) {
-            if data.trim() != "[DONE]" {
-                if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                    ingested_event = true;
-                    accumulator.ingest(&value, &mut on_delta, &mut on_tool_start);
+        // A stream that closes right after `data: {...}\n` (no blank-line terminator)
+        // leaves its final frame — often the finish_reason/usage frame, or the last
+        // content token — in `buffer`. Ingest it too (matches stream_completion);
+        // a truncated partial-JSON remainder simply fails the parse and is ignored.
+        if !buffer.trim().is_empty() {
+            if let Some(data) = sse_event_data(buffer.trim()) {
+                if data.trim() != "[DONE]" {
+                    if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                        ingested_event = true;
+                        accumulator.ingest(&value, &mut delta_emit, &mut tool_emit);
+                    }
                 }
             }
         }
-    }
 
-    // Non-SSE fallback: some gateways ignore `stream:true` and return a single plain
-    // JSON object (no `data:` events). The SSE loops above then ingest nothing and the
-    // turn would finalize empty. Parse the whole raw body as a complete response and
-    // stream it through on_delta so the answer renders. Handles both the Anthropic
-    // shape ({content:[{type:text,…}]}) and the OpenAI shape ({choices:[…]}).
-    if !ingested_event {
-        let decoded = String::from_utf8_lossy(&raw_bytes);
-        let trimmed = decoded.trim();
-        if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-            let normalized = if anthropic && value.get("choices").is_none() {
-                crate::ai_anthropic::from_anthropic_response(&value)
-            } else {
-                value
-            };
-            if let Some(message) = normalized
-                .get("choices")
-                .and_then(Value::as_array)
-                .and_then(|arr| arr.first())
-                .and_then(|c| c.get("message"))
-            {
-                let content = message.get("content").and_then(Value::as_str).unwrap_or("");
-                let reasoning = message
-                    .get("reasoning_content")
-                    .or_else(|| message.get("reasoning"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if !content.is_empty() || !reasoning.is_empty() {
-                    on_delta(content, reasoning);
+        // Non-SSE fallback: some gateways ignore `stream:true` and return a single plain
+        // JSON object (no `data:` events). The SSE loops above then ingest nothing and the
+        // turn would finalize empty. Parse the whole raw body as a complete response and
+        // stream it through on_delta so the answer renders. Handles both the Anthropic
+        // shape ({content:[{type:text,…}]}) and the OpenAI shape ({choices:[…]}).
+        if !ingested_event {
+            let decoded = String::from_utf8_lossy(&raw_bytes);
+            let trimmed = decoded.trim();
+            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+                let normalized = if anthropic && value.get("choices").is_none() {
+                    crate::ai_anthropic::from_anthropic_response(&value)
+                } else {
+                    value
+                };
+                if let Some(message) = normalized
+                    .get("choices")
+                    .and_then(Value::as_array)
+                    .and_then(|arr| arr.first())
+                    .and_then(|c| c.get("message"))
+                {
+                    let content = message.get("content").and_then(Value::as_str).unwrap_or("");
+                    let reasoning = message
+                        .get("reasoning_content")
+                        .or_else(|| message.get("reasoning"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if !content.is_empty() || !reasoning.is_empty() {
+                        delta_emit(content, reasoning);
+                    }
+                    return Ok(AiChatCompletionResponse {
+                        status: 200,
+                        body: normalized,
+                    });
                 }
-                return Ok(AiChatCompletionResponse {
-                    status: 200,
-                    body: normalized,
-                });
             }
         }
-    }
 
-    // Emit any buffered partial `<think>` tail so the last fragment isn't dropped.
-    accumulator.flush(&mut on_delta);
+        // Emit any buffered partial `<think>` tail so the last fragment isn't dropped.
+        accumulator.flush(&mut delta_emit);
 
-    // A mid-stream operational error (Anthropic delivers overload/rate-limit/
-    // api_error as a typed SSE event on an already-200 stream) must fail the turn,
-    // not be finalized as a truncated success — route it through the same error/
-    // retry path as a non-200 connection-phase failure.
-    if let Some(error) = accumulator.stream_error() {
-        return Err(error.to_string());
-    }
+        // A mid-stream operational error (Anthropic delivers overload/rate-limit/
+        // api_error as a typed SSE event on an already-200 stream) must fail the turn,
+        // not be finalized as a truncated success — route it through the same error/
+        // retry path as a non-200 connection-phase failure.
+        if let Some(error) = accumulator.stream_error() {
+            return Err(error.to_string());
+        }
 
-    Ok(AiChatCompletionResponse {
-        status: 200,
-        body: accumulator.into_response_body(),
-    })
+        return Ok(AiChatCompletionResponse {
+            status: 200,
+            body: accumulator.into_response_body(),
+        });
+    } // 'request reconnect loop
 }
 
 /// Assembles streamed SSE delta chunks into a single OpenAI-style response body.
@@ -2184,7 +2276,9 @@ pub struct RetryNotice {
     pub attempt: u32,
     /// Total attempts that will be made before giving up.
     pub max_attempts: u32,
-    /// Machine reason: `rate-limited` | `server` | `forbidden` | `timeout` | `network`.
+    /// Machine reason: `rate-limited` | `server` | `forbidden` | `timeout` |
+    /// `network` | `stream` (dropped/stalled before the first token — the
+    /// transport reconnects transparently).
     pub reason: String,
     /// Short human detail (e.g. `HTTP 429`).
     pub detail: String,
