@@ -6,6 +6,7 @@ import { normalizeRepeatedOutput } from "./aiOutputNormalizer";
 import { buildNativeHistoryContent, buildUserContent } from "./aiRuntimePrompt";
 import { pruneStaleToolOutputs } from "./aiChatContextCompaction";
 import { bridgeNativeToolCompleted, bridgeNativeToolStarted } from "./aiNativeOrchestrationBridge";
+import { ensureNativeSubagentProgressBridge } from "./aiNativeSubagentEvents";
 import { captureNativeEditBefore, NATIVE_FILE_EDIT_TOOLS, registerNativeEditReview } from "./aiNativeFileReview";
 import { clearPendingQuestionsForSession, registerPendingQuestion } from "./aiPendingQuestion";
 import { clearActiveTurn, registerActiveTurn } from "./aiActiveTurns";
@@ -58,6 +59,9 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
   if (!isTauriRuntime()) {
     throw new Error("Native turn loop requires the desktop runtime.");
   }
+  // Subagent progress outlives this turn for background Tasks — bridge it via
+  // the app-lifetime listener, not this turn's (torn down at settle).
+  ensureNativeSubagentProgressBridge();
 
   const turnId = crypto.randomUUID();
   const messageId = crypto.randomUUID();
@@ -222,6 +226,10 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
           }
           break;
         }
+        // "subagentProgress" is deliberately NOT handled here: it is bridged by
+        // the app-lifetime listener in aiNativeSubagentEvents.ts, because a
+        // background subagent keeps streaming after this turn's listener is
+        // torn down (and handling it in both places would double-append).
         case "approvalRequired": {
           const request: AiToolApprovalRequest = {
             id: event.requestId,
@@ -298,6 +306,9 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
               ...(event.cachedPromptTokens && event.cachedPromptTokens > 0
                 ? { cachedPromptTokens: event.cachedPromptTokens }
                 : {}),
+              ...(event.modelCalls && event.modelCalls > 0
+                ? { requestCount: event.modelCalls }
+                : {}),
             },
             input.selectedModel,
           );
@@ -353,6 +364,18 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             delayMs: event.delayMs,
           });
           input.onStatusChange?.("thinking");
+          break;
+        case "reasoningEffortFallback":
+          // The provider rejected the configured reasoning effort; Rust already
+          // applied the strongest accepted variant and is retrying the round.
+          // Drop an inline plaque into the timeline AT THIS EXACT SPOT — the
+          // transcript then shows where the fallback happened and what changed.
+          // The retried round's own StatusChange("thinking") follows and opens
+          // fresh segments after the plaque.
+          timeline.addNotice(
+            { type: "reasoning-fallback", requested: event.requested, applied: event.applied },
+            `Reasoning effort "${event.requested}" is not accepted by the provider — "${event.applied}" was applied.`,
+          );
           break;
         case "turnCancelled":
           if (assistantMessage.turnUsage) {
@@ -452,7 +475,7 @@ async function buildRunTurnInput(input: AiChatSendInput, turnId: string, message
     // Reasoning effort the TS path attaches via reasoningPayload() must also reach
     // the native Rust turn-loop, otherwise desktop requests silently drop the
     // effort on reasoning models. Empty object when the model has no effort levels.
-    reasoning: reasoningPayload(input.preferences.selectedEffortId, input.provider),
+    reasoning: reasoningPayload(input.preferences.selectedEffortId, input.provider, input.selectedModel),
     // Anthropic prompt caching: tag the (stable) system prompt with a cache_control
     // breakpoint so Claude-family models cache it and re-read it cheaply each turn.
     // The TS path does this via applyPromptCacheBreakpoints; the native path needs

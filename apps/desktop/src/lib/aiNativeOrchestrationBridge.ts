@@ -9,7 +9,13 @@
 
 import { setAiSessionGoal } from "./aiSessionGoal";
 import { replaceAiSessionTodos, type AiSessionTodo } from "./aiSessionTodos";
-import { completeSubagentRun, getSubagentRun, registerSubagentRun } from "./aiSubagentRuns";
+import {
+  appendSubagentTranscript,
+  completeSubagentRun,
+  getSubagentRun,
+  registerSubagentRun,
+  updateLastSubagentTranscript,
+} from "./aiSubagentRuns";
 import type { SubagentKind } from "./aiSubagents";
 
 function parseJson(raw: string | undefined): Record<string, unknown> | null {
@@ -49,6 +55,48 @@ export function bridgeNativeToolStarted(sessionId: string, callId: string, tool:
     parentAgentId: null,
     abortController: new AbortController(),
   });
+}
+
+/**
+ * Stream a native subagent's live progress into its run row (Agent rail).
+ * stage "text" replaces the last assistant transcript entry in place with the
+ * accumulated snapshot (the Rust side throttles to ~3 events/s); stage "tool"
+ * appends a system line naming the tool the subagent just started; stage
+ * "done"/"error" settles the run row with its summary — for a BACKGROUND task
+ * this is the ONLY completion signal (the Task tool call itself returned
+ * "started" long ago); for a foreground task the Task completion bridge below
+ * writes the same summary right after (idempotent).
+ */
+export function bridgeNativeSubagentProgress(
+  callId: string,
+  stage: "text" | "tool" | "done" | "error",
+  content: string,
+  tool: string,
+) {
+  const run = getSubagentRun(callId);
+  if (!run) return;
+  // A row the user already cancelled must not be revived by a late done/error.
+  if (run.status !== "running") return;
+  if (stage === "text" && content.trim()) {
+    updateLastSubagentTranscript(callId, content);
+    return;
+  }
+  if (stage === "tool" && tool.trim()) {
+    const preview = content.trim();
+    appendSubagentTranscript(
+      callId,
+      preview ? `→ ${tool} ${preview}` : `→ ${tool}`,
+      "system",
+    );
+    return;
+  }
+  if (stage === "done") {
+    completeSubagentRun(callId, content.trim() || "Done", "completed");
+    return;
+  }
+  if (stage === "error") {
+    completeSubagentRun(callId, content.trim() || "Failed", "failed");
+  }
 }
 
 /** Mirror a completed orchestration tool call into the matching session store. */
@@ -95,8 +143,13 @@ export function bridgeNativeToolCompleted(
   }
 
   if (tool === "Task") {
+    // Background spawn: the tool result is just {status:"started"} — the run row
+    // keeps streaming and is settled later by the SubagentProgress done/error
+    // stage, not by this immediate completion.
+    if (result.background === true) return;
     const summary = typeof result.summary === "string" ? result.summary : "Done";
-    if (getSubagentRun(callId)) completeSubagentRun(callId, summary, "completed");
+    const run = getSubagentRun(callId);
+    if (run && run.status === "running") completeSubagentRun(callId, summary, "completed");
   }
 }
 

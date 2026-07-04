@@ -70,14 +70,30 @@ export type AiChatTurnTokenUsage = {
   estimatedCostUsd: number | null;
   /** Prompt tokens served from the provider's prompt cache (cache read), when reported. */
   cachedPromptTokens?: number;
+  /** Model API requests the turn issued (loop rounds + recovery synthesis). */
+  requestCount?: number;
 };
 
 // Assistant turns are rendered as an ordered timeline, so reasoning, text and
+/** Structured payload of an inline turn notice (rendered as a plaque in the
+ *  assistant timeline at the exact position the event happened). */
+export type AiInlineNotice = {
+  type: "reasoning-fallback";
+  /** The reasoning effort the user configured (rejected by the provider). */
+  requested: string;
+  /** The strongest provider-accepted effort applied instead. */
+  applied: string;
+};
+
 // tool calls keep their exact model order instead of being flattened.
 export type AiMessageSegment =
   | { kind: "reasoning"; id: string; text: string }
   | { kind: "text"; id: string; text: string }
-  | { kind: "tool"; id: string; toolCall: AiChatToolCall };
+  | { kind: "tool"; id: string; toolCall: AiChatToolCall }
+  /** Inline event plaque (e.g. reasoning-effort fallback). `text` is a plain
+   *  one-line fallback for persistence/export; the UI renders `notice`. Never
+   *  part of model-visible content (deriveSegmentContent filters by kind). */
+  | { kind: "notice"; id: string; text: string; notice: AiInlineNotice };
 
 export type AiChatMessageKind = "default" | "compaction-checkpoint" | "goal-orchestration" | "review-request";
 

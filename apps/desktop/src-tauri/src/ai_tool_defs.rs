@@ -273,27 +273,27 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "CodeGraphDefinition",
-        "Find definition(s) of a symbol in the code graph. Only one symbol at a time.",
+        "Find where a symbol is defined via the precomputed whole-repo code graph — instant and exact. PREFER over Grep for 'where is X defined'. One symbol per call.",
         &[req("symbol", "string", "Exact or partial symbol name.")],
     ));
     tools.push(tool(
         "CodeGraphCallers",
-        "List all callers of a symbol (who depends on it).",
+        "List every caller of a symbol (who depends on it) from the precomputed code graph — exact, whole-repo, instant. PREFER over Grep for 'who calls/uses X'.",
         &[req("symbol", "string", "Symbol name.")],
     ));
     tools.push(tool(
         "CodeGraphCallees",
-        "List all symbols a given symbol calls.",
+        "List every symbol a given symbol calls, from the precomputed code graph — an instant map of what X depends on. PREFER over reading the body and chasing imports by hand.",
         &[req("symbol", "string", "Symbol name.")],
     ));
     tools.push(tool(
         "CodeGraphExplain",
-        "Deep info about a symbol: degree, neighbors, and connections sorted by relevance.",
+        "Deep info about a symbol: kind, degree, neighbors, and connections sorted by relevance. First stop before refactoring or changing a signature — shows the blast radius without grepping.",
         &[req("symbol", "string", "Symbol name.")],
     ));
     tools.push(tool(
         "CodeGraphOverview",
-        "Overview of the code graph: total nodes, edges, community count, and top 10 god nodes (most connected symbols).",
+        "Overview of the code graph: total nodes, edges, community count, and top 10 god nodes (most connected symbols). Fastest orientation in an unfamiliar codebase — run before a broad exploration.",
         &[],
     ));
     tools.push(tool(
@@ -475,11 +475,15 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
     ));
     tools.push(tool(
         "AgentMessage",
-        "Agent-to-agent coordination board.",
+        "Shared agent board for this session — the main agent and every Task subagent read and post here (authors are agent ids; you post as 'main' from the main loop). Post findings other agents need (file locations, decisions, contracts, blockers) under a clear topic; read before duplicating work. Re-reads: pass sinceMs = the timestampMs of the last entry you saw to get only newer posts.",
         &[
-            opt("action", "string", "post or read."),
-            opt("topic", "string", "Channel."),
-            opt("content", "string", "Message."),
+            opt("action", "string", "read (default) or post."),
+            opt("topic", "string", "Channel name (filter on read; required with content on post)."),
+            opt("content", "string", "Message body (post)."),
+            opt("author", "string", "Read filter: only this agent's posts (e.g. 'explorer-1a2b3c4d' or 'main')."),
+            // Ceiling = year 9999 in epoch-ms: i64::MAX would render a schema
+            // "maximum" beyond JSON's f64-safe integer range.
+            opt_int("sinceMs", "Read cursor: only entries with timestampMs strictly greater than this.", 0, 253_402_300_799_999),
             opt_int("limit", "Max read.", 1, MAX_RESULTS_DEFAULT),
         ],
     ));
@@ -563,11 +567,21 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ));
         tools.push(tool(
             "Shell",
-            "Run ONE shell command and get {exitCode, stdout, stderr, timedOut, stdoutTruncated, stderrTruncated}. Runs non-interactively in the workspace root (override with cwd); default timeout 120s (max 600). Output over ~24k chars is head+tail truncated (see the *Truncated flags). On Windows it runs via cmd.exe /C as a SINGLE line — chain steps with `&&`, never a newline; use cmd syntax (dir/type, %VAR%, backslash paths). On Unix it is /bin/sh. Catastrophic commands are refused.",
+            "Run ONE shell command and get {exitCode, stdout, stderr, timedOut, stdoutTruncated, stderrTruncated}. Runs non-interactively in the workspace root (override with cwd); default timeout 120s (max 600). Output over ~24k chars is head+tail truncated (see the *Truncated flags). On Windows it runs via cmd.exe /C as a SINGLE line — chain steps with `&&`, never a newline; use cmd syntax (dir/type, %VAR%, backslash paths). On Unix it is /bin/sh. Catastrophic commands are refused. For long commands (builds, test suites, installs) pass background:true — you get {jobId, status:\"started\"} back IMMEDIATELY, keep working, then fetch the result with ShellOutput. Never sit idle waiting for a foreground command you could have backgrounded.",
             &[
                 req("command", "string", "The command line (single line; chain with && or ;)."),
                 opt("cwd", "string", "Working directory (workspace-relative); defaults to the workspace root."),
                 opt_int("timeoutSecs", "Timeout in seconds (default 120).", TIMEOUT_MIN, TIMEOUT_MAX),
+                opt("background", "boolean", "true = run detached: returns {jobId} at once; collect with ShellOutput. Use for anything slow (builds, tests, installs)."),
+            ],
+        ));
+        tools.push(tool(
+            "ShellOutput",
+            "Fetch a background Shell job's result (from Shell background:true). wait:true (default) blocks until the job finishes or timeoutSecs passes; wait:false returns the current status instantly. Returns {jobId, status: running|done|failed, result} where result is the full Shell response JSON.",
+            &[
+                req("jobId", "string", "Job id returned by Shell background:true."),
+                opt("wait", "boolean", "Block until finished (default true)."),
+                opt_int("timeoutSecs", "Max seconds to wait (default 600).", 5, 1800),
             ],
         ));
         tools.push(tool(
@@ -643,13 +657,21 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ));
         tools.push(tool(
             "Task",
-            "Spawn a subagent.",
+            "Spawn an isolated subagent with its own model↔tool loop; blocks until it returns {agentId, subagentType, summary, boardPosts, boardTopics}. The subagent sees ONLY your prompt (no chat history) — include all needed context and say exactly what to return. PARALLEL FAN-OUT: two or more Task calls issued in ONE response run CONCURRENTLY — fan out independent work (explore several subsystems, review + test at once) instead of chaining sequential Tasks; parallel subagents that edit files must target DISJOINT files. BACKGROUND: background:true returns {agentId, status:\"started\"} immediately — you keep working while the subagent runs; collect results with TaskWait. Prefer background for long/heavy briefs so you never sit blocked. Subagents coordinate through the shared AgentMessage board and cannot spawn further subagents.",
             &[
-                req("description", "string", "Title."),
-                req("prompt", "string", "Task."),
-                opt("subagent_type", "string", ""),
-                opt("model", "string", ""),
-                opt("resume", "string", ""),
+                req("description", "string", "Short title shown in the Agent rail."),
+                req("prompt", "string", "Full task brief: context, goal, and the exact report you expect back."),
+                opt("subagent_type", "string", "generalPurpose (default, full tools) | testRunner | codeReviewer (read-only) | explorer (read-only)."),
+                opt("model", "string", "Optional model id override for this subagent; omit to inherit the current model."),
+                opt("background", "boolean", "true = detached: returns {agentId, status:\"started\"} at once; collect with TaskWait. Use for heavy briefs while you do other work."),
+            ],
+        ));
+        tools.push(tool(
+            "TaskWait",
+            "Wait for background subagents (Task background:true) and return their results: {tasks: [{agentId, subagentType, description, status: running|done|failed, summary, boardPosts, boardTopics}], stillRunning, timedOut}. Omit agentIds to wait for ALL background tasks in this session; pass agentIds to target specific ones. Blocks until every target settles or timeoutSecs passes (partial results are returned on timeout).",
+            &[
+                opt_str_arr("agentIds", "Agent ids to wait for (from Task background:true). Omit = all."),
+                opt_int("timeoutSecs", "Max seconds to wait (default 600).", 5, 1800),
             ],
         ));
 

@@ -110,7 +110,8 @@
 
 /* First-commit Agent home: a clean centered greeting + one composer card â€”
    no header chrome, no session tabs, no suggestions, no context meter. */
-.ai-chat-composer[data-agent-home="true"] .ai-context-ring {
+.ai-chat-composer[data-agent-home="true"] .ai-context-ring,
+.ai-chat-composer[data-agent-home="true"] .ai-context-stats {
   display: none;
 }
 
@@ -456,22 +457,30 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  /* container for the floating agent island's narrow-panel guard below */
+  container-type: inline-size;
 }
 
-/* Agent/Automatic add the orchestration-rail row above the scroller. */
-.ai-chat-body[data-orchestration-rail] .ai-chat-main {
-  grid-template-rows: auto minmax(0, 1fr);
-  overflow: visible;
+/* On a narrow chat panel the overlay island would sit on top of the message
+   text — below this width it yields the space back to the conversation. */
+@container (max-width: 460px) {
+  .ai-agent-orchestration-rail {
+    display: none;
+  }
 }
 
 /* Floating Agent island — pure overlay, never steals space from the chat.
-   Absolute-positioned compact HUD card in the top-right corner. */
+   Codex-style compact card docked flush to the right wall, vertically
+   centered. Absolute inside .ai-chat-main, so it floats over the thread
+   without shifting a single pixel of chat layout. Rendered only when the
+   agent has real content (goal / tasks / reviews / subagents). */
 .ai-agent-orchestration-rail {
   position: absolute;
-  top: 12px;
-  right: 14px;
-  width: 232px;
-  max-height: calc(100% - 24px);
+  top: 50%;
+  right: 0;
+  transform: translateY(-50%);
+  width: 242px;
+  max-height: min(56%, 430px);
   z-index: 50;
   display: flex;
   flex-direction: column;
@@ -479,12 +488,25 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-lg) 0 0 var(--radius-lg);
   border: 1px solid var(--border-subtle);
+  border-right: 0;
   background: var(--surface-0);
   box-shadow:
     inset 0 1px 0 var(--on-surface-faint),
     var(--shadow-md);
+  animation: ai-agent-rail-in 180ms ease;
+}
+
+@keyframes ai-agent-rail-in {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+  }
 }
 
 .ai-agent-rail-collapse {
@@ -510,14 +532,15 @@
   color: var(--text-0);
 }
 
-/* Collapsed mini island — takes almost no space, click to expand full Goal/Tasks view */
+/* Collapsed mini island — slim handle glued to the right wall, still centered.
+   Takes almost no space; click to expand the full Goal/Tasks/Subagents card. */
 .ai-agent-orchestration-rail.ai-agent-rail-collapsed {
-  width: 38px;
-  right: 10px;
-  top: 12px;
-  max-height: 92px;
-  padding: 5px 2px;
-  border-radius: var(--radius-md);
+  width: 34px;
+  right: 0;
+  max-height: 96px;
+  padding: 7px 2px;
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+  border-right: 0;
   background: var(--surface-0);
   box-shadow: var(--shadow-sm);
   display: flex;
@@ -647,7 +670,8 @@
   font-size: 11px;
   font-weight: 500;
   min-height: 34px;
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  /* card is docked to the right wall: only the left top corner is rounded */
+  border-radius: var(--radius-lg) 0 0 0;
 }
 
 .ai-agent-now-bar .spin-icon {
@@ -657,7 +681,7 @@
 .ai-agent-now-bar[data-phase="idle"] {
   color: var(--text-2);
   background: var(--surface-0);
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  border-radius: var(--radius-lg) 0 0 0;
 }
 
 .ai-agent-now-bar[data-phase="idle"] .spin-icon {
@@ -746,42 +770,156 @@
   text-align: left;
 }
 
-.ai-agent-rail-subagents li[data-selected="true"] > .ai-subagent-panel-row-button {
-  outline: 1px solid var(--accent);
-  border-radius: var(--radius-sm);
-}
+/* ── Subagent rows in the Agent island (Codex-quiet: dot · type · desc · clock) ── */
 
-.ai-agent-rail-transcript {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  max-height: 160px;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-0);
-}
-
-.ai-agent-rail-transcript header {
+.ai-subagent-row-line {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border-subtle);
+  gap: 2px;
+  min-width: 0;
 }
 
-.ai-agent-rail-transcript header strong {
+.ai-subagent-rail-row {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
   font-size: 11px;
   color: var(--text-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
+  transition: background 100ms ease;
+}
+
+.ai-subagent-rail-row:hover {
+  background: var(--hover);
+}
+
+.ai-subagent-status-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.ai-subagent-status-dot[data-status="running"] {
+  background: var(--accent);
+  animation: ai-subagent-pulse 1.6s ease-in-out infinite;
+}
+
+.ai-subagent-status-dot[data-status="completed"] {
+  background: var(--success);
+}
+
+.ai-subagent-status-dot[data-status="failed"] {
+  background: #e5694b;
+}
+
+@keyframes ai-subagent-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+.ai-subagent-row-status {
+  color: var(--text-3);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.ai-agent-rail-transcript-close {
+.ai-agent-rail-subagents li[data-status="failed"] .ai-subagent-row-status {
+  color: #e5694b;
+}
+
+/* Inline stop button (rows + subagent window head) */
+.ai-agent-rail-subagents .ai-subagent-cancel,
+.ai-subagent-window .ai-subagent-cancel {
+  flex: none;
   display: grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--icon-muted);
+  cursor: pointer;
+  transition: color 110ms ease, background 110ms ease;
+}
+
+.ai-agent-rail-subagents .ai-subagent-cancel:hover,
+.ai-subagent-window .ai-subagent-cancel:hover {
+  color: #e5694b;
+  background: color-mix(in srgb, #e5694b 14%, transparent);
+}
+
+/* History section: quiet collapsible header in the block-header style */
+.ai-agent-rail-history-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: inherit;
+}
+
+.ai-agent-rail-history-toggle strong {
+  color: var(--text-1);
+  font-weight: 600;
+}
+
+.ai-agent-rail-history-toggle svg {
+  color: var(--icon-muted);
+}
+
+.ai-agent-rail-history-caret {
+  transition: transform 140ms ease;
+}
+
+.ai-agent-rail-history-caret[data-open] {
+  transform: rotate(90deg);
+}
+
+/* ── Subagent window: the island drilled into one run ── */
+
+.ai-subagent-window {
+  max-height: min(64%, 500px);
+}
+
+.ai-subagent-window-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-1);
+}
+
+.ai-subagent-window-back {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
   border: 0;
   border-radius: var(--radius-xs);
   background: transparent;
@@ -790,38 +928,100 @@
   transition: background 110ms ease, color 110ms ease;
 }
 
-.ai-agent-rail-transcript-close:hover {
+.ai-subagent-window-back:hover {
   background: var(--hover);
   color: var(--text-0);
 }
 
-.ai-agent-rail-transcript-body {
-  overflow-y: auto;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.ai-subagent-window-clock {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
-.ai-agent-rail-transcript-body article {
+.ai-subagent-window-state {
+  color: var(--text-3);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ai-subagent-window-state[data-status="failed"] {
+  color: #e5694b;
+}
+
+.ai-subagent-window-state[data-status="completed"] {
+  color: var(--success);
+}
+
+.ai-subagent-window-title {
+  flex: none;
+  margin: 0;
+  padding: 8px 12px 7px;
+  color: var(--text-0);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  border-bottom: 1px solid var(--border-subtle);
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ai-subagent-window-transcript {
+  flex: 1 1 auto;
+  min-height: 96px;
+  overflow-y: auto;
+  padding: 8px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ai-subagent-window-transcript article {
   margin: 0;
 }
 
-.ai-agent-rail-transcript-body article small {
-  display: block;
-  color: var(--text-3);
-  font-size: 10px;
-  text-transform: uppercase;
-  margin-bottom: 4px;
-}
-
-.ai-agent-rail-transcript-body article p {
+.ai-subagent-window-transcript article p {
   margin: 0;
   color: var(--text-1);
   font-size: 11px;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* Tool lines ("→ Read {…}") read as quiet mono log entries. */
+.ai-subagent-window-transcript article[data-role="system"] p {
+  color: var(--text-3);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.ai-subagent-window-transcript article[data-role="summary"] {
+  padding-top: 7px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.ai-subagent-window-transcript article[data-role="summary"] strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-3);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.ai-subagent-window-empty {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11px;
 }
 
 .ai-agent-rail-block {
@@ -849,17 +1049,6 @@
   max-height: none;
 }
 
-.ai-agent-rail-badge {
-  font-size: 8.5px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xs);
-  padding: 1px 5px;
-}
-
 .ai-agent-rail-goal-dock {
   display: flex;
   justify-content: center;
@@ -869,10 +1058,37 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
-/* goal island inside floating rail: keep visual pop but fit the card */
-.ai-agent-orchestration-rail .ai-agent-goal-island {
-  border-radius: var(--radius-md);
-  padding: 11px 12px 12px;
+/* Inside the floating island the goal is a quiet flat section (Codex-style):
+   the label dot carries the accent, no nested card chrome. */
+.ai-agent-orchestration-rail .ai-agent-rail-goal-dock {
+  padding: 10px 12px;
+}
+
+.ai-agent-orchestration-rail .ai-agent-goal-island,
+.ai-agent-orchestration-rail .ai-agent-goal-island[data-empty="true"] {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+}
+
+.ai-agent-orchestration-rail .ai-agent-goal-island:not([data-empty="true"])::before {
+  display: none;
+}
+
+.ai-agent-orchestration-rail .ai-agent-goal-island[data-empty="true"] .ai-agent-goal-island-label {
+  justify-content: flex-start;
+}
+
+.ai-agent-orchestration-rail .ai-agent-goal-island-label {
+  margin-bottom: 5px;
+}
+
+.ai-agent-orchestration-rail .ai-agent-goal-island-text {
+  font-size: 11.5px;
+  -webkit-line-clamp: 4;
 }
 
 .ai-agent-goal-island {
@@ -1085,10 +1301,6 @@
   font-size: 10px;
 }
 
-.ai-agent-rail-subagents-compact {
-  max-height: 100px;
-}
-
 .ai-agent-rail-block header {
   display: flex;
   align-items: center;
@@ -1117,13 +1329,6 @@
   font-variant-numeric: tabular-nums;
   text-transform: none;
   letter-spacing: 0;
-}
-
-.ai-agent-rail-empty {
-  margin: 0;
-  color: var(--text-3);
-  font-size: 11px;
-  line-height: 1.45;
 }
 
 .ai-agent-rail-tasks {
@@ -1184,7 +1389,7 @@
 }
 
 .ai-agent-rail-subagents {
-  max-height: 120px;
+  max-height: 168px;
   overflow-y: auto;
 }
 
@@ -2539,6 +2744,39 @@
   }
 }
 
+/* Bottom "now" plaque: the thinking indicator upgraded with live detail chips
+   (current tool / touched file / running subagent). Lives for the whole turn. */
+.ai-agent-now-plaque {
+  gap: 5px;
+  max-width: min(92%, 560px);
+}
+
+.ai-agent-now-plaque-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 5px;
+  padding: 2.5px 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-2);
+  font-size: 10px;
+  line-height: 1.2;
+  min-width: 0;
+  max-width: 230px;
+}
+
+.ai-agent-now-plaque-chip svg {
+  flex: none;
+  color: var(--icon-muted);
+}
+
+.ai-agent-now-plaque-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Inside a turn timeline, the thinking indicator is a flat node (no box) so it
    matches the reasoning/tool nodes and sits on the same left rail. */
 .ai-turn-flow .ai-thinking-indicator {
@@ -2627,6 +2865,49 @@
   opacity: 0.78;
 }
 
+/* Inline event plaque inside the assistant timeline (ai-turn-flow) — sits at
+   the exact position the event happened. Informational (accent), not alarming:
+   the turn already recovered, the transcript just records what changed. */
+.ai-turn-inline-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 4px 0;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+  font: 11px/1.45 var(--font-ui);
+}
+
+.ai-turn-inline-notice > svg {
+  flex: none;
+}
+
+.ai-turn-inline-notice-text {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.ai-turn-inline-notice-text strong {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-turn-inline-notice-text > span {
+  color: color-mix(in srgb, var(--accent) 70%, #ffffff);
+  opacity: 0.94;
+  overflow-wrap: anywhere;
+}
+
 .ai-chat-error span:first-child,
 .ai-chat-closed-notice span:first-child {
   min-width: 0;
@@ -2676,6 +2957,16 @@
   padding: 8px 16px 12px;
   border-top: 1px solid var(--border-subtle);
   background: var(--chrome);
+  /* named container for the context-stats narrow-composer guard below */
+  container: ai-composer-shell / inline-size;
+}
+
+/* On a narrow chat panel the token readout would squeeze the model/effort
+   dropdowns — below this width the ring alone carries the signal. */
+@container ai-composer-shell (max-width: 400px) {
+  .ai-context-stats {
+    display: none;
+  }
 }
 
 .ai-chat-composer-shell .ai-chat-composer {
@@ -3377,6 +3668,83 @@
   align-items: center;
 }
 
+/* omp-style used/budget readout to the left of the ring — same popover toggle */
+/* Live tok/s readout left of the context stats — same quiet mono voice. */
+.ai-token-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 5px;
+  color: var(--text-2);
+  font: 10px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.ai-token-speed svg {
+  color: var(--accent);
+  opacity: 0.8;
+}
+
+.ai-token-speed em {
+  font-style: normal;
+  opacity: 0.55;
+}
+
+.ai-chat-composer[data-agent-home="true"] .ai-token-speed {
+  display: none;
+}
+
+@container ai-composer-shell (max-width: 400px) {
+  .ai-token-speed {
+    display: none;
+  }
+}
+
+.ai-context-stats {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: 10px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.ai-context-stats:hover,
+.ai-context-stats[data-active="true"] {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-1);
+}
+
+.ai-context-stats-sep {
+  margin: 0 2px;
+  opacity: 0.45;
+}
+
+.ai-context-stats-budget {
+  opacity: 0.62;
+}
+
+.ai-context-stats[data-level="medium"] .ai-context-stats-used {
+  color: #c9a24a;
+}
+
+.ai-context-stats[data-level="high"] .ai-context-stats-used {
+  color: #d86b5c;
+}
+
 .ai-context-ring {
   position: relative;
   display: grid;
@@ -4019,118 +4387,6 @@
   gap: 4px;
 }
 
-/* ============================================================================
-   Agent orchestration — docked as a slim full-width strip at the top of the
-   chat, in the flow (not a floating island). Goal/progress + tasks + subagents
-   read as one quiet header band above the timeline.
-   ============================================================================ */
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) {
-  position: relative;
-  top: auto;
-  right: auto;
-  width: 100%;
-  max-width: 100%;
-  max-height: 196px;
-  display: grid;
-  grid-template-columns: clamp(220px, 30%, 300px) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 0;
-  border: 0;
-  border-bottom: 1px solid var(--border-subtle);
-  border-radius: 0;
-  background: var(--chrome);
-  box-shadow: none;
-  overflow: hidden;
-}
-
-/* The live "now" status spans the full width across the top of the strip. */
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-now-bar {
-  grid-column: 1 / -1;
-  grid-row: 1;
-  border-radius: 0;
-  border-bottom: 1px solid var(--border-subtle);
-  padding-right: 34px;
-}
-
-/* Goal dock anchors the left column below the now-bar. */
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-goal-dock {
-  grid-column: 1;
-  grid-row: 2;
-  border-right: 1px solid var(--border-subtle);
-  padding: 9px 12px;
-  overflow-y: auto;
-}
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-goal-island {
-  text-align: left;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-}
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-goal-island-text {
-  text-align: left;
-  -webkit-line-clamp: 2;
-}
-
-/* Tasks / reviews / subagents flow horizontally across the right column. */
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-scroll {
-  grid-column: 2;
-  grid-row: 2;
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
-  gap: 0;
-  min-width: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-block {
-  flex: 1 1 0;
-  min-width: 172px;
-  padding: 9px 12px;
-  border-right: 1px solid var(--border-subtle);
-  overflow-y: auto;
-}
-/* Collapse button pins to the strip's top-right. */
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-collapse {
-  top: 6px;
-  right: 6px;
-}
-/* A selected subagent transcript becomes the last horizontal panel. */
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail:not(.ai-agent-rail-collapsed) .ai-agent-rail-transcript {
-  flex: 1 1 240px;
-  min-width: 240px;
-  border-left: 1px solid var(--border-subtle);
-  overflow-y: auto;
-}
-
-/* Collapsed strip: a slim full-width bar, not a floating chip. */
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail.ai-agent-rail-collapsed {
-  position: relative;
-  top: auto;
-  right: auto;
-  width: 100%;
-  max-height: none;
-  height: 30px;
-  flex-direction: row;
-  justify-content: flex-start;
-  padding: 0 12px;
-  border: 0;
-  border-bottom: 1px solid var(--border-subtle);
-  border-radius: 0;
-  background: var(--chrome);
-  box-shadow: none;
-}
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail.ai-agent-rail-collapsed .ai-agent-rail-mini {
-  flex-direction: row;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-}
-.ai-chat-body[data-orchestration-rail] .ai-agent-orchestration-rail.ai-agent-rail-collapsed .ai-agent-mini-expand {
-  margin-left: auto;
-}
-
 .agent-browser-preview {
   --browser-preview-bg: var(--editor);
   --browser-preview-surface: var(--surface-1);
@@ -4560,16 +4816,98 @@
   border: 1px solid var(--border-subtle);
   border-radius: 10px;
   background: var(--surface-0);
+  padding: 10px 12px;
 }
 
-.ai-chat-compaction-checkpoint .ai-chat-message-meta span {
+/* Header: icon+label · before→after tokens · timestamp — one quiet Codex line. */
+.ai-compaction-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  min-width: 0;
+}
+
+.ai-compaction-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
   color: var(--text-1);
+  font: 600 11.5px/1 var(--font-ui);
+  letter-spacing: 0.01em;
+}
+
+.ai-compaction-title svg {
+  color: var(--accent);
+}
+
+.ai-compaction-tokens {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  color: var(--text-2);
+  font: 11px/1 var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ai-compaction-tokens svg {
+  opacity: 0.55;
+}
+
+.ai-compaction-reduction {
+  margin-left: 2px;
+  padding: 2px 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font: 600 10px/1 var(--font-mono);
+  font-style: normal;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-compaction-head time {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font: 10.5px/1 var(--font-ui);
+}
+
+.ai-compaction-dropped {
+  margin: 0;
+  padding: 6px 0 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ai-compaction-dropped li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text-2);
+  font: 11px/1.4 var(--font-ui);
+}
+
+.ai-compaction-dropped li span:last-child {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
 }
 
 .ai-chat-compaction-body p {
   margin: 0 0 8px;
   color: #b0b0b0;
   font: 12px/1.4 var(--font-ui);
+}
+
+.ai-chat-compaction-body details + details {
+  margin-top: 6px;
 }
 
 .ai-chat-compaction-details > summary {
@@ -6289,12 +6627,6 @@
   cursor: pointer;
 }
 
-.ai-turn-summary-compact {
-  font-size: 11px;
-  color: var(--text-2);
-  font-variant-numeric: tabular-nums;
-}
-
 .ai-turn-diagnostics {
   display: flex;
   flex-wrap: wrap;
@@ -6534,37 +6866,45 @@
   color: var(--text-1);
 }
 
-.ai-composer-compacting-bar {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 3px;
-  height: 12px;
-}
-
-.ai-composer-compacting-bar span {
-  width: 3px;
-  height: 100%;
-  border-radius: 2px;
-  background: var(--accent);
-  animation: ai-compacting-pulse 1s ease-in-out infinite;
-}
-
-.ai-composer-compacting-bar span:nth-child(2) {
-  animation-delay: 0.18s;
-}
-
-.ai-composer-compacting-bar span:nth-child(3) {
-  animation-delay: 0.36s;
-}
-
 .ai-composer-compacting-label {
+  flex: 0 0 auto;
   font-weight: 500;
   letter-spacing: 0.01em;
 }
 
-@keyframes ai-compacting-pulse {
-  0%, 100% { transform: scaleY(0.4); opacity: 0.55; }
-  50% { transform: scaleY(1); opacity: 1; }
+/* Codex-style indeterminate progress: a thin rounded track with a travelling
+   accent highlight. Summarization duration is unknown, so no fake percentages. */
+.ai-composer-compacting-track {
+  position: relative;
+  flex: 1;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  overflow: hidden;
+}
+
+.ai-composer-compacting-sweep {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 36%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, transparent, var(--accent) 45%, var(--accent) 55%, transparent);
+  animation: ai-compacting-sweep 1.15s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+}
+
+@keyframes ai-compacting-sweep {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(310%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-composer-compacting-sweep {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
 }
 
 .ai-composer-voice-error {

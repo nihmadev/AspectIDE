@@ -263,11 +263,13 @@ pub fn clear_all() {
     }
 }
 
-/// Tauri command: release a disposed chat session's native goals/todos/read set.
-/// Called from the frontend when a chat session is deleted.
+/// Tauri command: release a disposed chat session's native goals/todos/read set
+/// plus its background-job records. Called from the frontend when a chat session
+/// is deleted.
 #[tauri::command]
 pub fn ai_session_dispose(session_id: String) {
     clear_session(&session_id);
+    crate::ai_jobs::dispose_session(&session_id);
 }
 
 #[cfg(test)]

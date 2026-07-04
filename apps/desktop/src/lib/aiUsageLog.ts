@@ -38,6 +38,8 @@ export type AiUsageLogEntry = {
   estimatedCostUsd: number | null;
   /** Wall-clock turn duration in ms. */
   durationMs: number;
+  /** Model API requests the turn issued (loop rounds + recovery synthesis), when known. */
+  requestCount?: number;
 };
 
 type PersistedUsageLog = {
@@ -117,6 +119,7 @@ export type AppendUsageLogInput = {
   cachedPromptTokens?: number;
   estimatedCostUsd: number | null;
   durationMs: number;
+  requestCount?: number;
 };
 
 /**
@@ -148,6 +151,7 @@ export async function appendAiUsageLogEntry(input: AppendUsageLogInput): Promise
     cachedPromptTokens: nonNegative(input.cachedPromptTokens ?? 0),
     estimatedCostUsd: typeof input.estimatedCostUsd === "number" && input.estimatedCostUsd > 0 ? input.estimatedCostUsd : null,
     durationMs,
+    ...(nonNegative(input.requestCount ?? 0) > 0 ? { requestCount: nonNegative(input.requestCount ?? 0) } : {}),
   };
   const next = [...existing, entry].slice(-maxUsageLogEntries);
   cache = next;

@@ -28,6 +28,7 @@ export function recordAiUsageLogEntry(assistant: AiChatMessage | null | undefine
     cachedPromptTokens: usage.cachedPromptTokens,
     estimatedCostUsd: usage.estimatedCostUsd,
     durationMs: assistant?.responseTiming?.totalMs ?? assistant?.responseDurationMs ?? 0,
+    requestCount: usage.requestCount ?? assistant?.responseTiming?.modelCalls,
   });
 }
 
@@ -96,6 +97,37 @@ export function stripTrailingErrorBubble(messages: AiChatMessage[], lastError: s
     return messages.slice(0, -1);
   }
   return messages;
+}
+
+/**
+ * Cancel-during-retry recovery: when the user presses Stop while a failed turn
+ * is sitting in the auto-retry cycle, the transcript tail is their unanswered
+ * message — with no retry coming, it would hang there forever. Return the
+ * history with that dangling user message (and any trailing error bubble /
+ * empty assistant shell) removed, plus the message text so the composer can
+ * take it back as a draft. `null` when there is nothing to recover: the tail
+ * was answered with real assistant work, is a special message (checkpoint,
+ * review request), or has no text. Messages carrying attachments are left in
+ * the transcript untouched — the composer's original attachment blobs were
+ * revoked at send time, so pulling only the text back would silently destroy
+ * the attachments; keeping the message loses nothing.
+ */
+export function restoreUnansweredUserMessage(
+  messages: AiChatMessage[],
+  lastError: string | null,
+): { messages: AiChatMessage[]; draft: string } | null {
+  let trimmed = stripTrailingErrorBubble(messages, lastError);
+  const tail = trimmed[trimmed.length - 1];
+  if (tail?.role === "assistant") {
+    if (messageHasAssistantWork(tail) || tail.content.trim()) return null;
+    trimmed = trimmed.slice(0, -1);
+  }
+  const last = trimmed[trimmed.length - 1];
+  if (last?.role !== "user" || last.kind) return null;
+  if (last.attachments?.length) return null;
+  const draft = last.content.trim();
+  if (!draft) return null;
+  return { messages: trimmed.slice(0, -1), draft };
 }
 
 export function isAbortError(error: unknown) {

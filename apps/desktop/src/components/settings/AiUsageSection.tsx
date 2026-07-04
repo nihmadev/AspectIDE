@@ -142,6 +142,7 @@ export function AiUsageSection({ t, workspace }: { t: TranslateFn; workspace: Wo
                     <div><dt>{t("settings.usage.detail.model")}</dt><dd>{entry.model}</dd></div>
                     <div><dt>{t("settings.usage.detail.mode")}</dt><dd>{entry.agentMode || "—"}</dd></div>
                     <div><dt>{t("settings.usage.detail.project")}</dt><dd>{entry.workspaceName || projectKeyLabel(entry.workspaceKey, t)}</dd></div>
+                    <div><dt>{t("settings.usage.detail.requests")}</dt><dd>{entry.requestCount && entry.requestCount > 0 ? formatInteger(entry.requestCount) : "—"}</dd></div>
                     <div><dt>{t("settings.usage.detail.input")}</dt><dd>{formatInteger(entry.promptTokens)}</dd></div>
                     <div><dt>{t("settings.usage.detail.output")}</dt><dd>{formatInteger(entry.completionTokens)}</dd></div>
                     <div><dt>{t("settings.usage.detail.cached")}</dt><dd>{formatInteger(entry.cachedPromptTokens)}</dd></div>

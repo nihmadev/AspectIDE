@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { mapComposerAttachments } from "./ai-chat/AiComposerAttachments";
 import { AiChatComposer } from "./ai-chat/AiChatComposer";
 import { AiChatHistoryPopover } from "./ai-chat/AiChatHistoryPopover";
-import { AiChatMessages } from "./ai-chat/AiChatMessages";
+import { AiChatMessages, MarkdownSmoothStreamContext } from "./ai-chat/AiChatMessages";
 
 import { AiAgentOrchestrationRail } from "./ai-chat/AiAgentOrchestrationRail";
 import { AiQuestionCard } from "./ai-chat/AiQuestionCard";
@@ -15,8 +15,8 @@ import { AiSubagentPanel } from "./ai-chat/AiSubagentPanel";
 import { AiAutomaticChecklist } from "./ai-chat/AiAutomaticChecklist";
 import { buildContextDropSummary } from "../lib/aiChatContextReport";
 import { aiChatErrorFromMessage, classifyAiChatError, type AiChatErrorPresentation } from "../lib/aiChatErrors";
-import { clearAiRetryNotice, setAiRetryNotice } from "../lib/aiRetryNotice";
-import { automaticRetryReason, isTransientRetryKind, nextAutomaticRetry, resetAutomaticRetry } from "../lib/aiAutomaticRetry";
+import { clearAiRetryNotice, getAiRetryNotice, setAiRetryNotice } from "../lib/aiRetryNotice";
+import { automaticRetryReason, getAutomaticRetryAttempts, isTransientRetryKind, nextAutomaticRetry, resetAutomaticRetry } from "../lib/aiAutomaticRetry";
 import { isAutomaticSocialOnlyMessage } from "../lib/aiAutomaticSocialMessage";
 
 import { AiChatSlashMenu } from "./ai-chat/AiChatSlashMenu";
@@ -111,6 +111,7 @@ import {
   readErrorMessage,
   recordAiUsageLogEntry,
   replaceEmptyAssistantTail,
+  restoreUnansweredUserMessage,
   statusToSessionStatus,
   stripTrailingErrorBubble,
   trimCancelledAssistantShell,
@@ -135,6 +136,7 @@ import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type
 import { isTauriRuntime, luxCommands } from "../lib/tauri";
 import { getActiveTurnId } from "../lib/aiActiveTurns";
 import { useVoiceInput } from "../lib/useVoiceInput";
+import { useLiveTokenSpeed } from "../lib/useLiveTokenSpeed";
 import { useAiChatScroll } from "../lib/useAiChatScroll";
 import { useAiChatComposerAttachments } from "../lib/useAiChatComposerAttachments";
 import { useComposerSessionDraft } from "../lib/useComposerSessionDraft";
@@ -145,7 +147,7 @@ import {
 import { findAnyPendingToolApproval } from "../lib/aiChatPendingApproval";
 import { openWorkspaceEditorPath } from "../lib/openWorkspaceEditorPath";
 import { AiChatGlobalApprovalBanner } from "./ai-chat/AiChatGlobalApprovalBanner";
-import { AiThinkingIndicator, isPendingAssistantShell } from "./ai-chat/AiThinkingIndicator";
+import { AiAgentNowPlaque } from "./ai-chat/AiAgentNowPlaque";
 import { AiChatClosedNotice } from "./ai-chat/AiChatClosedNotice";
 import { AiChatError } from "./ai-chat/AiChatErrorNotice";
 import { AiRetryBanner } from "./ai-chat/AiRetryBanner";
@@ -216,6 +218,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const [mentionNavigated, setMentionNavigated] = useState(false);
   const [mentionCandidates, setMentionCandidates] = useState<AiMentionCandidate[]>([]);
   const [compacting, setCompacting] = useState(false);
+  // Live tok/s of the running turn, shown left of the context stats. null hides it.
+  const liveTokenSpeed = useLiveTokenSpeed(
+    activeAiChatSessionId,
+    aiPreferences.showTokenSpeed,
+  );
   // Live "plan run" card shown after the user presses Start on a plan (#35). Set on
   // handoff, cleared on dismiss or session switch. Its steps/progress are driven
   // live by the session's todo store (see AiPlanRunCard), not by this state.
@@ -258,18 +265,6 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const streamingMessageId = activeSessionBusy
     ? [...messages].reverse().find((entry) => entry.role === "assistant")?.id ?? null
     : null;
-  // Genuinely nothing to look at yet: no assistant shell at all (fresh send, still
-  // between the user turn and assistantCreated), or a shell that has produced no
-  // reasoning/tool/text segment. The moment any of those render, they carry their
-  // own live-state UI, so this standalone "..." must step aside instead of lingering
-  // for the rest of the turn (it used to invert this and stay lit long after real
-  // content — e.g. tool calls — was already on screen, reading as a stuck turn).
-  const showStandaloneThinking = useMemo(() => {
-    if (!activeSessionBusy) return false;
-    const tailMessage = messages[messages.length - 1];
-    if (!tailMessage || tailMessage.role !== "assistant") return true;
-    return isPendingAssistantShell(tailMessage, tailMessage.id === streamingMessageId);
-  }, [activeSessionBusy, messages, streamingMessageId]);
   const isAgentHome = presentation === "agent" && visibleMessages.length === 0;
   const showOrchestrationRail = isFullExecutionAgentMode(aiPreferences.agentMode);
   const showSessionChrome = presentation === "panel" || presentation === "agent";
@@ -744,6 +739,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     const sessionId = (sendingSessionId === activeAiChatSessionId ? sendingSessionId : null)
       ?? (isAiChatSessionBusyStatus(activeStatus) ? activeAiChatSessionId : null);
     if (!sessionId) return;
+    // Snapshot the retry state BEFORE the resets below wipe it: it decides
+    // whether the tail user message is a doomed retry orphan worth recovering.
+    const retryCycleActive = getAiRetryNotice(sessionId) !== null
+      || getAutomaticRetryAttempts(sessionId) > 0;
+    const turnInFlight = getAiChatTurnRuntimeSnapshot().sendingSessionId === sessionId;
     const pendingContinuation = goalContinuationTimersRef.current.get(sessionId);
     if (pendingContinuation !== undefined) {
       clearTimeout(pendingContinuation);
@@ -756,7 +756,22 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     setAiChatSessionStatus(sessionId, "idle");
     setSendError(null);
     trimCancelledAssistantShell(sessionId, replaceAiChatMessages);
-  }, [activeAiChatSessionId, activeStatus, replaceAiChatMessages, sendingSessionId, setAiChatSessionStatus]);
+    // Stop pressed during the retry backoff (no attempt in flight): the tail
+    // user message will never be answered — hand its text back to the composer
+    // instead of leaving it hanging in the transcript forever. Mid-attempt
+    // cancels keep today's behavior (the aborted turn's own cleanup still runs
+    // asynchronously and would race a transcript rewrite). A non-empty composer
+    // draft is never clobbered — in that case the message stays in the chat.
+    if (retryCycleActive && !turnInFlight && sessionId === activeAiChatSessionId && !message.trim()) {
+      const live = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === sessionId);
+      const restored = live ? restoreUnansweredUserMessage(live.messages, live.lastError ?? null) : null;
+      if (restored) {
+        replaceAiChatMessages(sessionId, restored.messages);
+        updateMessage(restored.draft);
+        requestAnimationFrame(() => textareaRef.current?.focus());
+      }
+    }
+  }, [activeAiChatSessionId, activeStatus, message, replaceAiChatMessages, sendingSessionId, setAiChatSessionStatus, updateMessage]);
 
   const resolveToolApproval = useCallback((approvalId: string, decision: AiToolApprovalDecision) => {
     resolveAiToolApproval(approvalId, decision);
@@ -1970,6 +1985,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       handleComposerDragOver={handleComposerDragOver}
       handleComposerDrop={handleComposerDrop}
       compacting={compacting}
+      tokenSpeed={liveTokenSpeed}
       handleComposerKeyDown={handleComposerKeyDown}
       handleComposerPaste={handleComposerPaste}
       handleMessageChange={handleMessageChange}
@@ -2081,6 +2097,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
           )}
           {messages.length > 0 ? (
             <section className="ai-chat-thread" aria-live="polite">
+              <MarkdownSmoothStreamContext.Provider value={aiPreferences.chatSmoothStream}>
               <AiChatMessages
                 canMutateHistory={!activeSessionBusy && !activeSessionClosed && Boolean(workspace)}
                 canRestoreUserMessage={canRestoreUserMessage}
@@ -2100,6 +2117,7 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                 onReviewAction={handleReviewAction}
                 reviewDisabled={activeSessionBusy || activeSessionClosed}
               />
+              </MarkdownSmoothStreamContext.Provider>
               {pendingPlan && (
                 <AiPlanCard
                   plan={pendingPlan}
@@ -2157,7 +2175,9 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                 </div>
               )}
               {activeChatSession && <AiRetryBanner sessionId={activeChatSession.id} t={t} />}
-              {showStandaloneThinking && <AiThinkingIndicator status={activeStatus} t={t} />}
+              {activeSessionBusy && activeChatSession && (
+                <AiAgentNowPlaque sessionId={activeChatSession.id} status={activeStatus} t={t} />
+              )}
               {activeSessionClosed && <AiChatClosedNotice onRestore={() => restoreAiChatSession(activeAiChatSessionId)} t={t} />}
               {sendError && (
                 <AiChatError

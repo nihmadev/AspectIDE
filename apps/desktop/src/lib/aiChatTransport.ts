@@ -76,7 +76,7 @@ export async function requestChatCompletion(
   if (!desktopRuntime && !browserPreviewRuntime) throw createDesktopRuntimeError("AI chat completion");
 
   const toolsEnabled = options.toolsEnabled ?? true;
-  const reasoning = reasoningPayload(input.selectedEffortId, input.provider);
+  const reasoning = reasoningPayload(input.selectedEffortId, input.provider, input.selectedModel);
   const payload = {
     model: input.selectedModel.alias || input.selectedModel.id,
     messages: applyPromptCacheBreakpoints(messages, input.selectedModel),
@@ -464,9 +464,42 @@ export function isAnthropicCacheModel(model: AiModelConfig): boolean {
   return id.includes("claude") || id.includes("anthropic");
 }
 
-export function reasoningPayload(effortId: string, provider: AiProviderConfig): Record<string, unknown> {
-  if (!effortId) return {};
-  const normalizedEffort = effortId === "xhigh" && provider.protocol !== "local-proxy" ? "high" : effortId;
+/**
+ * Effort strings providers actually accept on the wire (OpenAI `reasoning_effort`
+ * enum superset). Custom user-defined effort levels get ids like "effort"/"effort-2"
+ * that strict providers reject with 400 "unknown variant" — those must never be sent.
+ */
+const KNOWN_WIRE_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/**
+ * Maps a configured effort id to a provider-safe wire string. Preset ids
+ * ("minimal"…"xhigh") pass through; custom efforts match by label when the user
+ * named them after a real level (e.g. label "Max" → "max"); anything else
+ * returns "" so the reasoning field is omitted and the provider default applies.
+ */
+export function resolveWireReasoningEffort(
+  effortId: string,
+  model?: Pick<AiModelConfig, "effortLevels"> | null,
+): string {
+  if (!effortId) return "";
+  const candidates = [effortId];
+  const config = model?.effortLevels?.find((effort) => effort.id === effortId);
+  if (config?.label) candidates.push(config.label);
+  for (const candidate of candidates) {
+    const normalized = candidate.trim().toLowerCase();
+    if (KNOWN_WIRE_REASONING_EFFORTS.has(normalized)) return normalized;
+  }
+  return "";
+}
+
+export function reasoningPayload(
+  effortId: string,
+  provider: AiProviderConfig,
+  model?: Pick<AiModelConfig, "effortLevels"> | null,
+): Record<string, unknown> {
+  const wireEffort = resolveWireReasoningEffort(effortId, model);
+  if (!wireEffort) return {};
+  const normalizedEffort = wireEffort === "xhigh" && provider.protocol !== "local-proxy" ? "high" : wireEffort;
   // Send the single field the provider expects, not both. OpenRouter's unified API
   // takes `reasoning: { effort }`; every other OpenAI-compatible provider takes the
   // OpenAI-standard `reasoning_effort` string. Sending the unknown `reasoning`

@@ -195,12 +195,18 @@ pub fn ai_blackboard_post(
 
 /// Read messages from a session's blackboard: returns the most recent `limit`
 /// matching entries in chronological (oldest-first) order, so the newest is last.
-/// Optional `topic` filters to a single channel; `limit` caps the result count.
+/// Optional `topic` filters to a single channel; `author` filters to one agent's
+/// posts; `since_ms` is a cursor that returns only entries strictly newer than
+/// the given epoch-milliseconds timestamp (agents pass the `timestampMs` of the
+/// last entry they saw, so re-reads don't replay the whole board); `limit` caps
+/// the result count.
 #[tauri::command]
 pub fn ai_blackboard_read(
     session_id: String,
     topic: Option<String>,
     limit: Option<usize>,
+    author: Option<String>,
+    since_ms: Option<i64>,
 ) -> Result<Vec<BlackboardEntry>, String> {
     let session_id = sanitize_session_id(&session_id);
     if !is_authorized_session_id(&session_id) {
@@ -216,6 +222,9 @@ pub fn ai_blackboard_read(
     let topic_filter = topic
         .map(|t| t.trim().to_lowercase())
         .filter(|t| !t.is_empty());
+    let author_filter = author
+        .map(|a| a.trim().to_lowercase())
+        .filter(|a| !a.is_empty());
     let limit = limit.unwrap_or(50).clamp(1, MAX_ENTRIES_PER_SESSION);
 
     let mut selected: Vec<BlackboardEntry> = entries
@@ -225,12 +234,55 @@ pub fn ai_blackboard_read(
             topic_filter
                 .as_ref()
                 .is_none_or(|t| entry.topic.to_lowercase() == *t)
+                && author_filter
+                    .as_ref()
+                    .is_none_or(|a| entry.author.to_lowercase() == *a)
+                && since_ms.is_none_or(|cursor| entry.timestamp_ms > cursor)
         })
         .take(limit)
         .cloned()
         .collect();
     selected.reverse();
     Ok(selected)
+}
+
+/// Board activity summary for one author since a timestamp: `(post count, the
+/// distinct topics they posted under)`. Used by the Task tool result so the
+/// parent agent learns what a finished subagent published to the board without
+/// re-reading (and re-paying for) the full entries.
+///
+/// The bound is INCLUSIVE (`>=`), unlike [`ai_blackboard_read`]'s strict `>`
+/// cursor: `since_ms` here is the subagent's spawn time, and a post landing in
+/// the same millisecond as the spawn is the subagent's own and must count.
+/// (Pre-spawn collisions are impossible — the author id is minted at spawn.)
+/// The read cursor is strict because callers pass the timestamp of the last
+/// entry they already saw.
+pub fn author_activity_since(
+    session_id: &str,
+    author: &str,
+    since_ms: i64,
+) -> (usize, Vec<String>) {
+    let session_id = sanitize_session_id(session_id);
+    if !is_authorized_session_id(&session_id) {
+        return (0, Vec::new());
+    }
+    let Ok(guard) = board().lock() else {
+        return (0, Vec::new());
+    };
+    let Some(entries) = guard.get(&session_id) else {
+        return (0, Vec::new());
+    };
+    let mut count = 0usize;
+    let mut topics: Vec<String> = Vec::new();
+    for entry in entries {
+        if entry.timestamp_ms >= since_ms && entry.author == author {
+            count += 1;
+            if !topics.contains(&entry.topic) {
+                topics.push(entry.topic.clone());
+            }
+        }
+    }
+    (count, topics)
 }
 
 /// Clear a session's blackboard (chat clear / lifecycle reset).
@@ -284,15 +336,101 @@ mod tests {
         )
         .unwrap();
 
-        let all = ai_blackboard_read(session.clone(), None, None).unwrap();
+        let all = ai_blackboard_read(session.clone(), None, None, None, None).unwrap();
         assert_eq!(all.len(), 3);
 
-        let auth = ai_blackboard_read(session.clone(), Some("auth".into()), None).unwrap();
+        let auth =
+            ai_blackboard_read(session.clone(), Some("auth".into()), None, None, None).unwrap();
         assert_eq!(auth.len(), 2);
         assert_eq!(auth[0].content, "found login in auth.rs");
 
         ai_blackboard_clear(session.clone()).unwrap();
-        assert!(ai_blackboard_read(session, None, None).unwrap().is_empty());
+        assert!(ai_blackboard_read(session, None, None, None, None)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn read_filters_by_author_and_since_cursor() {
+        let session = format!("test-{}", uuid::Uuid::new_v4());
+        let first = ai_blackboard_post(
+            session.clone(),
+            "explorer-aa11".into(),
+            "auth".into(),
+            "login lives in auth.rs".into(),
+        )
+        .unwrap();
+        ai_blackboard_post(
+            session.clone(),
+            "reviewer-bb22".into(),
+            "auth".into(),
+            "token TTL too short".into(),
+        )
+        .unwrap();
+
+        // Author filter returns only that agent's posts (case-insensitive).
+        let by_author = ai_blackboard_read(
+            session.clone(),
+            None,
+            None,
+            Some("Explorer-AA11".into()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(by_author.len(), 1);
+        assert_eq!(by_author[0].content, "login lives in auth.rs");
+
+        // The since cursor is strict: passing the first entry's own timestamp
+        // returns only entries strictly newer than it.
+        let newer = ai_blackboard_read(session.clone(), None, None, None, Some(first.timestamp_ms))
+            .unwrap();
+        assert!(newer.iter().all(|e| e.timestamp_ms > first.timestamp_ms));
+        assert!(!newer.iter().any(|e| e.id == first.id));
+
+        // A far-future cursor yields nothing.
+        assert!(
+            ai_blackboard_read(session, None, None, None, Some(i64::MAX))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn author_activity_since_counts_posts_and_topics() {
+        let session = format!("test-{}", uuid::Uuid::new_v4());
+        let started = Utc::now().timestamp_millis();
+        ai_blackboard_post(
+            session.clone(),
+            "explorer-cc33".into(),
+            "auth".into(),
+            "a".into(),
+        )
+        .unwrap();
+        ai_blackboard_post(
+            session.clone(),
+            "explorer-cc33".into(),
+            "ui".into(),
+            "b".into(),
+        )
+        .unwrap();
+        ai_blackboard_post(
+            session.clone(),
+            "other-dd44".into(),
+            "auth".into(),
+            "c".into(),
+        )
+        .unwrap();
+
+        let (count, topics) = author_activity_since(&session, "explorer-cc33", started);
+        assert_eq!(count, 2);
+        assert_eq!(topics, vec!["auth".to_string(), "ui".to_string()]);
+
+        // Unknown author / future cursor → empty.
+        assert_eq!(author_activity_since(&session, "nobody", started).0, 0);
+        assert_eq!(
+            author_activity_since(&session, "explorer-cc33", i64::MAX).0,
+            0
+        );
     }
 
     #[test]
@@ -328,7 +466,7 @@ mod tests {
                 .is_err(),
                 "post must reject guessable id {guessable:?}"
             );
-            assert!(ai_blackboard_read(guessable.into(), None, None)
+            assert!(ai_blackboard_read(guessable.into(), None, None, None, None)
                 .unwrap()
                 .is_empty());
             assert!(ai_blackboard_clear(guessable.into()).is_ok());
@@ -348,7 +486,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(entry.content, "found it");
-        assert_eq!(ai_blackboard_read(session, None, None).unwrap().len(), 1);
+        assert_eq!(
+            ai_blackboard_read(session, None, None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -358,7 +501,8 @@ mod tests {
             ai_blackboard_post(session.clone(), "a".into(), "t".into(), format!("msg {i}"))
                 .unwrap();
         }
-        let all = ai_blackboard_read(session, None, Some(MAX_ENTRIES_PER_SESSION)).unwrap();
+        let all =
+            ai_blackboard_read(session, None, Some(MAX_ENTRIES_PER_SESSION), None, None).unwrap();
         assert_eq!(all.len(), MAX_ENTRIES_PER_SESSION);
         // Oldest entries dropped; newest retained.
         assert!(all

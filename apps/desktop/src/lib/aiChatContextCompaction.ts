@@ -18,14 +18,16 @@ export const TOOL_OUTPUT_PRUNE_MARKER = "[Lux · tool output pruned";
 export const PRESERVE_RECENT_MESSAGE_COUNT = 10;
 export const MIN_MESSAGES_FOR_COMPACTION = 10;
 /**
- * Manual ("Compact now" / `/compact`) compaction must work at any moment, even in
- * a short chat that is nowhere near the auto-compact threshold. Forced runs use a
- * smaller preserve window and message floor so there is always something older to
- * summarize instead of refusing with "too few messages". Auto-compaction keeps the
- * larger, conservative values above.
+ * Manual ("Compact now" / `/compact`) compaction must work at any moment, even on
+ * a one-message chat. Forced runs use a floor of 1 and an ADAPTIVE preserve window
+ * (never larger than `eligible - 1`), so there is always at least one older message
+ * to summarize instead of refusing with "too few messages" — or, the subtler cliff,
+ * refusing with "already-checkpoint-only" because a fixed preserve window swallowed
+ * the whole short transcript. Auto-compaction keeps the larger, conservative values
+ * above.
  */
 export const FORCED_PRESERVE_RECENT_MESSAGE_COUNT = 5;
-export const FORCED_MIN_MESSAGES_FOR_COMPACTION = 5;
+export const FORCED_MIN_MESSAGES_FOR_COMPACTION = 1;
 /** OpenCode-style prune: keep full tool output only on the latest N assistant turns. */
 export const PRESERVE_FULL_TOOL_OUTPUT_ASSISTANT_TURNS = 3;
 const MIN_TOOL_OUTPUT_CHARS_TO_PRUNE = 320;
@@ -231,8 +233,13 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
   const tokensBefore = estimateHistoryTokens(prunedMessages);
   const force = input.force === true;
   const minMessages = force ? FORCED_MIN_MESSAGES_FOR_COMPACTION : MIN_MESSAGES_FOR_COMPACTION;
-  const preserveCount = force ? FORCED_PRESERVE_RECENT_MESSAGE_COUNT : PRESERVE_RECENT_MESSAGE_COUNT;
   const eligible = prunedMessages.filter((message) => !isCompactionCheckpointMessage(message));
+  // Forced runs shrink the preserve window so at least one eligible message always
+  // lands in the summarized slice — a fixed window on a short chat preserved
+  // everything and bailed with "already-checkpoint-only" instead of compacting.
+  const preserveCount = force
+    ? Math.min(FORCED_PRESERVE_RECENT_MESSAGE_COUNT, Math.max(0, eligible.length - 1))
+    : PRESERVE_RECENT_MESSAGE_COUNT;
 
   if (eligible.length < minMessages) {
     const onlyPruned = prunedMessages !== input.messages;
@@ -634,7 +641,7 @@ async function summarizeCompactionTranscript(input: {
       apiKey: input.provider.apiKey || null,
       model: input.model.alias || input.model.id,
       protocol: input.provider.protocol,
-      reasoning: reasoningPayload(input.selectedEffortId, input.provider),
+      reasoning: reasoningPayload(input.selectedEffortId, input.provider, input.model),
     });
     return truncateText(summary, MAX_SUMMARY_CHARS);
   }

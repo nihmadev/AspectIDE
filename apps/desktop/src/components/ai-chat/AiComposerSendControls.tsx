@@ -1,12 +1,15 @@
-import { CornerDownLeft, Mic, SendHorizontal, Square } from "lucide-react";
+import { CornerDownLeft, Gauge, Mic, SendHorizontal, Square } from "lucide-react";
 import { memo } from "react";
 import { AiContextIndicator } from "./AiContextIndicator";
 import { VOICE_MODE_RECORDING, VOICE_MODE_TRANSCRIBING, type AiComposerVoiceState } from "./aiComposerTypes";
 import type { AiChatContextUsageMeta, AiChatContextUsageSummary } from "../../lib/aiChatContextUsage";
 import type { AiChatContextDropSummary } from "../../lib/aiChatContextReport";
+import { formatTokenSpeed } from "../../lib/useLiveTokenSpeed";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 
 type AiComposerSendControlsProps = {
+  /** Live tok/s of the running turn, or null to hide the readout. */
+  tokenSpeed?: number | null;
   contextOpen: boolean;
   contextTitle: string;
   contextUsage: AiChatContextUsageSummary & AiChatContextUsageMeta;
@@ -27,6 +30,7 @@ type AiComposerSendControlsProps = {
 
 /** Right composer actions: context budget indicator + voice + send/stop. */
 export const AiComposerSendControls = memo(function AiComposerSendControls({
+  tokenSpeed = null,
   contextOpen,
   contextTitle,
   contextUsage,
@@ -51,6 +55,18 @@ export const AiComposerSendControls = memo(function AiComposerSendControls({
       : t("aiChat.send.disabledTooltip");
   return (
     <div className="ai-composer-right-actions">
+      {tokenSpeed !== null && (
+        <span
+          className="ai-token-speed"
+          role="status"
+          aria-live="off"
+          title={t("aiChat.tokenSpeed.title")}
+        >
+          <Gauge size={11} aria-hidden="true" />
+          {formatTokenSpeed(tokenSpeed)}
+          <em>tok/s</em>
+        </span>
+      )}
       <AiContextIndicator
         contextOpen={contextOpen}
         contextTitle={contextTitle}

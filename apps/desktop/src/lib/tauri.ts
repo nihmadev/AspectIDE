@@ -1332,13 +1332,22 @@ export type AiTurnEvent =
   | { kind: "userMessageInjected"; turnId: string; text: string }
   | { kind: "toolCallStarted"; turnId: string; callId: string; tool: string; input: string }
   | { kind: "toolCallCompleted"; turnId: string; callId: string; status: AiTurnToolStatus; output: string; error: string | null }
+  /** Live progress from a running Task subagent. stage: "text" = throttled snapshot
+   *  of the subagent's streamed answer (content = full text so far), "tool" = the
+   *  subagent started the named tool (content = short argument preview), "done" =
+   *  final summary. callId matches the Task toolCallStarted event (the id the
+   *  subagent-run store registered). */
+  | { kind: "subagentProgress"; turnId: string; callId: string; agentId: string; stage: "text" | "tool" | "done" | "error"; content: string; tool: string }
   | { kind: "approvalRequired"; turnId: string; requestId: string; tool: string; title: string; summary: string; preview: string; risk: string }
   | { kind: "questionRequired"; turnId: string; requestId: string; question: string; detail: string; options: AiTurnQuestionOption[]; multiSelect: boolean; allowCustom: boolean; htmlPreview: string }
   | { kind: "planProposed"; turnId: string; planId: string; title: string; summary: string; steps: AiTurnPlanStep[]; alternatives: AiPlanDecision[]; risks: string[]; verification: string[]; quality: number; coaching: string[]; autoStart: boolean }
-  | { kind: "turnUsage"; turnId: string; promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number }
+  | { kind: "turnUsage"; turnId: string; promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number; modelCalls?: number }
   | { kind: "turnDone"; turnId: string; messageId: string; content: string; durationMs: number }
   | { kind: "turnError"; turnId: string; error: string }
   | { kind: "turnRetry"; turnId: string; attempt: number; maxAttempts: number; reason: string; detail: string; delayMs: number }
+  /** Provider rejected the configured reasoning effort; the turn auto-applied the
+   *  strongest variant the provider's error advertises and retried the round. */
+  | { kind: "reasoningEffortFallback"; turnId: string; requested: string; applied: string }
   | { kind: "turnCancelled"; turnId: string };
 
 export async function subscribeAiTurn(handler: (event: AiTurnEvent) => void) {

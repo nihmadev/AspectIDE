@@ -90,6 +90,24 @@ export function AiContextIndicator({
           contextDrops={contextDrops}
         />
       )}
+      {/* omp-style compact readout beside the ring: used/budget at a glance,
+          same popover toggle. Hidden on narrow composers via container query. */}
+      <button
+        type="button"
+        className="ai-context-stats"
+        data-level={level}
+        data-active={contextOpen || undefined}
+        aria-label={t("aiChat.context.statsAria", {
+          used: formatCompactTokens(contextUsage.totalTokens),
+          budget: formatCompactTokens(contextUsage.tokenBudget),
+        })}
+        title={contextTitle}
+        onClick={() => setContextOpen((open) => !open)}
+      >
+        <span className="ai-context-stats-used">{formatCompactTokens(contextUsage.totalTokens)}</span>
+        <span className="ai-context-stats-sep" aria-hidden="true">/</span>
+        <span className="ai-context-stats-budget">{formatCompactTokens(contextUsage.tokenBudget)}</span>
+      </button>
       <button
         type="button"
         className="ai-context-ring"

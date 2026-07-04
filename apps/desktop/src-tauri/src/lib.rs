@@ -55,6 +55,7 @@ mod ai_compaction;
 mod ai_context_sources;
 mod ai_failure;
 mod ai_goal_eval;
+mod ai_jobs;
 mod ai_permissions;
 mod ai_prompt;
 mod ai_related;

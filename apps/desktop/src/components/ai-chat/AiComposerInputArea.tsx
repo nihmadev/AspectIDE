@@ -55,10 +55,12 @@ export const AiComposerInputArea = memo(function AiComposerInputArea({
       )}
       {compacting && (
         <div className="ai-composer-compacting" role="status" aria-live="polite">
-          <span className="ai-composer-compacting-bar" aria-hidden="true">
-            <span /><span /><span />
-          </span>
           <span className="ai-composer-compacting-label">{t("aiChat.composer.compacting")}</span>
+          {/* Indeterminate Codex-style sweep: summarization duration is unknown,
+              so a travelling highlight beats fake percentages. */}
+          <span className="ai-composer-compacting-track" aria-hidden="true">
+            <span className="ai-composer-compacting-sweep" />
+          </span>
         </div>
       )}
       <textarea

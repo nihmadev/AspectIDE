@@ -1,7 +1,6 @@
-import { Check, ChevronRight, Clock3, Coins, FilePenLine, SearchCheck, Zap } from "lucide-react";
+import { Check, ChevronRight, Clock3, Coins, FilePenLine, Repeat2, SearchCheck, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { AiChatMessage } from "../../lib/aiChatTypes";
-import type { ContextCompactionState } from "../../lib/aiChatContextCompaction";
 import { formatCompactTokens } from "../../lib/aiChatContextUsage";
 import { buildTurnFileSummary } from "../../lib/aiTurnFileSummary";
 import { openWorkspaceEditorPath } from "../../lib/openWorkspaceEditorPath";
@@ -9,7 +8,6 @@ import type { TranslateFn } from "../../lib/i18n/useTranslation";
 
 type AiTurnSummaryCardProps = {
   message: AiChatMessage;
-  compaction?: ContextCompactionState | null;
   workspaceRoot: string | null;
   t: TranslateFn;
   onReview?: () => void;
@@ -17,7 +15,7 @@ type AiTurnSummaryCardProps = {
   reviewDisabled?: boolean;
 };
 
-export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onReview, reviewDisabled = false }: AiTurnSummaryCardProps) {
+export function AiTurnSummaryCard({ message, workspaceRoot, t, onReview, reviewDisabled = false }: AiTurnSummaryCardProps) {
   const [filesExpanded, setFilesExpanded] = useState(false);
   const fileSummary = useMemo(() => buildTurnFileSummary(message, workspaceRoot), [message, workspaceRoot]);
   const usage = message.turnUsage;
@@ -29,10 +27,9 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
   const hasFiles = Boolean(fileSummary && fileSummary.files.length > 0);
   const hasUsage = Boolean(usage && (usage.promptTokens > 0 || usage.completionTokens > 0));
   const hasTiming = totalDurationMs > 0;
-  const hasCompaction = Boolean(compaction?.droppedItems && compaction.droppedItems.length > 0);
   const showReview = Boolean(onReview) && (hasFiles || hasUsage || hasTiming);
 
-  if (!hasFiles && !hasUsage && !hasTiming && !hasCompaction) return null;
+  if (!hasFiles && !hasUsage && !hasTiming) return null;
 
   // The file list is collapsed by default behind the header (filesExpanded), so the
   // summary stays a single quiet line; clicking the header toggles it open/closed.
@@ -69,6 +66,12 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
               {formatDuration(totalDurationMs)}
             </span>
           )}
+          {usage?.requestCount && usage.requestCount > 0 ? (
+            <span title={t("aiChat.turnUsage.requests", { count: usage.requestCount })}>
+              <Repeat2 size={12} />
+              {usage.requestCount} req
+            </span>
+          ) : null}
           {hasUsage && usage && (
             <span title={t("aiChat.turnUsage.summary", {
               input: formatCompactTokens(usage.promptTokens),
@@ -133,24 +136,6 @@ export function AiTurnSummaryCard({ message, compaction, workspaceRoot, t, onRev
         </section>
       )}
 
-      {hasCompaction && compaction?.droppedItems && (
-        <details className="ai-turn-summary-compact">
-          <summary>
-            {t("aiChat.compact.droppedSummary", {
-              count: compaction.droppedItems.length,
-              tokens: formatCompactTokens(compaction.droppedTokens ?? 0),
-            })}
-          </summary>
-          <ul>
-            {compaction.droppedItems.map((item) => (
-              <li key={`${item.kind}-${item.label}-${item.tokens}`}>
-                <span>{item.label}</span>
-                <span>{formatCompactTokens(item.tokens)}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
     </div>
   );
 }

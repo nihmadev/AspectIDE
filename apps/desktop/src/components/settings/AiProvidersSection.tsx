@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Cpu, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Cpu, GripVertical, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   AI_PROVIDER_PRESETS,
@@ -188,6 +188,11 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
   const [runningModelId, setRunningModelId] = useState<string | null>(null);
   const [refreshingModels, setRefreshingModels] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  // Effort drag-reorder: which row is being dragged and where it would land.
+  // The row is draggable only when armed from the grip handle, so text selection
+  // inside the label input never starts an accidental drag.
+  const [effortDrag, setEffortDrag] = useState<{ id: string; overId: string | null; after: boolean } | null>(null);
+  const effortDragArmedRef = useRef(false);
   const modelIdRef = useRef(editingModelId);
   const editingModel = getAiModel(provider, editingModelId) ?? provider.models[0];
   const canRemoveModel = provider.models.length > 1;
@@ -528,7 +533,75 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
                 }}><Plus size={14} /> {t("settings.providers.addEffort")}</button>
               </div>
               {editingModel.effortLevels.length === 0 ? <p>{t("settings.providers.noEffortSelector")}</p> : editingModel.effortLevels.map((effort) => (
-                <div className="effort-row" key={effort.id}>
+                <div
+                  className="effort-row"
+                  key={effort.id}
+                  draggable={editingModel.effortLevels.length > 1}
+                  data-dragging={effortDrag?.id === effort.id || undefined}
+                  data-drop={effortDrag && effortDrag.overId === effort.id && effortDrag.id !== effort.id
+                    ? (effortDrag.after ? "after" : "before")
+                    : undefined}
+                  onDragStart={(event) => {
+                    // Only the grip arms a drag; dragging from the input would
+                    // fight text selection. The arm is a one-shot ticket,
+                    // consumed here so a stale flag can never hijack a later
+                    // gesture.
+                    if (!effortDragArmedRef.current) {
+                      event.preventDefault();
+                      return;
+                    }
+                    effortDragArmedRef.current = false;
+                    event.dataTransfer.effectAllowed = "move";
+                    setEffortDrag({ id: effort.id, overId: null, after: false });
+                  }}
+                  onDragOver={(event) => {
+                    if (!effortDrag) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    const after = event.clientY > rect.top + rect.height / 2;
+                    setEffortDrag((current) => current && (current.overId !== effort.id || current.after !== after)
+                      ? { ...current, overId: effort.id, after }
+                      : current);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (effortDrag && effortDrag.id !== effort.id) {
+                      updateEfforts(
+                        reorderEffortLevels(editingModel.effortLevels, effortDrag.id, effort.id, effortDrag.after),
+                        preferences.selectedEffortId,
+                      );
+                    }
+                    effortDragArmedRef.current = false;
+                    setEffortDrag(null);
+                  }}
+                  onDragEnd={() => {
+                    effortDragArmedRef.current = false;
+                    setEffortDrag(null);
+                  }}
+                >
+                  <span
+                    className="effort-drag-handle"
+                    title={t("settings.providers.effortDragHint")}
+                    aria-hidden="true"
+                    data-disabled={editingModel.effortLevels.length < 2 || undefined}
+                    onPointerDown={() => {
+                      effortDragArmedRef.current = true;
+                      // The release can land anywhere (off the grip, outside
+                      // the window) and native dragstart may never fire, so
+                      // disarm on the next global pointer release — otherwise
+                      // the shared flag stays stuck and the next unrelated
+                      // gesture (e.g. selecting text in the label input) would
+                      // start a reorder drag. dragstart fires before the
+                      // drag-induced pointercancel, so real drags pass their
+                      // gate first.
+                      const disarm = () => { effortDragArmedRef.current = false; };
+                      window.addEventListener("pointerup", disarm, { once: true });
+                      window.addEventListener("pointercancel", disarm, { once: true });
+                    }}
+                  >
+                    <GripVertical size={14} />
+                  </span>
                   <input value={effort.label} aria-label={t("settings.providers.effortLabelAria", { id: effort.id })} onChange={(event) => {
                     updateEfforts(editingModel.effortLevels.map((candidate) => candidate.id === effort.id ? { ...candidate, label: event.currentTarget.value } : candidate), preferences.selectedEffortId);
                   }} />
@@ -544,4 +617,26 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
       </SettingsPanel>
     </div>
   );
+}
+
+/**
+ * Move the dragged effort next to the drop target: before it (`after` false) or
+ * after it. Returns the input array unchanged for no-op drops (unknown ids,
+ * self-drop), so callers can pass the result straight to state.
+ */
+function reorderEffortLevels(
+  levels: AiEffortConfig[],
+  dragId: string,
+  targetId: string,
+  after: boolean,
+): AiEffortConfig[] {
+  if (dragId === targetId) return levels;
+  const from = levels.findIndex((level) => level.id === dragId);
+  if (from < 0 || !levels.some((level) => level.id === targetId)) return levels;
+  const next = [...levels];
+  const [moved] = next.splice(from, 1);
+  if (!moved) return levels;
+  const insertAt = next.findIndex((level) => level.id === targetId) + (after ? 1 : 0);
+  next.splice(insertAt, 0, moved);
+  return next;
 }

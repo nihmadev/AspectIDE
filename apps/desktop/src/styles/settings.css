@@ -1259,8 +1259,9 @@
 }
 
 .effort-row {
+  position: relative; /* anchors the drag drop-indicator line */
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
 }
 
@@ -1268,6 +1269,60 @@
   width: 32px;
   height: 32px; /* match the 32px input beside it (shared group is 28px) */
   padding: 0;
+}
+
+/* Grip zone before the input — the only place a reorder drag can start. */
+.effort-drag-handle {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 32px;
+  border-radius: var(--radius-xs);
+  color: var(--text-3);
+  cursor: grab;
+  transition: color 100ms ease, background 100ms ease;
+}
+
+.effort-row:hover .effort-drag-handle {
+  color: var(--text-2);
+}
+
+.effort-drag-handle:hover {
+  color: var(--text-1);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.effort-drag-handle[data-disabled] {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.effort-row[data-dragging] {
+  opacity: 0.45;
+}
+
+.effort-row[data-dragging] .effort-drag-handle {
+  cursor: grabbing;
+}
+
+/* Accent insertion line rendered in the middle of the 8px row gap. */
+.effort-row[data-drop]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+.effort-row[data-drop="before"]::before {
+  top: -5px;
+}
+
+.effort-row[data-drop="after"]::before {
+  bottom: -5px;
 }
 
 /* Empty state ("no effort selector") — bare <p>, so mute the UA defaults. */

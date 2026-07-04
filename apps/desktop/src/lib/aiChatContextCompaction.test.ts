@@ -135,3 +135,67 @@ describe("compactChatHistory auto over-threshold", () => {
     expect(isCompactionCheckpointMessage(result.messages[0]!)).toBe(true);
   });
 });
+
+describe("compactChatHistory forced on short chats", () => {
+  it("compacts a single-message chat when forced", async () => {
+    const input = baseInput({ messages: makeMessages(1), force: true });
+
+    const result = await compactChatHistory(input);
+
+    expect(result.compacted).toBe(true);
+    expect(aiCompactionSummary).toHaveBeenCalledTimes(1);
+    expect(result.messages).toHaveLength(1);
+    expect(isCompactionCheckpointMessage(result.messages[0]!)).toBe(true);
+  });
+
+  it("compacts exactly-preserve-window-sized chats instead of bailing already-checkpoint-only", async () => {
+    // Old cliff: 5 eligible messages passed the forced floor (5) but the fixed
+    // forced preserve window (5) swallowed the whole transcript, leaving nothing
+    // older to summarize — forced compaction silently did nothing.
+    const input = baseInput({ messages: makeMessages(5), force: true });
+
+    const result = await compactChatHistory(input);
+
+    expect(result.compacted).toBe(true);
+    expect(result.reason).toBeUndefined();
+    expect(isCompactionCheckpointMessage(result.messages[0]!)).toBe(true);
+    expect(result.messages.length).toBeLessThanOrEqual(input.messages.length);
+  });
+
+  it("re-compacts a checkpoint followed by one new message when forced", async () => {
+    const [checkpointSource] = makeMessages(1);
+    const checkpoint: AiChatMessage = {
+      ...checkpointSource!,
+      id: "ckpt-1",
+      kind: "compaction-checkpoint",
+      content: "[Lux · context compacted]\ncovered_messages=4\nPrior summary body.",
+    };
+    const follow = { ...makeMessages(2)[1]!, id: "m-follow" };
+    const input = baseInput({ messages: [checkpoint, follow], force: true });
+
+    const result = await compactChatHistory(input);
+
+    expect(result.compacted).toBe(true);
+    expect(result.messages).toHaveLength(1);
+    expect(isCompactionCheckpointMessage(result.messages[0]!)).toBe(true);
+    // The new checkpoint merges the prior one's covered count instead of dropping it.
+    expect(result.messages[0]!.content).toContain("covered_messages=5");
+  });
+
+  it("still refuses a chat with nothing eligible to compact", async () => {
+    const [checkpointSource] = makeMessages(1);
+    const checkpoint: AiChatMessage = {
+      ...checkpointSource!,
+      id: "ckpt-only",
+      kind: "compaction-checkpoint",
+      content: "[Lux · context compacted]\ncovered_messages=4\nPrior summary body.",
+    };
+    const input = baseInput({ messages: [checkpoint], force: true });
+
+    const result = await compactChatHistory(input);
+
+    expect(result.compacted).toBe(false);
+    expect(result.reason).toBe("too-few-messages");
+    expect(aiCompactionSummary).not.toHaveBeenCalled();
+  });
+});

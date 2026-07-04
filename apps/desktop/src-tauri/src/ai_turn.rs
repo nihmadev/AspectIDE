@@ -315,6 +315,24 @@ pub enum TurnEvent {
         error: Option<String>,
     },
 
+    /// Live progress from a running subagent (Task tool). `call_id` is the Task
+    /// tool call id — the same id the UI registered the subagent run under — so
+    /// the Agent rail can stream the subagent's work while it runs instead of
+    /// showing a silent "running…" row. `stage` is "text" (throttled snapshot of
+    /// the subagent's streamed answer in `content`), "tool" (the subagent started
+    /// the tool named in `tool`; `content` carries a short argument preview) or
+    /// "done" (`content` is the final summary). Named `stage` because `kind` is
+    /// this enum's serde tag.
+    #[serde(rename_all = "camelCase")]
+    SubagentProgress {
+        turn_id: String,
+        call_id: String,
+        agent_id: String,
+        stage: String,
+        content: String,
+        tool: String,
+    },
+
     /// Approval required — UI must respond via `ai_resolve_turn_approval`.
     #[serde(rename_all = "camelCase")]
     ApprovalRequired {
@@ -380,6 +398,8 @@ pub enum TurnEvent {
         completion_tokens: u64,
         total_tokens: u64,
         cached_prompt_tokens: u64,
+        /// Model API requests this turn issued (rounds + recovery synthesis).
+        model_calls: u64,
     },
 
     /// Turn completed successfully.
@@ -407,6 +427,18 @@ pub enum TurnEvent {
         reason: String,
         detail: String,
         delay_ms: u64,
+    },
+
+    /// The provider rejected the configured reasoning effort (HTTP 400 unknown
+    /// variant / unsupported value). The turn auto-recovered by applying the
+    /// strongest effort the provider's own error advertises and retrying the
+    /// round. The UI shows a persistent notice: "requested isn't accepted —
+    /// applied was set instead".
+    #[serde(rename_all = "camelCase")]
+    ReasoningEffortFallback {
+        turn_id: String,
+        requested: String,
+        applied: String,
     },
 }
 
@@ -901,6 +933,10 @@ pub async fn ai_run_turn(
     state: tauri::State<'_, crate::SharedState>,
     input: TurnInput,
 ) -> Result<(), String> {
+    // Owned mutably so the reasoning-effort auto-fallback below can rewrite the
+    // reasoning blob mid-turn; every later round (and subagent spawn) then
+    // inherits the corrected effort.
+    let mut input = input;
     let turn_id = input
         .turn_id
         .clone()
@@ -980,6 +1016,10 @@ pub async fn ai_run_turn(
     let mut usage_completion: u64 = 0;
     let mut usage_total: u64 = 0;
     let mut usage_cached: u64 = 0;
+    // Model API requests issued by this turn (loop rounds + the tool-free
+    // recovery synthesis). Transport-level connection retries are invisible
+    // here by design — the user-facing number is "how many completions ran".
+    let mut model_calls: u64 = 0;
     // True only when the model ended the turn by answering (no tool calls). When it
     // instead exhausts `max_rounds` mid-work, `final_content` may be stale text from
     // an early round; the recovery turn below then refreshes it (L8).
@@ -1004,6 +1044,11 @@ pub async fn ai_run_turn(
     // must not authorize edits in the new one (on-disk state may have changed).
     crate::ai_session::clear_read_files(&input.session_id);
 
+    // One-shot guard for the reasoning-effort auto-fallback: a single rewrite +
+    // retry per turn. If the provider still 400s after applying its own advertised
+    // maximum, that is a genuine error and must surface.
+    let mut reasoning_fallback_used = false;
+
     // ── Model ↔ tool loop ──
     for _round in 0..max_rounds {
         // Honor a Stop pressed between rounds: abort before another model call.
@@ -1017,6 +1062,7 @@ pub async fn ai_run_turn(
                 usage_completion,
                 usage_total,
                 usage_cached,
+                model_calls,
             );
             let _ = emit_turn_event(
                 &app,
@@ -1059,6 +1105,7 @@ pub async fn ai_run_turn(
             payload,
             input.prompt_input.provider_protocol.clone(),
         );
+        model_calls += 1;
 
         // Stream tokens live: each SSE delta is forwarded as its own StreamDelta
         // so the frontend renders text as it arrives instead of in one jump. On
@@ -1135,6 +1182,27 @@ pub async fn ai_run_turn(
         {
             Ok(r) => r,
             Err(error) => {
+                // Reasoning-effort auto-recovery: a 400 rejecting our effort value
+                // is fixable — the provider's error lists what it accepts. Apply
+                // the strongest advertised variant, tell the UI, and retry the
+                // round (the conversation is untouched: nothing was appended yet).
+                if !reasoning_fallback_used {
+                    if let Some(fix) = crate::ai_chat_backend::reasoning_effort_fallback(
+                        input.reasoning.as_mut(),
+                        &error,
+                    ) {
+                        reasoning_fallback_used = true;
+                        let _ = emit_turn_event(
+                            &app,
+                            &TurnEvent::ReasoningEffortFallback {
+                                turn_id: turn_id.clone(),
+                                requested: fix.requested,
+                                applied: fix.applied,
+                            },
+                        );
+                        continue;
+                    }
+                }
                 // Drop any cancellation flag for this id so a Stop racing the
                 // model-call failure doesn't leak a stale entry (consistent with
                 // the clear-on-finish path below).
@@ -1147,6 +1215,7 @@ pub async fn ai_run_turn(
                     usage_completion,
                     usage_total,
                     usage_cached,
+                    model_calls,
                 );
                 let _ = emit_turn_event(
                     &app,
@@ -1198,6 +1267,7 @@ pub async fn ai_run_turn(
                 usage_completion,
                 usage_total,
                 usage_cached,
+                model_calls,
             );
             let _ = emit_turn_event(
                 &app,
@@ -1303,17 +1373,124 @@ pub async fn ai_run_turn(
             reads_in_batch
         };
 
+        // ── Parallel subagent fan-out ──
+        // When the model issues 2+ Task calls in ONE response, run them
+        // CONCURRENTLY instead of one-after-another: each subagent is an
+        // isolated context (own messages, own model loop), so they cannot race
+        // each other's conversation state — the wall-clock win is ~N× for an
+        // N-agent fan-out. Started/Completed events are emitted inside each
+        // future (live, as each subagent starts/finishes); the sequential loop
+        // below consumes the stored results so tool-message ordering and
+        // cancellation semantics stay identical to the sequential path.
+        //
+        // Known cosmetic tradeoff: when the model interleaves other tools
+        // BETWEEN Task calls in one batch (e.g. [Task, Read, Task]), the UI
+        // sees the Task rows before the Read row — event order follows
+        // execution order (fan-out first), not the declared array order.
+        //
+        // F7 interaction: the aggregate budget is re-checked here BEFORE
+        // launching the fan-out — if a previous round already exhausted it,
+        // the Tasks fall through to the sequential loop, whose budget check
+        // stubs them as skipped instead of running up to 4 full subagents
+        // against a spent budget. (A budget trip by a non-Task tool in the
+        // SAME batch cannot retro-skip fan-out Tasks — they already ran; their
+        // real results are folded rather than discarded.)
+        let parallel_ids = if turn_output_bytes >= TURN_OUTPUT_BYTE_BUDGET
+            || turn_tool_calls >= TURN_TOOL_CALL_BUDGET
+        {
+            Vec::new()
+        } else {
+            parallel_task_call_ids(&assistant.tool_calls)
+        };
+        let mut parallel_task_results: std::collections::HashMap<String, Result<String, String>> =
+            if parallel_ids.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                use futures_util::StreamExt;
+                // Build the futures in a plain loop (boxed) instead of a closure
+                // chain: an `async move` closure over borrowed iterator items trips
+                // the compiler's higher-ranked lifetime check inside the tauri
+                // command macro ("implementation of FnOnce is not general enough").
+                type FanoutFuture<'a> = std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<Output = (String, Result<String, String>)>
+                            + Send
+                            + 'a,
+                    >,
+                >;
+                let mut fanout_futures: Vec<FanoutFuture<'_>> = Vec::new();
+                for tc in assistant
+                    .tool_calls
+                    .iter()
+                    .filter(|tc| parallel_ids.contains(&tc.id))
+                {
+                    let app_ref = &app;
+                    let state_ref = &state;
+                    let input_ref = &input;
+                    let turn_ref = &turn_id;
+                    let allowed_ref = &allowed_tool_names;
+                    fanout_futures.push(Box::pin(async move {
+                        let _ = emit_turn_event(
+                            app_ref,
+                            &TurnEvent::ToolCallStarted {
+                                turn_id: turn_ref.clone(),
+                                call_id: tc.id.clone(),
+                                tool: tc.name.clone(),
+                                input: tc.arguments.clone(),
+                            },
+                        );
+                        let result = Box::pin(execute_tool(
+                            app_ref,
+                            state_ref,
+                            input_ref,
+                            turn_ref,
+                            true,
+                            tc,
+                            allowed_ref,
+                        ))
+                        .await;
+                        let (status, output, error) = match &result {
+                            Ok(output) => ("success".to_string(), output.clone(), None),
+                            Err(err) => ("error".to_string(), String::new(), Some(err.clone())),
+                        };
+                        let _ = emit_turn_event(
+                            app_ref,
+                            &TurnEvent::ToolCallCompleted {
+                                turn_id: turn_ref.clone(),
+                                call_id: tc.id.clone(),
+                                status,
+                                output,
+                                error,
+                            },
+                        );
+                        (tc.id.clone(), result)
+                    }));
+                }
+                futures_util::stream::iter(fanout_futures)
+                    .buffer_unordered(MAX_PARALLEL_NATIVE_SUBAGENTS)
+                    .collect::<Vec<(String, Result<String, String>)>>()
+                    .await
+                    .into_iter()
+                    .collect()
+            };
+
         // Execute each tool call.
         for (tc_index, tc) in assistant.tool_calls.iter().enumerate() {
-            let _ = emit_turn_event(
-                &app,
-                &TurnEvent::ToolCallStarted {
-                    turn_id: turn_id.clone(),
-                    call_id: tc.id.clone(),
-                    tool: tc.name.clone(),
-                    input: tc.arguments.clone(),
-                },
-            );
+            // A fan-out Task already ran above (events included) — consume its
+            // stored result and skip straight to the shared bookkeeping below.
+            let prefetched = parallel_task_results.remove(&tc.id);
+            let was_parallel = prefetched.is_some();
+            if !was_parallel {
+                let _ = emit_turn_event(
+                    &app,
+                    &TurnEvent::ToolCallStarted {
+                        turn_id: turn_id.clone(),
+                        call_id: tc.id.clone(),
+                        tool: tc.name.clone(),
+                        input: tc.arguments.clone(),
+                    },
+                );
+            }
 
             // F6: reject edits whose only eligible read is from THIS same batch —
             // the model generated the edit before receiving the Read result.
@@ -1384,32 +1561,40 @@ pub async fn ai_run_turn(
 
             // Box the per-tool future: `execute_tool` is a large state machine
             // (every tool arm) and would otherwise blow the `large_futures` budget.
-            let result = Box::pin(execute_tool(
-                &app,
-                &state,
-                &input,
-                &turn_id,
-                true,
-                tc,
-                &allowed_tool_names,
-            ))
-            .await;
+            let result = match prefetched {
+                Some(result) => result,
+                None => {
+                    Box::pin(execute_tool(
+                        &app,
+                        &state,
+                        &input,
+                        &turn_id,
+                        true,
+                        tc,
+                        &allowed_tool_names,
+                    ))
+                    .await
+                }
+            };
 
             let (status, output, error) = match result {
                 Ok(output) => ("success".to_string(), output, None),
                 Err(err) => ("error".to_string(), String::new(), Some(err)),
             };
 
-            let _ = emit_turn_event(
-                &app,
-                &TurnEvent::ToolCallCompleted {
-                    turn_id: turn_id.clone(),
-                    call_id: tc.id.clone(),
-                    status: status.clone(),
-                    output: output.clone(),
-                    error: error.clone(),
-                },
-            );
+            // Fan-out Tasks already emitted their Completed event live above.
+            if !was_parallel {
+                let _ = emit_turn_event(
+                    &app,
+                    &TurnEvent::ToolCallCompleted {
+                        turn_id: turn_id.clone(),
+                        call_id: tc.id.clone(),
+                        status: status.clone(),
+                        output: output.clone(),
+                        error: error.clone(),
+                    },
+                );
+            }
 
             // F7: clamp tool output before appending to the conversation so unbounded
             // MCP/browser/research results cannot explode the context window. Opaque
@@ -1451,6 +1636,7 @@ pub async fn ai_run_turn(
                     usage_completion,
                     usage_total,
                     usage_cached,
+                    model_calls,
                 );
                 let _ = emit_turn_event(
                     &app,
@@ -1550,6 +1736,7 @@ pub async fn ai_run_turn(
             payload,
             input.prompt_input.provider_protocol.clone(),
         );
+        model_calls += 1;
         let stream_app = app.clone();
         let stream_turn_id = turn_id.clone();
         let cancel_turn_id = turn_id.clone();
@@ -1607,6 +1794,7 @@ pub async fn ai_run_turn(
                         usage_completion,
                         usage_total,
                         usage_cached,
+                        model_calls,
                     );
                     let _ = emit_turn_event(
                         &app,
@@ -1647,6 +1835,7 @@ pub async fn ai_run_turn(
                     usage_completion,
                     usage_total,
                     usage_cached,
+                    model_calls,
                 );
                 let _ = emit_turn_event(
                     &app,
@@ -1672,6 +1861,7 @@ pub async fn ai_run_turn(
         usage_completion,
         usage_total,
         usage_cached,
+        model_calls,
     );
     // Turn finished normally — drop any stale cancellation flag for this id and
     // discard anything staged but not yet drained (it would target a dead turn;
@@ -1702,8 +1892,12 @@ fn emit_accumulated_usage(
     usage_completion: u64,
     usage_total: u64,
     usage_cached: u64,
+    model_calls: u64,
 ) {
-    if usage_prompt == 0 && usage_completion == 0 && usage_total == 0 {
+    // A turn that issued requests but got no usage back (provider omitted the
+    // usage chunk) still reports its request count — spend visibility beats a
+    // silently missing row.
+    if usage_prompt == 0 && usage_completion == 0 && usage_total == 0 && model_calls == 0 {
         return;
     }
     let _ = emit_turn_event(
@@ -1718,6 +1912,7 @@ fn emit_accumulated_usage(
                 usage_prompt + usage_completion
             },
             cached_prompt_tokens: usage_cached,
+            model_calls,
         },
     );
 }
@@ -2113,6 +2308,24 @@ async fn execute_tool(
     let args: serde_json::Value =
         serde_json::from_str(&tc.arguments).unwrap_or_else(|_| serde_json::json!({}));
 
+    // ── Cross-agent file-edit serialization ──
+    // Parallel Task subagents run concurrently; their file-mutating tool arms
+    // must not interleave read-modify-write spans on the same file (StrReplace
+    // reads, patches, and writes inside its arm). One global async lock
+    // serializes every mutating arm — local file IO is microseconds next to the
+    // model calls that dominate a subagent's wall-clock, and read-only tools
+    // stay fully parallel. No UI-wait-while-holding hazard: subagents are
+    // non-interactive (approval never prompts), and the interactive parent
+    // never executes tools concurrently with a fan-out (it is awaiting it).
+    let _file_edit_guard = if matches!(
+        tc.name.as_str(),
+        "Write" | "StrReplace" | "PatchEngine" | "Delete" | "Checkpoint"
+    ) {
+        Some(file_edit_lock().lock().await)
+    } else {
+        None
+    };
+
     // Automatic mode is full autonomy: every side-effecting tool runs without a
     // human approval prompt (catastrophic-shell and path guards still apply).
     // `require_tool_approval` still evaluates the user's permission rules first, so
@@ -2329,6 +2542,58 @@ async fn execute_tool(
                 read_only,
             )
             .await?;
+            let background = args
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if background {
+                // Detached mode: the command keeps running while the agent works
+                // on (approval above already happened, so backgrounding never
+                // bypasses the gate). Live output still mirrors into the
+                // "Lux AI" terminal tab; the final result is fetched with
+                // ShellOutput {jobId}.
+                let job_id = format!("shell-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+                crate::ai_jobs::register_shell_job(&input.session_id, &job_id, &command);
+                let bg_app = app.clone();
+                let bg_session = input.session_id.clone();
+                let bg_job_id = job_id.clone();
+                let bg_call_id = tc.id.clone();
+                let bg_cwd = cwd.map(std::path::PathBuf::from);
+                tauri::async_runtime::spawn(async move {
+                    use tauri::Manager;
+                    let bg_state = bg_app.state::<crate::SharedState>();
+                    let result = crate::ai_tools::ai_shell(
+                        bg_app.clone(),
+                        bg_state.clone(),
+                        command,
+                        bg_cwd,
+                        timeout_secs,
+                        Some(bg_call_id),
+                    )
+                    .await;
+                    match result {
+                        Ok(response) => crate::ai_jobs::complete_shell_job(
+                            &bg_session,
+                            &bg_job_id,
+                            crate::ai_jobs::JobStatus::Done,
+                            serde_json::to_string(&response).unwrap_or_default(),
+                        ),
+                        Err(error) => crate::ai_jobs::complete_shell_job(
+                            &bg_session,
+                            &bg_job_id,
+                            crate::ai_jobs::JobStatus::Failed,
+                            error,
+                        ),
+                    }
+                });
+                return Ok(serde_json::json!({
+                    "jobId": job_id,
+                    "background": true,
+                    "status": "started",
+                    "note": "Command runs in the background (live output in the Lux AI terminal). Keep working; fetch the result with ShellOutput {jobId} — wait:true blocks until it finishes.",
+                })
+                .to_string());
+            }
             let result = crate::ai_tools::ai_shell(
                 app.clone(),
                 state.clone(),
@@ -2339,6 +2604,68 @@ async fn execute_tool(
             )
             .await?;
             serde_json::to_string(&result).map_err(|e| e.to_string())
+        }
+
+        "ShellOutput" => {
+            // Fetch (or wait for) a background Shell job started with
+            // Shell {background: true}.
+            let job_id = json_str(&args, "jobId");
+            if job_id.is_empty() {
+                return Err(
+                    "ShellOutput requires jobId (from Shell {background: true}).".to_string(),
+                );
+            }
+            let wait = args
+                .get("wait")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(true);
+            // Subagents (non-interactive) cannot be stop-interrupted inside a
+            // blocked tool call — cap their wait so a stuck job can't pin a
+            // subagent round for half an hour.
+            let max_wait = if interactive { 1800 } else { 300 };
+            let timeout_secs = args
+                .get("timeoutSecs")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(600)
+                .clamp(5, max_wait);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            loop {
+                let Some(job) = crate::ai_jobs::get_shell_job(&input.session_id, &job_id) else {
+                    let known: Vec<String> = crate::ai_jobs::list_shell_jobs(&input.session_id)
+                        .into_iter()
+                        .map(|job| job.job_id)
+                        .collect();
+                    return Err(format!(
+                        "Unknown background shell job `{job_id}`. Known jobs: [{}].",
+                        known.join(", ")
+                    ));
+                };
+                if job.status != crate::ai_jobs::JobStatus::Running {
+                    return Ok(serde_json::json!({
+                        "jobId": job.job_id,
+                        "command": job.command,
+                        "status": job.status.as_str(),
+                        "durationMs": chrono::Utc::now().timestamp_millis().saturating_sub(job.started_ms),
+                        "result": job.result,
+                    })
+                    .to_string());
+                }
+                let timed_out = std::time::Instant::now() >= deadline;
+                if !wait || timed_out {
+                    return Ok(serde_json::json!({
+                        "jobId": job.job_id,
+                        "command": job.command,
+                        "status": "running",
+                        "timedOut": timed_out,
+                        "note": "Still running — live output streams into the Lux AI terminal. Call ShellOutput again (wait:true) to block until done.",
+                    })
+                    .to_string());
+                }
+                if is_turn_cancelled(turn_id) {
+                    return Err("cancelled".to_string());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
         }
         // ── File read tools ──
         "Read" => {
@@ -2552,19 +2879,20 @@ async fn execute_tool(
 
         "Grep" => {
             let query = json_str(&args, "query");
+            let use_regex = args
+                .get("useRegex")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let result = crate::search::search_query(
                 state.clone(),
-                query,
+                query.clone(),
                 lux_core::SearchOptions {
                     case_sensitive: args
                         .get("caseSensitive")
                         .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
                     whole_word: false,
-                    use_regex: args
-                        .get("useRegex")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false),
+                    use_regex,
                     include_hidden: false,
                     include_globs: vec![],
                     exclude_globs: vec![],
@@ -2572,7 +2900,20 @@ async fn execute_tool(
                 },
             )
             .await?;
-            serde_json::to_string(&result).map_err(|e| e.to_string())
+            let mut value = serde_json::to_value(&result).map_err(|e| e.to_string())?;
+            // Result-side steering: a literal grep for an exact code-graph symbol
+            // gets a hint naming the CodeGraph call that answers the underlying
+            // question precisely. Models weigh tool outputs far more than a nudge
+            // buried in the system prompt.
+            if !use_regex {
+                if let Some(hint) = crate::code_graph::grep_symbol_hint(state.inner(), &query).await
+                {
+                    if let Some(obj) = value.as_object_mut() {
+                        obj.insert("codeGraphHint".to_string(), serde_json::json!(hint));
+                    }
+                }
+            }
+            Ok(value.to_string())
         }
         "GitContext" => {
             // A non-repo workspace (or missing git) previously surfaced as an opaque
@@ -2683,18 +3024,37 @@ async fn execute_tool(
             // empty/omitted action reads (never writes), and an unrecognized action
             // is rejected rather than silently falling through to the write branch.
             let action = json_str(&args, "action").trim().to_ascii_lowercase();
+            // Board identity: the interactive caller is the main agent; a subagent's
+            // execute_tool receives its agent id (e.g. "explorer-1a2b3c4d") in the
+            // turn_id position. Posting under the real author (instead of the old
+            // agent-mode string, which labelled every entry "agent") is what lets
+            // sibling agents attribute findings and filter reads by author.
+            let board_author = if interactive {
+                "main".to_string()
+            } else {
+                turn_id.to_string()
+            };
             match action.as_str() {
                 "read" | "get" | "" => {
                     let topic = json_str_opt(&args, "topic");
+                    let author = json_str_opt(&args, "author");
+                    let since_ms = args.get("sinceMs").and_then(serde_json::Value::as_i64);
                     let limit = args
                         .get("limit")
                         .and_then(serde_json::Value::as_u64)
                         .and_then(|v| usize::try_from(v).ok());
-                    let entries =
-                        crate::ai_a2a::ai_blackboard_read(input.session_id.clone(), topic, limit)?;
-                    serde_json::to_string(
-                        &serde_json::json!({ "action": "read", "messages": entries }),
-                    )
+                    let entries = crate::ai_a2a::ai_blackboard_read(
+                        input.session_id.clone(),
+                        topic,
+                        limit,
+                        author,
+                        since_ms,
+                    )?;
+                    serde_json::to_string(&serde_json::json!({
+                        "action": "read",
+                        "you": board_author,
+                        "messages": entries,
+                    }))
                     .map_err(|e| e.to_string())
                 }
                 "post" | "write" | "send" => {
@@ -2705,7 +3065,7 @@ async fn execute_tool(
                     }
                     let entry = crate::ai_a2a::ai_blackboard_post(
                         input.session_id.clone(),
-                        input.agent_mode.clone(),
+                        board_author,
                         topic,
                         content,
                     )?;
@@ -4150,6 +4510,12 @@ async fn execute_tool(
                     parts.push(format!("RepoMap: {json}"));
                 }
             }
+            // CodeGraph — readiness + the query's own symbols resolved through the
+            // graph. Seeing the graph answer its own question is the strongest nudge
+            // to reach for CodeGraph* tools instead of grepping relationships.
+            if let Some(part) = crate::code_graph::fast_context_part(state.inner(), &query).await {
+                parts.push(part);
+            }
             // RulesContext
             if let Ok(rc) = crate::ai_context_sources::ai_rules_context(
                 state.clone(),
@@ -4666,7 +5032,107 @@ async fn execute_tool(
             // Optional per-subagent model override; falls back to the parent/session
             // model inside run_subagent when absent.
             let model_override = json_str_opt(&args, "model");
-            let agent_id = format!("subagent-{}", uuid::Uuid::new_v4().simple());
+            let agent_id = subagent_agent_id(&subagent_type);
+            let spawned_at_ms = chrono::Utc::now().timestamp_millis();
+            let background = args
+                .get("background")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if background {
+                // Detached mode: spawn the subagent's whole loop and return NOW —
+                // the parent keeps working (or ends its turn) while the subagent
+                // streams into the Agent rail. Results are collected with TaskWait
+                // (same turn or any later one in this session).
+                crate::ai_jobs::register_task(
+                    &input.session_id,
+                    crate::ai_jobs::BackgroundTask {
+                        agent_id: agent_id.clone(),
+                        call_id: tc.id.clone(),
+                        description: description.clone(),
+                        subagent_type: subagent_type.clone(),
+                        started_ms: spawned_at_ms,
+                        status: crate::ai_jobs::JobStatus::Running,
+                        summary: String::new(),
+                        board_posts: 0,
+                        board_topics: Vec::new(),
+                    },
+                );
+                let bg_app = app.clone();
+                let bg_input = input.clone();
+                let bg_turn_id = turn_id.to_string();
+                let bg_call_id = tc.id.clone();
+                let bg_agent_id = agent_id.clone();
+                let bg_description = description.clone();
+                let bg_type = subagent_type.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Re-acquire managed state from the owned AppHandle: the
+                    // command's `State` guard cannot cross into a 'static task.
+                    use tauri::Manager;
+                    let bg_state = bg_app.state::<crate::SharedState>();
+                    // run_subagent_boxed (declared `dyn Future + Send`) breaks the
+                    // otherwise-cyclic Send inference: execute_tool spawns a task
+                    // that awaits run_subagent, which awaits execute_tool.
+                    let result = run_subagent_boxed(
+                        &bg_app,
+                        &bg_state,
+                        &bg_input,
+                        &bg_turn_id,
+                        &bg_call_id,
+                        &bg_agent_id,
+                        &bg_description,
+                        &prompt,
+                        &bg_type,
+                        model_override.as_deref(),
+                    )
+                    .await;
+                    let (board_posts, board_topics) = crate::ai_a2a::author_activity_since(
+                        &bg_input.session_id,
+                        &bg_agent_id,
+                        spawned_at_ms,
+                    );
+                    match result {
+                        Ok(summary) => crate::ai_jobs::complete_task(
+                            &bg_input.session_id,
+                            &bg_agent_id,
+                            crate::ai_jobs::JobStatus::Done,
+                            summary,
+                            board_posts,
+                            board_topics,
+                        ),
+                        Err(error) => {
+                            // run_subagent only emits "done" on success — surface
+                            // the failure to the Agent rail so the row settles.
+                            let _ = emit_turn_event(
+                                &bg_app,
+                                &TurnEvent::SubagentProgress {
+                                    turn_id: bg_turn_id.clone(),
+                                    call_id: bg_call_id.clone(),
+                                    agent_id: bg_agent_id.clone(),
+                                    stage: "error".to_string(),
+                                    content: error.clone(),
+                                    tool: String::new(),
+                                },
+                            );
+                            crate::ai_jobs::complete_task(
+                                &bg_input.session_id,
+                                &bg_agent_id,
+                                crate::ai_jobs::JobStatus::Failed,
+                                error,
+                                board_posts,
+                                board_topics,
+                            );
+                        }
+                    }
+                });
+                return Ok(serde_json::json!({
+                    "agentId": agent_id,
+                    "subagentType": subagent_type,
+                    "background": true,
+                    "status": "started",
+                    "note": "Subagent runs in the background. Keep working; collect the result with TaskWait (filter by agentId or wait for all).",
+                })
+                .to_string());
+            }
             // `turn_id` here is the real parent turn id: subagents cannot spawn
             // Task (blocked inline below), so run_subagent is only reached on the
             // interactive parent path. Thread it through so a Stop on the parent
@@ -4677,6 +5143,7 @@ async fn execute_tool(
                 state,
                 input,
                 turn_id,
+                &tc.id,
                 &agent_id,
                 &description,
                 &prompt,
@@ -4684,12 +5151,92 @@ async fn execute_tool(
                 model_override.as_deref(),
             )
             .await?;
+            // Board digest: tell the parent what this subagent published to the
+            // shared AgentMessage board (count + topics) so it can pull details
+            // with a targeted read instead of re-reading the whole board blind.
+            let (board_posts, board_topics) =
+                crate::ai_a2a::author_activity_since(&input.session_id, &agent_id, spawned_at_ms);
             Ok(serde_json::json!({
                 "agentId": agent_id,
                 "subagentType": subagent_type,
                 "summary": summary,
+                "boardPosts": board_posts,
+                "boardTopics": board_topics,
             })
             .to_string())
+        }
+
+        "TaskWait" => {
+            // Collect background Task results. Blocks (polling) until every
+            // targeted job settles, the timeout passes, or the turn is stopped.
+            let requested_ids: Vec<String> = args
+                .get("agentIds")
+                .and_then(serde_json::Value::as_array)
+                .map(|values| {
+                    values
+                        .iter()
+                        .filter_map(|value| value.as_str())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let timeout_secs = args
+                .get("timeoutSecs")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(600)
+                .clamp(5, 1800);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+            loop {
+                let all = crate::ai_jobs::list_tasks(&input.session_id);
+                let targets: Vec<_> = if requested_ids.is_empty() {
+                    all
+                } else {
+                    all.into_iter()
+                        .filter(|task| requested_ids.contains(&task.agent_id))
+                        .collect()
+                };
+                if targets.is_empty() {
+                    return Ok(serde_json::json!({
+                        "tasks": [],
+                        "note": "No matching background tasks in this session. Start one with Task {background: true}.",
+                    })
+                    .to_string());
+                }
+                let still_running = targets
+                    .iter()
+                    .filter(|task| task.status == crate::ai_jobs::JobStatus::Running)
+                    .count();
+                let timed_out = std::time::Instant::now() >= deadline;
+                if still_running == 0 || timed_out {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    let tasks: Vec<_> = targets
+                        .iter()
+                        .map(|task| {
+                            serde_json::json!({
+                                "agentId": task.agent_id,
+                                "callId": task.call_id,
+                                "subagentType": task.subagent_type,
+                                "description": task.description,
+                                "status": task.status.as_str(),
+                                "summary": task.summary,
+                                "boardPosts": task.board_posts,
+                                "boardTopics": task.board_topics,
+                                "durationMs": now_ms.saturating_sub(task.started_ms),
+                            })
+                        })
+                        .collect();
+                    return Ok(serde_json::json!({
+                        "tasks": tasks,
+                        "stillRunning": still_running,
+                        "timedOut": timed_out && still_running > 0,
+                    })
+                    .to_string());
+                }
+                if is_turn_cancelled(turn_id) {
+                    return Err("cancelled".to_string());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            }
         }
 
         "ContextBudgeter" => {
@@ -5079,15 +5626,117 @@ async fn execute_tool(
     }
 }
 
+/// Max Task subagents running concurrently in one fan-out batch. Excess calls
+/// queue and start as slots free up (`buffer_unordered`).
+const MAX_PARALLEL_NATIVE_SUBAGENTS: usize = 4;
+
+/// Global lock serializing file-mutating tool arms across concurrently running
+/// agents (see the acquisition site in [`execute_tool`]).
+fn file_edit_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Ids of the Task calls that should fan out concurrently: only when the model's
+/// response contains two or more Task calls. A single Task (or none) returns an
+/// empty list so the plain sequential path — identical to the pre-fan-out
+/// behavior — handles it. Duplicate call ids (a malformed/hostile provider
+/// response) also fall back to sequential: the fan-out stores results in a map
+/// keyed by call id, where a duplicate would silently drop one subagent's
+/// result and re-execute the call.
+fn parallel_task_call_ids(calls: &[ParsedToolCall]) -> Vec<String> {
+    let ids: Vec<String> = calls
+        .iter()
+        .filter(|tc| tc.name == "Task")
+        .map(|tc| tc.id.clone())
+        .collect();
+    let unique: std::collections::HashSet<&String> = ids.iter().collect();
+    if ids.len() >= 2 && unique.len() == ids.len() {
+        ids
+    } else {
+        Vec::new()
+    }
+}
+
+/// Build a subagent's board/UI identity: `<type>-<8 hex chars>`, e.g.
+/// `explorer-1a2b3c4d`. Human-readable (the type is visible in A2A board authors
+/// and progress labels) while staying unique per spawn.
+fn subagent_agent_id(subagent_type: &str) -> String {
+    let uuid = uuid::Uuid::new_v4().simple().to_string();
+    let short = &uuid[..8];
+    // Keep the id shell-and-topic safe: the type comes from the model, so strip
+    // anything outside [a-zA-Z0-9] and cap the length.
+    let safe_type: String = subagent_type
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .take(24)
+        .collect();
+    if safe_type.is_empty() {
+        format!("agent-{short}")
+    } else {
+        format!("{safe_type}-{short}")
+    }
+}
+
+/// Cap a subagent's final summary before it enters the parent conversation, so
+/// a verbose subagent cannot flood the parent's context window.
+const MAX_SUBAGENT_SUMMARY_CHARS: usize = 12_000;
+
+fn clamp_subagent_summary(summary: String) -> String {
+    let total = summary.chars().count();
+    if total <= MAX_SUBAGENT_SUMMARY_CHARS {
+        return summary;
+    }
+    let truncated: String = summary.chars().take(MAX_SUBAGENT_SUMMARY_CHARS).collect();
+    format!(
+        "{truncated}\n\n[Subagent summary truncated: {total} chars total, showing first {MAX_SUBAGENT_SUMMARY_CHARS}.]"
+    )
+}
+
+/// Boxed, explicitly-`Send` wrapper around [`run_subagent`]. Background Task
+/// spawning creates a recursive async chain (`execute_tool` → spawned task →
+/// `run_subagent` → `execute_tool`), and rustc cannot infer `Send` through that
+/// cycle of opaque futures — the declared `dyn Future + Send` return type here
+/// is the fixed point that breaks the inference recursion.
+#[allow(clippy::too_many_arguments)]
+fn run_subagent_boxed<'a>(
+    app: &'a tauri::AppHandle,
+    state: &'a tauri::State<'a, crate::SharedState>,
+    parent: &'a TurnInput,
+    parent_turn_id: &'a str,
+    call_id: &'a str,
+    agent_id: &'a str,
+    description: &'a str,
+    prompt: &'a str,
+    subagent_type: &'a str,
+    model_override: Option<&'a str>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
+    Box::pin(run_subagent(
+        app,
+        state,
+        parent,
+        parent_turn_id,
+        call_id,
+        agent_id,
+        description,
+        prompt,
+        subagent_type,
+        model_override,
+    ))
+}
+
 /// Run an isolated subagent turn (Task tool). The subagent gets its own model↔tool
 /// loop with a capped round limit and read-only-leaning tools, then returns a concise
 /// summary to the parent. Shares the session's A2A blackboard for coordination.
+/// Emits [`TurnEvent::SubagentProgress`] (text snapshots + tool starts + done) keyed
+/// by `call_id` so the Agent rail streams the subagent's work live.
 #[allow(clippy::too_many_arguments)]
 async fn run_subagent(
     app: &tauri::AppHandle,
     state: &tauri::State<'_, crate::SharedState>,
     parent: &TurnInput,
     parent_turn_id: &str,
+    call_id: &str,
     agent_id: &str,
     description: &str,
     prompt: &str,
@@ -5096,7 +5745,13 @@ async fn run_subagent(
     // parent/session model when absent.
     model_override: Option<&str>,
 ) -> Result<String, String> {
-    const MAX_SUBAGENT_ROUNDS: usize = 16;
+    // Automatic mode is full autonomy with relaxed budgets — give its subagents
+    // more room before the forced stop, matching the parent loop's philosophy.
+    let max_rounds: usize = if parent.agent_mode == "automatic" {
+        24
+    } else {
+        16
+    };
     let read_only = matches!(subagent_type, "codeReviewer" | "explorer");
     // Honor the Task `model` override; otherwise inherit the parent turn's model.
     let subagent_model: &str = model_override
@@ -5106,10 +5761,14 @@ async fn run_subagent(
 
     // Subagent system prompt: focused, returns a summary.
     let instructions = format!(
-        "You are a Lux subagent ({subagent_type}). Task: {description}\n\
-         Work in an isolated context. Use tools to gather evidence and complete the task. \
-         Coordinate via AgentMessage (read sibling findings, post your discoveries). \
-         Return a concise final summary for the parent agent. Do not spawn further subagents."
+        "You are Lux subagent '{agent_id}' ({subagent_type}). Task: {description}\n\
+         Work in an isolated context: the parent agent sees ONLY your final message, so make \
+         it a complete, self-contained report (findings, file paths, evidence, next steps). \
+         Shared board: AgentMessage action=read shows what the main agent and sibling \
+         subagents posted (filter with topic/author/sinceMs); AgentMessage action=post \
+         publishes discoveries other agents need (file locations, decisions, contracts, \
+         blockers) under a clear topic — you post as '{agent_id}', and the parent is told \
+         which topics you posted to. Do not spawn further subagents."
     );
     let mut prompt_input = parent.prompt_input.clone();
     prompt_input.agent_instructions = instructions.clone();
@@ -5125,10 +5784,27 @@ async fn run_subagent(
         build_system_message(&system, parent.anthropic_cache),
         serde_json::json!({ "role": "user", "content": prompt }),
     ];
-    let tools = crate::ai_tool_defs::runtime_tool_definitions(
+    let mut tools = crate::ai_tool_defs::runtime_tool_definitions(
         if read_only { "ask" } else { &parent.agent_mode },
         parent.agent_browser_enabled,
     );
+    // Strip orchestration tools that belong to the MAIN agent only: Task
+    // (nesting is blocked anyway), and Goal/TodoWrite/PresentPlan, which write
+    // the parent session's goal/task-list/plan stores — a subagent calling them
+    // would silently overwrite the user's visible session state (and
+    // PresentPlan would emit a plan event keyed by a nonexistent turn id).
+    // Subagents report through their final summary and the AgentMessage board.
+    const MAIN_AGENT_ONLY_TOOLS: [&str; 5] =
+        ["Task", "TaskWait", "Goal", "TodoWrite", "PresentPlan"];
+    tools.retain(|t| {
+        let name = t
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .or_else(|| t.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or_default();
+        !MAIN_AGENT_ONLY_TOOLS.contains(&name)
+    });
     // F4: build the subagent's own allowlist so it cannot dispatch tools outside
     // its mode either (a read_only subagent must not execute Write/Shell/etc.).
     let subagent_allowed: std::collections::HashSet<String> = tools
@@ -5142,19 +5818,35 @@ async fn run_subagent(
         .map(str::to_string)
         .collect();
 
+    // Emit a live progress event for this subagent, keyed by the Task call id the
+    // UI registered the run under. Best-effort: a UI emit failure never fails work.
+    let emit_progress = |stage: &str, content: String, tool: String| {
+        let _ = emit_turn_event(
+            app,
+            &TurnEvent::SubagentProgress {
+                turn_id: parent_turn_id.to_string(),
+                call_id: call_id.to_string(),
+                agent_id: agent_id.to_string(),
+                stage: stage.to_string(),
+                content,
+                tool,
+            },
+        );
+    };
+
     let mut final_content = String::new();
-    for _round in 0..MAX_SUBAGENT_ROUNDS {
+    for _round in 0..max_rounds {
         // A Stop on the parent turn must halt the subagent immediately instead of
-        // burning up to MAX_SUBAGENT_ROUNDS model calls + running side-effecting
-        // tools. The parent loop is blocked awaiting this Task, so this is the
-        // only place the cancellation can be observed mid-subagent. Do NOT clear
-        // the flag here — the parent's post-tool check still needs to see it to
+        // burning up to max_rounds model calls + running side-effecting tools.
+        // The parent loop is blocked awaiting this Task, so this is the only
+        // place the cancellation can be observed mid-subagent. Do NOT clear the
+        // flag here — the parent's post-tool check still needs to see it to
         // abort the parent turn afterward.
         if is_turn_cancelled(parent_turn_id) {
             return Ok(if final_content.is_empty() {
                 "Subagent cancelled.".to_string()
             } else {
-                final_content
+                clamp_subagent_summary(final_content)
             });
         }
         let mut payload = serde_json::json!({
@@ -5179,18 +5871,43 @@ async fn run_subagent(
         // speak SSE — every round stalls until the request timeout, which the user
         // experiences as the whole IDE freezing while a subagent runs. Streaming
         // also lets a parent Stop abort the model call mid-flight (the `should_cancel`
-        // hook) instead of only between rounds. The subagent is an isolated context,
-        // so its tokens are intentionally not forwarded to the parent UI.
+        // hook) instead of only between rounds. The subagent's text is NOT forwarded
+        // into the parent chat, but throttled snapshots stream to the Agent rail via
+        // SubagentProgress so the run is observable while it works.
         let cancel_turn = parent_turn_id.to_string();
+        let mut round_text = String::new();
+        let mut last_progress = std::time::Instant::now();
+        let mut emitted_len = 0usize;
         let response = crate::ai_chat_backend::completion_streaming(
             request,
-            |_content, _reasoning| {},
+            |content, _reasoning| {
+                if content.is_empty() {
+                    return;
+                }
+                round_text.push_str(content);
+                // Throttle snapshots: at most one every 300ms and only when new
+                // text actually arrived — the UI replaces the last transcript
+                // entry in place, so each event carries the full round text.
+                if last_progress.elapsed().as_millis() >= 300 && round_text.len() > emitted_len {
+                    emitted_len = round_text.len();
+                    last_progress = std::time::Instant::now();
+                    emit_progress("text", round_text.clone(), String::new());
+                }
+            },
             move || is_turn_cancelled(&cancel_turn),
-            // Subagents run in an isolated context with no UI to notify.
+            // Subagents run in an isolated context with no retry UI to notify.
             |_notice| {},
+            // Tool starts are emitted at execution time below (with an argument
+            // preview) — emitting here too would interleave a "tool" line before
+            // the round's final text snapshot and split it into two entries.
             |_tool_name| {},
         )
         .await?;
+        // Flush the round's final text snapshot so the rail shows the complete
+        // narration even when the tail arrived inside the throttle window.
+        if round_text.len() > emitted_len {
+            emit_progress("text", round_text.clone(), String::new());
+        }
         let assistant = parse_assistant_message(&response.body);
         if !assistant.content.is_empty() {
             final_content = assistant.content.clone();
@@ -5208,10 +5925,24 @@ async fn run_subagent(
         }));
         // Subagents cannot spawn nested Task (depth limit) — block it inline.
         for child in &assistant.tool_calls {
-            let result = if child.name == "Task" {
+            // Stream the tool start (name + short argument preview) to the rail
+            // so the subagent's work is observable step by step.
+            let preview: String = child.arguments.chars().take(160).collect();
+            emit_progress("tool", preview, child.name.clone());
+            let result = if matches!(child.name.as_str(), "Task" | "TaskWait") {
                 Err("Nested subagents are not allowed (depth limit).".to_string())
+            } else if matches!(child.name.as_str(), "Goal" | "TodoWrite" | "PresentPlan") {
+                // Withheld from the defs above; catch a hallucinated call with a
+                // self-correcting message instead of the generic mode rejection.
+                Err(format!(
+                    "{} is reserved for the main agent (it writes the user's session \
+                     goal/tasks/plan). Report progress in your final summary or post \
+                     findings via AgentMessage.",
+                    child.name
+                ))
             } else {
-                // Subagent tool calls don't emit UI events (isolated context).
+                // Subagent tool calls don't emit ToolCall* events (isolated
+                // context) — progress flows through SubagentProgress instead.
                 Box::pin(execute_tool(
                     app,
                     state,
@@ -5238,17 +5969,19 @@ async fn run_subagent(
                 return Ok(if final_content.is_empty() {
                     "Subagent cancelled.".to_string()
                 } else {
-                    final_content
+                    clamp_subagent_summary(final_content)
                 });
             }
         }
     }
 
-    Ok(if final_content.is_empty() {
+    let summary = if final_content.is_empty() {
         "Subagent finished without a summary.".to_string()
     } else {
-        final_content
-    })
+        clamp_subagent_summary(final_content)
+    };
+    emit_progress("done", summary.clone(), String::new());
+    Ok(summary)
 }
 
 /// Check permission rules + mode, then prompt the UI for approval if needed.
@@ -5923,6 +6656,98 @@ fn json_str_array(value: &serde_json::Value, key: &str, max: usize) -> Vec<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn call(id: &str, name: &str) -> ParsedToolCall {
+        ParsedToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments: "{}".to_string(),
+        }
+    }
+
+    #[test]
+    fn parallel_fanout_needs_two_or_more_tasks() {
+        // 0 or 1 Task → empty (the sequential path handles it unchanged).
+        assert!(parallel_task_call_ids(&[]).is_empty());
+        assert!(parallel_task_call_ids(&[call("a", "Task")]).is_empty());
+        assert!(parallel_task_call_ids(&[call("a", "Read"), call("b", "Task")]).is_empty());
+
+        // 2+ Tasks → exactly the Task ids, in order; other tools excluded.
+        let batch = [
+            call("a", "Task"),
+            call("b", "Read"),
+            call("c", "Task"),
+            call("d", "Task"),
+        ];
+        assert_eq!(parallel_task_call_ids(&batch), vec!["a", "c", "d"]);
+
+        // Duplicate call ids (malformed/hostile response) → sequential fallback:
+        // the result map is keyed by id, a duplicate would drop one result.
+        let dup = [call("a", "Task"), call("a", "Task"), call("b", "Task")];
+        assert!(parallel_task_call_ids(&dup).is_empty());
+    }
+
+    #[test]
+    fn subagent_progress_event_wire_format() {
+        // The TS side (tauri.ts AiTurnEvent) matches on these exact camelCase
+        // keys and the "subagentProgress" tag — lock the serde contract.
+        let event = TurnEvent::SubagentProgress {
+            turn_id: "t1".into(),
+            call_id: "c1".into(),
+            agent_id: "explorer-1a2b3c4d".into(),
+            stage: "text".into(),
+            content: "snapshot".into(),
+            tool: String::new(),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "subagentProgress");
+        assert_eq!(value["turnId"], "t1");
+        assert_eq!(value["callId"], "c1");
+        assert_eq!(value["agentId"], "explorer-1a2b3c4d");
+        assert_eq!(value["stage"], "text");
+        assert_eq!(value["content"], "snapshot");
+        assert_eq!(value["tool"], "");
+    }
+
+    #[test]
+    fn reasoning_effort_fallback_event_wire_format() {
+        // tauri.ts matches on the "reasoningEffortFallback" tag and these exact
+        // camelCase keys — lock the serde contract.
+        let event = TurnEvent::ReasoningEffortFallback {
+            turn_id: "t1".into(),
+            requested: "minimal".into(),
+            applied: "max".into(),
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["kind"], "reasoningEffortFallback");
+        assert_eq!(value["turnId"], "t1");
+        assert_eq!(value["requested"], "minimal");
+        assert_eq!(value["applied"], "max");
+    }
+
+    #[test]
+    fn subagent_agent_id_is_readable_and_safe() {
+        let id = subagent_agent_id("explorer");
+        assert!(id.starts_with("explorer-"), "got {id}");
+        assert_eq!(id.len(), "explorer-".len() + 8);
+        // Unique per spawn.
+        assert_ne!(subagent_agent_id("explorer"), subagent_agent_id("explorer"));
+        // Model-supplied type is sanitized to alphanumerics; a fully-hostile
+        // type falls back to the neutral "agent-" prefix.
+        assert!(subagent_agent_id("../evil type!").starts_with("eviltype-"));
+        assert!(subagent_agent_id("!!!").starts_with("agent-"));
+    }
+
+    #[test]
+    fn subagent_summary_clamped_with_marker() {
+        let short = "done".to_string();
+        assert_eq!(clamp_subagent_summary(short.clone()), short);
+
+        let long = "x".repeat(MAX_SUBAGENT_SUMMARY_CHARS + 500);
+        let clamped = clamp_subagent_summary(long);
+        assert!(clamped.contains("[Subagent summary truncated"));
+        assert!(clamped.chars().count() < MAX_SUBAGENT_SUMMARY_CHARS + 200);
+    }
 
     #[test]
     fn approval_roundtrip() {

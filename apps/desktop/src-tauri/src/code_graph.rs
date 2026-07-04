@@ -130,8 +130,14 @@ impl Drop for BuildGuard {
 }
 
 /// True when a full build for exactly this workspace generation is in flight.
+///
+/// `code_graph_building_gen == 0` means "no build in flight", but a process that
+/// has never opened a workspace still has `workspace_generation == 0` too — without
+/// the explicit guard the two zeros alias, and "no workspace yet" reads as
+/// "building" (stalling [`with_index`]'s bounded wait for its full timeout and
+/// making [`fast_context_part`] report a bogus building status).
 fn build_in_flight(state: &SharedState, generation: u64) -> bool {
-    state.code_graph_building_gen.load(Ordering::Acquire) == generation
+    generation != 0 && state.code_graph_building_gen.load(Ordering::Acquire) == generation
 }
 
 /// Release incremental-update ownership and discard any stashed pending paths. Used
@@ -202,24 +208,339 @@ fn emit_finished_error(app: &AppHandle, error: &str) {
 }
 
 /// Shared code-graph accessor used by both commands and AI tool dispatch.
+///
+/// When the graph is not committed yet but a build for the current workspace is
+/// in flight (the common case right after workspace open), this WAITS for the
+/// build — bounded — instead of erroring. An early AI turn that reaches for a
+/// `CodeGraph`* tool would otherwise get a failure on its very first attempt and
+/// learn "this tool doesn't work here" for the rest of the session.
 pub async fn with_index<F, T>(state: &super::SharedState, f: F) -> Result<T, String>
 where
     F: FnOnce(&lux_codegraph::Index) -> Result<T, String>,
 {
-    let guard = state.code_graph.lock().await;
-    guard.as_ref().map_or_else(
-        || {
+    const BUILD_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(20);
+    const BUILD_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+    let deadline = std::time::Instant::now() + BUILD_WAIT_MAX;
+    loop {
+        {
+            let guard = state.code_graph.lock().await;
+            if let Some(index) = guard.as_ref() {
+                return f(index);
+            }
+        }
+        let generation = state.workspace_generation.load(Ordering::SeqCst);
+        let building =
+            build_in_flight(state, generation) || state.code_graph_updating.load(Ordering::Acquire);
+        if !building || std::time::Instant::now() >= deadline {
             // Model-actionable: the graph builds in the background on workspace open,
             // so a caller can hit this window before it commits. Name tools the AI can
             // actually invoke — never a Settings-only command it has no way to call.
-            Err(
+            return Err(
                 "Code graph is not built yet (it builds in the background on workspace open). \
                  Use SemanticSearch, SymbolContext, or Grep instead, or retry shortly."
                     .to_string(),
-            )
-        },
-        f,
-    )
+            );
+        }
+        tokio::time::sleep(BUILD_POLL).await;
+    }
+}
+
+// ── AI affordances ──
+//
+// The system prompt already tells the model to prefer CodeGraph* tools, but a
+// nudge buried in a long prompt loses to habit (grep/read). What actually moves
+// tool choice is evidence in the round itself: FastContext showing the graph
+// resolving the model's own query, and Grep results pointing at the exact
+// CodeGraph call that answers the underlying question.
+
+/// Query words that are never useful symbol lookups — filler verbs/nouns and
+/// language keywords that would burn token-budget slots on guaranteed misses.
+const QUERY_STOP_WORDS: &[&str] = &[
+    // English question/filler words
+    "the",
+    "and",
+    "for",
+    "not",
+    "with",
+    "from",
+    "into",
+    "this",
+    "that",
+    "what",
+    "where",
+    "when",
+    "how",
+    "why",
+    "who",
+    "are",
+    "was",
+    "can",
+    "does",
+    "should",
+    "would",
+    "could",
+    "please",
+    "need",
+    "want",
+    "also",
+    "just",
+    "using",
+    "used",
+    "more",
+    "some",
+    "any",
+    "look",
+    "give",
+    "tell",
+    "show",
+    "list",
+    "help",
+    // Common task verbs / generic nouns
+    "fix",
+    "bug",
+    "add",
+    "new",
+    "all",
+    "use",
+    "run",
+    "get",
+    "set",
+    "file",
+    "files",
+    "code",
+    "error",
+    "test",
+    "tests",
+    "build",
+    "make",
+    "check",
+    "find",
+    "impl",
+    "implement",
+    "refactor",
+    "function",
+    "class",
+    "method",
+    "module",
+    "component",
+    "update",
+    "change",
+    "remove",
+    "delete",
+    "rename",
+    "create",
+    "search",
+    "open",
+    "close",
+    "start",
+    "stop",
+    // Language keywords (never real symbol names, but identifier-shaped)
+    "let",
+    "const",
+    "var",
+    "pub",
+    "async",
+    "await",
+    "return",
+    "match",
+    "struct",
+    "enum",
+    "trait",
+    "type",
+    "static",
+    "true",
+    "false",
+    "null",
+    "void",
+    // Russian question/filler/task words
+    "все",
+    "как",
+    "что",
+    "это",
+    "где",
+    "когда",
+    "почему",
+    "зачем",
+    "надо",
+    "нужно",
+    "чтобы",
+    "есть",
+    "нету",
+    "этот",
+    "эта",
+    "они",
+    "она",
+    "оно",
+    "его",
+    "её",
+    "почини",
+    "исправь",
+    "сделай",
+    "добавь",
+    "убери",
+    "проверь",
+    "найди",
+    "покажи",
+    "напиши",
+    "удали",
+    "создай",
+    "измени",
+    "обнови",
+    "запусти",
+    "ошибка",
+    "баги",
+];
+
+/// Identifier-like tokens from a free-text query: ≥3 chars, contains a letter,
+/// not a stop word, deduped case-insensitively (full Unicode lowercase, so
+/// capitalized Russian words hit the Cyrillic stop entries too), capped at `cap`.
+fn identifier_tokens(query: &str, cap: usize) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for raw in query.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+        let token = raw.trim_matches('_');
+        if token.chars().count() < 3 || !token.chars().any(char::is_alphabetic) {
+            continue;
+        }
+        let lower = token.to_lowercase();
+        if QUERY_STOP_WORDS.contains(&lower.as_str()) {
+            continue;
+        }
+        if seen.insert(lower) {
+            out.push(token.to_string());
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Exact case-insensitive node lookup for the affordances — O(1) via the
+/// lowercase bucket map, never `resolve_symbol`'s full-graph prefix/substring
+/// scan. The scan is fine for an explicit `CodeGraph`* call; a hint that
+/// piggybacks on every Grep and `FastContext` round must stay near-free.
+fn exact_symbol_ids<'g>(
+    graph: &'g lux_codegraph::CodeGraph,
+    token: &str,
+) -> &'g [lux_codegraph::NodeId] {
+    graph.nodes_by_lowercase_name(&token.to_lowercase())
+}
+
+/// Location of a node as (`display name`, `file path`, `1-based line`).
+fn node_location(
+    graph: &lux_codegraph::CodeGraph,
+    id: lux_codegraph::NodeId,
+) -> Option<(String, String, u32)> {
+    let data = graph.node(id)?;
+    let name = graph.name_of(id)?.to_string();
+    let file = graph
+        .file_path(data.file)
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
+    Some((name, file, data.name_span.start_row + 1))
+}
+
+/// Pure core of [`fast_context_part`]: the ready-graph payload. Split from the
+/// locking wrapper so tests can exercise it against a real [`lux_codegraph::Index`]
+/// without a `SharedState`.
+fn fast_context_payload(index: &lux_codegraph::Index, query: &str) -> serde_json::Value {
+    let graph = index.graph();
+    let mut symbols = Vec::new();
+    for token in identifier_tokens(query, 8) {
+        let ids = exact_symbol_ids(graph, &token);
+        let Some((name, file, line)) = ids.first().and_then(|&id| node_location(graph, id)) else {
+            continue;
+        };
+        let id = ids[0];
+        symbols.push(serde_json::json!({
+            "query": token,
+            "name": name,
+            "file": file,
+            "line": line,
+            "callers": lux_codegraph::callers(graph, id).len(),
+            "callees": lux_codegraph::callees(graph, id).len(),
+            "matchCount": ids.len(),
+        }));
+        if symbols.len() >= 4 {
+            break;
+        }
+    }
+    serde_json::json!({
+        "status": "ready",
+        "nodes": graph.node_count(),
+        "edges": graph.edge_count(),
+        "querySymbols": symbols,
+        "hint": "Symbol relationships are precomputed. CodeGraphDefinition / CodeGraphCallers / CodeGraphCallees / CodeGraphExplain answer where-defined / who-calls / what-it-calls / blast-radius instantly — use them instead of grepping for symbol names.",
+    })
+}
+
+/// `FastContext` section: graph readiness + the query's own symbols resolved
+/// through the graph (name/file/line + caller/callee counts). Returns `None`
+/// when there is neither a graph nor a build/refresh in flight (e.g. no
+/// workspace), so `FastContext` stays silent instead of advertising a dead
+/// tool. Never waits, and only does O(1) exact lookups under the lock.
+pub async fn fast_context_part(state: &super::SharedState, query: &str) -> Option<String> {
+    let guard = state.code_graph.lock().await;
+    let Some(index) = guard.as_ref() else {
+        drop(guard);
+        let generation = state.workspace_generation.load(Ordering::SeqCst);
+        // Mirror with_index's availability logic: a full build OR an in-flight
+        // incremental refresh (which takes the index out of the mutex) both mean
+        // "coming back shortly" — and with_index waits for both.
+        let building =
+            build_in_flight(state, generation) || state.code_graph_updating.load(Ordering::Acquire);
+        if building {
+            return Some(
+                "CodeGraph: {\"status\":\"building\",\"note\":\"Code graph is building in the background; CodeGraph* tools wait for it automatically.\"}"
+                    .to_string(),
+            );
+        }
+        return None;
+    };
+    Some(format!("CodeGraph: {}", fast_context_payload(index, query)))
+}
+
+/// Pure core of [`grep_symbol_hint`] — gating + hint text, testable against a
+/// real [`lux_codegraph::Index`] without a `SharedState`.
+fn symbol_hint(index: &lux_codegraph::Index, query: &str) -> Option<String> {
+    let q = query.trim();
+    if q.chars().count() < 3
+        || q.len() > 128
+        || !q.chars().all(|c| c.is_alphanumeric() || c == '_')
+        || !q.chars().any(char::is_alphabetic)
+    {
+        return None;
+    }
+    let graph = index.graph();
+    // Exact-name match only (O(1) bucket): fuzzy prefix/substring hits on a grep
+    // for prose would produce noisy, wrong hints.
+    let ids = exact_symbol_ids(graph, q);
+    match ids {
+        [] => None,
+        [only] => {
+            let (name, file, line) = node_location(graph, *only)?;
+            let callers = lux_codegraph::callers(graph, *only).len();
+            let callees = lux_codegraph::callees(graph, *only).len();
+            Some(format!(
+                "'{name}' is a code-graph symbol ({callers} callers, {callees} callees, defined at {file}:{line}). For exact relationships use CodeGraphCallers/CodeGraphCallees/CodeGraphExplain — instant and complete; grep hits still cover strings/comments the graph does not index.",
+            ))
+        }
+        many => Some(format!(
+            "'{q}' matches {} code-graph symbols. CodeGraphDefinition('{q}') lists the definitions; CodeGraphCallers/CodeGraphCallees give each one's exact relationships — faster than reading grep hits.",
+            many.len(),
+        )),
+    }
+}
+
+/// Grep-result affordance: when a literal Grep query is exactly a known graph
+/// symbol, return a one-line hint naming the `CodeGraph` call that answers the
+/// underlying question precisely. `None` for free text, unknown symbols, or an
+/// unbuilt graph. Never waits (Grep must stay fast) and only does an O(1)
+/// exact lookup under the lock.
+pub async fn grep_symbol_hint(state: &super::SharedState, query: &str) -> Option<String> {
+    let guard = state.code_graph.lock().await;
+    symbol_hint(guard.as_ref()?, query)
 }
 
 // ── Commands ──
@@ -716,4 +1037,132 @@ pub struct ConnectionEntry {
     pub line: u32,
     pub relation: String,
     pub direction: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fast_context_payload, identifier_tokens, symbol_hint};
+    use std::path::PathBuf;
+
+    #[test]
+    fn identifier_tokens_extracts_symbols_from_prose() {
+        let tokens = identifier_tokens("fix the bug in handleSend and AiChatPanel scroll", 6);
+        assert_eq!(tokens, vec!["handleSend", "AiChatPanel", "scroll"]);
+    }
+
+    #[test]
+    fn identifier_tokens_skips_stop_words_and_short_tokens() {
+        assert!(identifier_tokens("fix all the tests for this file", 6).is_empty());
+        assert!(identifier_tokens("a b if 42 1_2", 6).is_empty());
+    }
+
+    #[test]
+    fn identifier_tokens_lowercases_cyrillic_stop_words() {
+        // to_ascii_lowercase would let capitalized Russian filler through; the
+        // full-Unicode lowercase must catch it against the Cyrillic stop entries.
+        assert!(identifier_tokens("Почини Ошибка Нужно", 6).is_empty());
+    }
+
+    #[test]
+    fn identifier_tokens_dedups_case_insensitively_and_caps() {
+        let tokens = identifier_tokens("Foo foo FOO bar baz qux quux corge", 3);
+        assert_eq!(tokens, vec!["Foo", "bar", "baz"]);
+    }
+
+    #[test]
+    fn identifier_tokens_keeps_snake_case_identifiers() {
+        let tokens = identifier_tokens("where is with_index used", 6);
+        assert_eq!(tokens, vec!["with_index"]);
+    }
+
+    // ── Affordance cores against a real index ──
+
+    fn temp_workspace(files: &[(&str, &str)]) -> PathBuf {
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = format!(
+            "lux-code-graph-affordance-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let root = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_dir_all(&root);
+        for (rel, contents) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::File::create(&path)
+                .unwrap()
+                .write_all(contents.as_bytes())
+                .unwrap();
+        }
+        root
+    }
+
+    fn test_index() -> lux_codegraph::Index {
+        let root = temp_workspace(&[(
+            "src/lib.rs",
+            "pub fn alpha_entry() { beta_helper(); }\npub fn beta_helper() {}\n",
+        )]);
+        let index = lux_codegraph::Index::build(&root).expect("index builds");
+        let _ = std::fs::remove_dir_all(&root);
+        index
+    }
+
+    #[test]
+    fn symbol_hint_reports_exact_symbol_with_relationship_counts() {
+        let index = test_index();
+        let hint = symbol_hint(&index, "beta_helper").expect("exact symbol gets a hint");
+        assert!(hint.contains("beta_helper"), "hint: {hint}");
+        assert!(hint.contains("1 callers"), "hint: {hint}");
+        assert!(hint.contains("CodeGraphCallers"), "hint: {hint}");
+        // Case-insensitive exact match still hints.
+        assert!(symbol_hint(&index, "BETA_HELPER").is_some());
+    }
+
+    #[test]
+    fn symbol_hint_gates_out_non_symbol_queries() {
+        let index = test_index();
+        assert!(symbol_hint(&index, "be").is_none(), "too short");
+        assert!(
+            symbol_hint(&index, "beta_help").is_none(),
+            "prefix, not exact"
+        );
+        assert!(
+            symbol_hint(&index, "beta_helper()").is_none(),
+            "non-identifier chars"
+        );
+        assert!(
+            symbol_hint(&index, "alpha|beta").is_none(),
+            "regex alternation"
+        );
+        assert!(symbol_hint(&index, "12345").is_none(), "no letters");
+        assert!(symbol_hint(&index, &"x".repeat(200)).is_none(), "too long");
+        assert!(
+            symbol_hint(&index, "no_such_symbol_here").is_none(),
+            "unknown symbol"
+        );
+    }
+
+    #[test]
+    fn fast_context_payload_resolves_query_symbols_exactly() {
+        let index = test_index();
+        let payload = fast_context_payload(&index, "why does alpha_entry break beta_helper here");
+        assert_eq!(payload["status"], "ready");
+        let symbols = payload["querySymbols"].as_array().expect("array");
+        let names: Vec<&str> = symbols.iter().filter_map(|s| s["name"].as_str()).collect();
+        assert!(names.contains(&"alpha_entry"), "names: {names:?}");
+        assert!(names.contains(&"beta_helper"), "names: {names:?}");
+        // Non-symbol prose tokens must not fabricate entries (exact-only lookup).
+        assert!(!names.contains(&"break"), "names: {names:?}");
+    }
+
+    #[test]
+    fn fast_context_payload_stays_ready_with_no_matching_symbols() {
+        let index = test_index();
+        let payload = fast_context_payload(&index, "completely unrelated prose here");
+        assert_eq!(payload["status"], "ready");
+        assert!(payload["querySymbols"].as_array().unwrap().is_empty());
+        assert!(payload["nodes"].as_u64().unwrap() >= 2);
+    }
 }

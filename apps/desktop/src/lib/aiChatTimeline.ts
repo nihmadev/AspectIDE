@@ -4,6 +4,7 @@ import {
   deriveSegmentToolCalls,
   type AiChatMessage,
   type AiChatToolCall,
+  type AiInlineNotice,
   type AiMessageSegment,
 } from "./aiChatTypes";
 
@@ -126,6 +127,13 @@ export function createTurnTimeline(emit: (patch: Partial<AiChatMessage>) => void
       if (!text.trim()) return;
       activeTextId = crypto.randomUUID();
       segments.push({ kind: "text", id: activeTextId, text });
+      flushNow();
+    },
+    /** Drop an inline event plaque (e.g. reasoning-effort fallback) into the
+     *  timeline at the CURRENT position — the transcript then shows it exactly
+     *  where the event happened, between the segments streamed before and after. */
+    addNotice(notice: AiInlineNotice, text: string) {
+      segments.push({ kind: "notice", id: crypto.randomUUID(), text, notice });
       flushNow();
     },
     addToolCalls(calls: AiChatToolCall[]) {

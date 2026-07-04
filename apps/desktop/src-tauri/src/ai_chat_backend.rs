@@ -200,6 +200,146 @@ pub fn apply_temperature(payload: &mut Value, reasoning: Option<&Value>, tempera
     }
 }
 
+/// Outcome of a reasoning-effort auto-fallback: the provider rejected
+/// `requested`, and the strongest variant it advertises (`applied`) was written
+/// back into the reasoning payload so the retried call goes through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReasoningEffortFix {
+    pub requested: String,
+    pub applied: String,
+}
+
+/// Strength ranking of the reasoning-effort vocabulary across providers.
+/// Unknown / provider-specific names rank below everything so the fallback only
+/// picks a variant it actually understands.
+fn reasoning_effort_rank(effort: &str) -> i8 {
+    match effort.to_ascii_lowercase().as_str() {
+        "none" => 0,
+        "minimal" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        "xhigh" => 5,
+        "max" => 6,
+        _ => -1,
+    }
+}
+
+/// Collect every backtick- or single-quote-delimited token from `text`, in order.
+/// Provider 400s quote both the rejected value and the accepted list this way
+/// (serde uses backticks, OpenAI-style validators use single quotes).
+fn quoted_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find(['`', '\'']) {
+        let quote = rest.as_bytes()[open] as char;
+        let after = &rest[open + 1..];
+        let Some(close) = after.find(quote) else {
+            break;
+        };
+        let token = &after[..close];
+        // Effort names are short lowercase words; skip quoted prose fragments.
+        if !token.is_empty() && token.len() <= 24 && !token.contains(char::is_whitespace) {
+            tokens.push(token.to_string());
+        }
+        rest = &after[close + 1..];
+    }
+    tokens
+}
+
+/// Parse a provider 400 that rejects our reasoning-effort value. Returns the
+/// rejected variant plus the list the provider says it accepts. Understands the
+/// two wire dialects in the wild:
+/// - serde-style: ``reasoning_effort: unknown variant `minimal`, expected one of `high`, `low`, …``
+/// - OpenAI-style: `Unsupported value: 'minimal' … Supported values are: 'low', 'medium', and 'high'.`
+fn parse_rejected_reasoning_effort(error: &str) -> Option<(String, Vec<String>)> {
+    let lower = error.to_ascii_lowercase();
+    // Only ever triggered for the reasoning knob — a 400 about some other enum
+    // field must stay a hard error, not silently mutate the request.
+    if !lower.contains("reasoning") {
+        return None;
+    }
+    if let Some(at) = lower.find("unknown variant") {
+        let rejected = quoted_tokens(&error[at..]).into_iter().next()?;
+        let expected = lower[at..].find("expected one of")?;
+        let allowed = quoted_tokens(&error[at + expected..]);
+        return Some((rejected, allowed));
+    }
+    if let Some(at) = lower.find("supported values are") {
+        // Tokens before the marker mix the rejected VALUE with the parameter
+        // NAME (`Unsupported value: 'xhigh' for parameter 'reasoning.effort'`) —
+        // prefer a token from the effort vocabulary, else the last token that
+        // isn't a dotted field path.
+        let before = quoted_tokens(&error[..at]);
+        let rejected = before
+            .iter()
+            .rev()
+            .find(|token| reasoning_effort_rank(token) >= 0)
+            .or_else(|| {
+                before.iter().rev().find(|token| {
+                    !token.contains('.') && !token.eq_ignore_ascii_case("reasoning_effort")
+                })
+            })
+            .cloned()?;
+        let allowed = quoted_tokens(&error[at..]);
+        return Some((rejected, allowed));
+    }
+    None
+}
+
+/// Auto-recover from a provider rejecting the configured reasoning effort
+/// (HTTP 400 "unknown variant" / "unsupported value"): pick the STRONGEST
+/// variant the provider's own error advertises and write it into the reasoning
+/// blob (both the `OpenAI` `reasoning_effort` field and the `OpenRouter`
+/// `reasoning.effort` shape, whichever the blob carries). Returns what was
+/// requested vs applied so the UI can tell the user, or `None` when the error
+/// is not an effort rejection (caller keeps its normal fatal path).
+pub fn reasoning_effort_fallback(
+    reasoning: Option<&mut Value>,
+    error: &str,
+) -> Option<ReasoningEffortFix> {
+    let reasoning = reasoning?;
+    let (rejected, allowed) = parse_rejected_reasoning_effort(error)?;
+    let applied = allowed
+        .iter()
+        .filter(|effort| reasoning_effort_rank(effort) >= 0)
+        .max_by_key(|effort| reasoning_effort_rank(effort))?
+        .clone();
+    // The provider claims to accept what we already sent — retrying with the
+    // same value would loop, so treat it as a genuine error.
+    if applied.eq_ignore_ascii_case(&rejected) {
+        return None;
+    }
+    let target = reasoning.as_object_mut()?;
+    let flat_touched = if target.contains_key("reasoning_effort") {
+        target.insert(
+            "reasoning_effort".to_string(),
+            Value::String(applied.clone()),
+        );
+        true
+    } else {
+        false
+    };
+    let nested_touched = if let Some(Value::Object(inner)) = target.get_mut("reasoning") {
+        inner.insert("effort".to_string(), Value::String(applied.clone()));
+        true
+    } else {
+        false
+    };
+    if !flat_touched && !nested_touched {
+        // The blob carried neither known shape (e.g. a proxy translated the field
+        // name) — set the OpenAI-standard key so the retry actually changes the wire.
+        target.insert(
+            "reasoning_effort".to_string(),
+            Value::String(applied.clone()),
+        );
+    }
+    Some(ReasoningEffortFix {
+        requested: rejected,
+        applied,
+    })
+}
+
 /// Build the `/models` listing endpoint from a provider base URL (`OpenAI` shape),
 /// mirroring `completion_endpoint` so trailing-slash and `/chat/completions` bases
 /// both resolve correctly.
@@ -2486,6 +2626,71 @@ fn emit_stream_event(app: &AppHandle, event: AiChatStreamEvent) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_effort_fallback_parses_serde_rejection_and_picks_strongest() {
+        // Real DeepSeek 400 shape (serde deserialization error).
+        let error = "AI provider error 400: Error from provider (DeepSeek): Failed to deserialize the JSON body into the target type: reasoning_effort: unknown variant `minimal`, expected one of `high`, `low`, `medium`, `max`, `xhigh` at line 1 column 20497";
+        let mut blob = serde_json::json!({ "reasoning_effort": "minimal" });
+        let fix = reasoning_effort_fallback(Some(&mut blob), error).expect("fix");
+        assert_eq!(fix.requested, "minimal");
+        assert_eq!(fix.applied, "max");
+        assert_eq!(blob["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn reasoning_effort_fallback_parses_openai_style_and_updates_nested_shape() {
+        let error = "AI provider error 400: Unsupported value: 'xhigh' for parameter 'reasoning.effort'. Supported values are: 'low', 'medium', and 'high'.";
+        let mut blob = serde_json::json!({ "reasoning": { "effort": "xhigh" } });
+        let fix = reasoning_effort_fallback(Some(&mut blob), error).expect("fix");
+        assert_eq!(fix.requested, "xhigh");
+        assert_eq!(fix.applied, "high");
+        assert_eq!(blob["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn reasoning_effort_fallback_ignores_unrelated_errors() {
+        let mut blob = serde_json::json!({ "reasoning_effort": "high" });
+        // Same serde wording but about a different field: must stay fatal.
+        let other_field = "Failed to deserialize the JSON body into the target type: tool_choice: unknown variant `always`, expected one of `auto`, `none`";
+        assert!(reasoning_effort_fallback(Some(&mut blob), other_field).is_none());
+        assert!(
+            reasoning_effort_fallback(Some(&mut blob), "AI provider error 429: rate limited")
+                .is_none()
+        );
+        assert!(reasoning_effort_fallback(
+            None,
+            "reasoning_effort: unknown variant `minimal`, expected one of `low`"
+        )
+        .is_none());
+        // Blob untouched by the rejected attempts.
+        assert_eq!(blob["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn reasoning_effort_fallback_refuses_no_op_and_unknown_vocabularies() {
+        // Provider claims to accept exactly what we sent → retrying would loop.
+        let same = "reasoning_effort: unknown variant `max`, expected one of `max`";
+        let mut blob = serde_json::json!({ "reasoning_effort": "max" });
+        assert!(reasoning_effort_fallback(Some(&mut blob), same).is_none());
+        // Allowed list contains nothing we understand → no safe pick.
+        let alien =
+            "reasoning_effort: unknown variant `minimal`, expected one of `turbo`, `ludicrous`";
+        assert!(reasoning_effort_fallback(Some(&mut blob), alien).is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_fallback_updates_both_payload_shapes_at_once() {
+        let error = "reasoning.effort rejected: unknown variant `minimal`, expected one of `low`, `medium`, `high`";
+        let mut blob = serde_json::json!({
+            "reasoning_effort": "minimal",
+            "reasoning": { "effort": "minimal" },
+        });
+        let fix = reasoning_effort_fallback(Some(&mut blob), error).expect("fix");
+        assert_eq!(fix.applied, "high");
+        assert_eq!(blob["reasoning_effort"], "high");
+        assert_eq!(blob["reasoning"]["effort"], "high");
+    }
 
     // Drive the accumulator with a sequence of content/reasoning deltas and return
     // the final (answer, thinking) after flush.

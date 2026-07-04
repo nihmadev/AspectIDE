@@ -54,6 +54,14 @@ export type AiPreferences = {
   /** User has seen the Telegram community welcome banner. */
   seenTelegramNotice: boolean;
   showResponseDuration: boolean;
+  /** Live tokens-per-second readout in the composer while a turn is generating. */
+  showTokenSpeed: boolean;
+  /**
+   * Smooth streaming: reveal the assistant's streamed answer with a fast
+   * adaptive typewriter animation instead of chunk-sized jumps. Purely visual —
+   * the underlying turn/text is identical; off falls back to raw chunk paints.
+   */
+  chatSmoothStream: boolean;
   /**
    * Token-economy ("caveman") mode. When on, a terse-output directive is appended
    * to the system prompt: the model drops filler/pleasantries/hedging and answers
@@ -756,6 +764,8 @@ export const defaultAiPreferences: AiPreferences = {
   hiddenModelIds: [],
   seenTelegramNotice: false,
   showResponseDuration: true,
+  showTokenSpeed: true,
+  chatSmoothStream: true,
   // Token economy ships ON by default: terse "caveman" output that drops filler/
   // pleasantries to save output tokens while keeping code, paths, errors, tool work,
   // and reasoning depth exact. Users can turn it off in Settings → AI Usage.
@@ -848,6 +858,8 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
       : defaultAiPreferences.hiddenModelIds,
     seenTelegramNotice: typeof source.seenTelegramNotice === "boolean" ? source.seenTelegramNotice : defaultAiPreferences.seenTelegramNotice,
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
+    showTokenSpeed: typeof source.showTokenSpeed === "boolean" ? source.showTokenSpeed : defaultAiPreferences.showTokenSpeed,
+    chatSmoothStream: typeof source.chatSmoothStream === "boolean" ? source.chatSmoothStream : defaultAiPreferences.chatSmoothStream,
     tokenEconomyEnabled: typeof source.tokenEconomyEnabled === "boolean" ? source.tokenEconomyEnabled : defaultAiPreferences.tokenEconomyEnabled,
     lspAutoInstall: typeof source.lspAutoInstall === "boolean" ? source.lspAutoInstall : defaultAiPreferences.lspAutoInstall,
     runtimeAutoProvision: typeof source.runtimeAutoProvision === "boolean" ? source.runtimeAutoProvision : defaultAiPreferences.runtimeAutoProvision,

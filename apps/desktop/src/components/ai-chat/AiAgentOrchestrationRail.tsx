@@ -1,5 +1,5 @@
-import { Check, ChevronRight, Circle, FileDiff, ListChecks, Loader2, Minus, Network, Square, X } from "lucide-react";
-import { useCallback, useEffect, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { ArrowLeft, Check, ChevronRight, Circle, FileDiff, History, ListChecks, Loader2, Minus, Network, Square } from "lucide-react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import {
   cancelSubagentRun,
   getSubagentRun,
@@ -88,11 +88,30 @@ function AiAgentOrchestrationRailBody({
   const evaluatorReason = getGoalRunEvaluatorReason(sessionId);
   const todos = listAiSessionTodos(sessionId);
   const fileReviews = listPendingFileReviewsForSession(sessionId);
-  const subagentRuns = listSubagentRunsForSession(sessionId).filter(
+  const allSubagentRuns = listSubagentRunsForSession(sessionId);
+  // Live list: running now, or finished within the last 5 minutes.
+  const subagentRuns = allSubagentRuns.filter(
     (run) => run.status === "running" || Date.now() - (run.endedAt ?? run.startedAt) < 300_000,
   );
+  // Finished runs that aged out of the live window — this session's history
+  // (the store keeps the last 32 finished runs, so this is already bounded).
+  const liveIds = new Set(subagentRuns.map((run) => run.id));
+  const historyRuns = allSubagentRuns.filter((run) => !liveIds.has(run.id));
   const runningSubagents = subagentRuns.filter((run) => run.status === "running").length;
   const completedTodos = todos.filter((todo) => todo.status === "completed").length;
+  const [historyOpen, setHistoryOpen] = useState(false);
+  // 1s heartbeat while any subagent runs so the per-row elapsed clocks stay live.
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    if (runningSubagents === 0) return;
+    const timer = setInterval(() => setClockTick((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [runningSubagents]);
+  // The island is an overlay: it only earns screen space when the agent has
+  // actually pinned a goal, opened tasks, produced reviews or spawned subagents
+  // (history counts — finished runs stay reachable).
+  const hasGoalContent = Boolean(goal) || Boolean(goalRun);
+  const hasContent = hasGoalContent || todos.length > 0 || fileReviews.length > 0 || allSubagentRuns.length > 0;
 
   // Finished subagents are hidden once older than the 5-min window (see filter above), but that
   // boundary is only evaluated at render time. Schedule a refresh at the soonest expiry so the row
@@ -117,6 +136,11 @@ function AiAgentOrchestrationRailBody({
   const selectedSubagentCandidate = selectedSubagentId ? getSubagentRun(selectedSubagentId) : null;
   const selectedSubagent =
     selectedSubagentCandidate && selectedSubagentCandidate.sessionId === sessionId ? selectedSubagentCandidate : null;
+
+  // Nothing to show — render nothing at all (no empty shell, no collapsed chip).
+  // An open subagent transcript pins the card even if its run row already aged
+  // out of the 5-minute list, so the panel never vanishes mid-read.
+  if (!hasContent && !selectedSubagent) return null;
 
   if (collapsed) {
     const busy = sessionStatus !== "idle" && sessionStatus !== "error";
@@ -148,6 +172,12 @@ function AiAgentOrchestrationRailBody({
     );
   }
 
+  // A selected subagent takes over the island: its own window with live status,
+  // transcript and summary. Back returns to the overview.
+  if (selectedSubagent) {
+    return <SubagentWindow run={selectedSubagent} t={t} onBack={() => setSelectedSubagentId(null)} />;
+  }
+
   return (
     <aside className="ai-agent-orchestration-rail" aria-label={t("aiChat.orchestration.aria")}>
       <button
@@ -161,6 +191,7 @@ function AiAgentOrchestrationRailBody({
       </button>
       <AiAgentNowBar sessionId={sessionId} sessionStatus={sessionStatus} t={t} />
 
+      {hasGoalContent && (
       <div className="ai-agent-rail-goal-dock" aria-label={t("aiChat.orchestration.goalTitle")}>
         <div className="ai-agent-goal-island" data-empty={goal ? undefined : true}>
           <span className="ai-agent-goal-island-label">{t("aiChat.orchestration.goalTitle")}</span>
@@ -212,40 +243,36 @@ function AiAgentOrchestrationRailBody({
           )}
         </div>
       </div>
+      )}
 
       <div className="ai-agent-rail-scroll">
+      {todos.length > 0 && (
       <section className="ai-agent-rail-block ai-agent-rail-block-compact" data-block="tasks">
         <header>
           <ListChecks size={12} />
           <strong>{t("aiChat.orchestration.tasksTitle")}</strong>
-          <span className="ai-agent-rail-badge">{t("aiChat.orchestration.aiManaged")}</span>
-          {todos.length > 0 && (
-            <span className="ai-agent-rail-meta">{completedTodos}/{todos.length}</span>
-          )}
+          <span className="ai-agent-rail-meta">{completedTodos}/{todos.length}</span>
         </header>
-        {todos.length === 0 ? (
-          <p className="ai-agent-rail-empty">{t("aiChat.orchestration.tasksEmpty")}</p>
-        ) : (
-          <ul className="ai-agent-rail-tasks ai-agent-rail-tasks-compact">
-            {todos.map((todo) => (
-              <li key={todo.id} data-status={todo.status}>
-                <TaskStatusGlyph status={todo.status} />
-                <span className="ai-agent-rail-task-text" title={todo.content}>{todo.content}</span>
-                {todo.linkedFilePath && (
-                  <button
-                    type="button"
-                    className="ai-agent-rail-task-file"
-                    onClick={() => void openWorkspaceEditorPath(todo.linkedFilePath!)}
-                    title={todo.linkedFilePath}
-                  >
-                    {basename(todo.linkedFilePath)}
-                  </button>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
+        <ul className="ai-agent-rail-tasks ai-agent-rail-tasks-compact">
+          {todos.map((todo) => (
+            <li key={todo.id} data-status={todo.status}>
+              <TaskStatusGlyph status={todo.status} />
+              <span className="ai-agent-rail-task-text" title={todo.content}>{todo.content}</span>
+              {todo.linkedFilePath && (
+                <button
+                  type="button"
+                  className="ai-agent-rail-task-file"
+                  onClick={() => void openWorkspaceEditorPath(todo.linkedFilePath!)}
+                  title={todo.linkedFilePath}
+                >
+                  {basename(todo.linkedFilePath)}
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
       </section>
+      )}
 
       {fileReviews.length > 0 && (
         <section className="ai-agent-rail-block ai-agent-rail-block-compact" data-block="reviews">
@@ -266,47 +293,42 @@ function AiAgentOrchestrationRailBody({
         </section>
       )}
 
+      {subagentRuns.length > 0 && (
       <section className="ai-agent-rail-block ai-agent-rail-block-compact" data-block="subagents">
         <header>
           <Network size={12} />
           <strong>{t("aiChat.orchestration.subagentsTitle")}</strong>
           <span className="ai-agent-rail-meta">{runningSubagents}/{maxParallelSubagents}</span>
         </header>
-        {subagentRuns.length === 0 ? (
-          <p className="ai-agent-rail-empty">{t("aiChat.orchestration.subagentsEmpty")}</p>
-        ) : (
-          <ul className="ai-subagent-tree ai-agent-rail-subagents ai-agent-rail-subagents-compact">
-            {buildSubagentTree(subagentRuns).map((node) => (
-              <SubagentRailRow
-                key={node.run.id}
-                node={node}
-                depth={0}
-                selectedId={selectedSubagentId}
-                t={t}
-                onSelect={setSelectedSubagentId}
-              />
+        <ul className="ai-subagent-tree ai-agent-rail-subagents">
+          {buildSubagentTree(subagentRuns).map((node) => (
+            <SubagentRailRow key={node.run.id} node={node} depth={0} t={t} onSelect={setSelectedSubagentId} />
+          ))}
+        </ul>
+      </section>
+      )}
+
+      {historyRuns.length > 0 && (
+      <section className="ai-agent-rail-block ai-agent-rail-block-compact" data-block="subagent-history">
+        <button
+          type="button"
+          className="ai-agent-rail-history-toggle"
+          onClick={() => setHistoryOpen((open) => !open)}
+          aria-expanded={historyOpen}
+        >
+          <History size={12} />
+          <strong>{t("aiChat.subagents.history")}</strong>
+          <span className="ai-agent-rail-meta">{historyRuns.length}</span>
+          <ChevronRight size={10} className="ai-agent-rail-history-caret" data-open={historyOpen || undefined} />
+        </button>
+        {historyOpen && (
+          <ul className="ai-subagent-tree ai-agent-rail-subagents">
+            {historyRuns.map((run) => (
+              <SubagentRailRow key={run.id} node={{ run, children: [] }} depth={0} t={t} onSelect={setSelectedSubagentId} />
             ))}
           </ul>
         )}
       </section>
-
-      {selectedSubagent && (
-        <section className="ai-agent-rail-transcript" aria-label={t("aiChat.orchestration.transcriptAria")}>
-          <header>
-            <strong>{selectedSubagent.description}</strong>
-            <button type="button" className="ai-agent-rail-transcript-close" onClick={() => setSelectedSubagentId(null)}>
-              <X size={12} />
-            </button>
-          </header>
-          <div className="ai-agent-rail-transcript-body">
-            {selectedSubagent.transcript.map((entry) => (
-              <article key={entry.id} data-role={entry.role}>
-                <p>{entry.content}</p>
-              </article>
-            ))}
-            {selectedSubagent.summary && <p className="ai-agent-rail-transcript-summary">{selectedSubagent.summary}</p>}
-          </div>
-        </section>
       )}
       </div>
     </aside>
@@ -322,39 +344,130 @@ function TaskStatusGlyph({ status }: { status: AiSessionTodoStatus }) {
 
 type SubagentTreeNode = { run: SubagentRun; children: SubagentTreeNode[] };
 
+/** Compact digital clock for run durations: `0:07`, `3:05`, `1:02:33`. */
+function formatSubagentClock(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = String(total % 60).padStart(2, "0");
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, "0")}:${seconds}`;
+  return `${minutes}:${seconds}`;
+}
+
+/** Right-aligned row status: live elapsed while running, total duration when
+ *  done, a short word for failed/cancelled. */
+function subagentRowStatus(run: SubagentRun, t: TranslateFn): string {
+  if (run.status === "running") return formatSubagentClock(Date.now() - run.startedAt);
+  if (run.status === "completed") return formatSubagentClock((run.endedAt ?? run.startedAt) - run.startedAt);
+  return t(`aiChat.subagents.status.${run.status}` as "aiChat.subagents.status.failed");
+}
+
 function SubagentRailRow({
   node,
   depth,
-  selectedId,
   t,
   onSelect,
 }: {
   node: SubagentTreeNode;
   depth: number;
-  selectedId: string | null;
   t: TranslateFn;
   onSelect: (id: string) => void;
 }) {
   const { run } = node;
   return (
-    <li data-status={run.status} data-selected={selectedId === run.id || undefined} style={{ "--subagent-depth": depth } as CSSProperties}>
-      <button type="button" className="ai-subagent-panel-row ai-subagent-panel-row-button" onClick={() => onSelect(run.id)}>
-        <span className="ai-subagent-panel-type">{run.subagentType}</span>
-        <span className="ai-subagent-panel-desc" title={run.description}>{run.description}</span>
-      </button>
-      {run.status === "running" && (
-        <button type="button" className="ai-subagent-cancel" title={t("aiChat.subagents.cancel")} onClick={() => cancelSubagentRun(run.id)}>
-          <Square size={10} />
+    <li data-status={run.status} style={{ "--subagent-depth": depth } as CSSProperties}>
+      <div className="ai-subagent-row-line">
+        <button
+          type="button"
+          className="ai-subagent-panel-row-button ai-subagent-rail-row"
+          onClick={() => onSelect(run.id)}
+          title={run.description}
+        >
+          <span className="ai-subagent-status-dot" data-status={run.status} aria-hidden="true" />
+          <span className="ai-subagent-panel-type">{run.subagentType}</span>
+          <span className="ai-subagent-panel-desc">{run.description}</span>
+          <span className="ai-subagent-row-status">{subagentRowStatus(run, t)}</span>
         </button>
-      )}
+        {run.status === "running" && (
+          <button type="button" className="ai-subagent-cancel" title={t("aiChat.subagents.cancel")} onClick={() => cancelSubagentRun(run.id)}>
+            <Square size={9} />
+          </button>
+        )}
+      </div>
       {node.children.length > 0 && (
         <ul>
           {node.children.map((child) => (
-            <SubagentRailRow key={child.run.id} node={child} depth={depth + 1} selectedId={selectedId} t={t} onSelect={onSelect} />
+            <SubagentRailRow key={child.run.id} node={child} depth={depth + 1} t={t} onSelect={onSelect} />
           ))}
         </ul>
       )}
     </li>
+  );
+}
+
+/**
+ * Dedicated subagent window: the island drills into one run — live status dot,
+ * ticking clock, streamed transcript (auto-follows the bottom) and the final
+ * summary. Back returns to the Goal/Tasks/Subagents overview.
+ */
+function SubagentWindow({ run, t, onBack }: { run: SubagentRun; t: TranslateFn; onBack: () => void }) {
+  // Tick the clock once a second while the run is live.
+  const [, setClockTick] = useState(0);
+  useEffect(() => {
+    if (run.status !== "running") return;
+    const timer = setInterval(() => setClockTick((tick) => tick + 1), 1000);
+    return () => clearInterval(timer);
+  }, [run.status]);
+  // Follow the live stream: pin the scroll to the bottom on every new entry.
+  const transcriptRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = transcriptRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [run.revision]);
+
+  const elapsed = formatSubagentClock((run.endedAt ?? Date.now()) - run.startedAt);
+  const summary = run.summary.trim();
+  // The live transcript usually ends with the same final answer the summary
+  // carries — only render the summary block when it adds new text.
+  const showSummary = Boolean(summary) && summary !== run.transcript.at(-1)?.content.trim();
+
+  return (
+    <aside className="ai-agent-orchestration-rail ai-subagent-window" aria-label={t("aiChat.subagents.aria")}>
+      <header className="ai-subagent-window-head">
+        <button type="button" className="ai-subagent-window-back" onClick={onBack} title={t("aiChat.subagents.back")} aria-label={t("aiChat.subagents.back")}>
+          <ArrowLeft size={12} />
+        </button>
+        <span className="ai-subagent-status-dot" data-status={run.status} aria-hidden="true" />
+        <span className="ai-subagent-panel-type">{run.subagentType}</span>
+        <span className="ai-subagent-window-clock">{elapsed}</span>
+        {run.status === "running" ? (
+          <button type="button" className="ai-subagent-cancel" title={t("aiChat.subagents.cancel")} onClick={() => cancelSubagentRun(run.id)}>
+            <Square size={9} />
+          </button>
+        ) : (
+          <span className="ai-subagent-window-state" data-status={run.status}>
+            {t(`aiChat.subagents.status.${run.status}` as "aiChat.subagents.status.completed")}
+          </span>
+        )}
+      </header>
+      <p className="ai-subagent-window-title" title={run.description}>{run.description}</p>
+      <div className="ai-subagent-window-transcript" ref={transcriptRef}>
+        {run.transcript.length === 0 && (
+          <p className="ai-subagent-window-empty">{t("aiChat.subagents.transcriptEmpty")}</p>
+        )}
+        {run.transcript.map((entry) => (
+          <article key={entry.id} data-role={entry.role}>
+            <p>{entry.content}</p>
+          </article>
+        ))}
+        {showSummary && (
+          <article data-role="summary">
+            <strong>{t("aiChat.subagents.summary")}</strong>
+            <p>{summary}</p>
+          </article>
+        )}
+      </div>
+    </aside>
   );
 }
 

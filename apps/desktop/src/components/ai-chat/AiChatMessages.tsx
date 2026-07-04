@@ -1,4 +1,4 @@
-import { ChevronRight, Copy, SearchCheck } from "lucide-react";
+import { Brain, ChevronRight, Copy, FoldVertical, MoveRight, SearchCheck } from "lucide-react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import { createContext, Fragment, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -8,6 +8,7 @@ import { AiAssistantMessageActions } from "./AiAssistantMessageActions";
 import { AiToolCallsGroup } from "../AiToolCall";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 import { isCompactionCheckpointMessage, type ContextCompactionState } from "../../lib/aiChatContextCompaction";
+import { formatCompactTokens } from "../../lib/aiChatContextUsage";
 import { AiPathEvidenceNotice } from "./AiPathEvidenceNotice";
 import { AiTurnSummaryCard } from "./AiTurnSummaryCard";
 import { AiThinkingIndicator, isPendingAssistantShell } from "./AiThinkingIndicator";
@@ -15,7 +16,7 @@ import type { AiChatSessionStatus } from "../../lib/store";
 import * as chatDisplayText from "../../lib/aiChatDisplayText";
 import { useElapsedSeconds, formatThinkingElapsed } from "../../lib/useElapsedSeconds";
 import { HtmlArtifact } from "./HtmlArtifact";
-import { isReviewRequestMessage, type AiChatMessage, type AiChatMessageAttachment, type AiChatResponseTiming, type AiMessageSegment, type AiToolApprovalDecision } from "../../lib/aiChatTypes";
+import { isReviewRequestMessage, type AiChatMessage, type AiChatMessageAttachment, type AiChatResponseTiming, type AiInlineNotice, type AiMessageSegment, type AiToolApprovalDecision } from "../../lib/aiChatTypes";
 
 const coerceChatMessageText =
   chatDisplayText.coerceChatMessageText
@@ -105,13 +106,24 @@ export function AiChatMessages({
   const getOnReviewFor = (id: string) =>
     onReviewAction ? () => onReviewAction(id) : undefined;
 
+  // Session-level compaction stats describe the LATEST compaction only, so they
+  // attach to the newest checkpoint card — an older surviving checkpoint must not
+  // wear stats from a compaction it didn't produce.
+  const latestCheckpointId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const candidate = messages[index];
+      if (candidate && isCompactionCheckpointMessage(candidate)) return candidate.id;
+    }
+    return null;
+  }, [messages]);
+
   const renderRow = (chatMessage: AiChatMessage) => (
     <AiChatMessageView
       key={chatMessage.id}
       message={chatMessage}
       streaming={chatMessage.id === streamingMessageId}
       showResponseDuration={showResponseDuration}
-      contextCompaction={contextCompaction}
+      contextCompaction={chatMessage.id === latestCheckpointId ? contextCompaction : null}
       workspaceRoot={workspaceRoot}
       canMutateHistory={canMutateHistory}
       canRestoreUserMessage={canRestoreUserMessage}
@@ -213,14 +225,57 @@ const AiChatMessageView = memo(function AiChatMessageView({
     );
   }
   if (isCompactionCheckpointMessage(message)) {
+    // Stats arrive only on the latest checkpoint (see latestCheckpointId in the
+    // parent); older surviving checkpoints render without a stats row.
+    const stats = contextCompaction ?? null;
+    const reductionPercent = stats && stats.tokensBefore > 0
+      ? Math.max(0, Math.round((1 - stats.tokensAfter / stats.tokensBefore) * 100))
+      : 0;
     return (
       <article className="ai-chat-message ai-chat-compaction-checkpoint" data-role="system">
-        <div className="ai-chat-message-meta">
-          <span>{t("aiChat.compact.checkpointLabel")}</span>
+        <header className="ai-compaction-head">
+          <span className="ai-compaction-title">
+            <FoldVertical size={13} aria-hidden="true" />
+            {t("aiChat.compact.checkpointLabel")}
+          </span>
+          {stats && (
+            <span
+              className="ai-compaction-tokens"
+              title={t("aiChat.compact.tokensBeforeAfter", {
+                before: formatCompactTokens(stats.tokensBefore),
+                after: formatCompactTokens(stats.tokensAfter),
+              })}
+            >
+              {formatCompactTokens(stats.tokensBefore)}
+              <MoveRight size={11} aria-hidden="true" />
+              {formatCompactTokens(stats.tokensAfter)}
+              {reductionPercent > 0 && (
+                <em className="ai-compaction-reduction">−{reductionPercent}%</em>
+              )}
+            </span>
+          )}
           <time>{formatMessageTime(message.timestamp)}</time>
-        </div>
+        </header>
         <div className="ai-chat-compaction-body">
           <p>{t("aiChat.compact.checkpointHint")}</p>
+          {stats?.droppedItems && stats.droppedItems.length > 0 && (
+            <details className="ai-chat-compaction-details">
+              <summary>
+                {t("aiChat.compact.droppedSummary", {
+                  count: stats.droppedItems.length,
+                  tokens: formatCompactTokens(stats.droppedTokens ?? 0),
+                })}
+              </summary>
+              <ul className="ai-compaction-dropped">
+                {stats.droppedItems.map((item) => (
+                  <li key={`${item.kind}-${item.label}-${item.tokens}`}>
+                    <span>{item.label}</span>
+                    <span>{formatCompactTokens(item.tokens)}</span>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
           {/* Collapsed by default: the full checkpoint is reference material,
               not conversation — one line in the transcript, expandable on demand. */}
           <details className="ai-chat-compaction-details">
@@ -286,7 +341,7 @@ const AiChatMessageView = memo(function AiChatMessageView({
         <AiPathEvidenceNotice message={message} streaming={streaming} t={t} />
       )}
       {!pendingShell && message.role === "assistant" && !streaming && (
-        <AiTurnSummaryCard message={message} compaction={contextCompaction} workspaceRoot={workspaceRoot} t={t} onReview={onReview} reviewDisabled={reviewDisabled} />
+        <AiTurnSummaryCard message={message} workspaceRoot={workspaceRoot} t={t} onReview={onReview} reviewDisabled={reviewDisabled} />
       )}
       {message.role === "assistant" && showResponseDuration && typeof message.responseDurationMs === "number" && !message.responseTiming && !message.turnUsage && (
         <div className="ai-chat-response-duration" title={formatResponseTimingTitle(message, t)}>{formatResponseDuration(message.responseDurationMs, t)}</div>
@@ -431,6 +486,11 @@ function formatTimingMs(value: number, t: TranslateFn) {
 // code until the turn settles (a half-written <script> would thrash the iframe).
 const MarkdownStreamingContext = createContext(false);
 
+// Smooth-streaming preference (Settings → AI Runtime). Provided by AiChatPanel
+// around the transcript; consumed inside MarkdownMessage. Context (not a prop)
+// so the memoized message rows don't need the toggle in their comparator.
+export const MarkdownSmoothStreamContext = createContext(true);
+
 function AiMessageBody({ message, streaming, sessionStatus, onApprovalDecision, t }: {
   message: AiChatMessage;
   streaming: boolean;
@@ -476,6 +536,13 @@ function AiMessageBody({ message, streaming, sessionStatus, onApprovalDecision, 
         toolBatch.push(segment);
         return;
       }
+      // An inline event plaque (e.g. reasoning-effort fallback) IS a real visual
+      // break: it happened between rounds, so close the tool group before it.
+      if (segment.kind === "notice") {
+        flushTools(`${index}`);
+        flowNodes.push(<AiInlineNoticePlaque key={segment.id} notice={segment.notice} t={t} />);
+        return;
+      }
       // An empty reasoning/text segment is not a real visual break, so it must NOT
       // split an in-progress tool group — otherwise consecutive tool rounds with
       // only blank scaffolding between them render as several collapsed groups
@@ -509,6 +576,23 @@ function AiMessageBody({ message, streaming, sessionStatus, onApprovalDecision, 
       {attachmentGallery}
       {flowNodes}
     </>
+  );
+}
+
+/** Inline event plaque inside the assistant timeline — rendered at the exact
+ *  position the event happened (e.g. the provider rejected the configured
+ *  reasoning effort mid-turn and the strongest accepted one was applied). */
+function AiInlineNoticePlaque({ notice, t }: { notice: AiInlineNotice; t: TranslateFn }) {
+  return (
+    <div className="ai-turn-inline-notice" role="note" data-notice={notice.type}>
+      <Brain size={13} aria-hidden="true" />
+      <span className="ai-turn-inline-notice-text">
+        <strong>
+          {t("aiChat.reasoningFallback.change", { requested: notice.requested, applied: notice.applied })}
+        </strong>
+        <span>{t("aiChat.reasoningFallback.body", { requested: notice.requested, applied: notice.applied })}</span>
+      </span>
+    </div>
   );
 }
 
@@ -608,12 +692,17 @@ function MarkdownMessage({ content, t }: { content: string; t: TranslateFn }) {
   const normalizedContent = useMemo(() => trimChatMessageEnd(decodeChatDisplayText(safeContent)), [safeContent]);
   const visibleContent = expanded ? normalizedContent : truncateMiddleForPreview(normalizedContent, 18_000, t);
   const streaming = useContext(MarkdownStreamingContext);
+  const smoothStream = useContext(MarkdownSmoothStreamContext);
+  // Smooth mode: animate the visible cursor toward the latest text (adaptive
+  // typewriter) — its per-frame paints replace the chunk throttle entirely.
+  const revealedContent = useSmoothRevealText(visibleContent, streaming && smoothStream);
   // While tokens stream in at ~30-60/sec, re-lexing the growing markdown every
   // time is the dominant per-token CPU cost on longer answers (O(n²) over the
-  // reply). Throttle the lexer input during streaming: the preview lags by at
-  // most ~1 frame of text, which is imperceptible for reading-speed text, and
-  // once the response settles the full text is lexed immediately.
-  const throttledVisible = useThrottledWhileStreaming(visibleContent, streaming, 160);
+  // reply). With smoothing off, throttle the lexer input during streaming: the
+  // preview lags by at most ~1 frame of text, which is imperceptible for
+  // reading-speed text, and once the response settles the full text is lexed
+  // immediately.
+  const throttledVisible = useThrottledWhileStreaming(revealedContent, streaming && !smoothStream, 160);
   const tokens = useMemo(() => tokenizeChatMarkdown(throttledVisible), [throttledVisible]);
   return (
     <div className="ai-chat-message-content ai-chat-markdown" data-collapsed={!expanded || undefined}>
@@ -863,6 +952,88 @@ function formatMessageTime(timestamp: number) {
  * is still accumulated elsewhere for correctness. On deactivation the latest
  * `value` is emitted immediately, so the settled view is always complete.
  */
+/**
+ * Smooth streaming reveal. Instead of repainting the whole latest chunk (which
+ * reads as jerky block-jumps when providers deliver large deltas), this animates
+ * a visible-character cursor toward the real text length every animation frame:
+ * a fast adaptive typewriter. The rate has a reading-speed floor and drains any
+ * backlog proportionally (~1/4s to catch up), so it never lags a fast model.
+ *
+ * Mount shows the current text in full — only growth AFTER mount animates. That
+ * way completed earlier segments (or rows remounted by virtualization) never
+ * replay from empty; only the live tail types.
+ *
+ * Paint frequency is quantized by content size: short answers update every
+ * frame, longer ones step down toward the plain 160ms throttle cadence, because
+ * each paint re-lexes the whole markdown (the known O(n²) streaming cost).
+ */
+/** Reading-speed floor for the smooth reveal, characters per second. */
+const SMOOTH_REVEAL_MIN_CPS = 360;
+/** Proportional catch-up: fraction of the backlog revealed per second (4 ≈ drain in 250ms). */
+const SMOOTH_REVEAL_CATCHUP = 4;
+
+function useSmoothRevealText(text: string, active: boolean): string {
+  const [visible, setVisible] = useState(text.length);
+  const visibleRef = useRef(visible);
+  const targetRef = useRef(text.length);
+  targetRef.current = text.length;
+
+  useEffect(() => {
+    if (!active) {
+      // Stream settled (or smoothing toggled off): show everything at once so
+      // the final markdown is always complete.
+      visibleRef.current = targetRef.current;
+      setVisible(targetRef.current);
+      return;
+    }
+    let raf = 0;
+    let lastPaint = 0;
+    const step = (now: number) => {
+      raf = requestAnimationFrame(step);
+      const target = targetRef.current;
+      // Content replaced/normalized shorter mid-stream: snap down, never slice
+      // beyond the string.
+      if (visibleRef.current > target) {
+        visibleRef.current = target;
+        lastPaint = now;
+        setVisible(target);
+        return;
+      }
+      const backlog = target - visibleRef.current;
+      if (backlog <= 0) {
+        // Idle (waiting for the next delta): keep the paint clock fresh so a
+        // burst after a pause animates from one frame's dt, not the whole wait.
+        lastPaint = now;
+        return;
+      }
+      // Larger documents re-lex more expensively per paint — widen the paint
+      // interval as the answer grows (60fps → ~30fps → the old 160ms cadence).
+      const paintInterval = target <= 4_000 ? 0 : target <= 12_000 ? 66 : 160;
+      if (now - lastPaint < paintInterval) return;
+      // dt spans everything since the LAST PAINT so gated frames still count —
+      // the reveal rate is cadence-independent.
+      const dt = lastPaint === 0 ? 1 / 60 : Math.min((now - lastPaint) / 1000, 0.25);
+      lastPaint = now;
+      const rate = Math.max(SMOOTH_REVEAL_MIN_CPS, backlog * SMOOTH_REVEAL_CATCHUP);
+      const advance = Math.max(1, Math.round(rate * dt));
+      visibleRef.current = Math.min(target, visibleRef.current + advance);
+      setVisible(visibleRef.current);
+    };
+    raf = requestAnimationFrame(step);
+    return () => cancelAnimationFrame(raf);
+  }, [active]);
+
+  if (!active) return text;
+  let cut = Math.min(visible, text.length);
+  // Never split a surrogate pair (emoji/CJK-ext): a lone high surrogate renders
+  // as a broken glyph for a frame.
+  if (cut > 0 && cut < text.length) {
+    const code = text.charCodeAt(cut - 1);
+    if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
+  }
+  return text.slice(0, cut);
+}
+
 function useThrottledWhileStreaming(value: string, active: boolean, intervalMs: number): string {
   const [throttled, setThrottled] = useState(value);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);

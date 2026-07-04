@@ -374,7 +374,14 @@ function assistantMessageWithTiming(
   };
   const baseUsage = turnUsage ?? estimateTurnUsageFromAssistant(merged) ?? undefined;
   // Populate the cost estimate (manual model price first, else alias-based rates).
-  const resolvedUsage = baseUsage ? attachTurnCostEstimate(baseUsage, model) : undefined;
+  const resolvedUsage = baseUsage
+    ? attachTurnCostEstimate(
+      responseTiming.modelCalls > 0 && baseUsage.requestCount === undefined
+        ? { ...baseUsage, requestCount: responseTiming.modelCalls }
+        : baseUsage,
+      model,
+    )
+    : undefined;
   return {
     ...merged,
     turnUsage: resolvedUsage,

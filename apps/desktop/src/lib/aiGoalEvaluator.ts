@@ -69,7 +69,7 @@ export async function requestGoalEvaluatorVerdict(input: {
         apiKey: input.provider.apiKey || null,
         model: input.model.alias || input.model.id,
         protocol: input.provider.protocol,
-        reasoning: reasoningPayload(input.selectedEffortId, input.provider),
+        reasoning: reasoningPayload(input.selectedEffortId, input.provider, input.model),
       });
       if (!verdict) return null;
       return { satisfied: verdict.satisfied, blocked: verdict.blocked, reason: verdict.reason, source: "model" };

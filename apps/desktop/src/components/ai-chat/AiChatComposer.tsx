@@ -19,6 +19,8 @@ export type { AiComposerVoiceState } from "./aiComposerTypes";
 type AiChatComposerProps = {
   activeSessionSending: boolean;
   compacting?: boolean;
+  /** Live tok/s of the running turn, or null to hide the readout. */
+  tokenSpeed?: number | null;
   agentOptions: AiComposerSelectOption[];
   attachments: AiComposerAttachmentView[];
   attachFiles: (files: FileList | File[] | null) => void;
@@ -83,6 +85,7 @@ type AiChatComposerProps = {
 export function AiChatComposer({
   activeSessionSending,
   compacting = false,
+  tokenSpeed = null,
   agentOptions,
   attachments,
   attachFiles,
@@ -203,6 +206,7 @@ export function AiChatComposer({
           t={t}
         />
         <AiComposerSendControls
+          tokenSpeed={tokenSpeed}
           contextOpen={contextOpen}
           contextTitle={contextTitle}
           contextUsage={contextUsage}
