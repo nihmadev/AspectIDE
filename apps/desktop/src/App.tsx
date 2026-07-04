@@ -210,6 +210,12 @@ export function App() {
     // Provision the baseline managed runtime (Node) in the background at startup, so
     // the common language servers work out of the box even with no system toolchain.
     bootstrapManagedRuntimes();
+    // Folder passed on the command line (Explorer "Open with Lux IDE" / `lux .`):
+    // open it as the workspace. Backend hands it out exactly once.
+    void luxCommands.startupOpenPath().then((path) => {
+      if (path) openRecentWorkspace(path);
+    }).catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const agentBrowserAutoUpdateKeyRef = useRef<string | null>(null);

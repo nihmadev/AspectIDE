@@ -44,7 +44,7 @@ export type TerminalOutputSink = (pending: ReadonlyMap<string, string[]>) => voi
  * unrelated Zustand subscriber (editor, chat, status bar).
  */
 class TerminalOutputCoalescer {
-  private readonly pending = new Map<string, string[]>();
+  private pending = new Map<string, string[]>();
   private sink: TerminalOutputSink | null = null;
   private scheduled = false;
 
@@ -71,8 +71,11 @@ class TerminalOutputCoalescer {
   /** Force an immediate synchronous commit of everything queued. */
   flush() {
     if (this.pending.size === 0) return;
+    // Swap the map out instead of clear(): `batch` must keep the queued chunks —
+    // clearing the same reference before the sink reads it silently drops every
+    // byte of terminal output (the v1.0.17 "terminal shows nothing" bug).
     const batch = this.pending;
-    this.pending.clear();
+    this.pending = new Map();
     this.sink?.(batch);
   }
 

@@ -3171,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "lux-desktop"
-version = "1.0.17"
+version = "1.0.18"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -3217,6 +3217,7 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
+ "winreg 0.55.0",
  "zip 4.6.1",
 ]
 

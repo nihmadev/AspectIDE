@@ -247,11 +247,11 @@ type AiModelTemplate = {
 };
 
 const reasoningEfforts = [
-  { id: "minimal", label: "Minimal" },
   { id: "low", label: "Low" },
   { id: "medium", label: "Medium" },
   { id: "high", label: "High" },
   { id: "xhigh", label: "xHigh" },
+  { id: "max", label: "Max" },
 ] as const satisfies readonly AiEffortConfig[];
 
 /** Standard reasoning-effort levels, exported for dynamically-built model configs. */

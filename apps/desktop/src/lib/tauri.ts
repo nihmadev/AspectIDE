@@ -831,6 +831,9 @@ export const luxCommands = {
   fsRename: (from: string, to: string) => invokeRequired<void>("fs_rename", { from, to }),
   fsCopy: (from: string, to: string) => invokeRequired<void>("fs_copy", { from, to }),
   fsDelete: (path: string) => invokeRequired<void>("fs_delete", { path }),
+  // External OS drag-drop import: writes base64 bytes to a collision-safe path
+  // inside the workspace and returns the final written path.
+  fsImportFile: (path: string, contentsBase64: string) => invokeRequired<string>("fs_import_file", { path, contentsBase64 }),
   fsRevealInFileExplorer: (path: string) => invokeRequired<void>("fs_reveal_in_file_explorer", { path }),
   fileSupportedFormats: () => invokeRequired<FileFormatSupport[]>("file_supported_formats"),
   fileInspect: (path: string, options?: Partial<FileInspectionOptions>) => invokeRequired<FileInspection>("file_inspect", { path, options: options ?? null }),
@@ -1143,6 +1146,9 @@ export const luxCommands = {
     notes: null,
   })),
   updateInstall: () => invokeRequired<void>("update_install"),
+  // Folder passed on the command line (Explorer "Open with Lux IDE" / `lux .`).
+  // One-shot on the backend; null when launched without arguments.
+  startupOpenPath: () => invokeOptional<string | null>("startup_open_path", undefined, () => null),
 };
 
 let browserUntitledCounter = 0;

@@ -499,7 +499,8 @@ export function reasoningPayload(
 ): Record<string, unknown> {
   const wireEffort = resolveWireReasoningEffort(effortId, model);
   if (!wireEffort) return {};
-  const normalizedEffort = wireEffort === "xhigh" && provider.protocol !== "local-proxy" ? "high" : wireEffort;
+  const normalizedEffort =
+    (wireEffort === "xhigh" || wireEffort === "max") && provider.protocol !== "local-proxy" ? "high" : wireEffort;
   // Send the single field the provider expects, not both. OpenRouter's unified API
   // takes `reasoning: { effort }`; every other OpenAI-compatible provider takes the
   // OpenAI-standard `reasoning_effort` string. Sending the unknown `reasoning`

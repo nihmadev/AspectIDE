@@ -10,6 +10,7 @@ import { displayPath, joinPath, normalizePath, parentPath } from "../../lib/file
 import { useTranslation } from "../../lib/i18n/useTranslation";
 import { useLuxStore } from "../../lib/store";
 import { luxCommands } from "../../lib/tauri";
+import { externalFilesFromDrop, importExternalFiles, isExternalFileDrag } from "../../lib/explorerImport";
 import type { FsEntry } from "../../lib/types";
 import {
   buildDirectories,
@@ -448,7 +449,13 @@ export function ExplorerPanel() {
   }, []);
 
   const dragOverDirectory = useCallback(
-    (targetDirectory: string) => {
+    (targetDirectory: string, external = false) => {
+      if (external) {
+        // OS file drag: any workspace directory is a valid copy target.
+        setDropTargetPath(normalizePath(targetDirectory));
+        ensureExplorerExpandedPath(targetDirectory);
+        return true;
+      }
       const currentDraggedEntry = draggedEntryRef.current ?? draggedEntry;
       if (!currentDraggedEntry || validateMoveTarget(currentDraggedEntry.entry, targetDirectory, fileTreeDirectories, t)) {
         setDropTargetPath(null);
@@ -466,12 +473,24 @@ export function ExplorerPanel() {
   }, []);
 
   const dropEntryIntoDirectory = useCallback(
-    async (targetDirectory: string) => {
+    async (targetDirectory: string, externalFiles?: File[]) => {
+      // OS files dropped from outside the app: copy them into the directory.
+      if (externalFiles && externalFiles.length > 0) {
+        setDropTargetPath(null);
+        setOperationError(null);
+        try {
+          await importExternalFiles(targetDirectory, externalFiles);
+          ensureExplorerExpandedPath(targetDirectory);
+        } catch (error) {
+          setOperationError(readErrorMessage(error, t));
+        }
+        return;
+      }
       const currentDraggedEntry = draggedEntryRef.current ?? draggedEntry;
       if (!currentDraggedEntry) return;
       await moveEntryInto(currentDraggedEntry.entry, targetDirectory);
     },
-    [draggedEntry, moveEntryInto],
+    [draggedEntry, ensureExplorerExpandedPath, moveEntryInto, t],
   );
 
   const selectedEntry = useMemo(
@@ -530,14 +549,15 @@ export function ExplorerPanel() {
           type="button"
           data-drop-target={dropTargetPath === folderKey}
           onClick={() => toggleExplorerExpandedPath(folderKey)}
-          onDragEnter={(event) => { if (!dragOverDirectory(folder.root)) return; event.preventDefault(); }}
+          onDragEnter={(event) => { if (!dragOverDirectory(folder.root, isExternalFileDrag(event.dataTransfer))) return; event.preventDefault(); }}
           onDragOver={(event) => {
-            if (!dragOverDirectory(folder.root)) return;
+            const external = isExternalFileDrag(event.dataTransfer);
+            if (!dragOverDirectory(folder.root, external)) return;
             event.preventDefault();
             event.stopPropagation();
-            event.dataTransfer.dropEffect = "move";
+            event.dataTransfer.dropEffect = external ? "copy" : "move";
           }}
-          onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void dropEntryIntoDirectory(folder.root); }}
+          onDrop={(event) => { event.preventDefault(); event.stopPropagation(); void dropEntryIntoDirectory(folder.root, externalFilesFromDrop(event.dataTransfer)); }}
           onContextMenu={(event) => { event.preventDefault(); setContextMenu({ entry: workspaceToEntry(folder), source: "blank", x: event.clientX, y: event.clientY }); }}
         >
           {expandedPaths.has(folderKey) ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
@@ -686,19 +706,20 @@ export function ExplorerPanel() {
             data-drop-target={dropTargetPath === rootKey}
             onClick={() => toggleExplorerExpandedPath(rootKey)}
             onDragEnter={(event) => {
-              if (!rootEntry || !dragOverDirectory(rootEntry.path)) return;
+              if (!rootEntry || !dragOverDirectory(rootEntry.path, isExternalFileDrag(event.dataTransfer))) return;
               event.preventDefault();
             }}
             onDragOver={(event) => {
-              if (!rootEntry || !dragOverDirectory(rootEntry.path)) return;
+              const external = isExternalFileDrag(event.dataTransfer);
+              if (!rootEntry || !dragOverDirectory(rootEntry.path, external)) return;
               event.preventDefault();
-              event.dataTransfer.dropEffect = "move";
+              event.dataTransfer.dropEffect = external ? "copy" : "move";
             }}
             onDrop={(event) => {
               if (!rootEntry) return;
               event.preventDefault();
               event.stopPropagation();
-              void dropEntryIntoDirectory(rootEntry.path);
+              void dropEntryIntoDirectory(rootEntry.path, externalFilesFromDrop(event.dataTransfer));
             }}
             onContextMenu={(event) => {
               if (!rootEntry) return;
@@ -725,16 +746,17 @@ export function ExplorerPanel() {
           onKeyDown={handleExplorerKeyDown}
           onContextMenu={(event) => { event.preventDefault(); if (rootEntry) setContextMenu({ entry: rootEntry, source: "blank", x: event.clientX, y: event.clientY }); }}
           onDragOver={(event) => {
-            if (!rootEntry || !dragOverDirectory(rootEntry.path)) return;
+            const external = isExternalFileDrag(event.dataTransfer);
+            if (!rootEntry || !dragOverDirectory(rootEntry.path, external)) return;
             event.preventDefault();
             event.stopPropagation();
-            event.dataTransfer.dropEffect = "move";
+            event.dataTransfer.dropEffect = external ? "copy" : "move";
           }}
           onDrop={(event) => {
             if (!rootEntry) return;
             event.preventDefault();
             event.stopPropagation();
-            void dropEntryIntoDirectory(rootEntry.path);
+            void dropEntryIntoDirectory(rootEntry.path, externalFilesFromDrop(event.dataTransfer));
           }}
         >
           {fileTreeError && <TreeMessage depth={0} tone="error" text={fileTreeError} />}
@@ -817,9 +839,9 @@ const FileRow = memo(function FileRow({
   isSelected: boolean;
   pendingParentKey: string | null;
   rowKey: string;
-  dragOverDirectory: (targetDirectory: string) => boolean;
+  dragOverDirectory: (targetDirectory: string, external?: boolean) => boolean;
   dragLeaveDirectory: (targetDirectory: string) => void;
-  dropEntryIntoDirectory: (targetDirectory: string) => Promise<void>;
+  dropEntryIntoDirectory: (targetDirectory: string, externalFiles?: File[]) => Promise<void>;
   endEntryDrag: () => void;
   openFile: (path: string) => void;
   requestDeleteEntry: (entry: FsEntry) => void;
@@ -860,18 +882,20 @@ const FileRow = memo(function FileRow({
   };
   const onDragEnter = isDirectory
     ? (event: DragEvent<HTMLButtonElement>) => {
-        if (!dragOverDirectory(entry.path)) return;
+        const external = isExternalFileDrag(event.dataTransfer);
+        if (!dragOverDirectory(entry.path, external)) return;
         event.preventDefault();
         event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
+        event.dataTransfer.dropEffect = external ? "copy" : "move";
       }
     : undefined;
   const onDragOver = isDirectory
     ? (event: DragEvent<HTMLButtonElement>) => {
-        if (!dragOverDirectory(entry.path)) return;
+        const external = isExternalFileDrag(event.dataTransfer);
+        if (!dragOverDirectory(entry.path, external)) return;
         event.preventDefault();
         event.stopPropagation();
-        event.dataTransfer.dropEffect = "move";
+        event.dataTransfer.dropEffect = external ? "copy" : "move";
       }
     : undefined;
   const onDragLeave = isDirectory
@@ -884,7 +908,7 @@ const FileRow = memo(function FileRow({
     ? (event: DragEvent<HTMLButtonElement>) => {
         event.preventDefault();
         event.stopPropagation();
-        void dropEntryIntoDirectory(entry.path);
+        void dropEntryIntoDirectory(entry.path, externalFilesFromDrop(event.dataTransfer));
       }
     : undefined;
 

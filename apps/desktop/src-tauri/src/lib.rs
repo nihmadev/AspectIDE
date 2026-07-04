@@ -40,6 +40,7 @@ mod search;
 mod settings;
 mod skills;
 mod ssh;
+mod system_integration;
 mod terminal;
 mod test_health;
 mod updater;
@@ -415,6 +416,62 @@ fn fs_copy(
     Ok(())
 }
 
+/// Imports one OS-dropped file into the workspace. The webview receives external
+/// drag-drop as path-less `File` blobs (`dragDropEnabled=false` keeps HTML5 `DnD` for
+/// internal drags), so the bytes travel over IPC as base64. Name collisions get
+/// a " (n)" suffix instead of overwriting. Returns the final written path.
+#[tauri::command]
+fn fs_import_file(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    path: PathBuf,
+    contents_base64: String,
+) -> Result<PathBuf, String> {
+    use base64::Engine as _;
+    let resolved = resolve_workspace_path_for_write(&state, &path)?;
+    let contents = base64::engine::general_purpose::STANDARD
+        .decode(contents_base64.as_bytes())
+        .map_err(|error| format!("invalid file payload: {error}"))?;
+    let target = unique_import_path(&resolved);
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&target, contents).map_err(|error| error.to_string())?;
+    emit_event(
+        &app,
+        LuxEvent::FsChanged {
+            path: target.clone(),
+        },
+    )?;
+    Ok(target)
+}
+
+/// "report.pdf" → "report (1).pdf" → "report (2).pdf" … until free.
+fn unique_import_path(path: &std::path::Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let extension = path
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let parent = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    for n in 1..10_000 {
+        let candidate = parent.join(format!("{stem} ({n}){extension}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
 #[tauri::command]
 fn fs_delete(app: AppHandle, state: State<'_, SharedState>, path: PathBuf) -> Result<(), String> {
     let path = resolve_workspace_path(&state, &path)?;
@@ -620,11 +677,15 @@ pub fn run() {
             if let Ok(app_data) = handle.path().app_data_dir() {
                 agent_browser::set_app_data_dir(app_data);
             }
-            let settings_path = handle
+            let app_config_dir = handle
                 .path()
                 .app_config_dir()
-                .map_err(Box::<dyn std::error::Error>::from)?
-                .join("settings.json");
+                .map_err(Box::<dyn std::error::Error>::from)?;
+            // Always-on shell integration (PATH shim + Explorer verb) — quick
+            // idempotent HKCU writes, but off the setup path regardless.
+            std::thread::spawn(system_integration::apply_default_integration);
+            system_integration::capture_startup_path();
+            let settings_path = app_config_dir.join("settings.json");
             let state = app.state::<SharedState>();
             *state
                 .settings
@@ -686,6 +747,7 @@ pub fn run() {
             fs_rename,
             fs_copy,
             fs_delete,
+            fs_import_file,
             fs_reveal_in_file_explorer,
             file_supported_formats,
             file_inspect,
@@ -863,6 +925,7 @@ pub fn run() {
             keybindings_set,
             updater::update_check,
             updater::update_install,
+            system_integration::startup_open_path,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Lux IDE")

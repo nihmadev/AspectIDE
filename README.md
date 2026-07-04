@@ -1,172 +1,205 @@
 <p align="center">
-  <img src="docs/assets/lux-mark.svg" width="96" height="96" alt="Lux IDE logo">
+  <img src="docs/assets/lux-mark.svg" width="110" height="110" alt="Lux IDE — AI-native code editor logo">
 </p>
 
 <h1 align="center">Lux IDE</h1>
 
 <p align="center">
-  Rust-first desktop IDE for fast, typed, AI-native developer workflows.
+  <b>The AI-native desktop IDE with a Rust engine.</b><br>
+  Autonomous coding agent, parallel subagents, code graph, project memory, web research — built into a fast, polished editor.
 </p>
 
 <p align="center">
-  <a href="https://github.com/GofMan5/lux-ide/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/GofMan5/lux-ide/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-0f172a"></a>
-  <img alt="Status" src="https://img.shields.io/badge/status-early%20alpha-f59e0b">
-  <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2-24c8db">
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-native%20engine-b7410e">
-  <img alt="React" src="https://img.shields.io/badge/React-workbench-149eca">
-  <img alt="pnpm" src="https://img.shields.io/badge/pnpm-10-f69220">
+  <a href="https://github.com/GofMan5/lux-ide/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/GofMan5/lux-ide?label=release&color=6d5cff"></a>
+  <a href="https://github.com/GofMan5/lux-ide/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/GofMan5/lux-ide/total?color=22c55e"></a>
+  <a href="https://github.com/GofMan5/lux-ide/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/GofMan5/lux-ide/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="Apache-2.0 license" src="https://img.shields.io/badge/license-Apache--2.0-0f172a"></a>
+  <a href="https://github.com/GofMan5/lux-ide/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/GofMan5/lux-ide?style=flat&color=f59e0b"></a>
 </p>
 
-![Lux IDE welcome screen](docs/assets/lux-welcome.png)
+<p align="center">
+  <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24c8db?logo=tauri&logoColor=white">
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-native%20engine-b7410e?logo=rust&logoColor=white">
+  <img alt="React" src="https://img.shields.io/badge/React-workbench-149eca?logo=react&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-typed%20IPC-3178c6?logo=typescript&logoColor=white">
+  <img alt="Monaco Editor" src="https://img.shields.io/badge/Monaco-editor-0078d4">
+</p>
 
-Lux IDE is an open-source desktop IDE built around a native Rust product engine and a React workbench. The goal is a serious Cursor/VS Code-class tool: real workspace operations, typed IPC, native services, polished editor UX, and AI workflows that can inspect and change a project without turning the app into a browser-only shell.
+<p align="center">
+  <a href="https://github.com/GofMan5/lux-ide/releases/latest"><b>⬇ Download for Windows</b></a>
+  ·
+  <a href="#-features">Features</a>
+  ·
+  <a href="#-the-ai-agent">AI Agent</a>
+  ·
+  <a href="#%EF%B8%8F-architecture">Architecture</a>
+  ·
+  <a href="#-support-the-project">Donate</a>
+  ·
+  <a href="https://t.me/lux_ide">Telegram</a>
+</p>
 
-The project is early alpha. The core workbench is real and usable for development, while release signing, updater channels, extension hosting, and full debug session execution are still in progress.
+---
 
-## Why Lux
+![Lux IDE — AI-native code editor with autonomous coding agent, welcome screen](docs/assets/lux-welcome.png)
 
-- **Rust owns the hard work.** Workspaces, filesystem mutations, document persistence, search, Git, LSP, terminal PTY, settings, keybindings, extension metadata, and installer/update policy stay native.
-- **React owns the surface.** The frontend focuses on layout, Monaco integration, panels, dialogs, command composition, and fast interaction.
-- **Typed boundaries.** Tauri commands and `lux://event` payloads keep frontend/backend contracts explicit instead of stringly typed glue.
-- **AI is a product surface.** Chat, agent workspace, provider settings, local voice input, context budgeting, and guarded file/shell tools are treated as first-class IDE workflows.
-- **Open by design.** The roadmap, architecture boundaries, contribution rules, and distribution policy are kept in the repo.
+**Lux IDE** is an open-source, Cursor-class desktop IDE where the heavy lifting — filesystem, search, Git, LSP, terminal PTY, the entire AI agent loop — runs in **native Rust**, and a **React + Monaco** workbench delivers the UI. No Electron. No browser-only shell. The AI isn't a sidebar plugin: it is a first-class product surface that can inspect, edit, verify, and ship changes in your project.
 
-## Current Features
+> ⚡ Auto-updates included — install once, every release lands automatically.
 
-- Native folder picker, recent workspaces, recursive explorer, file create/rename/delete/copy/reveal.
-- Monaco editor lifecycle backed by Rust `DocumentStore`: open, edit, save, save as, save all, dirty close guard, tabs, split editors, minimap, word wrap, and font zoom.
-- File watcher refresh, workspace search with include/exclude, case, regex, and whole-word filters.
-- Git status and diff plumbing for workspace files.
-- Integrated terminal surface backed by a Rust PTY service and xterm.js.
-- LSP manager with diagnostics, hover, definition, references, symbols, folding, inlay hints, semantic tokens, completion, code actions, formatting, signature help, rename, and workspace edits.
-- Settings UI for editor, keybindings, themes, profiles, AI providers, model/runtime options, and voice input.
-- AI chat and agent workspace with tool approval modes, file read/write/replace/patch/delete tools, web fetch, shell execution, test health, symbol context, and local STT hooks.
-- Extension discovery/status with stable contribution-point metadata.
-- DAP workspace inspection for `launch.json` and adapter detection. Debug session lifecycle is not wired yet.
+## ✨ Why Lux
 
-## Screenshots
+| | Lux IDE |
+|---|---|
+| 🦀 **Rust-first engine** | Workspaces, FS mutations, search, Git, LSP, PTY, settings, and the agent runtime are native Rust crates — fast and memory-safe |
+| 🤖 **Real autonomous agent** | Plan mode, tool approval gates, checkpoints & rollback, parallel subagents, live terminal mirror of everything the agent runs |
+| 🧠 **Project intelligence** | Tree-sitter **code graph** (definitions, callers, impact), per-project **SQLite memory**, discoverable **skills**, semantic context budgeting |
+| 🌐 **Built-in web research** | Multi-query research engine with reranking, passage citations, and consensus across sources — no stale model knowledge |
+| 🔌 **Any AI provider** | Anthropic, OpenAI, and ~30 preset providers via OpenAI-compatible or Anthropic protocol; prompt caching and streaming built in |
+| 🔒 **Local & private** | Zero listening ports by default, approval gates for dangerous tools, secrets redaction, your code stays on your machine |
 
-| Editor | AI Chat |
+## 🚀 Features
+
+### Editor & Workbench
+- **Monaco editor** with Rust-backed document lifecycle: tabs, split editors, dirty-close guard, minimap, font zoom, save-all.
+- **LSP done right** — diagnostics, hover, go-to-definition, references, rename, code actions, inlay hints, semantic tokens, formatting; language servers are auto-provisioned (Node/Rust/Python runtimes installed into a managed dir on demand).
+- **Workspace search** — parallel native search with regex, include/exclude globs, whole-word and case filters.
+- **Integrated terminal** on a Rust PTY service + xterm.js, with a live read-only **"Lux AI" tab** that mirrors every shell command the agent runs.
+- **Git integration** — status, diffs, and change review for workspace files.
+- **Structured file preview** — open xlsx, pdf, docx, sqlite, archives, and notebooks directly in the IDE.
+- **Themes, keybinding profiles, font pickers, i18n (EN/RU)** — the polish is part of the product.
+
+### 🤖 The AI Agent
+- **Agent / Automatic / Plan / Ask modes** — from fully autonomous "drive until done" to read-only planning with an explicit plan card you approve.
+- **Parallel subagents** — fan out independent tasks to up to 4 concurrent workers with live progress streaming and a shared message board.
+- **Checkpoints & rollback** — file-level snapshots before risky edits; accept or reject the agent's changes from a per-turn review bar.
+- **Code graph tools** — the agent queries definitions, callers, callees, and blast radius from a native tree-sitter graph instead of grepping blind.
+- **Persistent memory & skills** — the agent remembers project conventions across sessions (SQLite + FTS5) and follows vetted skill playbooks.
+- **Web research v2** — parallel multi-query fan-out, corpus reranking, canonical-URL dedup, inline citations.
+- **MCP support** — extend the agent's toolset live with Model Context Protocol servers.
+- **Voice input, vision attachments, usage & cost tracking** — speak to the agent, paste screenshots, watch tokens/s live.
+
+### 🛠 Trust & Safety
+- Tool **approval gates** with deny-beats-everything semantics, locked by a regression suite.
+- **SecretGuard** redaction before anything touching credentials is printed or committed.
+- **Zero-listening-ports** posture: stdio-first transports for LSP/DAP, guarded browser tooling.
+
+## 📸 Screenshots
+
+| Editor with LSP & terminal | AI chat with agent tools |
 | --- | --- |
-| ![Editor](docs/assets/lux-editor.png) | ![AI chat](docs/assets/lux-ai-chat.png) |
+| ![Lux IDE code editor — Monaco, LSP diagnostics, integrated terminal](docs/assets/lux-editor.png) | ![Lux IDE AI chat — autonomous coding agent with tool calls](docs/assets/lux-ai-chat.png) |
 
-| Agent Workspace | Settings |
+| Agent workspace | Settings |
 | --- | --- |
-| ![Agent workspace](docs/assets/lux-agent-workspace.png) | ![Settings](docs/assets/lux-settings.png) |
+| ![Lux IDE agent workspace — parallel subagents and task progress](docs/assets/lux-agent-workspace.png) | ![Lux IDE settings — AI providers, themes, keybindings](docs/assets/lux-settings.png) |
 
-## Architecture
+## 📥 Installation
 
-The desktop shell is one Tauri 2 application; the product engine is a Cargo workspace of focused, mostly I/O-free crates that the shell wraps in Tauri commands and `lux://event` payloads.
+**Windows:** grab the installer from the [latest release](https://github.com/GofMan5/lux-ide/releases/latest) — auto-update keeps you current after that.
+
+**Build from source:**
+
+```powershell
+# Prerequisites: Rust stable, Node.js 22+, pnpm 10+, Tauri 2 platform deps
+pnpm install
+pnpm dev            # desktop dev build
+pnpm tauri:build    # production bundle
+```
+
+`pnpm dev:web` runs a browser-only preview for UI iteration; production behavior requires the Tauri desktop runtime.
+
+## 🏛️ Architecture
+
+One Tauri 2 shell + a Cargo workspace of focused crates behind typed IPC (`lux://event` payloads, generated TypeScript bindings):
 
 ```text
 apps/desktop          Tauri 2 shell, React workbench, Monaco, xterm.js
-```
 
-Core and runtime:
-
-```text
-crates/lux-core       shared DTOs, typed errors/events, scan concurrency, generated TypeScript bindings
+crates/lux-core       shared DTOs, typed errors/events, scan concurrency, TS bindings
 crates/lux-workspace  workspace open/normalize and metadata
-crates/lux-fs         filesystem mutations and recursive workspace scanning with file watching
-crates/lux-editor     document store and open/edit/save/save-as lifecycle
-crates/lux-search     parallel workspace search with include/exclude, regex, and whole-word filters
-crates/lux-terminal   PTY service backing the integrated terminal
-crates/lux-ssh        non-interactive OpenSSH/scp argument building, ~/.ssh/config discovery, session registry
-crates/lux-git        Git status and diff plumbing over the system git binary
-crates/lux-settings   persisted settings, recent workspaces, and keybinding profiles
+crates/lux-fs         filesystem mutations, recursive scanning, file watching
+crates/lux-editor     document store and open/edit/save lifecycle
+crates/lux-search     parallel workspace search
+crates/lux-terminal   PTY service for the integrated terminal
+crates/lux-git        Git status/diff plumbing
+crates/lux-ssh        non-interactive SSH/scp session registry
+crates/lux-settings   persisted settings, recents, keybinding profiles
+
+crates/lux-lsp        language server lifecycle and protocol translation
+crates/lux-dap        debug adapter discovery and DAP transport
+crates/lux-file-intel office/PDF/spreadsheet/archive/DB extraction and previews
+crates/lux-codegraph  tree-sitter code graph: symbols, edges, resolve, metrics, query
+
+crates/lux-memory     per-project agent memory (SQLite + FTS5, ranked recall)
+crates/lux-skills     discoverable Markdown skill modules
+crates/lux-research   web research core: query building, parsing, lexical rerank
+
+crates/lux-extensions WASM extension host (manifests, contribution points, sandbox)
+crates/lux-bench      deterministic core-performance gate
 ```
 
-Language and code intelligence:
+Deep dives: [Rust-first boundaries](docs/architecture/rust-first-boundaries.md) · [Milestones](docs/architecture/milestones.md) · [Local channels & security posture](docs/architecture/local-channels.md)
 
-```text
-crates/lux-lsp        language server lifecycle, transport framing, and LSP request/response translation
-crates/lux-dap        debug adapter discovery and DAP protocol transport helpers
-crates/lux-file-intel office/PDF/spreadsheet/archive/database extraction and structured file previews
-crates/lux-codegraph  tree-sitter structural code graph: symbols, kinded edges, resolve, metrics, query
-```
+## ✅ Quality Gates
 
-AI:
-
-```text
-crates/lux-memory     per-project durable agent memory (SQLite + FTS5, relevance/importance/recency ranking)
-crates/lux-skills     discoverable Markdown skill modules (project and global scope) for the agent
-crates/lux-research   Perplexica-style web research core: search-URL building, result parsing, lexical rerank
-```
-
-Infrastructure:
-
-```text
-crates/lux-extensions WASM extension host: manifest discovery, contribution points, sandboxed activation
-crates/lux-bench      deterministic core-performance gate for indexing, search, and event batching
-```
-
-Read the architecture contract in [docs/architecture/rust-first-boundaries.md](docs/architecture/rust-first-boundaries.md) and the milestone plan in [docs/architecture/milestones.md](docs/architecture/milestones.md).
-
-## Quick Start
-
-Prerequisites:
-
-- Rust stable toolchain
-- Node.js 22+
-- pnpm 10+
-- Platform dependencies required by Tauri 2
+Every PR runs through:
 
 ```powershell
-pnpm install
-pnpm dev
-```
-
-For web-only frontend iteration:
-
-```powershell
-pnpm dev:web
-```
-
-`pnpm dev:web` is an explicit browser-preview mode for UI iteration only. Production behavior requires the Tauri desktop runtime; browser fallbacks for documents, settings, AI chat history, terminal echo, and LSP no-op responses are disabled outside dev preview. To inspect a built browser preview intentionally, build/run with `VITE_LUX_BROWSER_PREVIEW=1`.
-
-For a production desktop bundle:
-
-```powershell
-pnpm tauri:build
-```
-
-## Quality Gates
-
-Run these before opening a PR:
-
-```powershell
-pnpm typecheck
-pnpm build
+pnpm typecheck && pnpm build
 cargo fmt --all --check
-cargo check --workspace
+cargo clippy --workspace        # pedantic + nursery, deny warnings
 cargo test --workspace
-cargo run -p lux-bench -- --assert --output target/lux-bench-report.json
+cargo run -p lux-bench -- --assert   # core performance gate
 ```
 
-UI changes should also be verified in the running app, including console health, panel layout, keyboard flow, and the affected workflow.
+## 🗺 Roadmap
 
-`lux-bench` is the repeatable core-performance gate. It generates a deterministic temporary workspace and checks Rust-owned file indexing, literal search, and workspace event batching against conservative thresholds, printing a JSON report and optionally writing it with `--output` for CI artifacts or local comparison.
+- **Inline AI ghost-text completion** — the flagship next feature.
+- Project-wide search & replace.
+- Full DAP debug session execution from detected configurations.
+- WASM extension host with a stable public contribution API.
+- Agent-eval harness gating releases; unified multi-file changeset review.
+- Cold-start and workspace-open latency budgets in CI.
 
-## Roadmap
+## 💖 Support the Project
 
-- Harden the real workspace loop: explorer, document lifecycle, search, Git, settings, and terminal reliability.
-- Complete LSP ergonomics across common languages and make diagnostics/navigation feel native.
-- Wire full DAP debug sessions from detected configurations.
-- Build the WASM extension host and stable public contribution API.
-- Add signed release channels, installer QA, and updater artifacts.
-- Add startup/search/indexing benchmarks and publish repeatable performance targets.
+Lux IDE is free and open source, built by one developer. If it saves you time, fuel the roadmap:
 
-## Contributing
+<!-- donations:start -->
+| Platform | Link |
+|---|---|
+| 🎁 **DonationAlerts** | [donationalerts.com/r/gofman5](https://www.donationalerts.com/r/gofman5) |
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a change. Good contributions keep Rust as the product engine, preserve typed IPC, avoid placeholder UX, and include focused tests for shared behavior.
+**Crypto:**
 
-If you are new to the codebase, start with docs, reproducible bugs, focused UI polish, Rust unit tests, LSP/DAP adapters, extension manifest validation, and installer QA.
+| Network | Address |
+|---|---|
+| ₿ Bitcoin (BTC) | `bc1qs5yshuvaxdw7cg9q8602ts9jvc3csh9cyc4q3q` |
+| Ξ Ethereum (ETH / ERC-20) | `0xbbD9c40FfaCDf344D23293887B613A870F6497FB` |
+| ₮ USDT (TRC-20) | `TUitn7ovNfC1N8HaryDecGc8RxsZDqPB9k` |
+| ◎ Solana (SOL) | `D3YBBhbrCiGtEyQY5rR658yZX98qQau5s6Ae7seFBKov` |
+| 💎 TON | `UQB7Sn0sWrByEwZaZXLDv99UiyqkQraZdFZ02f8RJ--qlmdN` |
+| Ł Litecoin (LTC) | `ltc1qgpcmcfc0nntj3nhg0x05m3fkgm6tsv3d5r8zqq` |
+<!-- donations:end -->
 
-## License
+⭐ **Can't donate? Star the repo** — it's the single biggest boost for an open-source project's visibility.
 
-Lux IDE is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+## 🤝 Contributing
 
-## Community
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. Good contributions keep Rust as the product engine, preserve typed IPC, avoid placeholder UX, and include focused tests. New here? Start with docs, reproducible bugs, UI polish, Rust unit tests, or LSP/DAP adapters.
 
-Join the discussion on Telegram: [https://t.me/lux_ide](https://t.me/lux_ide)
+## 💬 Community
+
+- Telegram: [t.me/lux_ide](https://t.me/lux_ide)
+- Issues & feature requests: [GitHub Issues](https://github.com/GofMan5/lux-ide/issues)
+
+## 📄 License
+
+Apache License 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+---
+
+<p align="center">
+  <sub><b>Lux IDE</b> — open-source AI code editor · Cursor alternative · Rust IDE · Tauri desktop app · autonomous coding agent · AI pair programmer</sub>
+</p>

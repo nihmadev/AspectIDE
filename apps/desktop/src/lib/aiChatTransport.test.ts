@@ -19,7 +19,7 @@ function model(effortLevels: AiModelConfig["effortLevels"]): Pick<AiModelConfig,
 
 describe("resolveWireReasoningEffort", () => {
   it("passes preset effort ids through unchanged", () => {
-    for (const id of ["minimal", "low", "medium", "high", "xhigh"]) {
+    for (const id of ["minimal", "low", "medium", "high", "xhigh", "max"]) {
       expect(resolveWireReasoningEffort(id)).toBe(id);
     }
   });
@@ -55,10 +55,14 @@ describe("reasoningPayload", () => {
     expect(reasoningPayload("effort", provider(), model([{ id: "effort", label: "хуи" }]))).toEqual({});
   });
 
-  it("downgrades xhigh to high for non-local-proxy providers", () => {
+  it("downgrades xhigh/max to high for non-local-proxy providers", () => {
     expect(reasoningPayload("xhigh", provider())).toEqual({ reasoning_effort: "high" });
+    expect(reasoningPayload("max", provider())).toEqual({ reasoning_effort: "high" });
     expect(reasoningPayload("xhigh", provider({ protocol: "local-proxy" } as Partial<AiProviderConfig>))).toEqual({
       reasoning_effort: "xhigh",
+    });
+    expect(reasoningPayload("max", provider({ protocol: "local-proxy" } as Partial<AiProviderConfig>))).toEqual({
+      reasoning_effort: "max",
     });
   });
 

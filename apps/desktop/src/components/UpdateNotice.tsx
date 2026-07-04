@@ -1,5 +1,5 @@
 import { ArrowUpCircle, Download, Loader2, RefreshCw, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "../lib/i18n/useTranslation";
 import type { UpdaterState } from "../lib/useUpdater";
 
@@ -16,9 +16,45 @@ type UpdateNoticeProps = {
  * idle / up-to-date / checking stay silent so the UI is never noisy. The full
  * controls (manual check, current version) live in Settings → Updates.
  */
+const MB = 1024 * 1024;
+
+function formatMb(bytes: number): string {
+  return (bytes / MB).toFixed(1);
+}
+
+/** Rolling download speed (bytes/s) from progress samples; null until measurable. */
+function useDownloadSpeed(downloadedBytes: number, active: boolean): number | null {
+  const sample = useRef<{ at: number; bytes: number } | null>(null);
+  const [speed, setSpeed] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!active) {
+      sample.current = null;
+      setSpeed(null);
+      return;
+    }
+    const now = performance.now();
+    const prev = sample.current;
+    if (prev && downloadedBytes > prev.bytes) {
+      const elapsed = (now - prev.at) / 1000;
+      if (elapsed > 0.25) {
+        const instant = (downloadedBytes - prev.bytes) / elapsed;
+        // Light smoothing so the number doesn't jitter every event.
+        setSpeed((current) => (current === null ? instant : current * 0.6 + instant * 0.4));
+        sample.current = { at: now, bytes: downloadedBytes };
+      }
+    } else if (!prev) {
+      sample.current = { at: now, bytes: downloadedBytes };
+    }
+  }, [downloadedBytes, active]);
+
+  return speed;
+}
+
 export function UpdateNotice({ state, onInstall, onDismiss, onRetry }: UpdateNoticeProps) {
   const { t } = useTranslation();
   const [showNotes, setShowNotes] = useState(false);
+  const speed = useDownloadSpeed(state.downloadedBytes, state.status === "downloading");
 
   const visible =
     state.status === "available" ||
@@ -67,11 +103,12 @@ export function UpdateNotice({ state, onInstall, onDismiss, onRetry }: UpdateNot
 
           {state.status === "downloading" && (
             <>
-              <strong className="update-notice-title">{t("update.downloading.title")}</strong>
+              <div className="update-notice-title-row">
+                <strong className="update-notice-title">{t("update.downloading.title")}</strong>
+                <span className="update-notice-percent">{percent === null ? "" : `${percent}%`}</span>
+              </div>
               <p className="update-notice-text">
-                {percent === null
-                  ? t("update.downloading.preparing")
-                  : t("update.downloading.body", { version, percent })}
+                {percent === null ? t("update.downloading.preparing") : `Lux IDE ${version}`}
               </p>
               <div
                 className="update-notice-bar-track"
@@ -85,6 +122,15 @@ export function UpdateNotice({ state, onInstall, onDismiss, onRetry }: UpdateNot
                   data-indeterminate={percent === null ? "true" : undefined}
                   style={percent === null ? undefined : { width: `${percent}%` }}
                 />
+              </div>
+              <div className="update-notice-stats">
+                <span className="update-notice-bytes">
+                  {formatMb(state.downloadedBytes)}
+                  {state.totalBytes !== null ? ` / ${formatMb(state.totalBytes)}` : ""} MB
+                </span>
+                {speed !== null && speed > 0 && (
+                  <span className="update-notice-speed">{formatMb(speed)} MB/s</span>
+                )}
               </div>
             </>
           )}

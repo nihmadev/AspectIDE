@@ -1,5 +1,54 @@
 import { describe, expect, it } from "vitest";
-import { appendTerminalChunks, emptyTerminalBuffer, MAX_TERMINAL_BUFFER_CHARS } from "./terminalOutput";
+import { appendTerminalChunks, emptyTerminalBuffer, MAX_TERMINAL_BUFFER_CHARS, terminalOutputCoalescer } from "./terminalOutput";
+
+const nextFlush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+describe("terminalOutputCoalescer", () => {
+  it("delivers enqueued chunks to the sink (v1.0.17 clear-before-sink regression)", async () => {
+    const seen: Array<Map<string, string[]>> = [];
+    terminalOutputCoalescer.setSink((pending) => seen.push(new Map(pending)));
+
+    terminalOutputCoalescer.enqueue("t1", "hello ");
+    terminalOutputCoalescer.enqueue("t1", "world");
+    terminalOutputCoalescer.enqueue("t2", "other");
+    await nextFlush();
+
+    // The batch handed to the sink must still CONTAIN the chunks — flushing by
+    // clear()ing the shared map handed the sink an empty map, so every terminal
+    // rendered nothing while the PTY kept streaming.
+    expect(seen).toHaveLength(1);
+    expect(seen[0].get("t1")).toEqual(["hello ", "world"]);
+    expect(seen[0].get("t2")).toEqual(["other"]);
+  });
+
+  it("keeps post-flush chunks isolated from the delivered batch", async () => {
+    const seen: Array<Map<string, string[]>> = [];
+    terminalOutputCoalescer.setSink((pending) => seen.push(new Map(pending)));
+
+    terminalOutputCoalescer.enqueue("t1", "first");
+    await nextFlush();
+    terminalOutputCoalescer.enqueue("t1", "second");
+    await nextFlush();
+
+    expect(seen).toHaveLength(2);
+    expect(seen[0].get("t1")).toEqual(["first"]);
+    expect(seen[1].get("t1")).toEqual(["second"]);
+  });
+
+  it("discard drops queued chunks before they reach the sink", async () => {
+    const seen: Array<Map<string, string[]>> = [];
+    terminalOutputCoalescer.setSink((pending) => seen.push(new Map(pending)));
+
+    terminalOutputCoalescer.enqueue("t1", "doomed");
+    terminalOutputCoalescer.enqueue("t2", "survives");
+    terminalOutputCoalescer.discard("t1");
+    await nextFlush();
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0].has("t1")).toBe(false);
+    expect(seen[0].get("t2")).toEqual(["survives"]);
+  });
+});
 
 describe("appendTerminalChunks", () => {
   it("returns the previous buffer unchanged for an empty batch", () => {
