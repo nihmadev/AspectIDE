@@ -56,21 +56,6 @@ export function trimCancelledAssistantShell(
   if (!hasContent) replaceMessages(sessionId, session.messages.slice(0, -1));
 }
 
-/** Fold an error into a trailing empty assistant shell, else append it as a new bubble. */
-export function replaceEmptyAssistantTail(messages: AiChatMessage[], assistantError: AiChatMessage) {
-  const last = messages[messages.length - 1];
-  if (
-    last?.role === "assistant"
-    && !last.content.trim()
-    && !last.reasoning?.trim()
-    && (last.toolCalls?.length ?? 0) === 0
-    && (last.segments?.length ?? 0) === 0
-  ) {
-    return [...messages.slice(0, -1), { ...last, content: assistantError.content, timestamp: assistantError.timestamp }];
-  }
-  return [...messages, assistantError];
-}
-
 export function findLastUserMessageIndex(messages: AiChatMessage[]) {
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     if (messages[index].role === "user") return index;

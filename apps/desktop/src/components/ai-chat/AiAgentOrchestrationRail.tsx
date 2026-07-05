@@ -638,8 +638,14 @@ function SubagentRailRow({
   const { run } = node;
   // Mini live console: the newest transcript entry (a "→ Tool …" start line or
   // the streamed thinking/answer snapshot) shown under a RUNNING row, so the
-  // rail narrates what each subagent is doing without drilling in.
-  const tail = run.status === "running" ? run.transcript.at(-1) : undefined;
+  // rail narrates what each subagent is doing without drilling in. A FAILED row
+  // keeps showing its error line (the transcript tail is the compact error) so
+  // the failure is readable in the rail, not hidden behind a "failed" badge.
+  const tail = run.status === "running"
+    ? run.transcript.at(-1)
+    : run.status === "failed"
+      ? run.transcript.at(-1)
+      : undefined;
   return (
     <li data-status={run.status} style={{ "--subagent-depth": depth } as CSSProperties}>
       <div className="ai-subagent-row-line">

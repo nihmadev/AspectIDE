@@ -41,6 +41,35 @@ function coerceSubagentKind(value: unknown): SubagentKind {
     : ("generalPurpose" as SubagentKind);
 }
 
+const SUBAGENT_ERROR_MAX_CHARS = 240;
+
+/**
+ * Compact a raw subagent failure into one readable console line. Providers wrap
+ * errors in JSON ({"error":{"message":"…"}}) or verbose transport prose; pull the
+ * human message out, collapse whitespace, and clamp — so the rail shows
+ * "402 Insufficient balance" instead of a 2KB stack or an opaque "Failed".
+ */
+export function compactSubagentError(raw: string): string {
+  const text = raw?.trim();
+  if (!text) return "Subagent failed";
+  let message = text;
+  const parsed = parseJson(text);
+  if (parsed) {
+    const err = parsed.error;
+    const nested = err && typeof err === "object" ? (err as Record<string, unknown>).message : undefined;
+    message = String(
+      (typeof nested === "string" && nested)
+      || (typeof err === "string" && err)
+      || (typeof parsed.message === "string" && parsed.message)
+      || text,
+    );
+  }
+  message = message.replace(/\s+/g, " ").trim();
+  return message.length > SUBAGENT_ERROR_MAX_CHARS
+    ? `${message.slice(0, SUBAGENT_ERROR_MAX_CHARS - 1)}…`
+    : message;
+}
+
 /** Mirror a started Task tool call into the subagent-runs store (shows a running row). */
 export function bridgeNativeToolStarted(sessionId: string, callId: string, tool: string, input: string) {
   if (tool !== "Task") return;
@@ -95,7 +124,12 @@ export function bridgeNativeSubagentProgress(
     return;
   }
   if (stage === "error") {
-    completeSubagentRun(callId, content.trim() || "Failed", "failed");
+    // A compact error line lands in the rail transcript (styled by
+    // data-role="error"), so the failure is readable in the console — not only
+    // an opaque "failed" row status.
+    const message = compactSubagentError(content);
+    appendSubagentTranscript(callId, message, "error");
+    completeSubagentRun(callId, message, "failed");
     return;
   }
   // A whole-turn Stop (or a per-row Stop the UI hasn't applied yet) settled the
@@ -114,7 +148,14 @@ export function bridgeNativeToolCompleted(
   output: string,
 ) {
   if (status === "error") {
-    if (tool === "Task" && getSubagentRun(callId)) completeSubagentRun(callId, "Failed", "failed");
+    // Only settle a still-running row: the SubagentProgress "error" stage
+    // usually lands first and already wrote the transcript line — appending
+    // here too would duplicate it.
+    if (tool === "Task" && getSubagentRun(callId)?.status === "running") {
+      const message = compactSubagentError(output);
+      appendSubagentTranscript(callId, message, "error");
+      completeSubagentRun(callId, message, "failed");
+    }
     return;
   }
   const result = parseJson(output);

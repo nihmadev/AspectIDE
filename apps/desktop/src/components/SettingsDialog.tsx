@@ -1017,6 +1017,7 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
         />
         <ToggleSetting label={t("settings.aiRuntime.responseDuration.label")} detail={t("settings.aiRuntime.responseDuration.detail")} checked={preferences.showResponseDuration} onChange={(showResponseDuration) => onChange({ showResponseDuration })} />
         <ToggleSetting label={t("settings.aiRuntime.tokenSpeed.label")} detail={t("settings.aiRuntime.tokenSpeed.detail")} checked={preferences.showTokenSpeed} onChange={(showTokenSpeed) => onChange({ showTokenSpeed })} />
+        <ToggleSetting label={t("settings.aiRuntime.liveWorkTicker.label")} detail={t("settings.aiRuntime.liveWorkTicker.detail")} checked={preferences.liveWorkTicker} onChange={(liveWorkTicker) => onChange({ liveWorkTicker })} />
         <ToggleSetting label={t("settings.aiRuntime.smoothStream.label")} detail={t("settings.aiRuntime.smoothStream.detail")} checked={preferences.chatSmoothStream} onChange={(chatSmoothStream) => onChange({ chatSmoothStream })} />
         <ToggleSetting label={t("settings.aiRuntime.tokenEconomy.label")} detail={t("settings.aiRuntime.tokenEconomy.detail")} checked={preferences.tokenEconomyEnabled} onChange={(tokenEconomyEnabled) => onChange({ tokenEconomyEnabled })} />
         <ToggleSetting

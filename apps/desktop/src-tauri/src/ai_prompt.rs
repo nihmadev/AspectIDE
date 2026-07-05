@@ -424,11 +424,12 @@ mod tests {
         // Ceilings carry headroom for the progress-narration guidance, the
         // CodeGraph tool-map line, the WebResearch deep-research guidance, the
         // TodoWrite task-hygiene line, the subagent fan-out guidance, and the
-        // design-quality standard (deliberate features), while still guarding
-        // against an unbounded prompt.
+        // design-quality standard, and the quality-bar / YAGNI / self-review
+        // additions (deliberate features), while still guarding against an
+        // unbounded prompt.
         let prompt = build_system_prompt(&test_input());
         assert!(
-            prompt.len() <= 20_300,
+            prompt.len() <= 23_500,
             "agent prompt too long: {}",
             prompt.len()
         );
@@ -437,7 +438,7 @@ mod tests {
         auto_input.agent_mode = "automatic".to_string();
         let auto_prompt = build_system_prompt(&auto_input);
         assert!(
-            auto_prompt.len() <= 21_800,
+            auto_prompt.len() <= 25_000,
             "automatic prompt too long: {}",
             auto_prompt.len()
         );

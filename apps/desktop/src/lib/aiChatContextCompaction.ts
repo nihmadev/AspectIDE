@@ -1,6 +1,6 @@
 import { reasoningPayload, requestChatCompletion } from "./aiChatTransport";
 import type { AiChatMessage, AiChatToolCall } from "./aiChatTypes";
-import type { AiModelConfig, AiProviderConfig } from "./aiPreferences";
+import { resolveModelProtocol, type AiModelConfig, type AiProviderConfig } from "./aiPreferences";
 import { normalizeVisibleReasoning } from "./aiChatReasoning";
 import {
   clampContextAutoCompactThreshold,
@@ -640,7 +640,7 @@ async function summarizeCompactionTranscript(input: {
       baseUrl: input.provider.baseUrl,
       apiKey: input.provider.apiKey || null,
       model: input.model.alias || input.model.id,
-      protocol: input.provider.protocol,
+      protocol: resolveModelProtocol(input.provider, input.model),
       reasoning: reasoningPayload(input.selectedEffortId, input.provider, input.model),
     });
     return truncateText(summary, MAX_SUMMARY_CHARS);
@@ -677,10 +677,6 @@ async function summarizeCompactionTranscript(input: {
 
 export function resolveContextUsageBudget(model: AiModelConfig | null | undefined) {
   return resolveModelContextTokens(model);
-}
-
-export function resolveAutoCompactThreshold(preferences: { contextAutoCompactThreshold: number }) {
-  return clampContextAutoCompactThreshold(preferences.contextAutoCompactThreshold);
 }
 
 function buildCompactionDroppedReport(messages: AiChatMessage[]): ContextCompactionDroppedItem[] {

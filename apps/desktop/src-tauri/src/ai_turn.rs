@@ -967,6 +967,12 @@ pub struct TurnInput {
     /// Checkpoint tool on. Best-effort: augmentation never fails the tool call.
     #[serde(default)]
     pub file_checkpoint_id: Option<String>,
+    /// Wire model ids available on the ACTIVE provider (alias-resolved on the
+    /// frontend). Injected into the Task tool's `model` parameter description so
+    /// the orchestrating model assigns subagent models that actually exist
+    /// instead of guessing ids the provider will 400 on. Empty = no annotation.
+    #[serde(default)]
+    pub available_model_ids: Vec<String>,
 }
 
 /// Start a native AI turn. Runs the full model↔tool loop in Rust,
@@ -1045,6 +1051,7 @@ pub async fn ai_run_turn(
         &input.agent_mode,
         input.agent_browser_enabled,
     );
+    crate::ai_tool_defs::annotate_task_model_options(&mut tools, &input.available_model_ids);
     if matches!(input.agent_mode.as_str(), "agent" | "automatic") {
         tools.extend(crate::mcp::agent_tool_definitions().await);
     }
@@ -2127,7 +2134,7 @@ fn harness_alias_hint(normalized: &str) -> Option<&'static str> {
             "Use Shell (one single-line command; cmd.exe /C on Windows)."
         }
         "edit" | "multiedit" | "editfile" | "strreplaceeditor" | "applypatch" | "applydiff" => {
-            "Use StrReplace for one in-file replacement, or PatchEngine for a multi-file batch."
+            "Use StrReplace per edit (several edits = parallel StrReplace calls); PatchEngine only when edits must apply atomically together."
         }
         "websearch" | "searchweb" | "googlesearch" | "google" | "search" => {
             "Use WebResearch (open web question) or MultiWebResearch (several facets in parallel); SemanticSearch/Grep for code."
@@ -5214,7 +5221,24 @@ async fn execute_tool(
                 &subagent_type,
                 model_override.as_deref(),
             )
-            .await?;
+            .await
+            .inspect_err(|error| {
+                // Parity with the background path: a foreground failure must also
+                // settle the Agent-rail row with the error (run_subagent only emits
+                // progress stages on success/cancel — a transport/tool error would
+                // otherwise leave the row spinning and the error invisible there).
+                let _ = emit_turn_event(
+                    app,
+                    &TurnEvent::SubagentProgress {
+                        turn_id: turn_id.to_string(),
+                        call_id: tc.id.clone(),
+                        agent_id: agent_id.clone(),
+                        stage: "error".to_string(),
+                        content: error.clone(),
+                        tool: String::new(),
+                    },
+                );
+            })?;
             // Board digest: tell the parent what this subagent published to the
             // shared AgentMessage board (count + topics) so it can pull details
             // with a targeted read instead of re-reading the whole board blind.

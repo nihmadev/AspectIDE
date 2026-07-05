@@ -1,7 +1,7 @@
 import type { AiChatMessage } from "./aiChatTypes";
 import { filterVisibleChatMessages } from "./aiChatGoalOrchestration";
 import { reasoningPayload, requestChatCompletion, type ChatCompletionMessage } from "./aiChatTransport";
-import type { AiAgentMode, AiModelConfig, AiProviderConfig } from "./aiPreferences";
+import { resolveModelProtocol, type AiAgentMode, type AiModelConfig, type AiProviderConfig } from "./aiPreferences";
 import { truncateText } from "./aiRuntimeShared";
 import { listAiSessionTodos } from "./aiSessionTodos";
 import { isTauriRuntime, luxCommands } from "./tauri";
@@ -68,7 +68,7 @@ export async function requestGoalEvaluatorVerdict(input: {
         baseUrl: input.provider.baseUrl,
         apiKey: input.provider.apiKey || null,
         model: input.model.alias || input.model.id,
-        protocol: input.provider.protocol,
+        protocol: resolveModelProtocol(input.provider, input.model),
         reasoning: reasoningPayload(input.selectedEffortId, input.provider, input.model),
       });
       if (!verdict) return null;

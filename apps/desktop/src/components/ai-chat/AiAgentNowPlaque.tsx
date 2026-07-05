@@ -9,6 +9,9 @@ import type { AiChatSessionStatus } from "../../lib/store";
 type AiAgentNowPlaqueProps = {
   sessionId: string;
   status: AiChatSessionStatus;
+  /** Live single-line tail of the agent's raw output (streaming reasoning/text),
+   *  shown flowing to the right while it works. Empty = ticker off/nothing yet. */
+  workTail?: string;
   t: TranslateFn;
 };
 
@@ -20,7 +23,7 @@ type AiAgentNowPlaqueProps = {
  * duplicates the island's now-bar on purpose — one lives with the conversation,
  * one with the Goal/Tasks overview.
  */
-export function AiAgentNowPlaque({ sessionId, status, t }: AiAgentNowPlaqueProps) {
+export function AiAgentNowPlaque({ sessionId, status, workTail, t }: AiAgentNowPlaqueProps) {
   useSyncExternalStore(subscribeAiTurnActivity, getAiTurnActivitySnapshot, getAiTurnActivitySnapshot);
   useSyncExternalStore(subscribeSubagentRuns, () => 0, () => 0);
 
@@ -30,14 +33,20 @@ export function AiAgentNowPlaque({ sessionId, status, t }: AiAgentNowPlaqueProps
   const subagentText = runningSubagent
     ? `${runningSubagent.subagentType}: ${runningSubagent.description}`
     : activity.subagentLabel;
+  // The raw-work ticker replaces the tool/file chips while there's live output to
+  // show — one calm line beats a chip row plus a duplicate word. Chips remain the
+  // fallback when the ticker is off or before any tokens arrive.
+  const tail = workTail?.trim();
 
   return (
-    <div className="ai-thinking-indicator ai-agent-now-plaque" data-status={status} role="status" aria-live="polite">
+    <div className="ai-thinking-indicator ai-agent-now-plaque" data-status={status} data-ticker={tail ? "true" : undefined} role="status" aria-live="polite">
       <span />
       <span />
       <span />
       <strong>{aiChatStatusLabel(status, true, t)}</strong>
-      {subagentText ? (
+      {tail ? (
+        <span className="ai-agent-now-plaque-ticker" title={tail}>{tail}</span>
+      ) : subagentText ? (
         <span className="ai-agent-now-plaque-chip" title={subagentText}>
           <Network size={11} aria-hidden="true" />
           <span>{subagentText}</span>
@@ -48,7 +57,7 @@ export function AiAgentNowPlaque({ sessionId, status, t }: AiAgentNowPlaqueProps
           <span>{activity.toolName}</span>
         </span>
       ) : null}
-      {!subagentText && activity.filePath && (
+      {!tail && !subagentText && activity.filePath && (
         <span className="ai-agent-now-plaque-chip" title={activity.filePath}>
           <FileCode2 size={11} aria-hidden="true" />
           <span>{basename(activity.filePath)}</span>

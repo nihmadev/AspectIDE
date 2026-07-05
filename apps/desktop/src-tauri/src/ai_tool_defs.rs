@@ -541,7 +541,7 @@ pub fn runtime_tool_definitions(agent_mode: &str, browser_enabled: bool) -> Vec<
         ));
         tools.push(tool(
             "PatchEngine",
-            "Apply many file edits in one atomic batch (all-or-nothing; rolls back on any failure). Each op needs `action` and `path`; an invalid op is reported by its index. StrReplace-style ops are EOL-tolerant like StrReplace.",
+            "Atomic multi-file batch: ALL operations apply or NONE — one failed op rejects the whole batch. Use ONLY when edits must land together (cross-file rename/refactor where a half-applied state would be broken); for independent edits — even several in one file — use StrReplace/Write/Delete instead, so one failure cannot discard the rest. Each op needs `action` and `path`; a failing op is reported by its index. StrReplace-style ops are EOL-tolerant.",
             &[
                 req_arr_items("operations", "Patch ops.", patch_operation_schema()),
                 opt("saveToDisk", "boolean", ""),
@@ -930,6 +930,42 @@ const fn opt_arr_items(name: &'static str, desc: &'static str, items: serde_json
     }
 }
 
+/// Inject the active provider's wire model ids into the Task tool's `model`
+/// parameter description, so the orchestrating model only assigns subagent
+/// models that actually exist on this provider (instead of guessing ids like
+/// "haiku" that the provider will 400 on). No-op when the list is empty or the
+/// Task tool is absent (read-only modes).
+pub fn annotate_task_model_options(tools: &mut [serde_json::Value], available: &[String]) {
+    if available.is_empty() {
+        return;
+    }
+    // Bound the annotation: huge provider catalogs would bloat every request.
+    let shown: Vec<&str> = available.iter().map(String::as_str).take(24).collect();
+    let suffix = if available.len() > shown.len() {
+        format!(" (+{} more)", available.len() - shown.len())
+    } else {
+        String::new()
+    };
+    for def in tools.iter_mut() {
+        let is_task = def
+            .pointer("/function/name")
+            .and_then(|value| value.as_str())
+            == Some("Task");
+        if !is_task {
+            continue;
+        }
+        if let Some(model_desc) =
+            def.pointer_mut("/function/parameters/properties/model/description")
+        {
+            *model_desc = serde_json::Value::String(format!(
+                "Optional model id override for this subagent; omit to inherit the current model. Valid ids on the current provider: {}{suffix}.",
+                shown.join(", "),
+            ));
+        }
+        return;
+    }
+}
+
 fn tool(name: &str, description: &str, params: &[Param]) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
@@ -968,6 +1004,42 @@ fn tool(name: &str, description: &str, params: &[Param]) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_model_annotation_lists_provider_models() {
+        let mut defs = runtime_tool_definitions("agent", false);
+        let models = vec!["glm-5.2".to_string(), "claude-sonnet-4-6".to_string()];
+        annotate_task_model_options(&mut defs, &models);
+        let desc = defs
+            .iter()
+            .find(|def| def.pointer("/function/name").and_then(|v| v.as_str()) == Some("Task"))
+            .and_then(|def| def.pointer("/function/parameters/properties/model/description"))
+            .and_then(|v| v.as_str())
+            .expect("Task model description present");
+        assert!(desc.contains("glm-5.2"), "lists first model: {desc}");
+        assert!(
+            desc.contains("claude-sonnet-4-6"),
+            "lists second model: {desc}"
+        );
+        assert!(
+            desc.contains("omit to inherit"),
+            "keeps the inherit hint: {desc}"
+        );
+
+        // Empty list = untouched description (no trailing "Valid ids:" garbage).
+        let mut untouched = runtime_tool_definitions("agent", false);
+        annotate_task_model_options(&mut untouched, &[]);
+        let base = untouched
+            .iter()
+            .find(|def| def.pointer("/function/name").and_then(|v| v.as_str()) == Some("Task"))
+            .and_then(|def| def.pointer("/function/parameters/properties/model/description"))
+            .and_then(|v| v.as_str())
+            .expect("Task model description present");
+        assert!(
+            !base.contains("Valid ids"),
+            "empty list leaves the default: {base}"
+        );
+    }
 
     #[test]
     fn tool_defs_agent_mode_has_write_tools() {

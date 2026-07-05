@@ -16,7 +16,11 @@ import {
   type AiProviderProtocol,
 } from "../../lib/aiPreferences";
 import { formatCompactTokens } from "../../lib/aiChatContextUsage";
-import { resolveModelContextTokens } from "../../lib/aiModelContext";
+import {
+  MAX_CONTEXT_AUTO_COMPACT_THRESHOLD,
+  MIN_CONTEXT_AUTO_COMPACT_THRESHOLD,
+  resolveModelContextTokens,
+} from "../../lib/aiModelContext";
 import { fetchProviderModelConfigs, isFreeModelId, mergeRefreshedModels } from "../../lib/aiProviderModels";
 import { luxCommands, type AiProviderDiagnosticResponse } from "../../lib/tauri";
 import type { MessageKey } from "../../lib/i18n";
@@ -63,6 +67,14 @@ const PROVIDER_PRESET_DESCRIPTION_KEYS: Record<string, MessageKey> = {
   "local-proxy": "settings.providerPreset.localProxy.description",
   custom: "settings.providerPreset.custom.description",
 };
+
+/** Snap a user-entered override percent to the engine's valid auto-compact band
+ *  (50–95%) and return the 0..1 fraction — so the stored value equals what the
+ *  compaction pipeline actually applies (its floor is 50%). */
+function clampOverridePercent(percent: number): number {
+  const fraction = percent / 100;
+  return Math.min(MAX_CONTEXT_AUTO_COMPACT_THRESHOLD, Math.max(MIN_CONTEXT_AUTO_COMPACT_THRESHOLD, fraction));
+}
 
 function providerPresetDescription(providerType: string, t: TranslateFn) {
   const descriptionKey = PROVIDER_PRESET_DESCRIPTION_KEYS[providerType];
@@ -435,6 +447,15 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
               wide
             />
           )}
+          <NumberSetting
+            label={t("settings.providers.providerAutoCompact.label")}
+            detail={t("settings.providers.providerAutoCompact.detail")}
+            value={Math.round((provider.contextAutoCompactThreshold ?? 0) * 100)}
+            min={0}
+            max={95}
+            step={5}
+            onChange={(percent) => updateEditingProvider({ contextAutoCompactThreshold: percent > 0 ? clampOverridePercent(percent) : null })}
+          />
         </SettingsGrid>
       </SettingsPanel>
 
@@ -522,6 +543,32 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
                 max={1_000}
                 step={0.5}
                 onChange={(price) => updateEditingModel({ outputPricePerMillion: price > 0 ? price : null })}
+              />
+              <SelectSetting<AiProviderProtocol | "inherit">
+                label={t("settings.providers.modelProtocol.label")}
+                detail={t("settings.providers.modelProtocol.detail", { protocol: provider.protocol })}
+                value={editingModel.protocol ?? "inherit"}
+                options={[
+                  { label: t("settings.providers.modelProtocol.inherit", { protocol: provider.protocol }), value: "inherit" },
+                  { label: t("settings.providers.protocol.openaiCompatible"), value: "openai-compatible" },
+                  { label: t("settings.providers.protocol.anthropic"), value: "anthropic" },
+                  { label: t("settings.providers.protocol.google"), value: "google" },
+                  { label: t("settings.providers.protocol.azureOpenai"), value: "azure-openai" },
+                  { label: t("settings.providers.protocol.localProxy"), value: "local-proxy" },
+                ]}
+                onChange={(protocol) => updateEditingModel({ protocol: protocol === "inherit" ? null : protocol })}
+              />
+              <NumberSetting
+                label={t("settings.providers.modelAutoCompact.label")}
+                detail={t("settings.providers.modelAutoCompact.detail")}
+                value={Math.round((editingModel.contextAutoCompactThreshold ?? 0) * 100)}
+                min={0}
+                max={95}
+                step={5}
+                // 0 = inherit; any real override is clamped to the engine's valid
+                // 50–95% band so the stored value equals what actually applies
+                // (the compaction floor is 50% — a lower number would silently snap).
+                onChange={(percent) => updateEditingModel({ contextAutoCompactThreshold: percent > 0 ? clampOverridePercent(percent) : null })}
               />
             </SettingsGrid>
             <div className="effort-editor">

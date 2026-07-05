@@ -17,7 +17,8 @@ pub use model::{
 };
 pub use provider::{
     brave_search_url, canonical_url_key, duckduckgo_lite_search_url, duckduckgo_search_url,
-    expand_queries, extract_result_links, focus_biased_query, parse_brave_html,
-    parse_duckduckgo_html, parse_searxng_json, searxng_search_url, validate_source_url,
+    expand_queries, extract_result_links, focus_biased_query, mojeek_search_url, parse_brave_html,
+    parse_duckduckgo_html, parse_mojeek_html, parse_searxng_json, searxng_search_url,
+    validate_source_url,
 };
 pub use rerank::{rerank, rerank_deep, rerank_multi};

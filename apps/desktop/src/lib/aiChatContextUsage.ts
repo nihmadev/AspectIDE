@@ -3,13 +3,12 @@ import {
   estimateTokens,
   isCompactionCheckpointMessage,
   pruneStaleToolOutputs,
-  resolveAutoCompactThreshold,
   resolveContextUsageBudget,
 } from "./aiChatContextCompaction";
-import type { AiAgentMode, AiModelConfig, AiPreferences } from "./aiPreferences";
+import { resolveEffectiveAutoCompactThreshold, type AiAgentMode, type AiModelConfig, type AiPreferences, type AiProviderConfig } from "./aiPreferences";
 import type { AiChatAttachmentInput, AiChatMessage } from "./aiChatTypes";
 import { normalizeVisibleReasoning } from "./aiChatReasoning";
-import { resolveContextCompactTriggerTokens } from "./aiModelContext";
+import { clampContextAutoCompactThreshold, resolveContextCompactTriggerTokens } from "./aiModelContext";
 import { automaticModeEnforcementPrompt } from "./aiAutomaticModeEnforcement";
 import { luxSystemPromptBaseText } from "./aiSystemPrompt";
 import type { TranslateFn } from "./i18n/useTranslation";
@@ -41,6 +40,8 @@ export type BuildContextUsageInput = {
   conversation: AiChatMessage[];
   message: string;
   preferences: AiPreferences;
+  /** Active provider — carries an optional per-provider auto-compact override. */
+  selectedProvider?: AiProviderConfig | null;
   selectedModel: AiModelConfig | null;
   selectedModelAlias: string;
   t: TranslateFn;
@@ -90,6 +91,7 @@ export function buildAiChatContextUsageSummary({
   conversation,
   message,
   preferences,
+  selectedProvider,
   selectedModel,
   selectedModelAlias,
   t,
@@ -97,8 +99,12 @@ export function buildAiChatContextUsageSummary({
   hasProjectInstructions,
 }: BuildContextUsageInput): AiChatContextUsageSummary & AiChatContextUsageMeta {
   const contextTokenBudget = resolveContextUsageBudget(selectedModel);
-  const autoCompactThresholdPercent = Math.round(resolveAutoCompactThreshold(preferences) * 100);
-  const compactTriggerTokens = resolveContextCompactTriggerTokens(selectedModel, preferences.contextAutoCompactThreshold);
+  // Effective threshold: model override → provider override → global preference.
+  const effectiveThreshold = clampContextAutoCompactThreshold(
+    resolveEffectiveAutoCompactThreshold(preferences.contextAutoCompactThreshold, selectedProvider, selectedModel),
+  );
+  const autoCompactThresholdPercent = Math.round(effectiveThreshold * 100);
+  const compactTriggerTokens = resolveContextCompactTriggerTokens(selectedModel, effectiveThreshold);
   const hasInstructions = hasGlobalInstructions === true || hasProjectInstructions === true;
   const systemDetail = [
     agentName || preferences.agentMode,

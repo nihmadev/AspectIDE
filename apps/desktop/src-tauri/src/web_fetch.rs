@@ -352,10 +352,98 @@ async fn resolve_and_screen(
     if addresses.is_empty() {
         return Err("WebFetch host did not resolve to any address".to_string());
     }
-    if !allow_private && addresses.iter().any(|socket| is_private_ip(socket.ip())) {
-        return Err("WebFetch blocks localhost/private network addresses by default".to_string());
+    match screen_resolved_addresses(&addresses, allow_private) {
+        ScreenVerdict::Allow => Ok(addresses),
+        ScreenVerdict::Reject => {
+            Err("WebFetch blocks localhost/private network addresses by default".to_string())
+        }
+        // Every flagged address sits in the RFC 2544 benchmark range — the
+        // signature of a TUN-mode proxy's fake-IP DNS (Clash/sing-box default
+        // 198.18.0.0/15), where the OS resolver hands out synthetic addresses
+        // and the real connection is made by the proxy at egress. Confirm with
+        // the canary probe before allowing, so the range stays blocked on
+        // normal networks.
+        ScreenVerdict::AllowIfFakeIpDns => {
+            if fake_ip_dns_active().await {
+                Ok(addresses)
+            } else {
+                Err("WebFetch blocks localhost/private network addresses by default".to_string())
+            }
+        }
     }
-    Ok(addresses)
+}
+
+/// Screening verdict for a resolved address set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenVerdict {
+    Allow,
+    Reject,
+    /// Only benchmark-range (198.18.0.0/15) addresses were flagged — allowed
+    /// when the fake-IP DNS canary confirms a TUN-mode proxy environment.
+    AllowIfFakeIpDns,
+}
+
+/// Pure screening decision over resolved addresses (see [`resolve_and_screen`]).
+/// Kept side-effect free so the fake-IP policy is unit-testable.
+fn screen_resolved_addresses(addresses: &[SocketAddr], allow_private: bool) -> ScreenVerdict {
+    if allow_private {
+        return ScreenVerdict::Allow;
+    }
+    let mut benchmark_only = true;
+    let mut any_flagged = false;
+    for socket in addresses {
+        let ip = socket.ip();
+        if !is_private_ip(ip) {
+            continue;
+        }
+        any_flagged = true;
+        let is_benchmark = matches!(ip, IpAddr::V4(v4) if is_benchmark_range_v4(v4));
+        if !is_benchmark {
+            benchmark_only = false;
+        }
+    }
+    if !any_flagged {
+        ScreenVerdict::Allow
+    } else if benchmark_only {
+        ScreenVerdict::AllowIfFakeIpDns
+    } else {
+        ScreenVerdict::Reject
+    }
+}
+
+/// Cached canary probe for fake-IP DNS: resolve a guaranteed-public domain and
+/// see whether the answer lands in 198.18.0.0/15. Only a TUN-mode proxy's DNS
+/// (fake-ip mode) does that — real DNS never returns the benchmark range for
+/// `example.com`. Cached for 60s so toggling the VPN mid-session is picked up
+/// without re-resolving on every request.
+async fn fake_ip_dns_active() -> bool {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    const TTL: Duration = Duration::from_mins(1);
+
+    if let Ok(cache) = CACHE.lock() {
+        if let Some((at, active)) = *cache {
+            if at.elapsed() < TTL {
+                return active;
+            }
+        }
+    }
+    let active = tokio::task::spawn_blocking(|| {
+        ("example.com", 80)
+            .to_socket_addrs()
+            .is_ok_and(|mut addrs| {
+                addrs.any(
+                    |socket| matches!(socket.ip(), IpAddr::V4(v4) if is_benchmark_range_v4(v4)),
+                )
+            })
+    })
+    .await
+    .unwrap_or(false);
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = Some((Instant::now(), active));
+    }
+    active
 }
 
 fn validate_url(url: &str) -> Result<reqwest::Url, String> {
@@ -383,6 +471,13 @@ fn is_localhost_name(host: &str) -> bool {
     host == "localhost" || host.ends_with(".localhost")
 }
 
+/// 198.18.0.0/15 — RFC 2544 benchmarking. Blocked by default, but ALSO the
+/// standard fake-IP range TUN-mode proxies (Clash, sing-box) hand out from
+/// their synthetic DNS — see the fake-IP carve-out in [`resolve_and_screen`].
+const fn is_benchmark_range_v4(ip: Ipv4Addr) -> bool {
+    ip.octets()[0] == 198 && (ip.octets()[1] & 0xfe) == 18
+}
+
 const fn is_private_ipv4(ip: Ipv4Addr) -> bool {
     ip.is_private()
         || ip.is_loopback()
@@ -394,8 +489,7 @@ const fn is_private_ipv4(ip: Ipv4Addr) -> bool {
         || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 0x40)
         // 192.0.0.0/24 — IETF protocol assignments (RFC 6890).
         || (ip.octets()[0] == 192 && ip.octets()[1] == 0 && ip.octets()[2] == 0)
-        // 198.18.0.0/15 — benchmarking (RFC 2544).
-        || (ip.octets()[0] == 198 && (ip.octets()[1] & 0xfe) == 18)
+        || is_benchmark_range_v4(ip)
 }
 
 const fn is_private_ip(ip: IpAddr) -> bool {
@@ -543,6 +637,50 @@ mod tests {
         assert!(validate_url("file:///C:/Windows/win.ini").is_err());
         assert!(validate_url("ftp://example.com/file.txt").is_err());
         assert!(validate_url("https://example.com/docs").is_ok());
+    }
+
+    #[test]
+    fn screening_allows_benchmark_range_only_behind_fake_ip_dns() {
+        let fake_ip: Vec<SocketAddr> = vec!["198.18.0.5:443".parse().unwrap()];
+        let mixed: Vec<SocketAddr> = vec![
+            "198.18.0.5:443".parse().unwrap(),
+            "10.0.0.5:443".parse().unwrap(),
+        ];
+        let public: Vec<SocketAddr> = vec!["93.184.216.34:443".parse().unwrap()];
+        let private: Vec<SocketAddr> = vec!["192.168.1.10:443".parse().unwrap()];
+
+        // TUN fake-IP DNS answers (Clash/sing-box 198.18.0.0/15) are deferred to
+        // the canary check, never rejected outright and never blindly allowed.
+        assert_eq!(
+            screen_resolved_addresses(&fake_ip, false),
+            ScreenVerdict::AllowIfFakeIpDns
+        );
+        // Any genuinely private address alongside them still hard-rejects.
+        assert_eq!(
+            screen_resolved_addresses(&mixed, false),
+            ScreenVerdict::Reject
+        );
+        assert_eq!(
+            screen_resolved_addresses(&public, false),
+            ScreenVerdict::Allow
+        );
+        assert_eq!(
+            screen_resolved_addresses(&private, false),
+            ScreenVerdict::Reject
+        );
+        // allow_private (self-hosted SearxNG) bypasses screening entirely.
+        assert_eq!(
+            screen_resolved_addresses(&private, true),
+            ScreenVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn benchmark_range_covers_exactly_rfc2544() {
+        assert!(is_benchmark_range_v4("198.18.0.1".parse().unwrap()));
+        assert!(is_benchmark_range_v4("198.19.255.254".parse().unwrap()));
+        assert!(!is_benchmark_range_v4("198.17.255.254".parse().unwrap()));
+        assert!(!is_benchmark_range_v4("198.20.0.1".parse().unwrap()));
     }
 
     #[test]

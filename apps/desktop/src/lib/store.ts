@@ -80,6 +80,14 @@ export type EditorRevealTarget = {
   column: number;
 };
 
+/** One failed attempt shown in the error card's history disclosure; consecutive
+ *  identical failures collapse into a single entry with a bumped `count`. */
+export type AiChatErrorHistoryEntry = {
+  message: string;
+  timestamp: number;
+  count: number;
+};
+
 export type AiChatSession = {
   id: string;
   title: string;
@@ -93,6 +101,8 @@ export type AiChatSession = {
   pinned?: boolean;
   status: AiChatSessionStatus;
   lastError: string | null;
+  /** Failures accumulated across the current retry ladder; cleared on a clean idle. */
+  errorHistory?: AiChatErrorHistoryEntry[];
   closedAt: number | null;
   createdAt: number;
   updatedAt: number;
@@ -227,6 +237,8 @@ type LuxState = {
   updateAiChatMessage: (sessionId: string, messageId: string, patch: Partial<AiChatMessage>) => void;
   replaceAiChatMessages: (sessionId: string, messages: AiChatMessage[], options?: { contextCompaction?: ContextCompactionState | null }) => void;
   setAiChatSessionStatus: (sessionId: string, status: AiChatSessionStatus, lastError?: string | null) => void;
+  clearAiChatErrorHistory: (sessionId: string) => void;
+  appendAiChatSessionError: (sessionId: string, message: string) => void;
   updateEditorPreferences: (preferences: Partial<EditorPreferences>) => void;
   setEditorPreferences: (preferences: EditorPreferences) => void;
   setKeybindingProfile: (profile: KeybindingProfile) => void;
@@ -488,9 +500,38 @@ export const useLuxStore = create<LuxState>((set, get) => ({
     })),
   setAiChatSessionStatus: (sessionId, status, lastError = null) =>
     set((state) => ({
-      aiChatSessions: state.aiChatSessions.map((session) => session.id === sessionId
-        ? { ...session, status, lastError, updatedAt: status === "idle" ? session.updatedAt : Date.now() }
-        : session),
+      aiChatSessions: state.aiChatSessions.map((session) => {
+        if (session.id !== sessionId) return session;
+        // Error history feeds the error card's "previous attempts" disclosure:
+        // every failure appends an entry, a clean idle end clears the ladder, and
+        // intermediate statuses (e.g. "thinking" between auto-retries) keep it.
+        const errorHistory = lastError
+          ? appendAiChatErrorHistory(session.errorHistory, lastError)
+          : status === "idle"
+            ? undefined
+            : session.errorHistory;
+        return { ...session, status, lastError, errorHistory, updatedAt: status === "idle" ? session.updatedAt : Date.now() };
+      }),
+    })),
+  // A fresh (non-retry) send starts a new logical turn — the previous failure's
+  // retry ladder must not leak under a later, unrelated error card.
+  clearAiChatErrorHistory: (sessionId) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) =>
+        session.id === sessionId && session.errorHistory !== undefined
+          ? { ...session, errorHistory: undefined }
+          : session),
+    })),
+  // Record a transient failure in the session's error history WITHOUT changing
+  // status/lastError — used for the backend's in-turn retry notices (rate limit,
+  // provider hiccups) so the "Retrying" banner's error-history disclosure fills
+  // up live during the ladder, before the turn has ultimately failed.
+  appendAiChatSessionError: (sessionId, message) =>
+    set((state) => ({
+      aiChatSessions: state.aiChatSessions.map((session) =>
+        session.id === sessionId
+          ? { ...session, errorHistory: appendAiChatErrorHistory(session.errorHistory, message) }
+          : session),
     })),
   updateEditorPreferences: (preferences) => set((state) => ({ editorPreferences: mergeEditorPreferences(state.editorPreferences, preferences) })),
   setEditorPreferences: (editorPreferences) => set({ editorPreferences }),
@@ -987,10 +1028,29 @@ function createAiChatSession(workspaceRoot: string | null): AiChatSession {
     contextCompaction: null,
     status: "idle",
     lastError: null,
+    errorHistory: undefined,
     closedAt: null,
     createdAt: now,
     updatedAt: now,
   };
+}
+
+const AI_CHAT_ERROR_HISTORY_LIMIT = 8;
+
+/** Append a failure to the session's retry-error history. Consecutive identical
+ *  messages collapse into one entry with a bumped count (an auto-retry ladder
+ *  hitting the same 403 eight times reads as one line, not eight); the list is
+ *  capped so a marathon of distinct failures cannot grow unbounded. */
+export function appendAiChatErrorHistory(
+  history: AiChatErrorHistoryEntry[] | undefined,
+  message: string,
+): AiChatErrorHistoryEntry[] {
+  const entries = history ?? [];
+  const last = entries[entries.length - 1];
+  if (last && last.message === message) {
+    return [...entries.slice(0, -1), { ...last, count: last.count + 1, timestamp: Date.now() }];
+  }
+  return [...entries, { message, timestamp: Date.now(), count: 1 }].slice(-AI_CHAT_ERROR_HISTORY_LIMIT);
 }
 
 function normalizeAiChatSessionState(chatState: AiChatSessionState, fallbackRoot: string | null = null): Pick<LuxState, "aiChatSessions" | "activeAiChatSessionId"> {
@@ -1033,7 +1093,7 @@ function mergeAiChatSessionState(state: LuxState, chatState: AiChatSessionState)
 function chooseHydratedAiChatSession(current: AiChatSession, persisted: AiChatSession): AiChatSession {
   if (isAiChatSessionBusyStatus(current.status)) {
     if (persisted.messages.length > current.messages.length) {
-      return { ...current, ...persisted, status: current.status, lastError: current.lastError };
+      return { ...current, ...persisted, status: current.status, lastError: current.lastError, errorHistory: current.errorHistory };
     }
     return current;
   }
@@ -1054,6 +1114,7 @@ function normalizeAiChatSession(session: AiChatSession, options: { preserveRunti
     title: normalizeChatTitle(session.title || titleFromMessages(session.messages) || "New chat"),
     status,
     lastError: session.lastError ?? null,
+    errorHistory: Array.isArray(session.errorHistory) ? session.errorHistory : undefined,
     closedAt: Number.isFinite(session.closedAt) ? session.closedAt : null,
     messages: Array.isArray(session.messages) ? session.messages.map(normalizeAiChatMessage) : [],
     contextCompaction: session.contextCompaction ?? null,

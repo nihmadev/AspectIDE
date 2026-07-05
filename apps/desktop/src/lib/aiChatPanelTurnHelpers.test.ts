@@ -4,7 +4,6 @@ import {
   isAbortError,
   messageHasAssistantWork,
   readErrorMessage,
-  replaceEmptyAssistantTail,
   restoreUnansweredUserMessage,
   statusToSessionStatus,
   stripTrailingErrorBubble,
@@ -52,26 +51,6 @@ describe("stripTrailingErrorBubble", () => {
   it("keeps the message when the content does not match lastError", () => {
     const history = [message({ content: "different" })];
     expect(stripTrailingErrorBubble(history, "Rate limited")).toBe(history);
-  });
-});
-
-describe("replaceEmptyAssistantTail", () => {
-  const errorBubble = message({ id: "err", content: "boom", timestamp: 42 });
-
-  it("folds the error into a trailing empty assistant shell", () => {
-    const history = [message({ role: "user" }), message({ id: "shell" })];
-    const next = replaceEmptyAssistantTail(history, errorBubble);
-    expect(next).toHaveLength(2);
-    expect(next[1].id).toBe("shell");
-    expect(next[1].content).toBe("boom");
-    expect(next[1].timestamp).toBe(42);
-  });
-
-  it("appends a new bubble when the tail already has content", () => {
-    const history = [message({ content: "real answer" })];
-    const next = replaceEmptyAssistantTail(history, errorBubble);
-    expect(next).toHaveLength(2);
-    expect(next[1]).toBe(errorBubble);
   });
 });
 

@@ -14,6 +14,7 @@ import { clearPendingPlansForSession, getPendingPlanForSession, registerPendingP
 import { browserSessionName, ensureBrowserStream } from "./agentBrowser";
 import { bumpBrowserStreamRefresh } from "./aiChatTurnRuntime";
 import { loadProjectAgentsSnip } from "./aiProjectAgentsSnip";
+import { resolveModelProtocol } from "./aiPreferences";
 import { isTauriRuntime, luxCommands, subscribeAiTurn, type AiRunTurnInput, type AiTurnEvent } from "./tauri";
 
 /**
@@ -205,7 +206,16 @@ export async function runNativeChatTurn(input: AiChatSendInput): Promise<AiChatM
             ...(event.error ? { error: event.error } : {}),
             endTime: Date.now(),
           });
-          bridgeNativeToolCompleted(input.chatSessionId, event.callId, toolNameByCallId.get(event.callId) ?? "", event.status, event.output);
+          // On error the Rust side always sends output="" and puts the real message
+          // in `error`; pass the error so a failed Task (e.g. invalid args, rejected
+          // in this mode) surfaces its actual reason in the rail, not a generic one.
+          bridgeNativeToolCompleted(
+            input.chatSessionId,
+            event.callId,
+            toolNameByCallId.get(event.callId) ?? "",
+            event.status,
+            event.status === "error" ? (event.error ?? event.output) : event.output,
+          );
           // A successful navigational browser tool means the agent is driving a live
           // page — reflect it in the preview (stream + blue activity dot) automatically.
           if (event.status !== "error" && completed && NAVIGATIONAL_BROWSER_TOOLS.has(completed.tool)) {
@@ -462,9 +472,10 @@ async function buildRunTurnInput(input: AiChatSendInput, turnId: string, message
     baseUrl: input.provider.baseUrl,
     apiKey: input.provider.apiKey || null,
     model: selectedModelAlias,
-    // Best-effort semantic memory: empty for anthropic-protocol providers (no
-    // /embeddings endpoint) or when the user never set one.
-    embeddingModel: input.provider.protocol === "anthropic" ? null : (input.provider.embeddingModel || null),
+    // Best-effort semantic memory: empty for anthropic-protocol models (no
+    // /embeddings endpoint) or when the user never set one. Uses the EFFECTIVE
+    // protocol — a per-model override wins over the provider's setting.
+    embeddingModel: resolveModelProtocol(input.provider, input.selectedModel) === "anthropic" ? null : (input.provider.embeddingModel || null),
     agentMode: input.preferences.agentMode,
     toolRoundLimit: input.preferences.toolRoundLimit,
     toolApprovalMode: input.preferences.toolApprovalMode,
@@ -493,7 +504,7 @@ async function buildRunTurnInput(input: AiChatSendInput, turnId: string, message
       selectedEffortId: input.preferences.selectedEffortId,
       selectedModelAlias,
       providerName: input.provider.name,
-      providerProtocol: input.provider.protocol,
+      providerProtocol: resolveModelProtocol(input.provider, input.selectedModel),
       workspaceRoot: input.workspace?.root ?? "",
       runtimeToolsAvailable: true,
       agentBrowserEnabled: input.preferences.agentBrowserEnabled,
@@ -511,5 +522,9 @@ async function buildRunTurnInput(input: AiChatSendInput, turnId: string, message
     // (Write/StrReplace/Delete/PatchEngine augmenting the checkpoint) never runs,
     // because the native turn never learns which checkpoint to augment.
     fileCheckpointId: input.turnCheckpoint?.fileCheckpointId,
+    // Wire ids of every model on the ACTIVE provider — injected into the Task
+    // tool's `model` description so the orchestrator assigns subagent models
+    // that actually exist instead of guessing ids the provider 400s on.
+    availableModelIds: input.provider.models.map((model) => model.alias || model.id).filter(Boolean),
   };
 }

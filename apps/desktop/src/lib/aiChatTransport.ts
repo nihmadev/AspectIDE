@@ -1,4 +1,4 @@
-import type { AiModelConfig, AiProviderConfig } from "./aiPreferences";
+import { resolveModelProtocol, type AiModelConfig, type AiProviderConfig } from "./aiPreferences";
 import { readVisibleReasoningFromProviderField } from "./aiChatReasoning";
 import { createDesktopRuntimeError, isBrowserPreviewRuntime, isTauriRuntime, luxCommands, subscribeAiChatStream } from "./tauri";
 
@@ -495,12 +495,13 @@ export function resolveWireReasoningEffort(
 export function reasoningPayload(
   effortId: string,
   provider: AiProviderConfig,
-  model?: Pick<AiModelConfig, "effortLevels"> | null,
+  model?: Pick<AiModelConfig, "effortLevels" | "protocol"> | null,
 ): Record<string, unknown> {
   const wireEffort = resolveWireReasoningEffort(effortId, model);
   if (!wireEffort) return {};
+  // Effective protocol: a per-model override wins over the provider's setting.
   const normalizedEffort =
-    (wireEffort === "xhigh" || wireEffort === "max") && provider.protocol !== "local-proxy" ? "high" : wireEffort;
+    (wireEffort === "xhigh" || wireEffort === "max") && resolveModelProtocol(provider, model) !== "local-proxy" ? "high" : wireEffort;
   // Send the single field the provider expects, not both. OpenRouter's unified API
   // takes `reasoning: { effort }`; every other OpenAI-compatible provider takes the
   // OpenAI-standard `reasoning_effort` string. Sending the unknown `reasoning`

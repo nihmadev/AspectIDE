@@ -9,7 +9,7 @@ export type SubagentRunStatus = "running" | "completed" | "failed" | "cancelled"
 
 export type SubagentTranscriptEntry = {
   id: string;
-  role: "assistant" | "system";
+  role: "assistant" | "system" | "error";
   content: string;
   at: number;
 };

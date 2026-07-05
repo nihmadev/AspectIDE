@@ -12,10 +12,10 @@ use std::collections::HashMap;
 
 use lux_research::{
     brave_search_url, canonical_url_key, duckduckgo_lite_search_url, duckduckgo_search_url,
-    expand_queries, extract_result_links, focus_biased_query, parse_brave_html,
-    parse_duckduckgo_html, parse_searxng_json, rerank, rerank_deep, rerank_multi,
-    searxng_search_url, FocusMode, MultiResearchResponse, ResearchDepth, ResearchOptions,
-    ResearchResponse, SearchHit,
+    expand_queries, extract_result_links, focus_biased_query, mojeek_search_url, parse_brave_html,
+    parse_duckduckgo_html, parse_mojeek_html, parse_searxng_json, rerank, rerank_deep,
+    rerank_multi, searxng_search_url, FocusMode, MultiResearchResponse, ResearchDepth,
+    ResearchOptions, ResearchResponse, SearchHit,
 };
 use tauri::State;
 
@@ -71,7 +71,7 @@ pub async fn web_research(
     let mut notes = Vec::new();
     if searxng.is_none() {
         notes.push(
-            "Using the keyless search fallback (DuckDuckGo, then Brave). Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
+            "Using the keyless search fallback (DuckDuckGo, then Brave, then Mojeek). Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
         );
     }
 
@@ -142,7 +142,7 @@ pub async fn web_research(
     // Backend answered but parsed to nothing: a search-backend issue, not "no results".
     if merged.is_empty() && backend_responded {
         notes.push(
-            "The keyless search engines (DuckDuckGo, then Brave) responded but no results could be parsed (a challenge/anomaly page, or markup drift). This is a search-backend issue, not an absence of results — retry shortly, rephrase the query, or configure a SearxNG instance in Settings → AI → Web Research.".to_string(),
+            "The keyless search engines (DuckDuckGo, then Brave, then Mojeek) responded but no results could be parsed (a challenge/anomaly page, or markup drift). This is a search-backend issue, not an absence of results — retry shortly, rephrase the query, or configure a SearxNG instance in Settings → AI → Web Research.".to_string(),
         );
     }
 
@@ -316,7 +316,7 @@ pub async fn multi_web_research(
     let searxng = configured_searxng_url(&state);
     if searxng.is_none() {
         notes.push(
-            "Using the keyless search fallback (DuckDuckGo, then Brave). Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
+            "Using the keyless search fallback (DuckDuckGo, then Brave, then Mojeek). Configure a SearxNG instance in Settings → AI → Web Research for richer, focus-aware results.".to_string(),
         );
     }
 
@@ -522,17 +522,13 @@ async fn search_provider(
     }
 }
 
-/// Which keyless engine actually produced the hits ("brave" when the Brave
+/// Which keyless engine actually produced the hits ("brave"/"mojeek" when a
 /// fallback rescued a DDG failure, else "duckduckgo").
 fn keyless_provider_name(outcome: &DuckDuckGoOutcome) -> &'static str {
-    if outcome
-        .hits
-        .first()
-        .is_some_and(|hit| hit.engine == "brave")
-    {
-        "brave"
-    } else {
-        "duckduckgo"
+    match outcome.hits.first().map(|hit| hit.engine.as_str()) {
+        Some("brave") => "brave",
+        Some("mojeek") => "mojeek",
+        _ => "duckduckgo",
     }
 }
 
@@ -648,18 +644,32 @@ async fn search_keyless(query: &str, focus: FocusMode) -> Result<DuckDuckGoOutco
     let ddg = search_duckduckgo(query, focus).await;
     match ddg {
         Ok(outcome) if !outcome.hits.is_empty() => Ok(outcome),
-        // DDG responded-but-empty (challenge page) or hard-failed → try Brave.
+        // DDG responded-but-empty (challenge page) or hard-failed → try Brave,
+        // then Mojeek (independent index, classic markup, no bot challenge).
         Ok(empty_outcome) => match search_brave(query, focus).await {
             Ok(outcome) if !outcome.hits.is_empty() => Ok(outcome),
-            // Brave also empty/failed: keep DDG's outcome so the caller's
-            // "backend responded but unparseable" note stays accurate.
-            _ => Ok(empty_outcome),
+            _ => match search_mojeek(query, focus).await {
+                Ok(outcome) if !outcome.hits.is_empty() => Ok(outcome),
+                // Every engine empty/failed: keep DDG's outcome so the caller's
+                // "backend responded but unparseable" note stays accurate.
+                _ => Ok(empty_outcome),
+            },
         },
         Err(ddg_error) => match search_brave(query, focus).await {
-            Ok(outcome) => Ok(outcome),
-            Err(brave_error) => Err(format!(
-                "keyless search failed — DuckDuckGo: {ddg_error}; Brave: {brave_error}"
-            )),
+            Ok(outcome) if !outcome.hits.is_empty() => Ok(outcome),
+            Ok(_) => match search_mojeek(query, focus).await {
+                Ok(outcome) => Ok(outcome),
+                Err(_) => Ok(DuckDuckGoOutcome {
+                    hits: Vec::new(),
+                    backend_responded: true,
+                }),
+            },
+            Err(brave_error) => match search_mojeek(query, focus).await {
+                Ok(outcome) => Ok(outcome),
+                Err(mojeek_error) => Err(format!(
+                    "keyless search failed — DuckDuckGo: {ddg_error}; Brave: {brave_error}; Mojeek: {mojeek_error}"
+                )),
+            },
         },
     }
 }
@@ -680,6 +690,26 @@ async fn search_brave(query: &str, focus: FocusMode) -> Result<DuckDuckGoOutcome
     .await?;
     Ok(DuckDuckGoOutcome {
         hits: parse_brave_html(&body),
+        backend_responded: true,
+    })
+}
+
+/// Mojeek HTML fallback (keyless, GET). Independent index with stable classic
+/// markup — the last resort when `DuckDuckGo` and Brave both challenge or drift.
+async fn search_mojeek(query: &str, focus: FocusMode) -> Result<DuckDuckGoOutcome, String> {
+    let biased = focus_biased_query(query, focus);
+    let query = biased.as_deref().unwrap_or(query);
+    let url = mojeek_search_url(query);
+    let body = web_fetch::fetch_text(
+        &url,
+        "text/html",
+        SEARCH_TIMEOUT_SECS,
+        SEARCH_MAX_BYTES,
+        false,
+    )
+    .await?;
+    Ok(DuckDuckGoOutcome {
+        hits: parse_mojeek_html(&body),
         backend_responded: true,
     })
 }

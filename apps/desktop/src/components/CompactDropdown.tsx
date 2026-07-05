@@ -37,6 +37,10 @@ type CompactDropdownProps<T extends string> = {
   footer?: ReactNode;
   /** Per-option inline style (also applied to the trigger's current value) — e.g. font pickers previewing each family in itself. */
   getOptionStyle?: (value: T) => CSSProperties | undefined;
+  /** Optional node rendered in the TRIGGER as a quiet second line BELOW the
+   *  selected label (not in the option list) — e.g. the provider name shown
+   *  under the model, centered. Turns the trigger into a two-line stacked box. */
+  triggerSubLabel?: ReactNode;
 };
 
 // Session-scoped view memory per dropdown (keyed by className + label): the
@@ -80,6 +84,7 @@ export function CompactDropdown<T extends string>({
   hideOptionLabel,
   footer,
   getOptionStyle,
+  triggerSubLabel,
 }: CompactDropdownProps<T>) {
   // Label is part of the key so the three composer selects (same className)
   // don't share one memory slot.
@@ -312,7 +317,14 @@ export function CompactDropdown<T extends string>({
         }}
       >
         {icon}
-        <span className="compact-dropdown-value" style={getOptionStyle?.(value)}>{selectedLabel}</span>
+        {triggerSubLabel ? (
+          <span className="compact-dropdown-stack">
+            <span className="compact-dropdown-value" style={getOptionStyle?.(value)}>{selectedLabel}</span>
+            <span className="compact-dropdown-sublabel">{triggerSubLabel}</span>
+          </span>
+        ) : (
+          <span className="compact-dropdown-value" style={getOptionStyle?.(value)}>{selectedLabel}</span>
+        )}
         <ChevronDown size={12} />
       </button>
       {open && position && createPortal(

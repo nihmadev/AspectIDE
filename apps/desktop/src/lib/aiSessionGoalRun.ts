@@ -172,6 +172,7 @@ export function resumeGoalRun(sessionId: string) {
   run.completedAt = null;
   run.noProgressTurns = 0;
   stallSignals.delete(`${sessionId}:stall`);
+  repeatedAnswerSignals.delete(sessionId);
   resetToolLoopDetector(sessionId);
   run.budgetWrapupSent = false;
   run.blockedReason = null;
@@ -236,6 +237,7 @@ export function startGoalRun(
     `Limits: ${limits.maxRounds} rounds, ${Math.round(limits.maxDurationMs / 1000)}s, ${formatGoalTokenBudget(limits.maxTokens)} tokens.`,
   );
   stallSignals.delete(`${sessionId}:stall`);
+  repeatedAnswerSignals.delete(sessionId);
   resetToolLoopDetector(sessionId);
   goalRuns.set(sessionId, run);
   emit();
@@ -263,6 +265,7 @@ function finishGoalRun(sessionId: string, phase: Exclude<GoalRunPhase, "running"
   run.completionSummary = summary;
   run.lastEvaluatorReason = summary;
   stallSignals.delete(`${sessionId}:stall`);
+  repeatedAnswerSignals.delete(sessionId);
   goalRuns.set(sessionId, run);
   emit();
   return run;
@@ -272,6 +275,7 @@ function finishGoalRun(sessionId: string, phase: Exclude<GoalRunPhase, "running"
 export function disposeGoalRun(sessionId: string) {
   goalRuns.delete(sessionId);
   stallSignals.delete(`${sessionId}:stall`);
+  repeatedAnswerSignals.delete(sessionId);
   resetToolLoopDetector(sessionId);
   emit();
 }
@@ -522,6 +526,37 @@ export function evaluateGoalCondition(
   if (!refreshed) return { status: "idle" };
   if (refreshed.phase === "completed") {
     return { status: "satisfied", reason: refreshed.completionSummary ?? "Goal completed." };
+  }
+
+  // Refusal / hard-repeat guard — the ONE stall that stops even Automatic mode.
+  // A model that answers with near-identical no-tool text turn after turn is
+  // refusing the request (or hard-blocked); auto-continue would re-ask forever
+  // and burn tokens on the same answer. This runs BEFORE the [goal:blocked]
+  // handling so Automatic's "convert blocked to continue" nudge cannot recycle
+  // a persistent refusal, and it is deliberately exempt from the Automatic
+  // no-stop policy: repeating the identical question is not autonomy.
+  if (assistant && (assistant.toolCalls?.length ?? 0) === 0 && assistant.content.trim()) {
+    const normalized = normalizeAnswerForRepeatGuard(assistant.content);
+    const previous = repeatedAnswerSignals.get(sessionId);
+    if (previous && repeatedAnswerSimilarity(previous.snippet, normalized) >= REPEATED_ANSWER_SIMILARITY) {
+      const count = previous.count + 1;
+      repeatedAnswerSignals.set(sessionId, { snippet: normalized, count });
+      // A repeated answer that carries [goal:blocked] is an explicit refusal —
+      // stop one turn earlier than a plain repeat.
+      const limit = detectGoalBlockedMarker(assistant) ? 2 : REPEATED_ANSWER_LIMIT;
+      if (count >= limit) {
+        repeatedAnswerSignals.delete(sessionId);
+        const reason = `Stopped — the assistant repeated the same answer ${count}× with no tool work (refusal or hard block). Adjust the request and start a new goal.`;
+        refreshed.blockedReason = reason;
+        finishGoalRun(sessionId, "blocked", reason);
+        return { status: "blocked", reason };
+      }
+    } else {
+      repeatedAnswerSignals.set(sessionId, { snippet: normalized, count: 1 });
+    }
+  } else if (assistant && (assistant.toolCalls?.length ?? 0) > 0) {
+    // Real tool work resets the guard — the run is progressing again.
+    repeatedAnswerSignals.delete(sessionId);
   }
 
   if (detectGoalBlockedMarker(assistant)) {
@@ -804,6 +839,38 @@ const AUTOMATIC_NO_STOP_NUDGE =
   "Automatic mode: budgets are advisory and there is no user to stop you — keep working until the task is genuinely complete. Consolidate steps to stay efficient, verify with tools, and call Goal with status \"completed\" only when the completion condition is fully satisfied.";
 
 const stallSignals = new Map<string, number>();
+
+/** Consecutive near-identical no-tool answers per session (refusal-loop guard). */
+const repeatedAnswerSignals = new Map<string, { snippet: string; count: number }>();
+/** Total identical answers (first + repeats) before the run stops as blocked. */
+const REPEATED_ANSWER_LIMIT = 3;
+/** Word-set Jaccard similarity above which two answers count as "the same". */
+const REPEATED_ANSWER_SIMILARITY = 0.7;
+
+/** Normalize an answer for repeat comparison: markers out, case/whitespace folded. */
+export function normalizeAnswerForRepeatGuard(text: string) {
+  return text
+    .replace(/\[goal:(?:complete|blocked)[^\]]*\]/gi, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 1_200);
+}
+
+/** Word-set Jaccard similarity (0..1) between two normalized answers. Refusal
+ *  turns are rarely byte-identical — the model rephrases the same refusal — so
+ *  compare shared vocabulary instead of exact text. */
+export function repeatedAnswerSimilarity(a: string, b: string) {
+  const wordsA = new Set(a.split(" ").filter((word) => word.length > 2));
+  const wordsB = new Set(b.split(" ").filter((word) => word.length > 2));
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  let shared = 0;
+  for (const word of wordsA) {
+    if (wordsB.has(word)) shared += 1;
+  }
+  return shared / Math.max(wordsA.size, wordsB.size);
+}
 
 function shouldAutoCompleteExploratoryGoal(run: GoalRunState, assistant: AiChatMessage | null) {
   if (!isExploratoryGoalRun(run.goal)) return false;

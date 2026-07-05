@@ -1,5 +1,5 @@
 import { automaticModeEnforcementPrompt } from "./aiAutomaticModeEnforcement";
-import type { AiAgentMode, AiModelConfig, AiPreferences, AiProviderConfig } from "./aiPreferences";
+import { resolveModelProtocol, type AiAgentMode, type AiModelConfig, type AiPreferences, type AiProviderConfig } from "./aiPreferences";
 import type { WorkspaceInfo } from "./types";
 import { isTauriRuntime, luxCommands } from "./tauri";
 
@@ -191,7 +191,7 @@ export async function buildLuxIdeSystemPromptAsync(context: LuxIdeSystemPromptCo
         selectedEffortId: context.preferences.selectedEffortId,
         selectedModelAlias: context.selectedModel.alias || context.selectedModel.id,
         providerName: context.provider.name,
-        providerProtocol: context.provider.protocol,
+        providerProtocol: resolveModelProtocol(context.provider, context.selectedModel),
         workspaceRoot: context.workspace?.root ?? "",
         runtimeToolsAvailable: context.runtimeToolsAvailable,
         agentBrowserEnabled: context.agentBrowserEnabled,

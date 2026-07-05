@@ -115,6 +115,10 @@ export type AiChatMessage = {
   /** Internal orchestration turns (goal kickoff/continuation) stay in history but not in the chat UI. */
   visibility?: AiChatMessageVisibility;
   content: string;
+  /** True for a user message staged as a "recommendation" while the agent was
+   *  working (folded into the running turn, not a fresh turn). The UI renders a
+   *  small "sent as recommendation" caption under it. */
+  recommendation?: boolean;
   /** Snapshot taken before this user turn (files + prior messages). */
   turnCheckpointId?: string;
   attachments?: AiChatMessageAttachment[];

@@ -56,6 +56,9 @@ export type AiPreferences = {
   showResponseDuration: boolean;
   /** Live tokens-per-second readout in the composer while a turn is generating. */
   showTokenSpeed: boolean;
+  /** Single-line live ticker of the agent's raw output in the status plaque while
+   *  it works (streaming reasoning/text tail). Default on. */
+  liveWorkTicker: boolean;
   /**
    * Smooth streaming: reveal the assistant's streamed answer with a fast
    * adaptive typewriter animation instead of chunk-sized jumps. Purely visual —
@@ -206,6 +209,9 @@ export type AiProviderConfig = {
    *  (semantic memory search). Empty when unset — best-effort, never blocks a
    *  turn, and is never used for `anthropic`-protocol providers (no endpoint). */
   embeddingModel: string;
+  /** Provider-level auto-compact threshold override (0..1 fraction of the model's
+   *  context window). Null/undefined = inherit the global preference. */
+  contextAutoCompactThreshold?: number | null;
 };
 
 export type AiModelConfig = {
@@ -218,8 +224,32 @@ export type AiModelConfig = {
   inputPricePerMillion?: number | null;
   /** Manual price (USD per 1M output tokens) for cost estimation. Null/0 → fall back to alias-based rates. */
   outputPricePerMillion?: number | null;
+  /** Per-model wire-protocol override — a mixed proxy can host models that speak
+   *  different APIs (e.g. one model via `anthropic`, the rest via `openai-compatible`).
+   *  Null/undefined = inherit the provider's protocol. */
+  protocol?: AiProviderProtocol | null;
+  /** Per-model auto-compact threshold override (0..1). Wins over the provider's
+   *  and the global value. Null/undefined = inherit. */
+  contextAutoCompactThreshold?: number | null;
   effortLevels: AiEffortConfig[];
 };
+
+/** Effective wire protocol for a model: model override → provider → sane default. */
+export function resolveModelProtocol(
+  provider: Pick<AiProviderConfig, "protocol"> | null | undefined,
+  model: Pick<AiModelConfig, "protocol"> | null | undefined,
+): AiProviderProtocol {
+  return model?.protocol ?? provider?.protocol ?? "openai-compatible";
+}
+
+/** Effective auto-compact threshold: model override → provider override → global. */
+export function resolveEffectiveAutoCompactThreshold(
+  globalThreshold: number,
+  provider: Pick<AiProviderConfig, "contextAutoCompactThreshold"> | null | undefined,
+  model: Pick<AiModelConfig, "contextAutoCompactThreshold"> | null | undefined,
+): number {
+  return model?.contextAutoCompactThreshold ?? provider?.contextAutoCompactThreshold ?? globalThreshold;
+}
 
 export type AiEffortConfig = {
   id: string;
@@ -769,6 +799,7 @@ export const defaultAiPreferences: AiPreferences = {
   seenTelegramNotice: false,
   showResponseDuration: true,
   showTokenSpeed: true,
+  liveWorkTicker: true,
   chatSmoothStream: true,
   // Token economy ships ON by default: terse "caveman" output that drops filler/
   // pleasantries to save output tokens while keeping code, paths, errors, tool work,
@@ -862,6 +893,7 @@ export function normalizeAiPreferences(value: unknown, options: NormalizeAiPrefe
       : defaultAiPreferences.hiddenModelIds,
     seenTelegramNotice: typeof source.seenTelegramNotice === "boolean" ? source.seenTelegramNotice : defaultAiPreferences.seenTelegramNotice,
     showResponseDuration: typeof source.showResponseDuration === "boolean" ? source.showResponseDuration : defaultAiPreferences.showResponseDuration,
+    liveWorkTicker: typeof source.liveWorkTicker === "boolean" ? source.liveWorkTicker : defaultAiPreferences.liveWorkTicker,
     showTokenSpeed: typeof source.showTokenSpeed === "boolean" ? source.showTokenSpeed : defaultAiPreferences.showTokenSpeed,
     chatSmoothStream: typeof source.chatSmoothStream === "boolean" ? source.chatSmoothStream : defaultAiPreferences.chatSmoothStream,
     tokenEconomyEnabled: typeof source.tokenEconomyEnabled === "boolean" ? source.tokenEconomyEnabled : defaultAiPreferences.tokenEconomyEnabled,
@@ -1087,6 +1119,7 @@ function normalizeProvider(value: unknown, preserveText: boolean): AiProviderCon
     localPath: localEndpoint.localPath,
     models: normalizeModels(value.models, preserveText, preset.models),
     embeddingModel: normalizeEditableText(value.embeddingModel, "", preserveText),
+    contextAutoCompactThreshold: normalizeOptionalCompactThreshold(value.contextAutoCompactThreshold),
   };
 }
 
@@ -1118,8 +1151,26 @@ function normalizeModelConfig(value: unknown, preserveText: boolean): AiModelCon
     contextTokens,
     inputPricePerMillion: normalizeModelPrice(value.inputPricePerMillion),
     outputPricePerMillion: normalizeModelPrice(value.outputPricePerMillion),
+    protocol: normalizeOptionalProtocol(value.protocol),
+    contextAutoCompactThreshold: normalizeOptionalCompactThreshold(value.contextAutoCompactThreshold),
     effortLevels: normalizeEffortLevels(value.effortLevels, preserveText),
   };
+}
+
+/** Per-model protocol override: a valid protocol id, else null (inherit). */
+function normalizeOptionalProtocol(value: unknown): AiProviderProtocol | null {
+  if (value === "openai-compatible" || value === "anthropic" || value === "google" || value === "azure-openai" || value === "local-proxy") return value;
+  return null;
+}
+
+/** Optional auto-compact threshold override: a finite fraction snapped to the
+ *  engine's valid 0.5..0.95 band, else null (inherit). Clamping here (not just at
+ *  display) keeps the stored value equal to what the compaction pipeline applies,
+ *  so Settings and the context meter never disagree. */
+function normalizeOptionalCompactThreshold(value: unknown): number | null {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : null;
+  if (parsed === null || !Number.isFinite(parsed) || parsed <= 0 || parsed > 1) return null;
+  return Math.min(0.95, Math.max(0.5, parsed));
 }
 
 /** Manual per-million token price: a finite, non-negative number, else null (use fallback rates). */

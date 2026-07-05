@@ -1,7 +1,7 @@
 //! Search-provider URL construction + result parsing for SearxNG (JSON API) and
 //! the keyless HTML fallbacks (DuckDuckGo, then Brave Search when DuckDuckGo
-//! serves its anomaly/challenge page). Pure: callers do the HTTP and hand the
-//! body back here to parse.
+//! serves its anomaly/challenge page, then Mojeek when both stonewall). Pure:
+//! callers do the HTTP and hand the body back here to parse.
 
 use std::net::{IpAddr, Ipv6Addr};
 
@@ -182,6 +182,80 @@ pub fn parse_brave_html(html: &str) -> Vec<SearchHit> {
             title,
             snippet,
             engine: "brave".to_string(),
+            provider_score: 0.0,
+        });
+    }
+    let mut seen = std::collections::HashSet::new();
+    hits.retain(|hit| seen.insert(hit.url.clone()));
+    hits
+}
+
+/// Build a keyless Mojeek HTML search URL for `query` (tertiary fallback engine —
+/// independent index, classic server-rendered markup, no bot challenge).
+#[must_use]
+pub fn mojeek_search_url(query: &str) -> String {
+    format!("https://www.mojeek.com/search?q={}", percent_encode(query))
+}
+
+/// Parse a Mojeek results page. Markup (stable classic HTML, observed live
+/// 2026-07): each organic result is an `<li>` holding
+///   * `<h2><a class="title" href="URL">Title</a></h2>` and
+///   * a following `<p class="s">snippet</p>`.
+///
+/// The scan keys off the exact `class="title"` token (attribute-quoted, so a
+/// bare `s`/`title` elsewhere can't false-positive), pairs each anchor with the
+/// nearest following `<p class="s">` (distance-bounded), funnels every href
+/// through the SSRF gate, and dedupes by URL (Mojeek clusters near-duplicate
+/// pages as separate `clu-result` items).
+#[must_use]
+pub fn parse_mojeek_html(html: &str) -> Vec<SearchHit> {
+    const TITLE_TOKEN: &str = "class=\"title\"";
+    const SNIPPET_TOKEN: &str = "<p class=\"s\">";
+    let mut hits = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = html[cursor..].find(TITLE_TOKEN) {
+        let token_pos = cursor + relative;
+        let Some(tag_start) = html[..token_pos].rfind("<a ") else {
+            cursor = token_pos + TITLE_TOKEN.len();
+            continue;
+        };
+        let Some(tag_rel_end) = html[tag_start..].find('>') else {
+            break;
+        };
+        let tag_end = tag_start + tag_rel_end;
+        let tag = &html[tag_start..=tag_end];
+        let href = extract_attr(tag, "href").unwrap_or_default();
+
+        let inner_start = tag_end + 1;
+        let Some(close_rel) = html[inner_start..].find("</a>") else {
+            break;
+        };
+        let title = strip_tags(&html[inner_start..inner_start + close_rel]);
+        cursor = inner_start + close_rel + "</a>".len();
+
+        let Some(url) = validate_source_url(href.trim()) else {
+            continue;
+        };
+        // Same-engine chrome ("See more results from…" uses a relative href and
+        // is already dropped by validate); guard absolute self-links too.
+        if url.contains("://www.mojeek.com/") || title.is_empty() {
+            continue;
+        }
+        let snippet = html[cursor..]
+            .find(SNIPPET_TOKEN)
+            .filter(|rel| *rel < 1_500)
+            .map(|rel| {
+                let start = cursor + rel + SNIPPET_TOKEN.len();
+                let end = html[start..].find("</p>").map_or(html.len(), |r| start + r);
+                strip_tags(&html[start..end])
+            })
+            .unwrap_or_default();
+
+        hits.push(SearchHit {
+            url,
+            title,
+            snippet,
+            engine: "mojeek".to_string(),
             provider_score: 0.0,
         });
     }
@@ -991,6 +1065,57 @@ mod tests {
         let hits = parse_brave_html(&html);
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].snippet, "", "distant snippet must not be adopted");
+    }
+
+    #[test]
+    fn parses_mojeek_results() {
+        // Shape observed live 2026-07: li.rN → a.ob (url preview) + h2 > a.title + p.s.
+        let html = r#"
+          <ul class="results-standard">
+            <li class="r1"><a title="https://michaelhelvey.dev/posts/rust_async_runtime" href="https://michaelhelvey.dev/posts/rust_async_runtime" class="ob"><p class="i"><span class="url">https://michaelhelvey.dev<span> &rsaquo; posts</span></span></p></a><h2><a class="title" title="https://michaelhelvey.dev/posts/rust_async_runtime" href="https://michaelhelvey.dev/posts/rust_async_runtime">Writing an Async Runtime in Rust</a></h2><p class="s">... it taught me a lot about <strong>async</strong> <strong>runtimes</strong> in <strong>Rust</strong>.</p></li>
+            <li class="r3"><a href="https://corrode.dev/blog/async/" class="ob"></a><h2><a class="title" href="https://corrode.dev/blog/async/">The State of Async Rust</a></h2><p class="s">Runtime design choices.</p><p class="more"><a href="/search?q=site%3Acorrode.dev+rust">See more results from corrode.dev &raquo;</a></p></li>
+          </ul>
+        "#;
+        let hits = parse_mojeek_html(html);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(
+            hits[0].url,
+            "https://michaelhelvey.dev/posts/rust_async_runtime"
+        );
+        assert_eq!(hits[0].title, "Writing an Async Runtime in Rust");
+        assert_eq!(
+            hits[0].snippet,
+            "... it taught me a lot about async runtimes in Rust."
+        );
+        assert_eq!(hits[0].engine, "mojeek");
+        assert_eq!(hits[1].title, "The State of Async Rust");
+        assert_eq!(hits[1].snippet, "Runtime design choices.");
+    }
+
+    #[test]
+    fn mojeek_parser_skips_chrome_dupes_and_ssrf() {
+        let html = r#"
+          <h2><a class="title" href="https://www.mojeek.com/about">About Mojeek</a></h2>
+          <h2><a class="title" href="/search?q=next">Next page</a></h2>
+          <h2><a class="title" href="https://dup.example/x">Dup A</a></h2><p class="s">First.</p>
+          <h2><a class="title" href="https://dup.example/x">Dup B</a></h2><p class="s">Second.</p>
+          <h2><a class="title" href="http://127.0.0.1/x">SSRF</a></h2>
+        "#;
+        let hits = parse_mojeek_html(html);
+        assert_eq!(
+            hits.len(),
+            1,
+            "self-links, relative, SSRF and dupes dropped"
+        );
+        assert_eq!(hits[0].url, "https://dup.example/x");
+    }
+
+    #[test]
+    fn mojeek_search_url_encodes_query() {
+        assert_eq!(
+            mojeek_search_url("rust async runtime"),
+            "https://www.mojeek.com/search?q=rust%20async%20runtime"
+        );
     }
 
     #[test]

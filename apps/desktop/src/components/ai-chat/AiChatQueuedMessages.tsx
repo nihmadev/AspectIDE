@@ -50,6 +50,26 @@ function AiQueuedChip({ entry, index, onSendNow, t }: { entry: QueuedMessage; in
   };
 
   const isRecommendation = entry.mode === "recommendation";
+  // Once a recommendation has been folded into the running turn, its chip must
+  // stop offering Send-now / mode-toggle / edit — those would race the in-flight
+  // injection into a duplicate turn. It stays visible (as "sending…") until Rust
+  // confirms the fold-in and the entry is removed.
+  const injected = Boolean(entry.injectedTurnId);
+
+  if (injected) {
+    return (
+      <div className="ai-chat-queue-chip" data-mode={entry.mode} data-injected="true">
+        <span className="ai-chat-queue-chip-index" aria-hidden="true">{index + 1}</span>
+        <span className="ai-chat-queue-chip-text">
+          <span className="ai-chat-queue-chip-tag">
+            <Lightbulb size={11} />
+            {t("aiChat.queue.sending")}
+          </span>
+          <span className="ai-chat-queue-chip-body" title={entry.text}>{entry.text}</span>
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="ai-chat-queue-chip" data-mode={entry.mode} data-editing={editing || undefined}>

@@ -437,7 +437,9 @@ pub async fn ai_file_patch(
     let write_result = apply_ai_patch_to_disk(&prepared, save_to_disk, &mut rollback).await;
     if let Err(error) = write_result {
         rollback_ai_patch(rollback).await;
-        return Err(error);
+        return Err(format!(
+            "{error} — all changes were rolled back, no files modified"
+        ));
     }
 
     let mut edited_documents = Vec::new();
@@ -1473,148 +1475,177 @@ async fn prepare_ai_patch_operations(
     let mut prepared = Vec::with_capacity(operations.len());
     let mut next_text_by_path = BTreeMap::<PathBuf, Option<String>>::new();
 
-    for operation in operations {
-        let action = operation.action.trim().to_ascii_lowercase();
-        let kind = match action.as_str() {
-            "create" => AiPreparedPatchKind::Create,
-            "write" | "rewrite" | "replacefile" | "replace_file" => AiPreparedPatchKind::Rewrite,
-            "strreplace" | "str_replace" | "replace" => AiPreparedPatchKind::Replace,
-            "delete" | "remove" => AiPreparedPatchKind::Delete,
-            _ => return Err(format!("unsupported patch action: {}", operation.action)),
-        };
-        let path = match kind {
-            AiPreparedPatchKind::Create
-            | AiPreparedPatchKind::Rewrite
-            | AiPreparedPatchKind::Replace
-            | AiPreparedPatchKind::Delete => {
-                // Finding 1: route ALL mutating operations through the write resolver.
-                resolve_workspace_path_for_write(state, &operation.path)?
-            }
-        };
-        let before_text = if let Some(previous) = next_text_by_path.get(&path) {
-            previous.clone()
-        } else if path.exists() {
-            Some(current_text_for_path(state, &path).await?)
-        } else {
-            None
-        };
-
-        match kind {
-            AiPreparedPatchKind::Create | AiPreparedPatchKind::Rewrite => {
-                let text = operation.text.ok_or_else(|| {
-                    format!("{} requires text for {}", operation.action, path.display())
-                })?;
-                if before_text.is_some()
-                    && kind == AiPreparedPatchKind::Create
-                    && !operation.overwrite.unwrap_or(false)
-                {
-                    return Err(format!("file already exists: {}", path.display()));
-                }
-                // `rewrite` replaces an EXISTING file's contents; it must not be a
-                // back door for silently creating a file (that is `create`'s job,
-                // which is gated by the overwrite check above). Requiring existence
-                // keeps the create/rewrite contract explicit; the turn-loop's
-                // read-before-edit guard already prevents clobbering unread content.
-                if kind == AiPreparedPatchKind::Rewrite && before_text.is_none() {
-                    return Err(format!(
-                        "rewrite target does not exist (use create): {}",
-                        path.display()
-                    ));
-                }
-                let stats = diff_stats(
-                    before_text.as_deref().unwrap_or(""),
-                    &text,
-                    before_text.is_none(),
-                );
-                next_text_by_path.insert(path.clone(), Some(text.clone()));
-                prepared.push(AiPreparedPatchOperation {
-                    kind,
-                    path,
-                    after_text: Some(text),
-                    stats,
-                });
-            }
-            AiPreparedPatchKind::Replace => {
-                let Some(before) = before_text else {
-                    return Err(format!(
-                        "file does not exist for replacement: {}",
-                        path.display()
-                    ));
-                };
-                let old_text = operation
-                    .old_text
-                    .ok_or_else(|| format!("replace requires oldText for {}", path.display()))?;
-                if old_text.is_empty() {
-                    return Err(format!("oldText must not be empty for {}", path.display()));
-                }
-                // F18: an omitted `newText` is a caller error, not a silent
-                // delete-to-empty. `ai_file_str_replace` takes `new_text: String`
-                // (non-optional), so the patch path must be equally strict; a
-                // deliberate deletion still works by passing an explicit empty string.
-                let new_text = operation
-                    .new_text
-                    .ok_or_else(|| format!("replace requires newText for {}", path.display()))?;
-                let expected = operation.expected_replacements.unwrap_or(1);
-                // CRLF tolerance (parity with `ai_file_str_replace`): match against the
-                // file's own EOL so a `\n`-only patch still applies to a `\r\n` file.
-                let eol = detect_eol(&before);
-                let old_text = normalize_eol(&old_text, eol);
-                let new_text = normalize_eol(&new_text, eol);
-                let replacement_count = before.matches(&old_text).count();
-                if replacement_count != expected {
-                    let new_already = before.matches(&new_text).count();
-                    let hint = if new_already > 0 && !new_text.is_empty() {
-                        format!(" (newText already present {new_already} time(s) — may already be applied)")
-                    } else {
-                        String::new()
-                    };
-                    return Err(format!(
-                        "replacement count mismatch for {}: expected {expected}, found {replacement_count}{hint}",
-                        path.display()
-                    ));
-                }
-                let after = before.replacen(&old_text, &new_text, expected);
-                let stats = diff_stats(&before, &after, false);
-                next_text_by_path.insert(path.clone(), Some(after.clone()));
-                prepared.push(AiPreparedPatchOperation {
-                    kind,
-                    path,
-                    after_text: Some(after),
-                    stats,
-                });
-            }
-            AiPreparedPatchKind::Delete => {
-                let Some(before) = before_text else {
-                    return Err(format!(
-                        "file does not exist for deletion: {}",
-                        path.display()
-                    ));
-                };
-                if path.is_dir() {
-                    return Err(format!(
-                        "PatchEngine deletes files only, not directories: {}",
-                        path.display()
-                    ));
-                }
-                let stats = AiFileOperationStats {
-                    lines_added: 0,
-                    lines_removed: before.lines().count(),
-                    files_changed: 0,
-                    files_created: 0,
-                    files_deleted: 1,
-                };
-                next_text_by_path.insert(path.clone(), None);
-                prepared.push(AiPreparedPatchOperation {
-                    kind,
-                    path,
-                    after_text: None,
-                    stats,
-                });
-            }
-        }
+    for (op_index, operation) in operations.into_iter().enumerate() {
+        // Name the failing op and remind the model of the batch contract: models
+        // routinely pack independent edits into PatchEngine, then re-send the whole
+        // batch when one op fails. The index + StrReplace pointer turns that retry
+        // loop into a one-shot fix.
+        let action_label = operation.action.trim().to_ascii_lowercase();
+        let prepared_op = prepare_one_patch_operation(state, operation, &mut next_text_by_path)
+            .await
+            .map_err(|error| patch_operation_error(op_index, &action_label, &error))?;
+        prepared.push(prepared_op);
     }
 
     Ok(prepared)
+}
+
+/// Error contract for a failed `PatchEngine` op: names the op by index, states
+/// that nothing was applied, and points at `StrReplace` for independent edits —
+/// so the model fixes one op instead of blindly re-sending the whole batch.
+fn patch_operation_error(op_index: usize, action: &str, error: &str) -> String {
+    format!(
+        "operation[{op_index}] ({action}): {error} — nothing was applied (PatchEngine is all-or-nothing); fix this operation and re-send, or make independent edits with StrReplace"
+    )
+}
+
+/// Validates and materializes a single `PatchEngine` operation against the
+/// current text (or the batch's own pending text for a path edited twice).
+async fn prepare_one_patch_operation(
+    state: &State<'_, SharedState>,
+    operation: AiFilePatchOperation,
+    next_text_by_path: &mut BTreeMap<PathBuf, Option<String>>,
+) -> Result<AiPreparedPatchOperation, String> {
+    let action = operation.action.trim().to_ascii_lowercase();
+    let kind = match action.as_str() {
+        "create" => AiPreparedPatchKind::Create,
+        "write" | "rewrite" | "replacefile" | "replace_file" => AiPreparedPatchKind::Rewrite,
+        "strreplace" | "str_replace" | "replace" => AiPreparedPatchKind::Replace,
+        "delete" | "remove" => AiPreparedPatchKind::Delete,
+        _ => return Err(format!("unsupported patch action: {}", operation.action)),
+    };
+    let path = match kind {
+        AiPreparedPatchKind::Create
+        | AiPreparedPatchKind::Rewrite
+        | AiPreparedPatchKind::Replace
+        | AiPreparedPatchKind::Delete => {
+            // Finding 1: route ALL mutating operations through the write resolver.
+            resolve_workspace_path_for_write(state, &operation.path)?
+        }
+    };
+    let before_text = if let Some(previous) = next_text_by_path.get(&path) {
+        previous.clone()
+    } else if path.exists() {
+        Some(current_text_for_path(state, &path).await?)
+    } else {
+        None
+    };
+
+    match kind {
+        AiPreparedPatchKind::Create | AiPreparedPatchKind::Rewrite => {
+            let text = operation.text.ok_or_else(|| {
+                format!("{} requires text for {}", operation.action, path.display())
+            })?;
+            if before_text.is_some()
+                && kind == AiPreparedPatchKind::Create
+                && !operation.overwrite.unwrap_or(false)
+            {
+                return Err(format!("file already exists: {}", path.display()));
+            }
+            // `rewrite` replaces an EXISTING file's contents; it must not be a
+            // back door for silently creating a file (that is `create`'s job,
+            // which is gated by the overwrite check above). Requiring existence
+            // keeps the create/rewrite contract explicit; the turn-loop's
+            // read-before-edit guard already prevents clobbering unread content.
+            if kind == AiPreparedPatchKind::Rewrite && before_text.is_none() {
+                return Err(format!(
+                    "rewrite target does not exist (use create): {}",
+                    path.display()
+                ));
+            }
+            let stats = diff_stats(
+                before_text.as_deref().unwrap_or(""),
+                &text,
+                before_text.is_none(),
+            );
+            next_text_by_path.insert(path.clone(), Some(text.clone()));
+            Ok(AiPreparedPatchOperation {
+                kind,
+                path,
+                after_text: Some(text),
+                stats,
+            })
+        }
+        AiPreparedPatchKind::Replace => {
+            let Some(before) = before_text else {
+                return Err(format!(
+                    "file does not exist for replacement: {}",
+                    path.display()
+                ));
+            };
+            let old_text = operation
+                .old_text
+                .ok_or_else(|| format!("replace requires oldText for {}", path.display()))?;
+            if old_text.is_empty() {
+                return Err(format!("oldText must not be empty for {}", path.display()));
+            }
+            // F18: an omitted `newText` is a caller error, not a silent
+            // delete-to-empty. `ai_file_str_replace` takes `new_text: String`
+            // (non-optional), so the patch path must be equally strict; a
+            // deliberate deletion still works by passing an explicit empty string.
+            let new_text = operation
+                .new_text
+                .ok_or_else(|| format!("replace requires newText for {}", path.display()))?;
+            let expected = operation.expected_replacements.unwrap_or(1);
+            // CRLF tolerance (parity with `ai_file_str_replace`): match against the
+            // file's own EOL so a `\n`-only patch still applies to a `\r\n` file.
+            let eol = detect_eol(&before);
+            let old_text = normalize_eol(&old_text, eol);
+            let new_text = normalize_eol(&new_text, eol);
+            let replacement_count = before.matches(&old_text).count();
+            if replacement_count != expected {
+                let new_already = before.matches(&new_text).count();
+                let hint = if new_already > 0 && !new_text.is_empty() {
+                    format!(
+                        " (newText already present {new_already} time(s) — may already be applied)"
+                    )
+                } else {
+                    String::new()
+                };
+                return Err(format!(
+                    "replacement count mismatch for {}: expected {expected}, found {replacement_count}{hint}",
+                    path.display()
+                ));
+            }
+            let after = before.replacen(&old_text, &new_text, expected);
+            let stats = diff_stats(&before, &after, false);
+            next_text_by_path.insert(path.clone(), Some(after.clone()));
+            Ok(AiPreparedPatchOperation {
+                kind,
+                path,
+                after_text: Some(after),
+                stats,
+            })
+        }
+        AiPreparedPatchKind::Delete => {
+            let Some(before) = before_text else {
+                return Err(format!(
+                    "file does not exist for deletion: {}",
+                    path.display()
+                ));
+            };
+            if path.is_dir() {
+                return Err(format!(
+                    "PatchEngine deletes files only, not directories: {}",
+                    path.display()
+                ));
+            }
+            let stats = AiFileOperationStats {
+                lines_added: 0,
+                lines_removed: before.lines().count(),
+                files_changed: 0,
+                files_created: 0,
+                files_deleted: 1,
+            };
+            next_text_by_path.insert(path.clone(), None);
+            Ok(AiPreparedPatchOperation {
+                kind,
+                path,
+                after_text: None,
+                stats,
+            })
+        }
+    }
 }
 
 async fn apply_ai_patch_to_disk(
@@ -2040,6 +2071,27 @@ fn truncate_shell_output_flagged(value: &str) -> (String, bool) {
 mod tests {
     use super::*;
     use lux_core::{LspRange, LspSymbolKind};
+
+    #[test]
+    fn patch_operation_error_names_index_and_recovery_path() {
+        let error = patch_operation_error(
+            3,
+            "replace",
+            "replacement count mismatch for a.ts: expected 1, found 0",
+        );
+        assert!(
+            error.starts_with("operation[3] (replace):"),
+            "must name the failing op: {error}"
+        );
+        assert!(
+            error.contains("nothing was applied"),
+            "must state the all-or-nothing outcome: {error}"
+        );
+        assert!(
+            error.contains("StrReplace"),
+            "must point at the independent-edit tool: {error}"
+        );
+    }
 
     #[test]
     fn patch_stats_combine_counts_all_operation_types() {

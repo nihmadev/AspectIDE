@@ -1320,6 +1320,9 @@ export type AiRunTurnInput = {
    *  pre-edit snapshot of the path(s) it is about to touch — so a later Rollback
    *  can restore files the model never explicitly ran the Checkpoint tool on. */
   fileCheckpointId?: string;
+  /** Wire ids of every model on the active provider — surfaces the valid Task
+   *  `model` override options to the orchestrating model. */
+  availableModelIds?: string[];
 };
 
 /** One suggested answer to an AskUser question. */

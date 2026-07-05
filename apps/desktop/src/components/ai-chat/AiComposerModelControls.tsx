@@ -3,7 +3,7 @@ import { memo } from "react";
 import type { ReactNode, RefObject } from "react";
 import { CompactDropdown } from "../CompactDropdown";
 import type { AiComposerSelectOption } from "./aiComposerTypes";
-import type { AiPreferences } from "../../lib/aiPreferences";
+import { getAiProvider, type AiPreferences } from "../../lib/aiPreferences";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 
 type AiComposerModelControlsProps = {
@@ -49,6 +49,13 @@ export const AiComposerModelControls = memo(function AiComposerModelControls({
   updateAiPreference,
   t,
 }: AiComposerModelControlsProps) {
+  // Provider shown as a quiet second line UNDER the model name in the picker
+  // trigger (centered two-line box) — so a long provider never crowds or truncates
+  // the model, and the model stays the primary label.
+  const providerName = getAiProvider(preferences.providers, preferences.selectedProviderId)?.name?.trim() ?? "";
+  const providerSubLabel = providerName
+    ? <span className="ai-composer-model-provider" title={providerName}>{providerName}</span>
+    : undefined;
   return (
     <div className="ai-composer-left-actions">
       <input
@@ -81,12 +88,13 @@ export const AiComposerModelControls = memo(function AiComposerModelControls({
         onChange={(selectedAgentId) => updateAiPreference({ selectedAgentId })}
       />
       <CompactDropdown
-        className="ai-composer-select"
+        className="ai-composer-select ai-composer-select-model"
         icon={<Sparkles size={13} />}
         label={t("aiChat.model.label")}
         value={selectedModelId}
         options={modelOptions}
         onChange={updateModel}
+        triggerSubLabel={providerSubLabel}
         searchable
         searchPlaceholder={modelSearchPlaceholder}
         searchEmptyLabel={modelSearchEmptyHint}

@@ -1,4 +1,4 @@
-import { Brain, ChevronRight, Copy, FoldVertical, MoveRight, SearchCheck } from "lucide-react";
+import { Brain, ChevronRight, Copy, FoldVertical, Lightbulb, MoveRight, SearchCheck } from "lucide-react";
 import type { CSSProperties, ReactNode, RefObject } from "react";
 import { createContext, Fragment, memo, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -11,7 +11,7 @@ import { isCompactionCheckpointMessage, type ContextCompactionState } from "../.
 import { formatCompactTokens } from "../../lib/aiChatContextUsage";
 import { AiPathEvidenceNotice } from "./AiPathEvidenceNotice";
 import { AiTurnSummaryCard } from "./AiTurnSummaryCard";
-import { AiThinkingIndicator, isPendingAssistantShell } from "./AiThinkingIndicator";
+import { isPendingAssistantShell } from "./AiThinkingIndicator";
 import type { AiChatSessionStatus } from "../../lib/store";
 import * as chatDisplayText from "../../lib/aiChatDisplayText";
 import { useElapsedSeconds, formatThinkingElapsed } from "../../lib/useElapsedSeconds";
@@ -210,6 +210,11 @@ const AiChatMessageView = memo(function AiChatMessageView({
   // the editor (no separate framed textarea below the message).
   const [editingUser, setEditingUser] = useState(false);
   const pendingShell = isPendingAssistantShell(message, streaming);
+  // An empty streaming shell would render a second "Thinking…" indicator that
+  // duplicates the live status plaque below the thread — skip the shell entirely
+  // and let the plaque be the single busy indicator. Once real tokens/tools
+  // arrive, pendingShell is false and the answer renders here as usual.
+  if (pendingShell) return null;
   if (isReviewRequestMessage(message)) {
     return (
       <article className="ai-chat-message ai-chat-review-request" data-role="user">
@@ -287,39 +292,37 @@ const AiChatMessageView = memo(function AiChatMessageView({
     );
   }
   return (
-    <article className="ai-chat-message" data-role={message.role} data-pending={pendingShell || undefined}>
-      {pendingShell ? (
-        <div className="ai-turn-flow ai-turn-flow-pending" data-streaming="true">
-          <AiThinkingIndicator status={sessionStatus} t={t} compact />
-        </div>
+    <article className="ai-chat-message" data-role={message.role}>
+      <div className="ai-chat-message-meta">
+        <span>{message.role === "user" ? t("aiChat.role.user") : t("aiChat.role.assistant")}</span>
+        <time>{formatMessageTime(message.timestamp)}</time>
+      </div>
+      {message.role === "user" && editingUser ? (
+        <AiUserInlineEdit
+          initial={message.content}
+          onCancel={() => setEditingUser(false)}
+          onSubmit={(text) => {
+            setEditingUser(false);
+            onEditUserMessage(message.id, text);
+          }}
+          t={t}
+        />
       ) : (
-        <>
-          <div className="ai-chat-message-meta">
-            <span>{message.role === "user" ? t("aiChat.role.user") : t("aiChat.role.assistant")}</span>
-            <time>{formatMessageTime(message.timestamp)}</time>
-          </div>
-          {message.role === "user" && editingUser ? (
-            <AiUserInlineEdit
-              initial={message.content}
-              onCancel={() => setEditingUser(false)}
-              onSubmit={(text) => {
-                setEditingUser(false);
-                onEditUserMessage(message.id, text);
-              }}
-              t={t}
-            />
-          ) : (
-            <AiMessageBody
-              message={message}
-              streaming={streaming}
-              sessionStatus={sessionStatus}
-              onApprovalDecision={onApprovalDecision}
-              t={t}
-            />
-          )}
-        </>
+        <AiMessageBody
+          message={message}
+          streaming={streaming}
+          sessionStatus={sessionStatus}
+          onApprovalDecision={onApprovalDecision}
+          t={t}
+        />
       )}
-      {!pendingShell && message.role === "user" ? (
+      {message.role === "user" && message.recommendation && !editingUser && (
+        <p className="ai-chat-message-recommendation-caption">
+          <Lightbulb size={11} aria-hidden="true" />
+          {t("aiChat.queue.sentAsRecommendation")}
+        </p>
+      )}
+      {message.role === "user" ? (
         <AiChatMessageActions
           canMutate={canMutateHistory}
           canRestoreUser={canRestoreUserMessage(message.id)}
@@ -329,18 +332,18 @@ const AiChatMessageView = memo(function AiChatMessageView({
           onRestore={() => onRestoreUserMessage?.(message.id)}
           t={t}
         />
-      ) : !pendingShell ? (
+      ) : (
         <AiAssistantMessageActions
           canMutate={canMutateHistory}
           canStopAfterTool={canStopAfterTool ?? false}
           onStopAfterTool={() => onStopAfterTool?.()}
           t={t}
         />
-      ) : null}
-      {!pendingShell && message.role === "assistant" && !streaming && (
+      )}
+      {message.role === "assistant" && !streaming && (
         <AiPathEvidenceNotice message={message} streaming={streaming} t={t} />
       )}
-      {!pendingShell && message.role === "assistant" && !streaming && (
+      {message.role === "assistant" && !streaming && (
         <AiTurnSummaryCard message={message} workspaceRoot={workspaceRoot} t={t} onReview={onReview} reviewDisabled={reviewDisabled} />
       )}
       {message.role === "assistant" && showResponseDuration && typeof message.responseDurationMs === "number" && !message.responseTiming && !message.turnUsage && (
