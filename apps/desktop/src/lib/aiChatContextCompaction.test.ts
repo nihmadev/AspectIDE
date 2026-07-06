@@ -12,6 +12,7 @@ vi.mock("./tauri", () => ({
 import {
   compactChatHistory,
   isCompactionCheckpointMessage,
+  resolvePreserveWindow,
   type CompactChatHistoryInput,
 } from "./aiChatContextCompaction";
 import type { AiChatMessage } from "./aiChatTypes";
@@ -92,6 +93,42 @@ const FULL_SUMMARY = [
 beforeEach(() => {
   aiCompactionSummary.mockReset();
   aiCompactionSummary.mockResolvedValue(FULL_SUMMARY);
+});
+
+describe("resolvePreserveWindow token budget", () => {
+  it("shrinks the preserved window when recent messages are large", () => {
+    const messages = makeMessages(10); // ~432 tokens each
+    // Tiny budget forces the window down to the floor (2), not the max count (10).
+    const from = resolvePreserveWindow(messages, 10, 500);
+    expect(messages.length - from).toBe(2);
+  });
+
+  it("keeps up to maxCount when messages fit the budget", () => {
+    const messages = makeMessages(10);
+    const from = resolvePreserveWindow(messages, 6, 1_000_000);
+    expect(messages.length - from).toBe(6);
+  });
+
+  it("never preserves fewer than the floor even on a tiny budget", () => {
+    const messages = makeMessages(10);
+    const from = resolvePreserveWindow(messages, 10, 1);
+    expect(messages.length - from).toBe(2);
+  });
+});
+
+describe("compaction with large recent messages", () => {
+  it("still summarizes the bulk instead of bailing with no-reduction", async () => {
+    // Every message is large; the old fixed count-of-10 preserve window kept most
+    // of the context and under-compacted. The token budget shrinks the window so
+    // the older bulk is summarized into one checkpoint.
+    const input = baseInput({ autoCompactEnabled: true, force: false });
+    const result = await compactChatHistory(input);
+    expect(result.compacted).toBe(true);
+    expect(result.reason).toBeUndefined();
+    // Compacted to one checkpoint + a small preserved tail, far below the 30 sent.
+    expect(result.messages.length).toBeLessThan(8);
+    expect(result.messages.some(isCompactionCheckpointMessage)).toBe(true);
+  });
 });
 
 describe("compactChatHistory disabled-auto guard", () => {

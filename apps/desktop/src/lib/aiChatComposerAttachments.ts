@@ -4,6 +4,67 @@ import {
   readFileAsDataUrl,
 } from "./aiFileContext";
 import type { AiChatMessageAttachment } from "./aiChatTypes";
+import { luxCommands } from "./tauri";
+import { isTauriRuntime } from "./tauriRuntime";
+
+async function dataUrlToFile(dataUrl: string, name: string, mime: string): Promise<File> {
+  const response = await fetch(dataUrl);
+  const blob = await response.blob();
+  return new File([blob], name, { type: mime || blob.type || "application/octet-stream" });
+}
+
+/**
+ * Read an image from the OS clipboard as a PNG File (paste fallback for Linux
+ * WebKitGTK, where the webview `ClipboardEvent` carries no image). Returns
+ * `null` when there is no image or the native read is unavailable. The native
+ * command yields raw RGBA; we encode to PNG via an offscreen canvas.
+ */
+export async function readClipboardImageFile(): Promise<File | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    const image = await luxCommands.clipboardReadImage();
+    if (!image || image.width <= 0 || image.height <= 0) return null;
+    const binary = atob(image.rgbaBase64);
+    const rgba = new Uint8ClampedArray(binary.length);
+    for (let i = 0; i < binary.length; i += 1) rgba[i] = binary.charCodeAt(i);
+    if (rgba.length !== image.width * image.height * 4) return null;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.putImageData(new ImageData(rgba, image.width, image.height), 0, 0);
+    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+    if (!blob) return null;
+    return new File([blob], `pasted-${Date.now()}.png`, { type: "image/png" });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Open the native OS multi-file picker (desktop only) and read the selections
+ * into File objects. Returns `null` when the native dialog is unavailable or
+ * fails (caller falls back to the HTML `<input type=file>`), or `[]` when the
+ * user cancels the dialog.
+ */
+export async function pickNativeAttachmentFiles(): Promise<File[] | null> {
+  if (!isTauriRuntime()) return null;
+  try {
+    const paths = await luxCommands.pickAttachmentFiles();
+    if (paths.length === 0) return [];
+    return await Promise.all(
+      paths.map(async (path) => {
+        const asset = await luxCommands.readExternalFile(path);
+        const name = path.split(/[\\/]/).pop() || "attachment";
+        return dataUrlToFile(asset.dataUrl, name, asset.mimeType);
+      }),
+    );
+  } catch {
+    return null;
+  }
+}
 
 export type ComposerFileAttachment = {
   kind: "file";

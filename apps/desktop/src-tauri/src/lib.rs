@@ -57,6 +57,7 @@ mod ai_context_sources;
 mod ai_failure;
 mod ai_goal_eval;
 mod ai_jobs;
+mod ai_luxide;
 mod ai_permissions;
 mod ai_prompt;
 mod ai_related;
@@ -78,6 +79,7 @@ use lux_settings::SettingsStore;
 use lux_terminal::TerminalService;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_log::{log::LevelFilter, Target, TargetKind};
 use tokio::sync::oneshot;
@@ -106,7 +108,7 @@ use extensions::{
 };
 use file_intel::{
     file_asset_data, file_inspect, file_media_ai_context, file_open_external,
-    file_supported_formats,
+    file_supported_formats, read_external_file,
 };
 use fonts::list_system_font_families;
 use git::{
@@ -277,6 +279,59 @@ async fn workspace_pick_folder(app: AppHandle) -> Result<Option<WorkspaceInfo>, 
     let path = folder.into_path().map_err(|error| error.to_string())?;
     let workspace = lux_workspace::open_workspace(path).map_err(String::from)?;
     Ok(Some(workspace))
+}
+
+/// Open the native OS multi-file picker for chat attachments and return the
+/// selected absolute paths. Empty when the user cancels. The frontend reads each
+/// path via `read_external_file` and falls back to the HTML `<input type=file>`
+/// when the native dialog is unavailable.
+#[tauri::command]
+async fn pick_attachment_files(app: AppHandle) -> Result<Vec<String>, String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_files(move |files| {
+        let _ = sender.send(files);
+    });
+    let Some(files) = receiver.await.map_err(|error| error.to_string())? else {
+        return Ok(Vec::new());
+    };
+    let paths = files
+        .into_iter()
+        .filter_map(|file| file.into_path().ok())
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    Ok(paths)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClipboardImageData {
+    width: u32,
+    height: u32,
+    rgba_base64: String,
+}
+
+/// Read an image from the OS clipboard as raw RGBA (base64). Used as a paste
+/// fallback where the webview `ClipboardEvent` yields no image (Linux
+/// `WebKitGTK`). Returns `None` when the clipboard holds no image; the frontend
+/// encodes the RGBA to PNG via a canvas.
+#[tauri::command]
+async fn clipboard_read_image(app: AppHandle) -> Result<Option<ClipboardImageData>, String> {
+    use base64::Engine as _;
+    match app.clipboard().read_image() {
+        Ok(image) => {
+            let (width, height) = (image.width(), image.height());
+            // Bound the base64 payload shipped over IPC (~40 MiB raw ceiling).
+            if u64::from(width) * u64::from(height) * 4 > 40 * 1024 * 1024 {
+                return Err("clipboard image too large".to_string());
+            }
+            Ok(Some(ClipboardImageData {
+                width,
+                height,
+                rgba_base64: base64::engine::general_purpose::STANDARD.encode(image.rgba()),
+            }))
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 #[tauri::command]
@@ -650,6 +705,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state)
         .setup(|app| {
             // The updater plugin deserializes `plugins.updater` into a required
@@ -738,6 +794,8 @@ pub fn run() {
             workspace_open,
             workspace_close,
             workspace_pick_folder,
+            pick_attachment_files,
+            clipboard_read_image,
             fs_read_dir,
             fs_read_tree,
             fs_read_text,
@@ -753,6 +811,7 @@ pub fn run() {
             file_inspect,
             file_media_ai_context,
             file_asset_data,
+            read_external_file,
             ai_vision::ai_vision_encode,
             file_open_external,
             database_list_tables,
@@ -852,6 +911,10 @@ pub fn run() {
             ai_turn::ai_cancel_turn,
             ai_turn::ai_cancel_subagent,
             ai_turn::ai_inject_message,
+            ai_luxide::luxide_link_start,
+            ai_luxide::luxide_link_poll,
+            ai_luxide::luxide_open_url,
+            ai_luxide::luxide_usage,
             ai_workspace::ai_repo_map,
             ai_workspace::ai_workspace_index,
             ai_symbol_context,

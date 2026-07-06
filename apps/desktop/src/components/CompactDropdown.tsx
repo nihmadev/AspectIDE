@@ -7,6 +7,10 @@ type CompactDropdownOption<T extends string> = {
   label: string;
   value: T;
   group?: string;
+  /** Trailing badge text shown right-aligned in the option row (e.g. "0/1000"). */
+  badge?: string;
+  /** Leading availability dot: "ok" (green) or "blocked" (red). */
+  status?: "ok" | "blocked";
 };
 
 type DropdownPosition = {
@@ -401,7 +405,15 @@ export function CompactDropdown<T extends string>({
                         onClick={() => selectOption(option.value)}
                         onMouseEnter={() => setActiveValue(option.value)}
                       >
+                        {option.status && (
+                          <span
+                            className={`compact-dropdown-dot compact-dropdown-dot-${option.status}`}
+                            title={option.status === "blocked" ? "Limit reached" : "Available"}
+                            aria-hidden="true"
+                          />
+                        )}
                         <span style={getOptionStyle?.(option.value)}>{option.label}</span>
+                        {option.badge && <span className="compact-dropdown-badge">{option.badge}</span>}
                       </button>
                       {onHideOption && option.value !== value && (
                         <button

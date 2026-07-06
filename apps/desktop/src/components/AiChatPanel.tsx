@@ -81,6 +81,9 @@ import {
   resolveEffectiveAutoCompactThreshold,
   type AiPreferences,
 } from "../lib/aiPreferences";
+import { luxideAvailability, luxideWeeklyBadge, useLuxideModelSync, useLuxideUsagePoller } from "../lib/luxideModelSync";
+import { useLuxideUsageStore } from "../lib/luxideUsageStore";
+import { isLuxideProvider, relinkLuxide } from "../lib/luxideEnroll";
 import { resolveVisionImageFormat } from "../lib/aiVisionFormat";
 import { loadChatCheckpointStore, saveChatCheckpointStore } from "../lib/aiChatCheckpointStore";
 import { buildCheckpointSendInput } from "../lib/aiChatCheckpointInput";
@@ -93,6 +96,7 @@ import { restoreChatBeforeUserMessage, undoLastAgentTurn } from "../lib/aiChatTu
 import {
   buildMessageDisplayAttachments,
   collectClipboardFiles,
+  readClipboardImageFile,
   revokeComposerAttachmentPreviews,
 } from "../lib/aiChatComposerAttachments";
 import { buildMentionRuntimeAttachments, collectMentionHints } from "../lib/aiChatMentionAttachments";
@@ -218,6 +222,13 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const openSettingsSection = useLuxStore((state) => state.openSettingsSection);
   const setAiChatSessionContextBudgetReport = useLuxStore((state) => state.setAiChatSessionContextBudgetReport);
   const setActiveAiChatSession = useLuxStore((state) => state.setActiveAiChatSession);
+  // Keep the bundled LuxIDE provider's model list in sync with the gateway so admin
+  // enable/disable toggles (via @LuxIDE_bot) appear/disappear here live.
+  useLuxideModelSync();
+  // Single poll of this user's per-model usage → shared store (composer plaque + the
+  // model-picker weekly badge/status dot both read it).
+  useLuxideUsagePoller();
+  const luxideUsageMap = useLuxideUsageStore((state) => state.map);
   const { locale, t } = useTranslation();
   const [message, setMessage] = useState("");
   const [projectSlashCommands, setProjectSlashCommands] = useState<ProjectSlashCommand[]>([]);
@@ -349,17 +360,26 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
   const selectedModelValue = `${aiPreferences.selectedProviderId}${MODEL_VALUE_SEP}${aiPreferences.selectedModelId}`;
   const hiddenModelSet = useMemo(() => new Set(aiPreferences.hiddenModelIds), [aiPreferences.hiddenModelIds]);
   const modelOptions = useMemo(() => {
-    const options: { label: string; value: string; group?: string }[] = [];
+    const options: { label: string; value: string; group?: string; badge?: string; status?: "ok" | "blocked" }[] = [];
     const multiProvider = aiPreferences.providers.length > 1;
     for (const provider of aiPreferences.providers) {
+      const luxide = isLuxideProvider(provider);
       for (const model of provider.models) {
         const value = `${provider.id}${MODEL_VALUE_SEP}${model.id}`;
         if (hiddenModelSet.has(value) && value !== selectedModelValue) continue;
-        options.push({ label: model.name, value, group: multiProvider ? provider.name : undefined });
+        // LuxIDE models carry a weekly used/cap badge and a green/red availability dot.
+        const usage = luxide ? luxideUsageMap[model.alias] ?? null : null;
+        options.push({
+          label: model.name,
+          value,
+          group: multiProvider ? provider.name : undefined,
+          badge: luxide ? luxideWeeklyBadge(usage) ?? undefined : undefined,
+          status: luxide ? luxideAvailability(usage) ?? undefined : undefined,
+        });
       }
     }
     return options;
-  }, [aiPreferences.providers, hiddenModelSet, selectedModelValue]);
+  }, [aiPreferences.providers, hiddenModelSet, selectedModelValue, luxideUsageMap]);
   const effortOptions = selectedModel?.effortLevels.map((effort) => ({ label: effort.label, value: effort.id })) ?? [];
   const slashCommands = useMemo(
     () => filterSlashCommands(message, t, projectSlashCommands),
@@ -765,9 +785,17 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
 
   const handleComposerPaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = collectClipboardFiles(event.clipboardData);
-    if (files.length === 0) return;
-    event.preventDefault();
-    attachFiles(files);
+    if (files.length > 0) {
+      event.preventDefault();
+      attachFiles(files);
+      return;
+    }
+    // Fallback for Linux WebKitGTK, where the paste event carries no image: read
+    // the OS clipboard natively. No-op when it holds no image, so pasting text
+    // into the composer still works normally.
+    void readClipboardImageFile().then((file) => {
+      if (file) attachFiles([file]);
+    });
   };
 
   const handleCancelSend = useCallback(() => {
@@ -1441,6 +1469,15 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
       trimCancelledAssistantShell(sessionId, replaceAiChatMessages);
       setAiChatSessionStatus(sessionId, "error", errorPresentation.message);
       if (useLuxStore.getState().activeAiChatSessionId === sessionId) setSendError(errorPresentation);
+      // A LuxIDE auth failure means the device token is stale/rejected (e.g. after the
+      // gateway moved to Telegram-linked identity) — drop it and open the link modal.
+      if (errorPresentation.kind === "auth") {
+        const prov = getAiProvider(
+          useLuxStore.getState().aiPreferences.providers,
+          useLuxStore.getState().aiPreferences.selectedProviderId,
+        );
+        if (prov && isLuxideProvider(prov)) void relinkLuxide(prov.baseUrl);
+      }
     } finally {
       pendingSendLockRef.current.delete(sessionId);
       setSendPhase((current) => (current?.sessionId === sessionId ? null : current));
@@ -1471,7 +1508,10 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
         // surface the error so the user can intervene — this is the "works in all modes"
         // ladder, not an automatic-only behavior.
         const transientRetryable = Boolean(lastTurnError && isTransientRetryKind(lastTurnError.kind));
-        const retryPlan = (turnFailed && lastTurnError && (automatic || transientRetryable))
+        // Context overflow is recoverable in EVERY mode: the retry force-compacts the
+        // transcript first (below), so it must be allowed to retry like a transient.
+        const contextOverflow = lastTurnError?.kind === "context-overflow";
+        const retryPlan = (turnFailed && lastTurnError && (automatic || transientRetryable || contextOverflow))
           ? nextAutomaticRetry(sessionId)
           : null;
         const willRetry = retryPlan !== null && (automatic || !retryPlan.exhausted);
@@ -1517,15 +1557,27 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
                 return;
               }
               goalContinuationTimersRef.current.delete(retrySessionId);
-              fireRetry();
+              void fireRetry();
             }, delay);
             goalContinuationTimersRef.current.set(retrySessionId, handle);
           };
-          const fireRetry = () => {
+          const fireRetry = async () => {
             // Skip if another turn is already running or the session went away. A mode
             // switch mid-backoff no longer cancels the retry — the ladder is bounded in
             // manual/plan and the task should still reach a valid result.
             if (getAiChatTurnRuntimeSnapshot().sendingSessionId === retrySessionId) return;
+            // Context overflow: shrink the transcript BEFORE retrying, otherwise the
+            // retry re-sends the same oversized history and fails identically. Force
+            // compaction summarizes the older bulk; it escalates on each attempt.
+            if (lastTurnError?.kind === "context-overflow") {
+              try {
+                await runCompaction(true);
+              } catch {
+                // Compaction failed (e.g. summarizer offline) — retry anyway; the
+                // transient ladder still applies and may recover.
+              }
+              if (getAiChatTurnRuntimeSnapshot().sendingSessionId === retrySessionId) return;
+            }
             const live = useLuxStore.getState().aiChatSessions.find((entry) => entry.id === retrySessionId);
             if (!live || live.closedAt) return;
             if (getActiveGoalRun(retrySessionId)) {
@@ -1991,10 +2043,11 @@ export function AiChatPanel({ embedded = false, presentation = "panel", showClos
     // While the agent is busy, Enter stages the message into the per-session queue;
     // it drains automatically when the current turn finishes (see the drain effect).
     // Ctrl/Cmd+Enter also queues — both run verbatim as the next turn.
-    // Don't clear the composer input after enqueue — the user may want to type
-    // a second message immediately while the first is still queued (input independence).
+    // Clear the composer after enqueue: the queued text is already captured, so the
+    // field resets for the next message just like a normal send.
     if (activeSessionBusy && activeAiChatSessionId && message.trim()) {
       enqueueChatMessage(activeAiChatSessionId, message, "queued");
+      updateMessage("");
       return;
     }
     void handleSend();

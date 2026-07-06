@@ -4,6 +4,7 @@ import type { ReactNode, RefObject } from "react";
 import { CompactDropdown } from "../CompactDropdown";
 import type { AiComposerSelectOption } from "./aiComposerTypes";
 import { getAiProvider, type AiPreferences } from "../../lib/aiPreferences";
+import { pickNativeAttachmentFiles } from "../../lib/aiChatComposerAttachments";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 
 type AiComposerModelControlsProps = {
@@ -75,7 +76,14 @@ export const AiComposerModelControls = memo(function AiComposerModelControls({
         aria-label={t("aiChat.attachFiles")}
         title={t("aiChat.attachFiles")}
         disabled={disabled}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={() => {
+          // Prefer the native OS picker (desktop); fall back to the HTML input
+          // when the native dialog is unavailable. A cancel ([]) does nothing.
+          void pickNativeAttachmentFiles().then((files) => {
+            if (files === null) fileInputRef.current?.click();
+            else if (files.length > 0) attachFiles(files);
+          });
+        }}
       >
         <Paperclip size={15} />
       </button>

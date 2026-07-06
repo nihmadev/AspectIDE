@@ -17,6 +17,10 @@ export type AiComposerSelectOption = {
   label: string;
   value: string;
   group?: string;
+  /** Trailing badge text (e.g. weekly "0/1000" usage for LuxIDE models). */
+  badge?: string;
+  /** Availability dot: "ok" (green) or "blocked" (red). */
+  status?: "ok" | "blocked";
 };
 
 export const VOICE_MODE_RECORDING = "recording";

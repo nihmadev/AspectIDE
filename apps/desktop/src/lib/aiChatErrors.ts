@@ -5,6 +5,7 @@ export type AiChatErrorKind =
   | "cancelled"
   | "timeout"
   | "rate-limit"
+  | "context-overflow"
   | "auth"
   | "provider"
   | "invalid-json"
@@ -39,6 +40,20 @@ export function classifyAiChatError(error: unknown, t: TranslateFn): AiChatError
   const detail = readErrorMessage(error);
   const lower = detail.toLowerCase();
 
+  // Context overflow: the accumulated history no longer fits the model's window.
+  // This is RECOVERABLE by compacting the transcript, so the retry path force-runs
+  // compaction before re-sending (see AiChatPanel). Match the common provider
+  // phrasings across OpenAI/Anthropic/others.
+  if (/context[ _-]?length|context_length_exceeded|maximum context|reduce the length|too many tokens|context window|prompt is too long|input is too long|exceeds? the (model'?s )?(maximum )?context|maximum.*tokens/.test(lower)) {
+    return {
+      kind: "context-overflow",
+      message: t("aiChat.error.contextOverflow", { detail }),
+      detail,
+      canRetry: true,
+      canRetryTools: false,
+      canOpenSettings: false,
+    };
+  }
   // Rate limit (429): the backend already auto-retried the connection a couple of
   // times (with the live "retrying in Ns" notice), so reaching here means the limit
   // is still in effect. Surface a calm, recognizable message + retry instead of the

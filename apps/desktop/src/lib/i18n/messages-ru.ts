@@ -1233,6 +1233,7 @@ export const messagesRu: Messages = {
   "aiChat.error.cancelled": "Запрос отменён.",
   "aiChat.error.timeout": "Провайдер не ответил вовремя. {detail}",
   "aiChat.error.rateLimit": "Достигнут лимит запросов (429) — автоповтор не помог. Подожди немного и повтори, или смени модель/провайдера в настройках. {detail}",
+  "aiChat.error.contextOverflow": "Контекст переполнен — сжимаю переписку и продолжаю автоматически. {detail}",
   "aiChat.error.auth": "Ошибка авторизации (401/403) — проверь API-ключ в настройках. {detail}",
   "aiChat.error.providerUnavailable": "Провайдер недоступен. Проверьте, что локальный endpoint запущен. {detail}",
   "aiChat.error.invalidJson": "Провайдер вернул некорректный JSON. {detail}",

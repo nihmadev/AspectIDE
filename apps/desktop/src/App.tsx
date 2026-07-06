@@ -8,6 +8,7 @@ import { ProjectLoadingStatus } from "./components/ProjectLoadingStatus";
 import { StatusBar } from "./components/StatusBar";
 import { TitleBar } from "./components/TitleBar";
 import { UpdateNoticeHost } from "./components/UpdateNoticeHost";
+import { LuxideLinkModal } from "./components/LuxideLinkModal";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { saveChatCheckpointStore } from "./lib/aiChatCheckpointStore";
 import { loadAiChatHistory, resetAiChatPersistDigest, saveAiChatHistory } from "./lib/aiChatHistory";
@@ -699,6 +700,7 @@ export function App() {
         <DeferredCommandPalette open={commandPaletteOpen} />
         <DeferredSettingsDialog open={settingsOpen} />
         <UpdateNoticeHost />
+        <LuxideLinkModal />
       </div>
     );
   }
@@ -715,6 +717,7 @@ export function App() {
         <DeferredCommandPalette open={commandPaletteOpen} />
         <DeferredSettingsDialog open={settingsOpen} />
         <UpdateNoticeHost />
+        <LuxideLinkModal />
       </div>
     );
   }

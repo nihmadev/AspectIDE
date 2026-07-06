@@ -1,6 +1,7 @@
 import type { AiChatMessage, AiChatRuntimeStatus, AiChatSendInput, AiToolApprovalRequest } from "./aiChatTypes";
 import { createTurnTimeline } from "./aiChatTimeline";
 import { isAnthropicCacheModel, reasoningPayload } from "./aiChatTransport";
+import { resolveProviderApiKey } from "./luxideEnroll";
 import { attachTurnCostEstimate } from "./aiTurnUsage";
 import { normalizeRepeatedOutput } from "./aiOutputNormalizer";
 import { buildNativeHistoryContent, buildUserContent } from "./aiRuntimePrompt";
@@ -449,6 +450,9 @@ async function buildRunTurnInput(input: AiChatSendInput, turnId: string, message
   // mirroring buildInitialMessages on the TS path. Best-effort: a read failure must
   // not block the turn, so fall back to an empty snippet.
   const projectAgentsSnip = await loadProjectAgentsSnip(input).catch(() => "");
+  // Resolve the bearer credential: an explicit key wins; the keyless bundled
+  // LuxIDE provider auto-enrolls (PoW) and caches its per-device token.
+  const resolvedApiKey = await resolveProviderApiKey(input.provider);
   return {
     turnId,
     messageId,
@@ -470,7 +474,7 @@ async function buildRunTurnInput(input: AiChatSendInput, turnId: string, message
       .map((message) => ({ role: message.role, content: buildNativeHistoryContent(message) }))
       .filter((entry) => entry.role === "user" || entry.content.trim().length > 0),
     baseUrl: input.provider.baseUrl,
-    apiKey: input.provider.apiKey || null,
+    apiKey: resolvedApiKey || null,
     model: selectedModelAlias,
     // Best-effort semantic memory: empty for anthropic-protocol models (no
     // /embeddings endpoint) or when the user never set one. Uses the EFFECTIVE

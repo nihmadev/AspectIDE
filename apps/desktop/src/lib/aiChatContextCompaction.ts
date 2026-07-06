@@ -33,6 +33,13 @@ export const PRESERVE_FULL_TOOL_OUTPUT_ASSISTANT_TURNS = 3;
 const MIN_TOOL_OUTPUT_CHARS_TO_PRUNE = 320;
 const MIN_TOKEN_REDUCTION_RATIO = 0.08;
 const COMPACTION_COOLDOWN_MS = 12_000;
+// The preserved recent window is bounded by BOTH a message count and a token
+// budget (this fraction of the trigger). Without the token bound a few large
+// recent messages (big tool outputs, pasted files) stay in the preserved window
+// and defeat compaction — the whole point is to summarize the bulk, so we shrink
+// the window from the front until it fits the budget (never below the floor).
+const PRESERVE_TOKEN_BUDGET_RATIO = 0.35;
+const MIN_PRESERVED_MESSAGES = 2;
 const MAX_TRANSCRIPT_CHARS = 84_000;
 const MAX_SUMMARY_CHARS = 18_000;
 const MAX_PREVIOUS_SUMMARY_CHARS = 6_000;
@@ -226,6 +233,28 @@ export function pruneReducedTokenEstimate(before: AiChatMessage[], after: AiChat
   return left > 0 && right < left ? left - right : 0;
 }
 
+/**
+ * Index to preserve FROM: keeps the most recent messages bounded by both
+ * `maxCount` and `tokenBudget`. Walks backward from the end, always keeping at
+ * least `min(maxCount, MIN_PRESERVED_MESSAGES)`, then stops once adding the next
+ * older message would exceed the token budget. This guarantees the older bulk is
+ * summarized even when recent messages are individually huge.
+ */
+export function resolvePreserveWindow(messages: AiChatMessage[], maxCount: number, tokenBudget: number): number {
+  const floor = Math.min(maxCount, MIN_PRESERVED_MESSAGES);
+  let count = 0;
+  let tokens = 0;
+  let index = messages.length;
+  while (index > 0 && count < maxCount) {
+    const messageTokens = estimateMessageTokens(messages[index - 1]);
+    if (count >= floor && tokens + messageTokens > tokenBudget) break;
+    tokens += messageTokens;
+    count += 1;
+    index -= 1;
+  }
+  return Math.max(0, index);
+}
+
 export async function compactChatHistory(input: CompactChatHistoryInput): Promise<CompactChatHistoryResult> {
   const prunedMessages = pruneStaleToolOutputs(input.messages);
   const threshold = clampContextAutoCompactThreshold(input.threshold);
@@ -275,7 +304,10 @@ export async function compactChatHistory(input: CompactChatHistoryInput): Promis
     };
   }
 
-  const preserveFrom = Math.max(0, prunedMessages.length - preserveCount);
+  // Bound the preserved window by tokens as well as count, so large recent
+  // messages can't keep the bulk of the context out of the summarized slice.
+  const preserveBudget = Math.max(1, Math.floor(triggerTokens * PRESERVE_TOKEN_BUDGET_RATIO));
+  const preserveFrom = resolvePreserveWindow(prunedMessages, preserveCount, preserveBudget);
   const older = prunedMessages.slice(0, preserveFrom).filter((message) => !isCompactionCheckpointMessage(message));
   const recent = prunedMessages.slice(preserveFrom);
 

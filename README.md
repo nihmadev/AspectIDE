@@ -50,6 +50,8 @@
 
 > ⚡ **Install once, stay current** — releases ship with a signed auto-updater. 19 releases landed in the first 16 days.
 
+> 🎁 **Free models built in** — a curated set of models ships with Lux IDE at no cost. No API key, no card: link your Telegram once (1 account = your own daily/weekly limits) and start coding. Bring your own key any time for the full 35+ provider catalog.
+
 ## ✨ Why Lux
 
 | | Lux IDE | The usual suspects |
@@ -59,7 +61,7 @@
 | 🧠 **Memory** | Per-project **SQLite + FTS5 memory** with a knowledge graph (supersedes/extends/contradicts relations), rank fusion, and recency decay — local, inspectable, survives restarts | Context resets every session, or lives in someone else's cloud |
 | 🤖 **Agent execution** | Native Rust turn loop, parallel read-only tool fan-out, up to 4 **parallel subagents** with a shared message board, prompt caching, context compaction | Single-threaded chat loops |
 | 🌐 **Web research** | Built-in multi-query research engine: query expansion, cross-engine merge, corpus reranking, canonical-URL dedup, inline `[1]` citations | One-shot search wrapper, if anything |
-| 🔌 **Providers** | **35+ presets, BYO key** — OpenAI, Anthropic, Google, DeepSeek, Groq, OpenRouter, Ollama, LM Studio… Keys go straight from the Rust client to the provider | Proxied billing and a fixed model list |
+| 🔌 **Providers** | **Free models built in** (no key — link Telegram once, 1 account = your own limits) **+ 35+ BYO-key presets** — OpenAI, Anthropic, Google, DeepSeek, Groq, OpenRouter, Ollama, LM Studio… Your keys go straight from the Rust client to the provider | Proxied billing and a fixed model list |
 | 🔒 **Privacy** | **Zero listening ports** by default, stdio-first transports, all indexing/search/graph 100% local, SecretGuard redaction | Agent traffic routed through vendor cloud |
 | 💸 **Price** | Free, Apache-2.0, no telemetry surprises, no paywalled features | Subscription |
 

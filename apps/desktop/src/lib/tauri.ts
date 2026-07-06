@@ -560,6 +560,12 @@ export type FileAssetResponse = {
   size: number;
 };
 
+export type ClipboardImageData = {
+  width: number;
+  height: number;
+  rgbaBase64: string;
+};
+
 export type UpdateCheckResult = {
   /** Whether a newer signed build is available at the configured endpoints. */
   available: boolean;
@@ -849,6 +855,12 @@ export const luxCommands = {
     notes: string[];
   }>("file_media_ai_context", { request }),
   fileAssetData: (path: string) => invokeRequired<FileAssetResponse>("file_asset_data", { path }),
+  /** Native OS multi-file picker for chat attachments; returns absolute paths ([] on cancel). */
+  pickAttachmentFiles: () => invokeRequired<string[]>("pick_attachment_files", undefined, expectArray<string>),
+  /** Read a user-picked file from any absolute path into an inline data URL. */
+  readExternalFile: (path: string) => invokeRequired<FileAssetResponse>("read_external_file", { path }),
+  /** Read an image from the OS clipboard as raw RGBA (paste fallback on Linux). */
+  clipboardReadImage: () => invokeRequired<ClipboardImageData | null>("clipboard_read_image"),
   aiVisionEncode: (request: {
     path?: string | null;
     dataUrl?: string | null;
@@ -936,6 +948,20 @@ export const luxCommands = {
     tokenEconomy: boolean; customPromptEnabled: boolean; customPrompt: string;
   }) => invokeRequired<string>("ai_build_system_prompt", { input }),
   aiRunTurn: (input: AiRunTurnInput) => invokeRequired<null>("ai_run_turn", { input }),
+  /** Start a Telegram device-link: returns a code + deep link to the bot. */
+  luxideLinkStart: (baseUrl: string) =>
+    invokeRequired<{ code: string; deep_link: string }>("luxide_link_start", { baseUrl }),
+  /** Poll a device-link code: status "pending" until bound, then "ready" + token (once). */
+  luxideLinkPoll: (baseUrl: string, code: string) =>
+    invokeRequired<{ status: string; token: string; device_id: string }>("luxide_link_poll", { baseUrl, code }),
+  /** Open an http(s) URL in the OS default handler (the webview can't open externally). */
+  luxideOpenUrl: (url: string) => invokeRequired<void>("luxide_open_url", { url }),
+  /** Fetch per-model usage (all-time total + rolling-window used/cap) from the LuxIDE gateway (empty when not enrolled). */
+  luxideUsage: (baseUrl: string, token: string) =>
+    invokeRequired<{ id: string; total: number; windows: { window: string; used: number; cap: number }[] }[]>(
+      "luxide_usage",
+      { baseUrl, token },
+    ),
   /** Fetch a provider's available model ids from its OpenAI-compatible /models endpoint. */
   aiListProviderModels: (baseUrl: string, apiKey: string | null) =>
     invokeRequired<string[]>("ai_list_provider_models", { baseUrl, apiKey }),

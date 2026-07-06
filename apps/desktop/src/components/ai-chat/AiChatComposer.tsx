@@ -5,6 +5,7 @@ import { AiComposerCommandMenus } from "./AiComposerCommandMenus";
 import { AiComposerInputArea } from "./AiComposerInputArea";
 import { AiComposerModelControls } from "./AiComposerModelControls";
 import { AiComposerSendControls } from "./AiComposerSendControls";
+import { formatLuxideUsageLabel, useLuxideSelectedModelUsage } from "../../lib/luxideModelSync";
 import type { AiComposerSelectOption, AiComposerVoiceState } from "./aiComposerTypes";
 import type { SlashCommandMatch } from "../../lib/aiChatSlashCommands";
 import type { AiChatContextUsageMeta, AiChatContextUsageSummary } from "../../lib/aiChatContextUsage";
@@ -140,6 +141,9 @@ export function AiChatComposer({
   updateModel,
   voiceInput,
 }: AiChatComposerProps) {
+  // Compact "used / cap" daily-budget readout for the bundled LuxIDE models; null
+  // for any other provider or when the selected model has neither a cap nor usage.
+  const luxideUsageLabel = formatLuxideUsageLabel(useLuxideSelectedModelUsage());
   return (
     <div
       className="ai-chat-composer"
@@ -167,6 +171,11 @@ export function AiChatComposer({
         onSlashSelect={onSlashSelect}
         t={t}
       />
+      {luxideUsageLabel && (
+        <div className="ai-composer-usage" title="Your usage / your cap per window · Σ = your all-time total for this model">
+          {luxideUsageLabel}
+        </div>
+      )}
       <AiComposerInputArea
         message={message}
         disabled={disabled}

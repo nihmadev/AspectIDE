@@ -122,8 +122,11 @@ export function mergeRefreshedModels(
 ): AiProviderConfig {
   if (fetched.length === 0) return provider;
   const priorById = new Map(provider.models.map((model) => [model.id, model]));
+  // Fall back to a case-insensitive alias match so per-model overrides survive the
+  // one-time lowercase-id → gateway-alias migration (e.g. "minimax-m2.7" → "MiniMax-M2.7").
+  const priorByAlias = new Map(provider.models.map((model) => [model.alias.toLowerCase(), model]));
   const models = fetched.map((model) => {
-    const prior = priorById.get(model.id);
+    const prior = priorById.get(model.id) ?? priorByAlias.get(model.alias.toLowerCase());
     if (!prior) return model;
     // The freshly-fetched values are the source of truth (the profile re-derives
     // name/context); only carry a prior value forward when the fetch produced none.

@@ -3866,6 +3866,128 @@
   gap: 8px;
 }
 
+/* Telegram device-link modal (unlock the free bundled models). */
+.luxide-link-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 11, 18, 0.55);
+  backdrop-filter: blur(2px);
+}
+.luxide-link-card {
+  position: relative;
+  width: min(380px, calc(100vw - 40px));
+  padding: 26px 24px 22px;
+  border-radius: 16px;
+  text-align: center;
+  background: var(--panel-bg, #12151c);
+  border: 1px solid var(--border-color, rgba(148, 163, 184, 0.18));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.luxide-link-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: inline-flex;
+  padding: 5px;
+  border: none;
+  border-radius: 8px;
+  color: var(--ai-muted-text, rgba(148, 163, 184, 0.85));
+  background: transparent;
+  cursor: pointer;
+}
+.luxide-link-close:hover {
+  background: rgba(148, 163, 184, 0.14);
+}
+.luxide-link-icon {
+  display: inline-flex;
+  padding: 12px;
+  margin-bottom: 8px;
+  border-radius: 50%;
+  color: #38bdf8;
+  background: rgba(56, 189, 248, 0.14);
+}
+.luxide-link-title {
+  margin: 2px 0 10px;
+  font-size: 17px;
+  font-weight: 650;
+}
+.luxide-link-body {
+  margin: 0 0 16px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ai-muted-text, rgba(203, 213, 225, 0.92));
+}
+.luxide-link-cta {
+  display: inline-block;
+  margin: 2px 0 14px;
+  padding: 9px 18px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  color: #04141f;
+  background: linear-gradient(180deg, #4fc3f7, #29b6f6);
+  cursor: pointer;
+  border: none;
+}
+.luxide-link-cta:hover {
+  filter: brightness(1.05);
+}
+.luxide-link-muted {
+  font-size: 12.5px;
+  color: var(--ai-muted-text, rgba(148, 163, 184, 0.9));
+}
+.luxide-link-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--ai-muted-text, rgba(148, 163, 184, 0.85));
+}
+.luxide-link-ok {
+  font-size: 14px;
+  font-weight: 600;
+  color: #4ade80;
+}
+.luxide-link-err {
+  font-size: 12.5px;
+  color: #f87171;
+  overflow-wrap: anywhere;
+}
+.luxide-link-spin {
+  animation: luxide-link-spin 0.9s linear infinite;
+}
+@keyframes luxide-link-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Compact, centered usage plaque for the bundled LuxIDE models, shown just above
+   the input field: rolling-window used/cap plus the all-time Σ total. */
+.ai-composer-usage {
+  align-self: center;
+  max-width: 100%;
+  margin: 0 auto 4px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  color: var(--ai-muted-text, rgba(148, 163, 184, 0.9));
+  background: var(--ai-chip-bg, rgba(148, 163, 184, 0.12));
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .ai-composer-left-actions,
 .ai-composer-right-actions {
   min-width: 0;
@@ -4045,6 +4167,32 @@
   background: var(--selected);
   color: var(--text-0);
   font-weight: 600;
+}
+
+/* LuxIDE model rows: leading availability dot + trailing weekly used/cap badge. */
+.compact-dropdown-option {
+  gap: 7px;
+}
+.compact-dropdown-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 8%, transparent);
+}
+.compact-dropdown-dot-ok {
+  background: #4ade80;
+}
+.compact-dropdown-dot-blocked {
+  background: #f87171;
+}
+.compact-dropdown-badge {
+  margin-left: auto;
+  flex: 0 0 auto;
+  padding-left: 8px;
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2, rgba(148, 163, 184, 0.85));
 }
 
 /* Search box + scroll body + per-row hide affordance + footer (unified model picker). */

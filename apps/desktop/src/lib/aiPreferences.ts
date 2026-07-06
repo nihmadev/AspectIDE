@@ -147,6 +147,7 @@ export type AiVisionImageFormatPreference = "auto" | "webp" | "png";
 export type AiScanConcurrency = "auto" | "all" | "half";
 
 export type AiProviderPresetId =
+  | "luxide"
   | "openai"
   | "anthropic"
   | "openrouter"
@@ -290,6 +291,25 @@ export function standardReasoningEfforts(): AiEffortConfig[] {
 }
 
 export const AI_PROVIDER_PRESETS = [
+  {
+    id: "luxide",
+    name: "LuxIDE",
+    description: "Free models bundled with LuxIDE — no API key needed. Requests are proxied through the LuxIDE gateway; a per-device token is fetched automatically on first use.",
+    protocol: "openai-compatible",
+    baseUrl: "https://lux-ide.duckdns.org/v1",
+    // Model `id` MUST equal `alias` (the gateway's /v1/models id): the live model
+    // sync (see luxideModelSync.ts) keys refreshed models by the gateway id, so a
+    // divergent local id would reset the user's selection on the first refresh.
+    models: [
+      { id: "glm-4.7", name: "GLM 4.7", alias: "glm-4.7", contextTokens: 128_000, effortLevels: reasoningEfforts },
+      { id: "MiniMax-M2.7", name: "MiniMax M2.7", alias: "MiniMax-M2.7", contextTokens: 200_000, effortLevels: reasoningEfforts },
+      { id: "Kimi-K2.6", name: "Kimi K2.6", alias: "Kimi-K2.6", contextTokens: 200_000, effortLevels: reasoningEfforts },
+      { id: "step-3.7-flash", name: "Step 3.7 Flash", alias: "step-3.7-flash", contextTokens: 128_000, effortLevels: reasoningEfforts },
+      { id: "MiniMax-M3", name: "MiniMax M3", alias: "MiniMax-M3", contextTokens: 200_000, effortLevels: reasoningEfforts },
+      { id: "Spark-X2-Flash", name: "Spark X2 Flash", alias: "Spark-X2-Flash", contextTokens: 128_000, effortLevels: reasoningEfforts },
+      { id: "Qwen3.5-397B-A17B", name: "Qwen3.5 397B A17B", alias: "Qwen3.5-397B-A17B", contextTokens: 262_144, effortLevels: reasoningEfforts },
+    ],
+  },
   {
     id: "openai",
     name: "OpenAI",
@@ -741,8 +761,8 @@ export const AI_PROVIDER_PRESETS = [
   },
 ] as const satisfies readonly AiProviderPreset[];
 
-export const defaultAiProviderId = "local-proxy";
-export const defaultAiModelId = "gpt-5.5";
+export const defaultAiProviderId = "luxide";
+export const defaultAiModelId = "glm-4.7";
 export const defaultAiEffortId = "xhigh";
 
 export const defaultAiAgentProfiles: AiAgentProfile[] = [
@@ -772,7 +792,7 @@ export const defaultAiAgentProfiles: AiAgentProfile[] = [
   ].join("\n") },
 ];
 
-export const defaultAiProviders: AiProviderConfig[] = [createProviderFromPreset(getAiProviderPreset("local-proxy")!, [])];
+export const defaultAiProviders: AiProviderConfig[] = [createProviderFromPreset(getAiProviderPreset("luxide")!, [])];
 
 export const defaultAiPreferences: AiPreferences = {
   projectIndexingEnabled: true,

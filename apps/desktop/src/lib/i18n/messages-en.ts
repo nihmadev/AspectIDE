@@ -1233,6 +1233,7 @@ export const messagesEn = {
   "aiChat.error.cancelled": "Request cancelled.",
   "aiChat.error.timeout": "The provider timed out. {detail}",
   "aiChat.error.rateLimit": "Rate limit reached (429) — auto-retry didn't clear it. Wait a bit and retry, or switch model/provider in Settings. {detail}",
+  "aiChat.error.contextOverflow": "Context window is full — compacting the conversation and continuing automatically. {detail}",
   "aiChat.error.auth": "Authentication failed (401/403) — check your API key in Settings. {detail}",
   "aiChat.error.providerUnavailable": "The provider is unavailable. Check that the local endpoint is running. {detail}",
   "aiChat.error.invalidJson": "The provider returned an invalid JSON response. {detail}",

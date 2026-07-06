@@ -94,6 +94,37 @@ pub async fn file_asset_data(
     .map_err(|error| error.to_string())?
 }
 
+/// Read a user-picked file from ANY absolute path into an inline data URL for a
+/// chat attachment. Chosen via the native OS file dialog, so access is
+/// user-authorized; unlike `file_asset_data` it is NOT restricted to the
+/// workspace (the picker can select files anywhere). Bounded by the same size cap.
+#[tauri::command]
+pub async fn read_external_file(path: PathBuf) -> Result<FileAssetResponse, String> {
+    tokio::task::spawn_blocking(move || -> Result<FileAssetResponse, String> {
+        let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+        if !metadata.is_file() {
+            return Err("path is not a file".to_string());
+        }
+        if metadata.len() > FILE_ASSET_MAX_BYTES {
+            return Err(format!(
+                "file is too large to attach: {} bytes",
+                metadata.len()
+            ));
+        }
+        let bytes = fs::read(&path).map_err(|error| error.to_string())?;
+        let mime_type = mime_type_for_path(&path);
+        let encoded = general_purpose::STANDARD.encode(bytes);
+        Ok(FileAssetResponse {
+            path,
+            data_url: format!("data:{mime_type};base64,{encoded}"),
+            mime_type,
+            size: metadata.len(),
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub async fn file_open_external(
     state: State<'_, SharedState>,
