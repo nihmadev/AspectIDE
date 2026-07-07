@@ -356,7 +356,7 @@ pub fn default_keybinding_profile() -> KeybindingProfile {
             ),
             binding("editor.action.toggleWordWrap", "Alt+Z", Some("editor")),
             binding(
-                "editor.action.toggleMinimap",
+                "editor.action.toggleMinimap",  
                 "Ctrl+M Ctrl+M",
                 Some("editor"),
             ),

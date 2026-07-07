@@ -147,12 +147,10 @@
 }
 
 .lux-mem-search,
-.lux-mem-select,
 .lux-skill-field input,
 .lux-skill-field select,
 .lux-skill-field textarea,
 .lux-mem-composer-text,
-.lux-mem-composer-cat,
 .lux-research-input {
   width: 100%;
   min-width: 0;
@@ -174,23 +172,25 @@
      swallow the whole controls row and crush the search field to a sliver. */
   width: auto;
   flex: 0 0 auto;
-  padding-right: 10px;
-  cursor: pointer;
+}
+.lux-mem-select .compact-dropdown-trigger:hover,
+.lux-mem-select .compact-dropdown-trigger[aria-expanded="true"] {
+  border-color: var(--accent-strong);
+  background: var(--bg-0);
 }
 .lux-mem-search:focus,
-.lux-mem-select:focus,
+.lux-mem-select .compact-dropdown-trigger:focus-visible,
 .lux-skill-field input:focus,
-.lux-skill-field select:focus,
+.lux-skill-field .compact-dropdown-trigger:focus-visible,
 .lux-skill-field textarea:focus,
 .lux-mem-composer-text:focus,
-.lux-mem-composer-cat:focus,
+.lux-mem-composer-cat .compact-dropdown-trigger:focus-visible,
 .lux-research-input:focus {
   border-color: var(--accent-strong);
   background: var(--bg-0);
 }
 .lux-mem-search::placeholder,
 .lux-mem-composer-text::placeholder,
-.lux-mem-composer-cat::placeholder,
 .lux-skill-field input::placeholder,
 .lux-skill-field textarea::placeholder,
 .lux-research-input::placeholder {
@@ -663,11 +663,19 @@
   gap: 10px;
 }
 .lux-mem-composer-cat {
-  flex: 1;
-  min-width: 130px;
+  flex: 0 1 auto;
+}
+.lux-mem-composer-cat .compact-dropdown-trigger {
+  justify-content: space-between;
+  gap: 8px;
+}
+.lux-mem-composer-cat .compact-dropdown-trigger:hover,
+.lux-mem-composer-cat .compact-dropdown-trigger[aria-expanded="true"] {
+  border-color: var(--accent-strong);
+  background: var(--bg-0);
 }
 .lux-mem-composer-save {
-  height: 32px; /* match the 32px category input in the same row */
+  height: 26px;
 }
 .lux-mem-composer-imp,
 .lux-mem-composer-pin {
@@ -774,6 +782,11 @@
 .lux-skill-field select {
   cursor: pointer;
 }
+.lux-skill-field .lux-skill-field-select {
+  width: max-content;
+  align-self: flex-start;
+}
+
 .lux-skill-field small,
 .lux-skill-slug {
   color: var(--text-3);
@@ -1189,11 +1202,12 @@
 /* Env editor spans the full form width beneath the main row. */
 .lux-mcp-env-input {
   grid-column: 1 / -1;
-  height: auto;
-  min-height: 48px;
-  padding: 8px 10px;
+  height: 32px;
+  min-height: 32px;
+  padding: 7px 10px;
   resize: vertical;
   font: 12px/1.5 var(--font-mono);
+  overflow: auto;
 }
 .lux-mcp-editing-note {
   display: flex;

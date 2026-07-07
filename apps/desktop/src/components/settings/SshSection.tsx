@@ -1,8 +1,8 @@
-import { AlertTriangle, Loader2, RefreshCw, Server, ShieldCheck } from "lucide-react";
+import { Loader2, RefreshCw, Server } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 import { luxCommands, type SshOverview } from "../../lib/tauri";
-import { NumberSetting, SaveIndicator, SettingsGrid, ToggleSetting, type SaveState } from "./SettingsControls";
+import { NumberSetting, SettingsGrid, ToggleSetting, type SaveState } from "./SettingsControls";
 
 const STRICT_HOST_KEY = "ai.ssh.strictHostKey";
 const CONNECT_TIMEOUT_KEY = "ai.ssh.connectTimeoutSecs";
@@ -17,12 +17,10 @@ function clampTimeout(value: number) {
 /**
  * Settings for Lux's SSH integration (the Ssh* agent tools). SSH works out of the
  * box through the system OpenSSH client and the user's ~/.ssh/config — the only
- * choices here are the host-key policy and the connect timeout. The panel also
- * surfaces whether OpenSSH is detected and the hosts it can already reach.
+ * choices here are the host-key policy and the connect timeout.
  */
 export function SshSection({ t }: { t: TranslateFn }) {
   const [overview, setOverview] = useState<SshOverview | null>(null);
-  const [loaded, setLoaded] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [strict, setStrict] = useState(false);
   const [connectTimeout, setConnectTimeout] = useState(12);
@@ -38,7 +36,6 @@ export function SshSection({ t }: { t: TranslateFn }) {
     } catch {
       setOverview(null);
     } finally {
-      setLoaded(true);
       setRefreshing(false);
     }
   }, []);
@@ -69,27 +66,10 @@ export function SshSection({ t }: { t: TranslateFn }) {
     void persist(CONNECT_TIMEOUT_KEY, clamped);
   }, [persist]);
 
-  const available = overview?.available ?? false;
   const hosts = overview?.configHosts ?? [];
-  const sessionCount = overview?.sessions.length ?? 0;
 
   return (
     <div className="lux-research">
-      <div className="lux-research-intro">
-        {!loaded ? <Loader2 size={16} className="lux-spin" /> : available ? <ShieldCheck size={16} /> : <AlertTriangle size={16} />}
-        <p>
-          {!loaded
-            ? t("settings.ssh.checking")
-            : available
-              ? t("settings.ssh.available", { version: overview?.version ?? "OpenSSH" })
-              : t("settings.ssh.unavailable")}
-        </p>
-      </div>
-
-      {loaded && available && (
-        <p className="lux-research-note">{t("settings.ssh.summary", { hosts: hosts.length, sessions: sessionCount })}</p>
-      )}
-
       <SettingsGrid>
         <ToggleSetting
           checked={strict}
@@ -106,10 +86,6 @@ export function SshSection({ t }: { t: TranslateFn }) {
           onChange={onTimeoutChange}
         />
       </SettingsGrid>
-      {/* Idle renders the header's "User settings" scope label, which reads as an
-          orphan caption inside this section — only surface active save feedback. */}
-      {saveState !== "idle" && <SaveIndicator state={saveState} t={t} />}
-
       <div className="lux-research-field">
         <div className="lux-research-status-row">
           <span className="lux-research-label">

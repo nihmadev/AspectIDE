@@ -213,6 +213,15 @@ function longestExtension(lowerName: string) {
   return parts.at(-1) ?? "";
 }
 
+export function extensionForLanguage(languageId: string): string | undefined {
+  const lower = languageId.toLowerCase();
+  for (const [ext, meta] of extensionIconMap) {
+    const tone = meta.className.slice("file-icon file-icon-".length);
+    if (tone === lower) return ext;
+  }
+  return undefined;
+}
+
 function icon(Icon: LucideIcon, tone: string): FileIconMeta {
   return { Icon, className: `file-icon file-icon-${tone}` };
 }

@@ -26,6 +26,7 @@ import {
   tokenizeRelatedQuery,
   topDirectory,
 } from "./aiRuntimeFileContext";
+import { normalizePathSlashes } from "./aiRuntimeShared";
 import { countLines } from "./aiRuntimePatch";
 import { activeDocumentContextMaxChars } from "./aiRuntimePrompt";
 import { globFiles, grepTool, impactAnalysis, relatedFiles } from "./aiRuntimeExploreTools";
@@ -91,6 +92,26 @@ export async function repoMap(maxFiles: number): Promise<ToolResult> {
   });
 }
 
+async function resolveIndexLanguages(entries: import("./types").FsEntry[], workspaceRoot: string, options: import("./aiProjectIndex").BuildAiProjectIndexOptions): Promise<import("./aiProjectIndex").AiProjectIndexSnapshot> {
+  if (isTauriRuntime()) {
+    const root = normalizePathSlashes(workspaceRoot).replace(/\/+$/, "");
+    const fileEntries = entries.filter((e) => e.kind === "file");
+    const filePaths = fileEntries.map((e) => normalizePathSlashes(e.path));
+    if (filePaths.length > 0) {
+      const langs = await luxCommands.resolveFileLanguages(filePaths);
+      const langMap = new Map<string, string>();
+      for (let i = 0; i < filePaths.length; i++) {
+        const rp = root && filePaths[i].toLowerCase().startsWith(`${root.toLowerCase()}/`)
+          ? filePaths[i].slice(root.length + 1)
+          : filePaths[i];
+        langMap.set(rp, langs[i]);
+      }
+      return buildAiProjectIndexSnapshot(entries, options, (relativePath) => langMap.get(relativePath) ?? null);
+    }
+  }
+  return buildAiProjectIndexSnapshot(entries, options);
+}
+
 export async function workspaceIndex(args: UnknownRecord, input: AiChatSendInput): Promise<ToolResult> {
   const startedAtMs = performance.now();
   const maxFiles = clamp(numberArg(args, "maxFiles", 60), 1, 180);
@@ -102,7 +123,7 @@ export async function workspaceIndex(args: UnknownRecord, input: AiChatSendInput
     const native = await luxCommands.aiWorkspaceIndex(maxFiles, maxScan);
     const entries = await luxCommands.fsListFiles(maxScan);
     const projectSnapshot = input.workspace
-      ? buildAiProjectIndexSnapshot(entries, {
+      ? await resolveIndexLanguages(entries, input.workspace.root, {
           finishedAtMs: performance.now(),
           includeImages: input.preferences.includeImages,
           maxIndexedFiles: input.preferences.maxIndexedFiles,
@@ -142,7 +163,7 @@ export async function workspaceIndex(args: UnknownRecord, input: AiChatSendInput
   const files = entries.filter((entry) => entry.kind === "file" && !isLowSignalRelatedPath(entry.path));
   const descriptors = files.map((entry) => createRelatedFileDescriptor(entry, input.workspace?.root ?? ""));
   const projectSnapshot = input.workspace
-    ? buildAiProjectIndexSnapshot(entries, {
+    ? await resolveIndexLanguages(entries, input.workspace.root, {
         finishedAtMs: performance.now(),
         includeImages: input.preferences.includeImages,
         maxIndexedFiles: input.preferences.maxIndexedFiles,

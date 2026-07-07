@@ -1,4 +1,4 @@
-import { Check, ChevronDown, ChevronLeft, ChevronRight, Cpu, GripVertical, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Cpu, GripVertical, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import {
   AI_PROVIDER_PRESETS,
@@ -25,6 +25,7 @@ import { fetchProviderModelConfigs, isFreeModelId, mergeRefreshedModels } from "
 import { luxCommands, type AiProviderDiagnosticResponse } from "../../lib/tauri";
 import type { MessageKey } from "../../lib/i18n";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { CompactDropdown } from "../CompactDropdown";
 import { NumberSetting, SelectSetting, SettingsGrid, SettingsPanel, TextSetting } from "./SettingsControls";
 
 // Provider preset id → localized description key. Brand names stay verbatim; only the
@@ -142,12 +143,15 @@ export function AiProvidersSection({ onChange, preferences, t }: { onChange: (pa
     // "Providers" title + description, so repeating them here reads as a glitch.
     <SettingsPanel>
       <div className="provider-create-row">
-        <label className="settings-select-control provider-template-select">
+        <label className="provider-template-select">
           <span className="provider-template-label">{t("settings.providers.template")}</span>
-          <select value={providerPresetId} onChange={(event) => setProviderPresetId(event.currentTarget.value as AiProviderPresetId)}>
-            {AI_PROVIDER_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.name}</option>)}
-          </select>
-          <ChevronDown size={14} />
+          <CompactDropdown
+            className="provider-template-dropdown"
+            label={t("settings.providers.template")}
+            value={providerPresetId}
+            options={AI_PROVIDER_PRESETS.map((preset) => ({ label: preset.name, value: preset.id }))}
+            onChange={(value) => setProviderPresetId(value as AiProviderPresetId)}
+          />
         </label>
         <button type="button" className="provider-add-button" onClick={addProvider}><Plus size={15} /> {t("settings.providers.add")}</button>
       </div>
@@ -461,43 +465,122 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
 
       <SettingsPanel title={t("settings.providers.models.title")} description={t("settings.providers.models.description")}>
         <div className="provider-model-manager">
-          <div className="provider-model-list">
-            <div className="provider-model-list-head">
-              <strong>{t("settings.providers.models.listTitle")}</strong>
-              <div className="provider-model-list-actions">
-                <button type="button" onClick={() => void refreshModels()} disabled={refreshingModels} title={t("settings.providers.models.refreshHint")}>
-                  <RefreshCw size={14} className={refreshingModels ? "spin-icon" : undefined} /> {t("settings.providers.models.refresh")}
-                </button>
-                <button type="button" onClick={addModel}><Plus size={14} /> {t("settings.providers.addModel")}</button>
+          <div className="provider-model-left">
+            <div className="provider-model-list">
+              <div className="provider-model-list-head">
+                <strong>{t("settings.providers.models.listTitle")}</strong>
+                <div className="provider-model-list-actions">
+                  <button type="button" onClick={() => void refreshModels()} disabled={refreshingModels} title={t("settings.providers.models.refreshHint")}>
+                    <RefreshCw size={14} className={refreshingModels ? "spin-icon" : undefined} /> {t("settings.providers.models.refresh")}
+                  </button>
+                  <button type="button" onClick={addModel}><Plus size={14} /> {t("settings.providers.addModel")}</button>
+                </div>
+              </div>
+              {refreshError && <p className="provider-model-refresh-error" role="alert">{refreshError}</p>}
+              <div className="provider-model-rows" role="listbox" aria-label={t("settings.providers.models.listTitle")}>
+                {provider.models.map((model) => {
+                  const activeModel = provider.id === preferences.selectedProviderId && model.id === preferences.selectedModelId;
+                  return (
+                    <button
+                      key={model.id}
+                      type="button"
+                      role="option"
+                      aria-selected={model.id === editingModel.id}
+                      className="provider-model-row"
+                      data-active={model.id === editingModel.id}
+                      onClick={() => setEditingModelId(model.id)}
+                    >
+                      <span className="provider-model-row-main">
+                        <strong>{model.name || t("settings.providers.untitledModel")}</strong>
+                        <small className="provider-model-row-alias">{model.alias || model.id}</small>
+                      </span>
+                      <span className="provider-model-row-side">
+                        {activeModel ? <span className="provider-model-active-badge">{t("settings.providers.activeModel")}</span> : null}
+                        {model.effortLevels.length > 0 ? (
+                          <small className="provider-model-effort-meta">{t("settings.providers.effortCount", { count: model.effortLevels.length })}</small>
+                        ) : null}
+                      </span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
-            {refreshError && <p className="provider-model-refresh-error" role="alert">{refreshError}</p>}
-            <div className="provider-model-rows" role="listbox" aria-label={t("settings.providers.models.listTitle")}>
-              {provider.models.map((model) => {
-                const activeModel = provider.id === preferences.selectedProviderId && model.id === preferences.selectedModelId;
-                return (
-                  <button
-                    key={model.id}
-                    type="button"
-                    role="option"
-                    aria-selected={model.id === editingModel.id}
-                    className="provider-model-row"
-                    data-active={model.id === editingModel.id}
-                    onClick={() => setEditingModelId(model.id)}
+
+            <div className="effort-editor">
+              <div className="effort-editor-head">
+                <strong>{t("settings.providers.thinkingEffort")}</strong>
+                <button type="button" onClick={() => {
+                  const nextEffort = createAiEffortConfig(editingModel.effortLevels);
+                  updateEfforts([...editingModel.effortLevels, nextEffort], nextEffort.id);
+                }}><Plus size={14} /> {t("settings.providers.addEffort")}</button>
+              </div>
+              {editingModel.effortLevels.length === 0 ? <p>{t("settings.providers.noEffortSelector")}</p> : editingModel.effortLevels.map((effort) => (
+                <div
+                  className="effort-row"
+                  key={effort.id}
+                  draggable={editingModel.effortLevels.length > 1}
+                  data-dragging={effortDrag?.id === effort.id || undefined}
+                  data-drop={effortDrag && effortDrag.overId === effort.id && effortDrag.id !== effort.id
+                    ? (effortDrag.after ? "after" : "before")
+                    : undefined}
+                  onDragStart={(event) => {
+                    if (!effortDragArmedRef.current) {
+                      event.preventDefault();
+                      return;
+                    }
+                    effortDragArmedRef.current = false;
+                    event.dataTransfer.effectAllowed = "move";
+                    setEffortDrag({ id: effort.id, overId: null, after: false });
+                  }}
+                  onDragOver={(event) => {
+                    if (!effortDrag) return;
+                    event.preventDefault();
+                    event.dataTransfer.dropEffect = "move";
+                    const rect = event.currentTarget.getBoundingClientRect();
+                    const after = event.clientY > rect.top + rect.height / 2;
+                    setEffortDrag((current) => current && (current.overId !== effort.id || current.after !== after)
+                      ? { ...current, overId: effort.id, after }
+                      : current);
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (effortDrag && effortDrag.id !== effort.id) {
+                      updateEfforts(
+                        reorderEffortLevels(editingModel.effortLevels, effortDrag.id, effort.id, effortDrag.after),
+                        preferences.selectedEffortId,
+                      );
+                    }
+                    effortDragArmedRef.current = false;
+                    setEffortDrag(null);
+                  }}
+                  onDragEnd={() => {
+                    effortDragArmedRef.current = false;
+                    setEffortDrag(null);
+                  }}
+                >
+                  <span
+                    className="effort-drag-handle"
+                    title={t("settings.providers.effortDragHint")}
+                    aria-hidden="true"
+                    data-disabled={editingModel.effortLevels.length < 2 || undefined}
+                    onPointerDown={() => {
+                      effortDragArmedRef.current = true;
+                      const disarm = () => { effortDragArmedRef.current = false; };
+                      window.addEventListener("pointerup", disarm, { once: true });
+                      window.addEventListener("pointercancel", disarm, { once: true });
+                    }}
                   >
-                    <span className="provider-model-row-main">
-                      <strong>{model.name || t("settings.providers.untitledModel")}</strong>
-                      <small className="provider-model-row-alias">{model.alias || model.id}</small>
-                    </span>
-                    <span className="provider-model-row-side">
-                      {activeModel ? <span className="provider-model-active-badge">{t("settings.providers.activeModel")}</span> : null}
-                      {model.effortLevels.length > 0 ? (
-                        <small className="provider-model-effort-meta">{t("settings.providers.effortCount", { count: model.effortLevels.length })}</small>
-                      ) : null}
-                    </span>
-                  </button>
-                );
-              })}
+                    <GripVertical size={14} />
+                  </span>
+                  <input value={effort.label} aria-label={t("settings.providers.effortLabelAria", { id: effort.id })} onChange={(event) => {
+                    updateEfforts(editingModel.effortLevels.map((candidate) => candidate.id === effort.id ? { ...candidate, label: event.currentTarget.value } : candidate), preferences.selectedEffortId);
+                  }} />
+                  <button type="button" aria-label={t("settings.providers.removeEffort", { label: effort.label || effort.id })} title={t("settings.providers.removeEffort", { label: effort.label || effort.id })} onClick={() => {
+                    const nextEfforts = editingModel.effortLevels.filter((candidate) => candidate.id !== effort.id);
+                    updateEfforts(nextEfforts, nextEfforts[0]?.id ?? "");
+                  }}><Trash2 size={14} /></button>
+                </div>
+              ))}
             </div>
           </div>
 
@@ -557,6 +640,7 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
                   { label: t("settings.providers.protocol.localProxy"), value: "local-proxy" },
                 ]}
                 onChange={(protocol) => updateEditingModel({ protocol: protocol === "inherit" ? null : protocol })}
+                wide
               />
               <NumberSetting
                 label={t("settings.providers.modelAutoCompact.label")}
@@ -571,94 +655,6 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
                 onChange={(percent) => updateEditingModel({ contextAutoCompactThreshold: percent > 0 ? clampOverridePercent(percent) : null })}
               />
             </SettingsGrid>
-            <div className="effort-editor">
-              <div className="effort-editor-head">
-                <strong>{t("settings.providers.thinkingEffort")}</strong>
-                <button type="button" onClick={() => {
-                  const nextEffort = createAiEffortConfig(editingModel.effortLevels);
-                  updateEfforts([...editingModel.effortLevels, nextEffort], nextEffort.id);
-                }}><Plus size={14} /> {t("settings.providers.addEffort")}</button>
-              </div>
-              {editingModel.effortLevels.length === 0 ? <p>{t("settings.providers.noEffortSelector")}</p> : editingModel.effortLevels.map((effort) => (
-                <div
-                  className="effort-row"
-                  key={effort.id}
-                  draggable={editingModel.effortLevels.length > 1}
-                  data-dragging={effortDrag?.id === effort.id || undefined}
-                  data-drop={effortDrag && effortDrag.overId === effort.id && effortDrag.id !== effort.id
-                    ? (effortDrag.after ? "after" : "before")
-                    : undefined}
-                  onDragStart={(event) => {
-                    // Only the grip arms a drag; dragging from the input would
-                    // fight text selection. The arm is a one-shot ticket,
-                    // consumed here so a stale flag can never hijack a later
-                    // gesture.
-                    if (!effortDragArmedRef.current) {
-                      event.preventDefault();
-                      return;
-                    }
-                    effortDragArmedRef.current = false;
-                    event.dataTransfer.effectAllowed = "move";
-                    setEffortDrag({ id: effort.id, overId: null, after: false });
-                  }}
-                  onDragOver={(event) => {
-                    if (!effortDrag) return;
-                    event.preventDefault();
-                    event.dataTransfer.dropEffect = "move";
-                    const rect = event.currentTarget.getBoundingClientRect();
-                    const after = event.clientY > rect.top + rect.height / 2;
-                    setEffortDrag((current) => current && (current.overId !== effort.id || current.after !== after)
-                      ? { ...current, overId: effort.id, after }
-                      : current);
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    if (effortDrag && effortDrag.id !== effort.id) {
-                      updateEfforts(
-                        reorderEffortLevels(editingModel.effortLevels, effortDrag.id, effort.id, effortDrag.after),
-                        preferences.selectedEffortId,
-                      );
-                    }
-                    effortDragArmedRef.current = false;
-                    setEffortDrag(null);
-                  }}
-                  onDragEnd={() => {
-                    effortDragArmedRef.current = false;
-                    setEffortDrag(null);
-                  }}
-                >
-                  <span
-                    className="effort-drag-handle"
-                    title={t("settings.providers.effortDragHint")}
-                    aria-hidden="true"
-                    data-disabled={editingModel.effortLevels.length < 2 || undefined}
-                    onPointerDown={() => {
-                      effortDragArmedRef.current = true;
-                      // The release can land anywhere (off the grip, outside
-                      // the window) and native dragstart may never fire, so
-                      // disarm on the next global pointer release — otherwise
-                      // the shared flag stays stuck and the next unrelated
-                      // gesture (e.g. selecting text in the label input) would
-                      // start a reorder drag. dragstart fires before the
-                      // drag-induced pointercancel, so real drags pass their
-                      // gate first.
-                      const disarm = () => { effortDragArmedRef.current = false; };
-                      window.addEventListener("pointerup", disarm, { once: true });
-                      window.addEventListener("pointercancel", disarm, { once: true });
-                    }}
-                  >
-                    <GripVertical size={14} />
-                  </span>
-                  <input value={effort.label} aria-label={t("settings.providers.effortLabelAria", { id: effort.id })} onChange={(event) => {
-                    updateEfforts(editingModel.effortLevels.map((candidate) => candidate.id === effort.id ? { ...candidate, label: event.currentTarget.value } : candidate), preferences.selectedEffortId);
-                  }} />
-                  <button type="button" aria-label={t("settings.providers.removeEffort", { label: effort.label || effort.id })} title={t("settings.providers.removeEffort", { label: effort.label || effort.id })} onClick={() => {
-                    const nextEfforts = editingModel.effortLevels.filter((candidate) => candidate.id !== effort.id);
-                    updateEfforts(nextEfforts, nextEfforts[0]?.id ?? "");
-                  }}><Trash2 size={14} /></button>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       </SettingsPanel>

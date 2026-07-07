@@ -1,8 +1,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowUpCircle, BarChart3, Bot, Brain, Code2, Cpu, Database, FileText, Globe, Languages, Loader2, Plug, Plus, RefreshCw, RotateCcw, Search, Server, Settings, Share2, Trash2, Wand2, X } from "lucide-react";
+import { ArrowUpCircle, Award, Brain, Braces, Cable, ChartColumn, Cloud, Compass, Download, FileCode, FileText, HelpCircle, Key, Loader2, Play, RefreshCw, ScrollText, Search, Settings2, Share2, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { FontSelectSetting, NumberSetting, SaveIndicator, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { FontSelectSetting, NumberSetting, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
 import { SkillsSection } from "./settings/SkillsSection";
 import { MemorySection } from "./settings/MemorySection";
 import { SshSection } from "./settings/SshSection";
@@ -71,6 +71,9 @@ import {
   type WordWrapSetting,
 } from "../lib/editorPreferences";
 import { displayPath } from "../lib/fileTree";
+import { getFolderIconSvg } from "../lib/fileIconMap";
+import { extensionForLanguage, fileIconForName } from "../lib/fileIcons";
+import { displayNameForLanguage } from "../lib/languageLabels";
 import { loadDictionary, LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from "../lib/i18n";
 import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
 import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
@@ -93,60 +96,54 @@ type SettingsSection = {
   keywords: string[];
 };
 
-const settingsNavGroups: Array<{ labelKey: MessageKey; sectionIds: SettingsSectionId[] }> = [
-  { labelKey: "settings.group.workspace", sectionIds: ["general"] },
-  { labelKey: "settings.group.editor", sectionIds: ["editor", "lsp"] },
-  { labelKey: "settings.group.ai", sectionIds: ["ai-runtime", "ai-browser", "ai-instructions", "ai-skills", "ai-memory", "ai-ssh", "ai-mcp", "ai-providers", "ai-indexing", "ai-usage"] },
-];
-
 const settingsSections: SettingsSection[] = [
   {
     id: "general",
     titleKey: "settings.general.title",
     descriptionKey: "settings.general.description",
-    icon: <Languages size={16} />,
+    icon: <Settings2 size={16} />,
     keywords: ["language", "locale", "russian", "english", "язык", "general", "язык", "общие"],
   },
   {
     id: "editor",
     titleKey: "settings.group.editor",
     descriptionKey: "settings.editor.description",
-    icon: <Code2 size={16} />,
+    icon: <FileCode size={16} />,
     keywords: ["font", "line", "tab", "whitespace", "unicode", "minimap", "word wrap", "mouse", "zoom", "smooth", "ligatures", "appearance", "behavior", "редактор", "шрифт"],
   },
   {
     id: "lsp",
     titleKey: "settings.lsp.title",
     descriptionKey: "settings.lsp.description",
-    icon: <Cpu size={16} />,
+    icon: <Braces size={16} />,
     keywords: ["lsp", "language server", "rust-analyzer", "gopls", "ty", "pyright", "typescript", "clangd", "intellisense", "completion", "hover", "языковой сервер"],
   },
   {
     id: "ai-runtime",
     titleKey: "settings.aiRuntime.title",
     descriptionKey: "settings.aiRuntime.description",
-    icon: <Bot size={16} />,
+    icon: <Play size={16} />,
     keywords: ["ai", "agent", "mode", "model", "effort", "reasoning", "tools", "tool rounds", "runtime", "compact", "context"],
   },
   {
     id: "ai-browser",
     titleKey: "settings.agentBrowser.nav.title",
     descriptionKey: "settings.agentBrowser.nav.description",
-    icon: <Globe size={16} />,
+    icon: <Compass size={16} />,
     keywords: ["browser", "agent-browser", "chromium", "chrome", "automation", "stream", "preview", "браузер"],
   },
   {
     id: "ai-instructions",
     titleKey: "settings.instructions.title",
     descriptionKey: "settings.instructions.description",
-    icon: <FileText size={16} />,
+    icon: <ScrollText size={16} />,
     keywords: ["ai", "instructions", "system", "prompt", "profile", "behavior", "agent", "plan", "ask"],
   },
   {
     id: "ai-skills",
     titleKey: "settings.skills.title",
     descriptionKey: "settings.skills.description",
-    icon: <Wand2 size={16} />,
+    icon: <Award size={16} />,
     keywords: ["skill", "skills", "procedure", "playbook", "reusable", "instructions", "навык", "навыки"],
   },
   {
@@ -160,35 +157,35 @@ const settingsSections: SettingsSection[] = [
     id: "ai-ssh",
     titleKey: "settings.ssh.title",
     descriptionKey: "settings.ssh.description",
-    icon: <Server size={16} />,
+    icon: <Key size={16} />,
     keywords: ["ssh", "scp", "sftp", "remote", "server", "openssh", "host", "known_hosts", "identity", "key", "ssh-agent", "удалённый", "сервер"],
   },
   {
     id: "ai-mcp",
     titleKey: "settings.mcp.title",
     descriptionKey: "settings.mcp.description",
-    icon: <Plug size={16} />,
+    icon: <Cable size={16} />,
     keywords: ["mcp", "model context protocol", "server", "servers", "tools", "stdio", "integration", "сервер", "инструменты"],
   },
   {
     id: "ai-providers",
     titleKey: "settings.providers.title",
     descriptionKey: "settings.providers.description",
-    icon: <Cpu size={16} />,
+    icon: <Cloud size={16} />,
     keywords: ["ai", "provider", "providers", "model", "models", "openai", "anthropic", "openrouter", "gemini", "local", "proxy", "api key", "base url"],
   },
   {
     id: "ai-indexing",
     titleKey: "settings.indexing.title",
     descriptionKey: "settings.indexing.description",
-    icon: <Database size={16} />,
+    icon: <Search size={16} />,
     keywords: ["ai", "index", "indexing", "files", "images", "metadata", "context", "workspace"],
   },
   {
     id: "ai-usage",
     titleKey: "settings.usage.title",
     descriptionKey: "settings.usage.description",
-    icon: <BarChart3 size={16} />,
+    icon: <ChartColumn size={16} />,
     keywords: ["ai", "usage", "history", "tokens", "cost", "spend", "speed", "requests", "стоимость", "история", "токены"],
   },
 ];
@@ -211,14 +208,11 @@ export function SettingsDialog() {
   const setLocale = useLuxStore((state) => state.setLocale);
   const workspace = useLuxStore((state) => state.workspace);
   const settingsInitialSection = useLuxStore((state) => state.settingsInitialSection);
-  const [activeSectionId, setActiveSectionId] = useState<SettingsSectionId>("general");
-  const [query, setQuery] = useState("");
+  const [activeTab, setActiveTab] = useState<SettingsSectionId>("general");
   const [saveState, setSaveState] = useState<SaveState>("idle");
 
   const persistLocale = useCallback(
     (nextLocale: Locale) => {
-      // Fetch the locale's split dictionary before flipping the active locale so
-      // the UI re-renders straight into the new language (no English flash).
       void loadDictionary(nextLocale).finally(() => setLocale(nextLocale));
       setSaveState("saving");
       void luxCommands.settingsSet(scope, UI_LOCALE_KEY, nextLocale)
@@ -231,7 +225,7 @@ export function SettingsDialog() {
   useEffect(() => {
     if (!open || !settingsInitialSection) return;
     if (sectionById.has(settingsInitialSection as SettingsSectionId)) {
-      setActiveSectionId(settingsInitialSection as SettingsSectionId);
+      setActiveTab(settingsInitialSection as SettingsSectionId);
     }
   }, [open, settingsInitialSection]);
 
@@ -240,8 +234,6 @@ export function SettingsDialog() {
 
     let cancelled = false;
     void luxCommands.settingsGet(scope, AI_PREFERENCES_KEY).then((setting) => {
-      // preserveText: saved user prefs (custom prompt + instructions) must load
-      // verbatim, not be run through display normalization that trims/replaces them.
       if (!cancelled && setting) setAiPreferences(normalizeAiPreferences(setting.value, { preserveText: true }));
     }).catch(() => undefined);
     void luxCommands.settingsGet(scope, EDITOR_PREFERENCES_KEY).then((setting) => {
@@ -257,8 +249,6 @@ export function SettingsDialog() {
     (nextPreferences: AiPreferences) => {
       setAiPreferences(nextPreferences);
       setSaveState("saving");
-      // Re-apply the scan/search CPU budget immediately (idempotent atomic set)
-      // so a changed setting takes effect without an app restart.
       void luxCommands.setScanConcurrency(nextPreferences.scanConcurrency).catch(() => undefined);
       void luxCommands.settingsSet(scope, AI_PREFERENCES_KEY, nextPreferences)
         .then(() => setSaveState("saved"))
@@ -296,131 +286,96 @@ export function SettingsDialog() {
     [aiPreferences, persistAiPreferences, updateAiPreferences],
   );
 
-  const filteredSections = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase();
-    if (!normalizedQuery) return settingsSections;
-    return settingsSections.filter((section) => sectionMatchesQuery(section, normalizedQuery, t));
-  }, [query, t]);
+  const activeSection = sectionById.get(activeTab) ?? settingsSections[0];
+  const bodyRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (filteredSections.some((section) => section.id === activeSectionId)) return;
-    setActiveSectionId(filteredSections[0]?.id ?? "general");
-  }, [activeSectionId, filteredSections]);
-
-  const activeSection = sectionById.get(activeSectionId) ?? settingsSections[0];
+  const renderSidebarItem = (id: SettingsSectionId, icon: ReactNode, label: string) => (
+    <button
+      className={`settings__sidebar-item ${activeTab === id ? "active" : ""}`}
+      onClick={() => setActiveTab(id)}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
 
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Portal>
-        <Dialog.Overlay className="settings-overlay" />
+        <Dialog.Overlay asChild>
+          <div className="settings__overlay" />
+        </Dialog.Overlay>
         <Dialog.Content
-          className="settings-dialog"
+          className="settings__container"
           aria-describedby={undefined}
-          // Radix handles Escape on the document in the capture phase, before an
-          // open dropdown menu can claim it — an open menu owns Escape (it closes
-          // itself), so the settings dialog must stay put.
           onEscapeKeyDown={(event) => {
-            if (document.querySelector(".compact-dropdown-menu")) event.preventDefault();
+            const active = document.activeElement;
+            if (active instanceof HTMLElement && active.closest(".compact-dropdown-menu")) {
+              event.preventDefault();
+            }
           }}
         >
-          <div className="settings-shell">
-            <header className="settings-header">
-              <div className="settings-title">
-                <Settings size={17} />
-                <Dialog.Title>{t("settings.title")}</Dialog.Title>
-                <SaveIndicator state={saveState} t={t} />
+          <div className="settings__sidebar">
+            <div className="settings__sidebar-group">
+              <div className="settings__sidebar-title">Workspace</div>
+              {renderSidebarItem("general", <Settings2 size={14} />, "General")}
+              {renderSidebarItem("editor", <FileCode size={14} />, "Editor")}
+              {renderSidebarItem("lsp", <Braces size={14} />, "LSP")}
+            </div>
+            <div className="settings__sidebar-group">
+              <div className="settings__sidebar-title">AI</div>
+              {renderSidebarItem("ai-runtime", <Play size={14} />, "Runtime")}
+              {renderSidebarItem("ai-browser", <Compass size={14} />, "Browser")}
+              {renderSidebarItem("ai-instructions", <ScrollText size={14} />, "Instructions")}
+              {renderSidebarItem("ai-providers", <Cloud size={14} />, "Providers")}
+              {renderSidebarItem("ai-indexing", <Search size={14} />, "Indexing")}
+              {renderSidebarItem("ai-usage", <ChartColumn size={14} />, "Usage")}
+              {renderSidebarItem("ai-skills", <Award size={14} />, "Skills")}
+              {renderSidebarItem("ai-memory", <Brain size={14} />, "Memory")}
+              {renderSidebarItem("ai-ssh", <Key size={14} />, "SSH")}
+              {renderSidebarItem("ai-mcp", <Cable size={14} />, "MCP")}
+            </div>
+            <div className="settings__sidebar-footer">
+              <div className="settings__app-info">
+                Lux IDE
               </div>
-              <button className="icon-button compact" type="button" aria-label={t("settings.close")} title={t("settings.close")} onClick={() => setOpen(false)}>
-                <X size={15} />
-              </button>
-            </header>
+            </div>
+          </div>
 
-            <aside className="settings-sidebar" aria-label={t("settings.sections.aria")}>
-              <label className="settings-search">
-                <Search size={15} />
-                <input aria-label={t("settings.search.aria")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("settings.search.placeholder")} />
-              </label>
-              <SettingsSectionNav sections={filteredSections} activeSectionId={activeSectionId} onSelect={setActiveSectionId} t={t} />
-            </aside>
-
-            <main className="settings-main">
-              <div className="settings-main-header">
-                <div>
-                  <h2>{t(activeSection.titleKey)}</h2>
-                  <p>{t(activeSection.descriptionKey)}</p>
+          <div className="settings__content">
+            <div className="settings__content-header">
+              <h2>{t(activeSection.titleKey)}</h2>
+              <button className="settings__close" onClick={() => setOpen(false)}>×</button>
+            </div>
+            <div className="settings__content-body" ref={bodyRef}>
+              {activeTab === "general" && <GeneralSection locale={locale} onChangeLocale={persistLocale} t={t} />}
+              {activeTab === "editor" && (
+                <div className="settings-section-stack">
+                  <FontsSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
+                  <EditorAppearanceSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
+                  <EditorBehaviorSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
                 </div>
-                {activeSectionId !== "general" && activeSectionId !== "ai-instructions" && activeSectionId !== "ai-usage" && activeSectionId !== "ai-skills" && activeSectionId !== "ai-memory" && activeSectionId !== "ai-ssh" && activeSectionId !== "ai-mcp" && (
-                  <button className="settings-reset-button" type="button" onClick={() => resetSection(activeSectionId, persistEditorPreferences, persistAiPreferences, aiPreferences)}>
-                    <RotateCcw size={14} /> {t("settings.reset", { group: t(activeSection.titleKey) })}
-                  </button>
-                )}
-              </div>
-
-              <div className="settings-scroll-area">
-                {activeSectionId === "general" && <GeneralSection locale={locale} onChangeLocale={persistLocale} t={t} />}
-                {activeSectionId === "editor" && (
-                  <div className="settings-section-stack">
-                    <FontsSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
-                    <EditorAppearanceSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
-                    <EditorBehaviorSection preferences={editorPreferences} onChange={updateEditorPreference} t={t} />
-                  </div>
-                )}
-                {activeSectionId === "lsp" && <LanguageServersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
-                {activeSectionId === "ai-runtime" && (
-                  <AiActiveCard preferences={aiPreferences} onChange={updateAiPreference} t={t} />
-                )}
-                {activeSectionId === "ai-browser" && (
-                  <AgentBrowserSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />
-                )}
-                {activeSectionId === "ai-instructions" && <AiInstructionsSection fileEntries={fileEntries} preferences={aiPreferences} workspace={workspace} onChange={updateAiPreference} t={t} />}
-                {activeSectionId === "ai-providers" && <AiProvidersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
-                {activeSectionId === "ai-indexing" && <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
-                {activeSectionId === "ai-skills" && <SkillsSection workspace={workspace} t={t} />}
-                {activeSectionId === "ai-memory" && <MemorySection workspace={workspace} t={t} />}
-                {activeSectionId === "ai-ssh" && <SshSection t={t} />}
-                {activeSectionId === "ai-mcp" && <McpSection t={t} />}
-                {activeSectionId === "ai-usage" && <AiUsageSection workspace={workspace} t={t} />}
-              </div>
-            </main>
+              )}
+              {activeTab === "lsp" && <LanguageServersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+              {activeTab === "ai-runtime" && (
+                <AiActiveCard preferences={aiPreferences} onChange={updateAiPreference} t={t} />
+              )}
+              {activeTab === "ai-browser" && (
+                <AgentBrowserSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />
+              )}
+              {activeTab === "ai-instructions" && <AiInstructionsSection fileEntries={fileEntries} preferences={aiPreferences} workspace={workspace} onChange={updateAiPreference} t={t} />}
+              {activeTab === "ai-providers" && <AiProvidersSection preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+              {activeTab === "ai-indexing" && <AiIndexingSection aiIndex={aiIndex} preferences={aiPreferences} onChange={updateAiPreference} t={t} />}
+              {activeTab === "ai-skills" && <SkillsSection workspace={workspace} t={t} />}
+              {activeTab === "ai-memory" && <MemorySection workspace={workspace} t={t} />}
+              {activeTab === "ai-ssh" && <SshSection t={t} />}
+              {activeTab === "ai-mcp" && <McpSection t={t} />}
+              {activeTab === "ai-usage" && <AiUsageSection workspace={workspace} t={t} />}
+            </div>
           </div>
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-  );
-}
-
-function SettingsSectionNav({ activeSectionId, onSelect, sections, t }: { activeSectionId: SettingsSectionId; onSelect: (sectionId: SettingsSectionId) => void; sections: SettingsSection[]; t: TranslateFn }) {
-  const visibleIds = new Set(sections.map((section) => section.id));
-  return (
-    <div className="settings-nav-groups">
-      {settingsNavGroups.map((group) => {
-        const groupSections = group.sectionIds
-          .map((id) => sectionById.get(id))
-          .filter((section): section is SettingsSection => Boolean(section && visibleIds.has(section.id)));
-        if (groupSections.length === 0) return null;
-        return (
-          <section className="settings-nav-group" key={group.labelKey}>
-            <h3 className="settings-nav-group-label">{t(group.labelKey)}</h3>
-            {groupSections.map((section) => (
-              <button
-                className="settings-nav-item"
-                type="button"
-                key={section.id}
-                data-active={section.id === activeSectionId}
-                title={t(section.descriptionKey)}
-                onClick={() => onSelect(section.id)}
-              >
-                <span className="settings-nav-icon">{section.icon}</span>
-                <span>
-                  <strong>{t(section.titleKey)}</strong>
-                  <small>{t(section.descriptionKey)}</small>
-                </span>
-              </button>
-            ))}
-          </section>
-        );
-      })}
-    </div>
   );
 }
 
@@ -444,8 +399,6 @@ function GeneralSection({ locale, onChangeLocale, t }: { locale: Locale; onChang
 }
 
 function UpdatesSection({ t }: { t: TranslateFn }) {
-  // Shared singleton updater: the same state the corner UpdateNotice renders, so
-  // a check or install started here is reflected everywhere (and vice versa).
   const { state, check, install } = useUpdater();
 
   const updateAvailable = state.status === "available";
@@ -488,8 +441,6 @@ function UpdatesSection({ t }: { t: TranslateFn }) {
           <span className="settings-update-status">{statusLine}</span>
         </div>
         <div className="settings-update-actions">
-          {/* When an update is found, install right here — no waiting for the
-              corner toast. Mid-download/relaunch the button reflects progress. */}
           {(updateAvailable || downloading || relaunching) && (
             <button
               type="button"
@@ -544,8 +495,6 @@ function UpdatesSection({ t }: { t: TranslateFn }) {
   );
 }
 
-// System font list is loaded once per app session — the scan result is cached on
-// the Rust side too, so reopening Settings never re-walks the font directories.
 let systemFontFamiliesCache: string[] | null = null;
 let systemFontFamiliesPromise: Promise<string[]> | null = null;
 
@@ -557,7 +506,7 @@ function useSystemFontFamilies(): string[] {
       systemFontFamiliesCache = families;
       return families;
     }).catch(() => {
-      systemFontFamiliesPromise = null; // allow a retry on next mount
+      systemFontFamiliesPromise = null;
       return [] as string[];
     });
     let cancelled = false;
@@ -649,8 +598,6 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
   const [catalog, setCatalog] = useState<LspCatalogEntry[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [progress, setProgress] = useState<Record<string, LspInstallProgress>>(getLspInstallProgressSnapshot);
-  // Transient result line under a row after an uninstall finishes (e.g. the
-  // npm shared-package note) — keyed by languageId, cleared on the next action.
   const [uninstallNotes, setUninstallNotes] = useState<Record<string, string>>({});
 
   const refreshCatalog = useCallback(() => {
@@ -663,8 +610,6 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
     ensureLspInstallSubscription();
     refreshCatalog();
     const stopProgress = subscribeLspInstallProgress(() => setProgress({ ...getLspInstallProgressSnapshot() }));
-    // Re-pull the catalog whenever an install (or uninstall) finishes so the
-    // badge flips to Installed / Not installed.
     const stopFinish = onLspInstallFinished(() => refreshCatalog());
     return () => { stopProgress(); stopFinish(); };
   }, [refreshCatalog]);
@@ -680,9 +625,6 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
     if (!window.confirm(t("settings.lsp.uninstallConfirm", { name }))) return;
     clearLspInstallError(languageId);
     setUninstallNotes((notes) => (languageId in notes ? withoutKey(notes, languageId) : notes));
-    // Seed the intent into the STORE (not just local state): the store's own
-    // "started" handler reads its module map to preserve the uninstalling flag,
-    // and the subscription then mirrors it back into `progress` here.
     setLspUninstallIntent(languageId);
     setProgress({ ...getLspInstallProgressSnapshot() });
     void luxCommands.lspUninstallServer(languageId)
@@ -693,8 +635,6 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
   const installedCount = catalog?.filter((entry) => entry.installed).length ?? 0;
 
   return (
-    // No panel title/description: this is the section's only panel and the
-    // section header above it already renders the same title + description.
     <SettingsPanel>
       <SettingsGrid>
         <ToggleSetting
@@ -715,12 +655,6 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
 
       <section className="lsp-servers-head">
         <strong>{t("settings.lsp.listTitle")}</strong>
-        <div className="lsp-servers-head-actions">
-          {catalog && <span className="lsp-servers-count">{t("settings.lsp.installedCount", { installed: installedCount, total: catalog.length })}</span>}
-          <button type="button" onClick={refreshCatalog} title={t("settings.lsp.refresh")} aria-label={t("settings.lsp.refresh")}>
-            <RefreshCw size={14} /> {t("settings.lsp.refresh")}
-          </button>
-        </div>
       </section>
 
       {loadError && <p className="lsp-servers-error" role="alert">{loadError}</p>}
@@ -749,7 +683,6 @@ function LanguageServersSection({ onChange, preferences, t }: { onChange: (patch
   );
 }
 
-/** Shallow-clone an object without one key (small, allocation-free at this scale). */
 function withoutKey<T extends Record<string, string>>(obj: T, key: string): T {
   const { [key]: _removed, ...rest } = obj;
   return rest as T;
@@ -767,22 +700,10 @@ function LanguageServerRow({ entry, progress, note, onInstall, onUninstall, t }:
   const uninstalling = progress?.status === "installing" && progress.uninstalling === true;
   const busy = installing || uninstalling;
   const errored = progress?.status === "error";
-  // Status precedence: busy > error > installed(managed/PATH) > missing.
   const state = busy ? "installing" : errored ? "error" : entry.installed ? (entry.managed ? "managed" : "path") : "missing";
   const isManual = entry.installMethod === "manual";
-  // Managed installs are the only ones Lux can safely remove — a PATH/system
-  // install is never touched (mirrors the Rust-side managed-only guard).
   const canUninstall = entry.managed && entry.installed && !isManual;
-
-  const statusLabel = uninstalling
-    ? t("settings.lsp.uninstalling")
-    : installing
-      ? t("settings.lsp.status.installing", { percent: progress?.percent ?? 0 })
-      : errored
-        ? t("settings.lsp.status.error")
-        : entry.installed
-          ? entry.managed ? t("settings.lsp.status.installed") : t("settings.lsp.status.onPath")
-          : isManual ? t("settings.lsp.status.manual") : t("settings.lsp.status.missing");
+  const [showError, setShowError] = useState(false);
 
   return (
     <li className="lsp-server-row" data-state={state}>
@@ -790,7 +711,11 @@ function LanguageServerRow({ entry, progress, note, onInstall, onUninstall, t }:
         <div className="lsp-server-row-title">
           <span className="lsp-server-dot" data-state={state} aria-hidden="true" />
           <strong>{entry.name}</strong>
-          <code className="lsp-server-ext">{entry.extensions.slice(0, 4).map((e) => `.${e}`).join(" ")}</code>
+          {errored && (
+            <button type="button" className="lsp-server-error-btn" onClick={() => setShowError(!showError)} title={progress?.error}>
+              <HelpCircle size={12} />
+            </button>
+          )}
         </div>
         {busy && (
           <div className="lsp-server-progress" role="progressbar" aria-valuenow={progress?.percent ?? 0} aria-valuemin={0} aria-valuemax={100}>
@@ -798,22 +723,29 @@ function LanguageServerRow({ entry, progress, note, onInstall, onUninstall, t }:
             <span className="lsp-server-progress-step">{progress?.step}</span>
           </div>
         )}
-        {errored && <p className="lsp-server-row-error" title={progress?.error}>{progress?.error}</p>}
+        {errored && showError && <p className="lsp-server-row-error">{progress?.error}</p>}
         {isManual && !entry.installed && !busy && <p className="lsp-server-row-hint">{entry.manualHint}</p>}
         {!busy && !errored && note && <p className="lsp-server-row-note">{note}</p>}
       </div>
       <div className="lsp-server-row-action">
-        <span className="lsp-server-status" data-state={state}>{statusLabel}</span>
         {isManual ? (
           <span className="lsp-server-manual-tag">{t("settings.lsp.manualTag")}</span>
         ) : (
           <>
             {canUninstall && (
               <button type="button" className="lsp-server-uninstall" onClick={onUninstall} disabled={busy}>
+                <Trash2 size={14} />
                 {uninstalling ? t("settings.lsp.uninstalling") : t("settings.lsp.uninstall")}
               </button>
             )}
             <button type="button" className="lsp-server-install" data-installed={entry.installed || undefined} onClick={onInstall} disabled={busy}>
+              {installing ? (
+                <Loader2 size={14} className="spin-icon" />
+              ) : entry.installed ? (
+                <RefreshCw size={14} />
+              ) : (
+                <Download size={14} />
+              )}
               {installing
                 ? t("settings.lsp.installing")
                 : entry.installed
@@ -827,11 +759,6 @@ function LanguageServerRow({ entry, progress, note, onInstall, onUninstall, t }:
   );
 }
 
-/**
- * Managed language runtimes (Node / Rust / Python). These are the host toolchains
- * the LSP installers need; the IDE can provision them into a self-contained dir so
- * a clean machine needs zero manual setup. Mirrors the server list visually.
- */
 function RuntimesPanel({ t }: { t: TranslateFn }) {
   const [catalog, setCatalog] = useState<RuntimeCatalogEntry[] | null>(null);
   const [progress, setProgress] = useState<Record<string, RuntimeProvisionProgress>>(getRuntimeProvisionProgressSnapshot);
@@ -863,7 +790,6 @@ function RuntimesPanel({ t }: { t: TranslateFn }) {
       <section className="lsp-servers-head">
         <strong>{t("settings.runtimes.title")}</strong>
         <div className="lsp-servers-head-actions">
-          {catalog && <span className="lsp-servers-count">{t("settings.lsp.installedCount", { installed: installedCount, total: catalog.length })}</span>}
         </div>
       </section>
       <p className="lsp-servers-subtitle">{t("settings.runtimes.description")}</p>
@@ -890,14 +816,6 @@ function RuntimeRow({ entry, progress, onProvision, t }: {
   const errored = progress?.status === "error";
   const state = installing ? "installing" : errored ? "error" : entry.installed ? (entry.managed ? "managed" : "path") : "missing";
 
-  const statusLabel = installing
-    ? t("settings.lsp.status.installing", { percent: progress?.percent ?? 0 })
-    : errored
-      ? t("settings.lsp.status.error")
-      : entry.installed
-        ? entry.managed ? t("settings.runtimes.status.managed") : t("settings.runtimes.status.system")
-        : entry.canAuto ? t("settings.lsp.status.missing") : t("settings.lsp.status.manual");
-
   return (
     <li className="lsp-server-row" data-state={state}>
       <div className="lsp-server-row-main">
@@ -915,9 +833,15 @@ function RuntimeRow({ entry, progress, onProvision, t }: {
         {!entry.canAuto && !entry.installed && !installing && <p className="lsp-server-row-hint">{entry.manualHint}</p>}
       </div>
       <div className="lsp-server-row-action">
-        <span className="lsp-server-status" data-state={state}>{statusLabel}</span>
         {entry.canAuto ? (
           <button type="button" className="lsp-server-install" data-installed={entry.installed || undefined} onClick={onProvision} disabled={installing}>
+            {installing ? (
+              <Loader2 size={14} className="spin-icon" />
+            ) : entry.installed ? (
+              <RefreshCw size={14} />
+            ) : (
+              <Download size={14} />
+            )}
             {installing
               ? t("settings.lsp.installing")
               : entry.installed
@@ -932,9 +856,6 @@ function RuntimeRow({ entry, progress, onProvision, t }: {
   );
 }
 
-// A single focused "active model" card: the thing a user changes often (model + effort +
-// mode) shown at a glance, with the selected agent's behavior editable inline. Provider/model
-// management itself lives in the Providers section, so nothing is configured in two places.
 const AI_TOOL_APPROVAL_MODES: AiToolApprovalMode[] = ["default", "full-access"];
 const AI_FILE_EDIT_TRUST_MODES: AiFileEditTrustMode[] = ["preview-before-apply", "apply-immediately"];
 
@@ -1043,10 +964,6 @@ function AiActiveCard({ onChange, preferences, t }: { onChange: (patch: Partial<
           placeholder={t("settings.aiRuntime.permissionRules.placeholder")}
           value={preferences.toolPermissionRules.join("\n")}
           rows={5}
-          // commitOnBlur: permission rules are safety-critical. Persisting on every
-          // keystroke would push blank/partial lines through mergeAiPreferences'
-          // trim/filter and mutate live tool approvals mid-typing. Commit once the
-          // user leaves the field so only the finished rule set is normalized + saved.
           commitOnBlur
           onChange={(value) => onChange({ toolPermissionRules: value.split("\n") })}
           wide
@@ -1175,12 +1092,10 @@ function CodeGraphStatusCard({ t }: { t: TranslateFn }) {
 
   useEffect(() => {
     ensureCodeGraphSubscription();
-    // Seed from the persisted status once on mount.
     luxCommands
       .codeGraphStatus()
       .then(applyCodeGraphStatus)
       .catch(() => undefined);
-    // Refresh the status counts whenever a build finishes.
     return onCodeGraphBuildFinished(() => {
       luxCommands
         .codeGraphStatus()
@@ -1247,6 +1162,18 @@ function CodeGraphStatusCard({ t }: { t: TranslateFn }) {
 }
 
 function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: ReturnType<typeof useLuxStore.getState>["aiIndex"]; onChange: (patch: Partial<AiPreferences>) => void; preferences: AiPreferences; t: TranslateFn }) {
+  const [liveLanguages, setLiveLanguages] = useState<Array<{ count: number; label: string }> | null>(null);
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let cancelled = false;
+    luxCommands.aiIndexLanguages().then((langs) => {
+      if (!cancelled) setLiveLanguages(langs.map((l) => ({ label: l.key, count: l.count })));
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
+  const languages = (liveLanguages ?? aiIndex.languageCounts).filter(
+    (l) => !["other", "icns", "ico", "idx", "lock", "sample"].includes(l.label.toLowerCase())
+  );
   const statusLabel = aiIndex.status === "ready"
     ? t("settings.indexing.status.ready")
     : aiIndex.status === "indexing"
@@ -1276,6 +1203,7 @@ function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: Ret
           <IndexMetric label={t("settings.indexing.metric.source")} value={scanSourceLabel} />
           <IndexMetric label={t("settings.indexing.metric.scanLimit")} value={scanLimitLabel} />
           <IndexMetric label={t("settings.indexing.metric.scanTruncated")} value={scanTruncatedLabel} />
+          <IndexMetric label={t("settings.indexing.metric.configFiles")} value={formatInteger(aiIndex.configFiles)} />
           <IndexMetric label={t("settings.indexing.metric.ignored")} value={formatInteger(aiIndex.ignoredFiles)} />
           <IndexMetric label={t("settings.indexing.metric.truncated")} value={formatInteger(aiIndex.truncatedFiles)} />
           <IndexMetric label={t("settings.indexing.metric.duration")} value={formatIndexDuration(aiIndex.durationMs)} />
@@ -1284,12 +1212,11 @@ function AiIndexingSection({ aiIndex, onChange, preferences, t }: { aiIndex: Ret
         </div>
         {aiIndex.lastError && <p className="index-error-line">{t("settings.indexing.metric.error")}: {aiIndex.lastError}</p>}
         <div className="index-insights">
-          <IndexBucketList buckets={aiIndex.languageCounts} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.languages")} />
-          <IndexBucketList buckets={aiIndex.topDirectories} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.directories")} />
+          <IndexBucketList buckets={languages} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.languages")} variant="language" />
+          <IndexBucketList buckets={aiIndex.topDirectories} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.directories")} variant="directory" />
           <IndexImportantFiles files={aiIndex.importantFiles} emptyLabel={t("settings.indexing.emptyList")} title={t("settings.indexing.importantFiles")} />
         </div>
       </section>
-      {/* No panel title/description: the section header above already renders them. */}
       <SettingsPanel>
         <SettingsGrid>
           <ToggleSetting label={t("settings.indexing.projectIndexing.label")} detail={t("settings.indexing.projectIndexing.detail")} checked={preferences.projectIndexingEnabled} onChange={(projectIndexingEnabled) => onChange({ projectIndexingEnabled })} />
@@ -1327,19 +1254,41 @@ function IndexMetric({ label, value }: { label: string; value: string }) {
 
 const maxRecentUsageRows = 60;
 
-// AI Usage moved to ./settings/AiUsageSection — a request-log console with
-// time-window filters, stat cards, and expandable per-request rows.
-
-function IndexBucketList({ buckets, emptyLabel, title }: { buckets: Array<{ count: number; label: string }>; emptyLabel: string; title: string }) {
+function IndexBucketList({ buckets, emptyLabel, title, variant }: { buckets: Array<{ count: number; label: string }>; emptyLabel: string; title: string; variant?: "language" | "directory" }) {
   return (
     <div className="index-insight-list">
       <h4>{title}</h4>
-      {buckets.length === 0 ? <p>{emptyLabel}</p> : buckets.map((bucket) => (
-        <div className="index-bucket-row" key={bucket.label}>
-          <span>{bucket.label}</span>
-          <strong>{formatInteger(bucket.count)}</strong>
-        </div>
-      ))}
+      {buckets.length === 0 ? <p>{emptyLabel}</p> : buckets.map((bucket) => {
+        const displayLabel = variant === "language"
+          ? displayNameForLanguage(bucket.label)
+          : bucket.label;
+        const iconEl = variant === "language"
+          ? (() => {
+              const lower = bucket.label.toLowerCase();
+              const ext = extensionForLanguage(lower);
+              const meta = ext
+                ? fileIconForName(`file.${ext}`)
+                : fileIconForName(`index.${lower}`);
+              return meta.imgSrc
+                ? <img src={meta.imgSrc} width={14} height={14} className={meta.className} alt="" />
+                : <meta.Icon size={14} className={meta.className} />;
+            })()
+          : variant === "directory"
+            ? (() => {
+                const folderName = bucket.label.includes("/") ? bucket.label.split("/").at(-1)! : bucket.label;
+                return <img src={getFolderIconSvg(folderName)} width={14} height={14} className="folder-icon" alt="" />;
+              })()
+            : null;
+        return (
+          <div className="index-bucket-row" key={bucket.label}>
+            <div className="index-bucket-label">
+              {iconEl}
+              <span>{displayLabel}</span>
+            </div>
+            <strong>{formatInteger(bucket.count)}</strong>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1393,9 +1342,6 @@ function resetSection(sectionId: SettingsSectionId, resetEditor: (preferences: E
       selectedModelId: defaultAiPreferences.selectedModelId,
       selectedEffortId: defaultAiPreferences.selectedEffortId,
       toolApprovalMode: defaultAiPreferences.toolApprovalMode,
-      // Both safety/efficiency controls are rendered in AiActiveCard (fileEditTrust +
-      // tokenEconomy), so Reset must restore them too — otherwise a riskier
-      // "apply-immediately" trust mode or a disabled token economy silently survives.
       fileEditTrustMode: defaultAiPreferences.fileEditTrustMode,
       tokenEconomyEnabled: defaultAiPreferences.tokenEconomyEnabled,
       toolRoundLimit: defaultAiPreferences.toolRoundLimit,

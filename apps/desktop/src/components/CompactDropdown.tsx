@@ -27,6 +27,7 @@ type CompactDropdownProps<T extends string> = {
   onChange: (value: T) => void;
   options: CompactDropdownOption<T>[];
   value: T;
+  disabled?: boolean;
   /** When set (and there are enough options), show a live filter box at the top. */
   searchable?: boolean;
   /** Minimum option count before the search box appears (default 7). */
@@ -75,6 +76,7 @@ const LABEL_WIDTH_FACTOR = 8;
 
 export function CompactDropdown<T extends string>({
   className,
+  disabled = false,
   icon,
   label,
   onChange,
@@ -308,7 +310,9 @@ export function CompactDropdown<T extends string>({
         aria-label={label}
         title={label}
         ref={triggerRef}
+        disabled={disabled}
         onClick={() => {
+          if (disabled) return;
           portalHostRef.current = triggerRef.current?.closest<HTMLElement>("[role=\"dialog\"]") ?? null;
           setOpen((current) => !current);
         }}

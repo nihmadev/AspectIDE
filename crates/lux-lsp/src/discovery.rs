@@ -21,7 +21,7 @@ pub struct BuiltinServer {
 pub const BUILTIN_SERVERS: &[BuiltinServer] = &[
     BuiltinServer {
         language_id: "rust",
-        name: "rust-analyzer",
+        name: "Rust Language Server",
         command: "rust-analyzer",
         args: &[],
         extensions: &["rs"],
@@ -35,14 +35,14 @@ pub const BUILTIN_SERVERS: &[BuiltinServer] = &[
     },
     BuiltinServer {
         language_id: "python",
-        name: "ty",
+        name: "Python Language Server",
         command: "ty",
         args: &["server"],
         extensions: &["py", "pyi"],
     },
     BuiltinServer {
         language_id: "go",
-        name: "gopls",
+        name: "Go Language Server",
         command: "gopls",
         args: &[],
         extensions: &["go"],
@@ -84,14 +84,14 @@ pub const BUILTIN_SERVERS: &[BuiltinServer] = &[
     },
     BuiltinServer {
         language_id: "lua",
-        name: "lua-language-server",
+        name: "Lua Language Server",
         command: "lua-language-server",
         args: &[],
         extensions: &["lua"],
     },
     BuiltinServer {
         language_id: "cpp",
-        name: "clangd",
+        name: "C/C++ Language Server",
         command: "clangd",
         args: &[],
         extensions: &["c", "h", "cc", "cpp", "cxx", "hpp", "hxx"],

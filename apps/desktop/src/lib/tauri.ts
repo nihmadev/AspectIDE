@@ -1022,6 +1022,10 @@ export const luxCommands = {
       entrypoints: { path: string; relativePath: string; language: string; size: number }[];
       largest: { path: string; relativePath: string; language: string; size: number }[];
     }>("ai_workspace_index", { maxFiles: maxFiles ?? null, maxScan: maxScan ?? null }),
+  resolveFileLanguages: (paths: string[]) =>
+    invokeRequired<string[]>("resolve_file_languages", { paths }),
+  aiIndexLanguages: () =>
+    invokeRequired<{ key: string; count: number }[]>("ai_index_languages"),
   aiSymbolContext: (query?: string | null, path?: string | null, line?: number | null, column?: number | null, maxResults?: number | null) =>
     invokeRequired<AiSymbolContextResponse>("ai_symbol_context", { query: query ?? null, path: path ?? null, line: line ?? null, column: column ?? null, maxResults: maxResults ?? null }),
   voiceInputStatus: (provider: string, command?: string | null, modelPath?: string | null) =>

@@ -12,6 +12,7 @@ use tauri::State;
 
 use crate::ai_semantic;
 use crate::{workspace_root, SharedState};
+use lux_core::monaco_language_id_for_path;
 
 // ── RepoMap ──
 
@@ -422,6 +423,103 @@ async fn spawn_list_files_scanned(
     tokio::task::spawn_blocking(move || lux_fs::list_files_scanned(root, max))
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn resolve_file_languages(paths: Vec<String>) -> Result<Vec<String>, String> {
+    Ok(paths
+        .iter()
+        .map(|p| monaco_language_id_for_path(std::path::Path::new(p)))
+        .collect())
+}
+
+fn language_label(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let lower_name = p
+        .file_name()
+        .and_then(|v| v.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if matches!(lower_name.as_str(), "dockerfile" | "containerfile") {
+        return "dockerfile".to_string();
+    }
+    match p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("rs") => "rust",
+        Some("ts" | "tsx" | "mts" | "cts") => "typescript",
+        Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
+        Some("py" | "pyw") => "python",
+        Some("go" | "mod") => "go",
+        Some("java") => "java",
+        Some("kt" | "kts") => "kotlin",
+        Some("cs") => "csharp",
+        Some("fs" | "fsx") => "fsharp",
+        Some("cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx") => "cpp",
+        Some("c" | "h") => "c",
+        Some("rb") => "ruby",
+        Some("php") => "php",
+        Some("swift") => "swift",
+        Some("scala") => "scala",
+        Some("dart") => "dart",
+        Some("lua") => "lua",
+        Some("zig") => "zig",
+        Some("nim") => "nim",
+        Some("r") => "r",
+        Some("jl") => "julia",
+        Some("hs" | "lhs") => "haskell",
+        Some("clj" | "cljs" | "cljc") => "clojure",
+        Some("ex" | "exs") => "elixir",
+        Some("erl" | "hrl") => "erlang",
+        Some("pl" | "pm") => "perl",
+        Some("sh" | "bash" | "zsh" | "fish" | "ksh") => "shell",
+        Some("ps1" | "psm1" | "psd1") => "powershell",
+        Some("bat" | "cmd") => "bat",
+        Some("tf" | "tfvars" | "hcl" | "nomad") => "hcl",
+        Some("json" | "jsonc" | "json5" | "jsonl") => "json",
+        Some("toml" | "tml") => "toml",
+        Some("yaml" | "yml") => "yaml",
+        Some("css" | "scss" | "sass" | "less") => "css",
+        Some("html" | "htm" | "vue" | "svelte" | "astro") => "html",
+        Some("sql" | "ddl" | "dml") => "sql",
+        Some("xml" | "xsd" | "xsl" | "xslt") => "xml",
+        Some("csv" | "tsv" | "psv") => "csv",
+        Some("graphql" | "gql") => "graphql",
+        Some("proto") => "proto",
+        Some("prisma") => "prisma",
+        Some("md" | "mdx" | "markdown" | "rst" | "org") => "markdown",
+        Some("ini" | "cfg" | "conf" | "editorconfig") => "ini",
+        Some(ext) => ext,
+        None => "other",
+    }
+    .to_string()
+}
+
+#[tauri::command]
+pub async fn ai_index_languages(
+    state: State<'_, SharedState>,
+) -> Result<Vec<CountEntry>, String> {
+    let root = workspace_root(&state)?;
+    let entries = spawn_list_files(root, 20_000).await?;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for entry in &entries {
+        if entry.kind != lux_core::FsEntryKind::File {
+            continue;
+        }
+        let path = ai_semantic::normalize_slashes_pub(&entry.path.to_string_lossy());
+        let lang = language_label(&path);
+        *counts.entry(lang).or_default() += 1;
+    }
+    let mut result: Vec<CountEntry> = counts
+        .into_iter()
+        .map(|(key, count)| CountEntry { key, count })
+        .collect();
+    result.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.key.cmp(&b.key)));
+    result.truncate(20);
+    Ok(result)
 }
 
 #[cfg(test)]

@@ -93,7 +93,7 @@ export function collectAiProjectFileEntries(directories: FileTreeDirectories): F
   return Array.from(byPath.values());
 }
 
-export function buildAiProjectIndexSnapshot(entries: FsEntry[], options: BuildAiProjectIndexOptions): AiProjectIndexSnapshot {
+export function buildAiProjectIndexSnapshot(entries: FsEntry[], options: BuildAiProjectIndexOptions, getLanguage?: (relativePath: string) => string | null): AiProjectIndexSnapshot {
   const maxIndexedFiles = Math.max(1, Math.floor(options.maxIndexedFiles));
   const eligible: ScoredIndexFile[] = [];
   let totalFiles = 0;
@@ -107,7 +107,7 @@ export function buildAiProjectIndexSnapshot(entries: FsEntry[], options: BuildAi
       ignoredFiles += 1;
       continue;
     }
-    eligible.push(scoreIndexFile(entry, options.workspaceRoot, image));
+    eligible.push(scoreIndexFile(entry, options.workspaceRoot, image, getLanguage));
   }
 
   eligible.sort(compareScoredIndexFiles);
@@ -151,7 +151,7 @@ export function buildAiProjectIndexSnapshot(entries: FsEntry[], options: BuildAi
   };
 }
 
-function scoreIndexFile(entry: FsEntry, workspaceRoot: string, image: boolean): ScoredIndexFile {
+function scoreIndexFile(entry: FsEntry, workspaceRoot: string, image: boolean, getLanguage?: (relativePath: string) => string | null): ScoredIndexFile {
   const descriptor = createRelatedFileDescriptor(entry, workspaceRoot);
   const rules = isRulesContextPath(entry.path, workspaceRoot);
   const docs = isDocsContextPath(entry.path, workspaceRoot);
@@ -184,7 +184,7 @@ function scoreIndexFile(entry: FsEntry, workspaceRoot: string, image: boolean): 
     test,
     path: descriptor.path,
     relativePath: descriptor.relativePath,
-    language: image ? "images" : languageForPath(descriptor.relativePath),
+    language: image ? "images" : (getLanguage?.(descriptor.relativePath) ?? languageForPath(descriptor.relativePath)),
     size: Number.isFinite(entry.size) ? entry.size : null,
     modifiedAt: entry.modified_at,
     score,

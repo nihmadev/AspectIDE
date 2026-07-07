@@ -1,4 +1,5 @@
 import { Check, DownloadCloud, Loader2, Pencil, Plus, Trash2, Wand2 } from "lucide-react";
+import { CompactDropdown } from "../CompactDropdown";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 import { luxCommands, type ImportableSkill, type Skill, type SkillDraft, type SkillScope } from "../../lib/tauri";
@@ -212,10 +213,17 @@ function SkillEditor({
 
       <label className="lux-skill-field">
         <span>{t("settings.skills.field.scope")}</span>
-        <select value={scope} disabled={Boolean(existing)} onChange={(event) => setScope(event.target.value as SkillScope)}>
-          <option value="global">{t("settings.skills.scope.global")}</option>
-          <option value="project" disabled={!canUseProject}>{t("settings.skills.scope.project")}</option>
-        </select>
+        <CompactDropdown
+          className="lux-skill-field-select"
+          label={t("settings.skills.field.scope")}
+          disabled={Boolean(existing)}
+          value={scope}
+          options={[
+            { label: t("settings.skills.scope.global"), value: "global" as SkillScope },
+            { label: t("settings.skills.scope.project"), value: "project" as SkillScope },
+          ]}
+          onChange={(value) => setScope(value as SkillScope)}
+        />
         {!canUseProject && scope === "global" && <small>{t("settings.skills.projectNeedsWorkspace")}</small>}
       </label>
 

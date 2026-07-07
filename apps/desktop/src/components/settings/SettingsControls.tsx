@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Minus, Plus } from "lucide-react";
+import { Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { CompactDropdown } from "../CompactDropdown";
 import { withFontFallback } from "../../lib/editorPreferences";
@@ -123,15 +123,16 @@ export function ToolRoundLimitSetting({ detail, fallbackLimitedValue, label, lim
   );
 }
 
-export function SelectSetting<T extends string>({ detail, label, onChange, options, value }: { detail?: string; label: string; onChange: (value: T) => void; options: Array<{ label: string; value: T }>; value: T }) {
+export function SelectSetting<T extends string>({ detail, label, onChange, options, value, wide }: { detail?: string; label: string; onChange: (value: T) => void; options: Array<{ label: string; value: T }>; value: T; wide?: boolean }) {
   return (
-    <SettingField detail={detail} label={label}>
-      <label className="settings-select-control">
-        <select aria-label={label} value={value} onChange={(event) => onChange(event.currentTarget.value as T)}>
-          {options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
-        <ChevronDown size={14} />
-      </label>
+    <SettingField detail={detail} label={label} wide={wide}>
+      <CompactDropdown
+        className="settings-select-dropdown"
+        label={label}
+        value={value}
+        options={options}
+        onChange={onChange}
+      />
     </SettingField>
   );
 }
@@ -296,5 +297,5 @@ export function SaveIndicator({ state, t }: { state: SaveState; t: TranslateFn }
   if (state === "idle") return <span className="settings-save-state">{t("settings.save.userSettings")}</span>;
   if (state === "saving") return <span className="settings-save-state">{t("settings.save.saving")}</span>;
   if (state === "error") return <span className="settings-save-state" data-tone="error">{t("settings.save.failed")}</span>;
-  return <span className="settings-save-state" data-tone="saved"><Check size={12} /> {t("settings.save.saved")}</span>;
+  return <span className="settings-save-state" data-tone="saved">{t("settings.save.saved")}</span>;
 }

@@ -917,6 +917,8 @@ pub fn run() {
             ai_luxide::luxide_usage,
             ai_workspace::ai_repo_map,
             ai_workspace::ai_workspace_index,
+            ai_workspace::resolve_file_languages,
+            ai_workspace::ai_index_languages,
             ai_symbol_context,
             code_graph_build,
             code_graph_export_html,

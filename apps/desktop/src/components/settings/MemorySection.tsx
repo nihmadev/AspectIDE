@@ -1,4 +1,5 @@
-import { Brain, ChevronDown, ChevronRight, Flame, Link2, Loader2, Pin, PinOff, Plus, Sparkles, Trash2, X } from "lucide-react";
+import { Brain, ChevronDown, ChevronRight, Flame, Link2, Loader2, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "lucide-react";
+import { CompactDropdown } from "../CompactDropdown";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { TranslateFn } from "../../lib/i18n/useTranslation";
 import {
@@ -134,7 +135,7 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
         </div>
         <div className="lux-mem-head-actions">
           <button type="button" className="lux-mem-prune-btn" disabled={pruning} onClick={() => void pruneNow()} title={t("settings.memory.pruneHint")}>
-            {pruning ? <Loader2 size={13} className="lux-spin" /> : <Sparkles size={13} />} {t("settings.memory.prune")}
+            {pruning ? <Loader2 size={13} className="lux-spin" /> : <RefreshCw size={13} />} {t("settings.memory.prune")}
           </button>
           <button type="button" className="lux-mem-add-btn" onClick={() => setShowAdd((open) => !open)}>
             <Plus size={14} /> {t("settings.memory.add")}
@@ -177,12 +178,18 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
           placeholder={t("settings.memory.searchPlaceholder")}
           onChange={(event) => setQuery(event.target.value)}
         />
-        <select className="lux-mem-select" value={sort} onChange={(event) => setSort(event.target.value as MemorySortOrder)}>
-          <option value="relevance">{t("settings.memory.sort.relevance")}</option>
-          <option value="recent">{t("settings.memory.sort.recent")}</option>
-          <option value="importance">{t("settings.memory.sort.importance")}</option>
-          <option value="oldest">{t("settings.memory.sort.oldest")}</option>
-        </select>
+        <CompactDropdown
+          className="lux-mem-select"
+          label={t("settings.memory.sort.label")}
+          value={sort}
+          options={[
+            { label: t("settings.memory.sort.relevance"), value: "relevance" as MemorySortOrder },
+            { label: t("settings.memory.sort.recent"), value: "recent" as MemorySortOrder },
+            { label: t("settings.memory.sort.importance"), value: "importance" as MemorySortOrder },
+            { label: t("settings.memory.sort.oldest"), value: "oldest" as MemorySortOrder },
+          ]}
+          onChange={(value) => setSort(value as MemorySortOrder)}
+        />
         <label className="lux-mem-superseded-toggle">
           <input type="checkbox" checked={includeSuperseded} onChange={(event) => setIncludeSuperseded(event.target.checked)} />
           {t("settings.memory.showSuperseded")}
@@ -355,6 +362,14 @@ function MemoryComposer({
   const [pinned, setPinned] = useState(false);
   const [saving, setSaving] = useState(false);
 
+  const categoryOptions = useMemo(() => {
+    const options = COMMON_CATEGORIES.map((entry) => ({ label: entry, value: entry }));
+    if (defaultCategory && !COMMON_CATEGORIES.includes(defaultCategory)) {
+      options.unshift({ label: defaultCategory, value: defaultCategory });
+    }
+    return options;
+  }, [defaultCategory]);
+
   const save = async () => {
     if (!content.trim()) return;
     setSaving(true);
@@ -385,16 +400,13 @@ function MemoryComposer({
         rows={3}
       />
       <div className="lux-mem-composer-row">
-        <input
+        <CompactDropdown
           className="lux-mem-composer-cat"
-          list="lux-mem-categories"
+          label={t("settings.memory.category")}
           value={category}
-          onChange={(event) => setCategory(event.target.value)}
-          placeholder={t("settings.memory.category")}
+          options={categoryOptions}
+          onChange={(value) => setCategory(value)}
         />
-        <datalist id="lux-mem-categories">
-          {COMMON_CATEGORIES.map((entry) => <option key={entry} value={entry} />)}
-        </datalist>
         <label className="lux-mem-composer-imp">
           {t("settings.memory.importance")}
           <input
