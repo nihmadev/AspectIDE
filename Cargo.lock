@@ -332,7 +332,7 @@ dependencies = [
  "uuid",
  "which",
  "winreg 0.55.0",
- "zip 4.6.1",
+ "zip 7.2.0",
 ]
 
 [[package]]
@@ -377,7 +377,7 @@ dependencies = [
  "thiserror 2.0.18",
  "umya-spreadsheet",
  "xz2",
- "zip 4.6.1",
+ "zip 7.2.0",
 ]
 
 [[package]]
@@ -460,7 +460,7 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
- "zip 4.6.1",
+ "zip 7.2.0",
 ]
 
 [[package]]
@@ -8611,10 +8611,8 @@ checksum = "caa8cd6af31c3b31c6631b8f483848b91589021b28fffe50adada48d4f4d2ed1"
 dependencies = [
  "arbitrary",
  "crc32fast",
- "flate2",
  "indexmap 2.14.0",
  "memchr",
- "zopfli",
 ]
 
 [[package]]
