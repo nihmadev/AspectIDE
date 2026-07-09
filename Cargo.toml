@@ -62,7 +62,7 @@ uuid = { version = "1.13", features = ["serde", "v4"] }
 umya-spreadsheet = "2.3.3"
 wasmparser = "0.251.0"
 wasmtime = { version = "45.0.0", default-features = false, features = ["cranelift", "runtime", "std"] }
-zip = { version = "4.6.1", default-features = false, features = ["deflate"] }
+zip = { version = "7.2.0", default-features = false, features = ["deflate"] }
 tar = "0.4"
 flate2 = "1.1"
 bzip2 = "0.6"
