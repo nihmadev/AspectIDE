@@ -74,7 +74,7 @@ encoding_rs = "0.8"
 # family names for the pickers, never rasterize or shape text.
 fontdb = { version = "0.23.0", default-features = false, features = ["fs", "memmap"] }
 # SHA-256 for the AspectIDE gateway enrollment proof-of-work (hashcash).
-sha2 = "0.10"
+sha2 = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 # HKCU registry writes for the PATH shim + Explorer "Open with AspectIDE" verb.
