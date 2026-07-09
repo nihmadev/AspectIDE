@@ -78,4 +78,4 @@ sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 # HKCU registry writes for the PATH shim + Explorer "Open with AspectIDE" verb.
-winreg = "0.55"
+winreg = "0.56"
