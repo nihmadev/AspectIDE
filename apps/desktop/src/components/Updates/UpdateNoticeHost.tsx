@@ -1,0 +1,28 @@
+import { useEffect } from "react";
+import { useAspectStore } from "../lib/store/index";
+import { useUpdater } from "../lib/hooks/use-updater";
+import { UpdateNotice } from "./UpdateNotice";
+
+/**
+ * Owns the auto-update lifecycle for the whole app: runs the periodic check,
+ * renders the bottom-right {@link UpdateNotice}, and mirrors "update available"
+ * into the store so the title-bar badge stays in sync. Mounted once at the app
+ * root so a single updater drives every surface.
+ */
+export function UpdateNoticeHost() {
+  const { state, install, dismiss, check } = useUpdater();
+  const setUpdateAvailable = useAspectStore((store) => store.setUpdateAvailable);
+
+  useEffect(() => {
+    setUpdateAvailable(state.status === "available");
+  }, [state.status, setUpdateAvailable]);
+
+  return (
+    <UpdateNotice
+      state={state}
+      onInstall={install}
+      onDismiss={dismiss}
+      onRetry={() => void check()}
+    />
+  );
+}

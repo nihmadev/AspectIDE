@@ -1,0 +1,503 @@
+/* Workspace startup — Codex-style loading card */
+
+.project-load-overlay {
+  position: fixed;
+  inset: 35px 0 0;
+  z-index: 120;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  animation: project-load-overlay-in 320ms ease both;
+}
+
+.project-load-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(6px);
+}
+
+/* When the IDE-shell skeleton is showing, lighten the scrim so the shimmering
+   shape reads through (Codex-style: you see the app forming, not a black void). */
+.project-load-overlay:has(.workspace-skeleton) .project-load-scrim {
+  background: rgba(20, 20, 20, 0.55);
+  backdrop-filter: blur(2px);
+}
+
+/* ── Slim top progress line (sits under the title bar) ─────────────────────── */
+.project-load-topbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  z-index: 3;
+  overflow: hidden;
+  background: var(--bg-0);
+}
+
+/* Monochrome progress line — Codex lineage: no accent gradient, no glow. */
+.project-load-topbar::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: var(--load-progress, 0%);
+  background: rgba(255, 255, 255, 0.38);
+  transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.project-load-topbar[data-indeterminate="true"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 35%;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.35), transparent);
+  transform: translateX(-120%);
+  animation: project-load-topbar-slide 1.25s ease-in-out infinite;
+}
+
+.project-load-overlay[data-stage="error"] .project-load-topbar::before {
+  background: linear-gradient(90deg, var(--danger-strong), var(--danger));
+}
+
+@keyframes project-load-topbar-slide {
+  to { transform: translateX(360%); }
+}
+
+/* ── Workspace skeleton (ghost of the IDE shell) ──────────────────────────── */
+.workspace-skeleton {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: grid;
+  grid-template-columns: 248px 1fr;
+  overflow: hidden;
+  animation: project-load-overlay-in 360ms ease both;
+}
+
+.ws-skeleton-sidebar {
+  display: grid;
+  grid-template-rows: 38px 1fr;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--surface-0);
+}
+
+.ws-skeleton-sidebar-head {
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ws-skeleton-tree {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  padding: 12px 10px;
+}
+
+.ws-skeleton-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 22px;
+}
+
+.ws-skeleton-editor {
+  display: grid;
+  grid-template-rows: 38px 1fr;
+  background: var(--bg-0);
+}
+
+.ws-skeleton-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.ws-skeleton-tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+
+.ws-skeleton-tab[data-active="true"] {
+  background: var(--surface-0);
+  box-shadow: inset 0 -2px 0 var(--accent-soft);
+}
+
+.ws-skeleton-code {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  padding: 18px 20px;
+}
+
+.ws-skeleton-code-line {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 14px;
+}
+
+.ws-skeleton-gutter {
+  flex: 0 0 auto;
+  width: 18px;
+  text-align: right;
+  color: var(--text-3);
+  opacity: 0.35;
+  font: 10px/1 var(--font-mono);
+  user-select: none;
+}
+
+.ws-skeleton-dot {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  border-radius: var(--radius-xs);
+}
+
+/* Shared shimmer fill for every ghost element. */
+.ws-skeleton-bar,
+.ws-skeleton-dot {
+  height: 9px;
+  border-radius: 999px;
+  background: linear-gradient(
+    100deg,
+    var(--surface-1) 28%,
+    var(--surface-2) 46%,
+    var(--surface-1) 64%
+  );
+  background-size: 220% 100%;
+  animation: ws-skeleton-shimmer 1.5s ease-in-out infinite;
+}
+
+.ws-skeleton-dot {
+  height: 13px;
+}
+
+@keyframes ws-skeleton-shimmer {
+  0% { background-position: 180% 0; }
+  100% { background-position: -80% 0; }
+}
+
+/* Compact, quiet card — the skeleton behind it carries the "app is forming"
+   story; the card only reports facts. Codex lineage: monochrome, tight. */
+.project-load-card {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  gap: 12px;
+  width: min(360px, calc(100vw - 60px));
+  padding: 16px 18px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--surface-0);
+  box-shadow: var(--shadow-md);
+  animation: project-load-card-in 400ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.project-load-header {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 11px;
+  align-items: center;
+  min-width: 0;
+}
+
+.project-load-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle);
+  background: linear-gradient(160deg, var(--surface-1), var(--surface-0));
+  box-shadow: inset 0 1px 0 var(--on-surface-faint);
+  color: var(--icon-strong);
+}
+
+.project-load-header-copy {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.project-load-eyebrow {
+  display: none; /* the folder icon + name already say it — no label shouting */
+}
+
+.project-load-title {
+  margin: 0;
+  color: var(--text-0);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-load-path {
+  margin: 0;
+  color: var(--text-3);
+  font: 10.5px/1.4 var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-load-steps {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 8px 0 2px;
+  list-style: none;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Quiet checklist rows: no fills, no pulses — state lives in the glyph and the
+   text weight alone (only the done-check keeps a tinted glyph, turn-summary
+   style). */
+.project-load-step {
+  display: grid;
+  grid-template-columns: 20px 1fr;
+  gap: 8px;
+  align-items: center;
+  min-height: 25px;
+  transition: color 180ms ease;
+}
+
+.project-load-step[data-state="done"] .project-load-step-label {
+  color: var(--text-2);
+}
+
+.project-load-step[data-state="pending"] .project-load-step-label {
+  color: var(--text-3);
+}
+
+.project-load-step-marker {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  color: var(--text-1);
+}
+
+.project-load-step[data-state="done"] .project-load-step-marker {
+  color: var(--success);
+  opacity: 0.85;
+}
+
+.project-load-step[data-state="pending"] .project-load-step-marker {
+  color: var(--text-3);
+}
+
+.project-load-step-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+
+.project-load-step-label {
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.project-load-step[data-state="active"] .project-load-step-label {
+  color: var(--text-0);
+  font-weight: 600;
+}
+
+.project-load-spin {
+  animation: project-load-spin 0.85s linear infinite;
+}
+
+.project-load-footer {
+  display: grid;
+  gap: 7px;
+  padding-top: 2px;
+}
+
+.project-load-detail {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+}
+
+.project-load-footer-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.project-load-status-text {
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.project-load-percent {
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.03em;
+}
+
+.project-load-bar-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+/* Monochrome fill — a quiet light bar, no gradient, no glow. Indeterminate
+   breathes via opacity instead of a moving white sweep. */
+.project-load-bar {
+  position: relative;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--icon-strong);
+  transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.project-load-bar[data-indeterminate="true"] {
+  animation: project-load-bar-breathe 1.6s ease-in-out infinite;
+}
+
+.project-load-overlay[data-stage="error"] .project-load-bar {
+  background: linear-gradient(90deg, var(--danger-strong), var(--danger));
+}
+
+.project-load-error {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px 12px;
+  align-items: start;
+  width: min(420px, calc(100vw - 60px));
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(240, 106, 106, 0.28);
+  border-radius: var(--radius-md);
+  background: rgba(240, 106, 106, 0.06);
+  color: var(--danger);
+}
+
+.project-load-error svg {
+  margin-top: 1px;
+  color: var(--danger);
+}
+
+.project-load-error p {
+  margin: 0;
+  grid-column: 2;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-1);
+}
+
+.project-load-error button {
+  grid-column: 2;
+  justify-self: start;
+  padding: 5px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-1);
+  color: var(--text-1);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.project-load-error button:hover {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text-0);
+}
+
+@keyframes project-load-overlay-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes project-load-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes project-load-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes project-load-bar-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.project-load-overlay[data-exiting] {
+  animation: project-load-overlay-out 260ms ease both;
+  pointer-events: none;
+}
+
+.project-load-overlay[data-exiting] .project-load-card {
+  animation: project-load-card-out 260ms ease both;
+}
+
+@keyframes project-load-overlay-out {
+  to { opacity: 0; }
+}
+
+@keyframes project-load-card-out {
+  to {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.99);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-load-overlay,
+  .project-load-card {
+    animation: none !important;
+  }
+  .project-load-spin {
+    animation: none !important;
+  }
+  .project-load-bar {
+    transition: width 180ms ease;
+  }
+  .project-load-bar[data-indeterminate="true"]::after,
+  .project-load-step[data-state="active"] {
+    animation: none !important;
+  }
+  .project-load-overlay[data-exiting],
+  .project-load-overlay[data-exiting] .project-load-card {
+    animation: none !important;
+  }
+  .ws-skeleton-bar,
+  .ws-skeleton-dot,
+  .workspace-skeleton,
+  .project-load-topbar[data-indeterminate="true"]::after {
+    animation: none !important;
+  }
+}

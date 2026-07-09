@@ -1,0 +1,81 @@
+[package]
+name = "aspect-desktop"
+version = "1.0.21"
+description = "AspectIDE desktop shell"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "aspect_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "aspect-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+dunce.workspace = true
+aspect-ai-core = { path = "../../../crates/aspect-aspector-core" }
+aspect-agent-browser = { path = "../../../crates/aspect-agent-browser" }
+aspect-codegraph = { path = "../../../crates/aspect-codegraph" }
+aspect-agent-tools = { path = "../../../crates/aspect-agent-tools" }
+aspect-core = { path = "../../../crates/aspect-core" }
+aspect-dap = { path = "../../../crates/aspect-dap" }
+aspect-editor = { path = "../../../crates/aspect-editor" }
+aspect-extensions = { path = "../../../crates/aspect-extensions" }
+aspect-file-intel = { path = "../../../crates/aspect-file-intel" }
+aspect-fs = { path = "../../../crates/aspect-fs" }
+aspect-git = { path = "../../../crates/aspect-git" }
+aspect-lsp = { path = "../../../crates/aspect-lsp" }
+aspect-mcp = { path = "../../../crates/aspect-mcp" }
+aspect-runtimes = { path = "../../../crates/aspect-runtimes" }
+aspect-memory = { path = "../../../crates/aspect-memory" }
+aspect-research = { path = "../../../crates/aspect-research" }
+aspect-search = { path = "../../../crates/aspect-search" }
+aspect-settings = { path = "../../../crates/aspect-settings" }
+aspect-skills = { path = "../../../crates/aspect-skills" }
+aspect-security = { path = "../../../crates/aspect-security" }
+aspect-ssh = { path = "../../../crates/aspect-ssh" }
+aspect-terminal = { path = "../../../crates/aspect-terminal" }
+aspect-workspace = { path = "../../../crates/aspect-workspace" }
+globset.workspace = true
+image.workspace = true
+notify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+tauri-plugin-log = "2"
+tauri-plugin-clipboard-manager = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-process = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-updater = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "native-tls-vendored", "stream"] }
+futures-util = "0.3"
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+which = "7.0"
+# Legacy console-codepage decode fallback for AI Shell output (cp866/cp1251
+# mojibake on Windows); pinned minor to match the existing transitive version.
+encoding_rs = "0.8"
+# System font-family enumeration for Settings → Fonts. fs+memmap only: we list
+# family names for the pickers, never rasterize or shape text.
+fontdb = { version = "0.23.0", default-features = false, features = ["fs", "memmap"] }
+# SHA-256 for the AspectIDE gateway enrollment proof-of-work (hashcash).
+sha2 = "0.10"
+
+[target.'cfg(windows)'.dependencies]
+# HKCU registry writes for the PATH shim + Explorer "Open with AspectIDE" verb.
+winreg = "0.55"

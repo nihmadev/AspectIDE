@@ -1,0 +1,1283 @@
+/* Skills · Memory · Web Research settings.
+   Codex lineage: monochrome neutral chrome, token-driven surfaces, accent
+   reserved for functional signals only (focus, current-project scope, pinned).
+   Kept visually identical to settings.css so every tab reads as one design. */
+
+.lux-spin {
+  animation: lux-spin-kf 0.8s linear infinite;
+}
+@keyframes lux-spin-kf {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* ── shared section shells ── */
+.lux-mem,
+.lux-skill,
+.lux-research {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.lux-mem-empty,
+.lux-skill-none,
+.lux-skill-empty,
+.lux-mem-none {
+  margin: 0;
+  padding: 14px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.lux-mem-error,
+.lux-skill-error {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.4;
+  /* Backend errors carry long unbroken tokens (paths, URLs). */
+  overflow-wrap: anywhere;
+}
+
+.lux-mem-loading,
+.lux-skill-loading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/* ── section header (stats / scope filters + actions) ── */
+.lux-mem-head,
+.lux-skill-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 28px;
+}
+
+.lux-mem-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-1);
+  font-size: 13px;
+}
+.lux-mem-stat svg {
+  color: var(--text-2);
+}
+.lux-mem-pincount {
+  color: var(--text-3);
+}
+.lux-mem-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Secondary (neutral) buttons — match .settings-reset-button exactly. */
+.lux-mem-add-btn,
+.lux-mem-prune-btn,
+.lux-skill-new,
+.lux-skill-import,
+.lux-mem-composer-save,
+.lux-skill-save,
+.lux-research-test {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+.lux-mem-add-btn:hover,
+.lux-mem-prune-btn:not(:disabled):hover,
+.lux-skill-new:hover,
+.lux-skill-import:hover,
+.lux-mem-composer-save:not(:disabled):hover,
+.lux-skill-save:not(:disabled):hover,
+.lux-research-test:not(:disabled):hover {
+  background: var(--surface-hover);
+  color: var(--text-0);
+}
+.lux-mem-prune-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.lux-mem-composer-save:disabled,
+.lux-skill-save:disabled,
+.lux-research-test:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.lux-skill-head-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+/* ── controls: search · sort · filter chips ── */
+.lux-mem-controls {
+  display: flex;
+  gap: 8px;
+}
+
+.lux-mem-search,
+.lux-skill-field input,
+.lux-skill-field select,
+.lux-skill-field textarea,
+.lux-mem-composer-text,
+.lux-research-input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  outline: 0;
+  background: var(--bg-1);
+  color: var(--text-0);
+  font: 13px/1 var(--font-ui);
+  transition: border-color 100ms ease, background 100ms ease;
+}
+.lux-mem-search {
+  flex: 1;
+}
+.lux-mem-select {
+  /* The shared input rule sets width:100% — with flex-shrink:0 that would
+     swallow the whole controls row and crush the search field to a sliver. */
+  width: auto;
+  flex: 0 0 auto;
+}
+.lux-mem-select .compact-dropdown-trigger:hover,
+.lux-mem-select .compact-dropdown-trigger[aria-expanded="true"] {
+  border-color: var(--accent-strong);
+  background: var(--bg-0);
+}
+.lux-mem-search:focus,
+.lux-mem-select .compact-dropdown-trigger:focus-visible,
+.lux-skill-field input:focus,
+.lux-skill-field .compact-dropdown-trigger:focus-visible,
+.lux-skill-field textarea:focus,
+.lux-mem-composer-text:focus,
+.lux-mem-composer-cat .compact-dropdown-trigger:focus-visible,
+.lux-research-input:focus {
+  border-color: var(--accent-strong);
+  background: var(--bg-0);
+}
+.lux-mem-search::placeholder,
+.lux-mem-composer-text::placeholder,
+.lux-skill-field input::placeholder,
+.lux-skill-field textarea::placeholder,
+.lux-research-input::placeholder {
+  color: var(--text-3);
+}
+
+.lux-mem-superseded-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  padding: 0 4px;
+  color: var(--text-2);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.lux-mem-superseded-toggle input {
+  accent-color: var(--accent);
+}
+
+/* ── retention health chips (hot/warm/cold/evictable) ── */
+.lux-mem-retention {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lux-mem-retention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.lux-mem-retention-chip[data-tier="hot"] {
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  color: var(--accent);
+}
+.lux-mem-retention-chip[data-tier="hot"] svg {
+  color: var(--accent);
+}
+.lux-mem-retention-chip[data-tier="evictable"] {
+  color: var(--text-3);
+}
+.lux-mem-prune-result {
+  margin: 0;
+  color: var(--success);
+  font-size: 11.5px;
+}
+
+/* Neutral filter chips (monochrome — no solid accent fills). */
+.lux-mem-cats,
+.lux-skill-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.lux-mem-cats button,
+.lux-skill-scopes button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+.lux-mem-cats button:hover,
+.lux-skill-scopes button:hover {
+  background: var(--hover);
+  color: var(--text-0);
+}
+.lux-mem-cats button[data-active="true"],
+.lux-skill-scopes button[data-active="true"] {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-0);
+}
+.lux-mem-cats button span {
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.lux-mem-cats button[data-active="true"] span {
+  color: var(--text-2);
+}
+
+/* ── list rows ── */
+.lux-mem-list,
+.lux-skill-list,
+.lux-skill-import-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lux-mem-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  transition: border-color 100ms ease, background 100ms ease;
+}
+.lux-skill-row,
+.lux-skill-import-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  transition: border-color 100ms ease, background 100ms ease;
+}
+.lux-mem-row:hover,
+.lux-skill-row:hover,
+.lux-skill-import-row:hover {
+  background: var(--surface-hover);
+}
+.lux-mem-row[data-pinned] {
+  border-color: var(--accent-soft);
+  background: var(--accent-softer);
+}
+.lux-mem-row[data-superseded] {
+  opacity: 0.6;
+}
+.lux-skill-row[data-disabled] {
+  opacity: 0.6;
+}
+.lux-mem-row-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.lux-mem-expand {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.lux-mem-expand:hover {
+  background: var(--hover);
+  color: var(--text-1);
+}
+.lux-mem-row-main,
+.lux-skill-row-main {
+  min-width: 0;
+  flex: 1;
+}
+.lux-mem-content {
+  margin: 0 0 7px;
+  color: var(--text-0);
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.lux-mem-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.lux-mem-src {
+  font-family: var(--font-mono);
+}
+.lux-mem-superseded-pill {
+  height: 16px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-3);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 16px;
+  text-transform: uppercase;
+}
+
+/* ── relation graph (expanded row) ── */
+.lux-mem-relations {
+  margin: 9px 0 0 28px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+}
+.lux-mem-relations-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11px;
+}
+.lux-mem-relations-none {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.lux-mem-relations-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.lux-mem-relation-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+.lux-mem-relation-row svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.lux-mem-relation-kind {
+  flex-shrink: 0;
+  color: var(--text-1);
+  font-weight: 500;
+  text-transform: capitalize;
+}
+.lux-mem-relation-dir {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+.lux-mem-relation-target {
+  overflow: hidden;
+  min-width: 0;
+  flex: 1;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lux-mem-relation-confidence {
+  flex-shrink: 0;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+.lux-mem-relation-unrelate {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.lux-mem-relation-unrelate:hover {
+  background: var(--hover);
+  color: var(--danger);
+}
+
+/* Neutral status pills (scope / category badge). */
+.lux-mem-badge,
+.lux-skill-scope-badge {
+  height: 18px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 18px;
+  text-transform: uppercase;
+}
+/* Project scope is a functional signal (the open workspace) → accent tint. */
+.lux-skill-scope-badge[data-scope="project"] {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.lux-mem-imp {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hover-reveal row actions (mirrors the chat history rows). */
+.lux-mem-row-actions,
+.lux-skill-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 100ms ease;
+}
+.lux-mem-row:hover .lux-mem-row-actions,
+.lux-skill-row:hover .lux-skill-row-actions,
+.lux-skill-row-actions:focus-within,
+.lux-mem-row-actions:focus-within {
+  opacity: 1;
+}
+.lux-mem-row-actions button,
+.lux-skill-row-actions button {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.lux-mem-row-actions button:hover,
+.lux-skill-row-actions button:hover {
+  background: var(--hover);
+  color: var(--text-0);
+}
+.lux-mem-danger:hover,
+.lux-skill-danger:hover {
+  color: var(--danger) !important;
+}
+
+/* ── skill rows ── */
+.lux-skill-row-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+  min-width: 0;
+}
+.lux-skill-row-title svg {
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+.lux-skill-name {
+  overflow: hidden;
+  color: var(--text-0);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lux-skill-off {
+  height: 18px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  line-height: 18px;
+  text-transform: uppercase;
+}
+.lux-skill-desc {
+  margin: 0 0 7px;
+  overflow-wrap: anywhere; /* imported SKILL.md descriptions carry long URLs/paths */
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.lux-skill-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+.lux-skill-tags span {
+  padding: 1px 7px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-1);
+  color: var(--text-3);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+/* Toggle switch — identical geometry/colors to .settings-switch. */
+.lux-skill-toggle {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.lux-skill-toggle input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.lux-skill-toggle span {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-1);
+  transition: border-color 100ms ease, background 100ms ease;
+}
+.lux-skill-toggle span::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: transform 100ms ease, background 100ms ease;
+}
+.lux-skill-toggle input:checked + span {
+  border-color: var(--accent-strong);
+  background: var(--accent-soft);
+}
+.lux-skill-toggle input:checked + span::after {
+  background: var(--accent);
+  transform: translateX(16px);
+}
+
+/* ── memory composer (add) ── */
+.lux-mem-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+}
+.lux-mem-composer-text {
+  height: auto;
+  min-height: 64px;
+  padding: 9px 10px;
+  line-height: 1.5;
+  resize: vertical;
+}
+.lux-mem-composer-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.lux-mem-composer-cat {
+  flex: 0 1 auto;
+}
+.lux-mem-composer-cat .compact-dropdown-trigger {
+  justify-content: space-between;
+  gap: 8px;
+}
+.lux-mem-composer-cat .compact-dropdown-trigger:hover,
+.lux-mem-composer-cat .compact-dropdown-trigger[aria-expanded="true"] {
+  border-color: var(--accent-strong);
+  background: var(--bg-0);
+}
+.lux-mem-composer-save {
+  height: 26px;
+}
+.lux-mem-composer-imp,
+.lux-mem-composer-pin {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.lux-mem-composer-imp span {
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+.lux-mem-composer-imp input[type="range"] {
+  width: 96px;
+  accent-color: var(--accent);
+}
+.lux-mem-composer-pin input,
+.lux-mem-composer-imp input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.lux-mem-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+.lux-mem-wipe {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 100ms ease;
+}
+.lux-mem-wipe:hover {
+  background: var(--danger-soft);
+}
+
+/* ── skill editor / importer forms ── */
+.lux-skill-editor,
+.lux-skill-importer {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.lux-skill-editor-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.lux-skill-editor-head h3 {
+  margin: 0;
+  color: var(--text-0);
+  font-size: 15px;
+  font-weight: 600;
+}
+.lux-skill-editor-back {
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.lux-skill-editor-back:hover {
+  background: var(--surface-hover);
+  color: var(--text-0);
+}
+.lux-skill-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text-1);
+  font-size: 12px;
+}
+.lux-skill-field > span {
+  color: var(--text-0);
+  font-size: 13px;
+  font-weight: 500;
+}
+.lux-skill-field textarea {
+  height: auto;
+  min-height: 120px;
+  padding: 10px 11px;
+  line-height: 1.5;
+  resize: vertical;
+  font: 12px/1.5 var(--font-mono);
+}
+.lux-skill-field select {
+  cursor: pointer;
+}
+.lux-skill-field .lux-skill-field-select {
+  width: max-content;
+  align-self: flex-start;
+}
+
+.lux-skill-field small,
+.lux-skill-slug {
+  color: var(--text-3);
+  font-size: 11px;
+}
+.lux-skill-slug {
+  font-family: var(--font-mono);
+}
+.lux-skill-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.lux-skill-enabled {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-1);
+  font-size: 13px;
+}
+.lux-skill-enabled input {
+  accent-color: var(--accent);
+}
+.lux-skill-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ── skill importer ── */
+.lux-skill-import-note {
+  margin: 2px 0 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.lux-skill-import-success {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--success) 35%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+  font-size: 12px;
+}
+.lux-skill-import-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 4px;
+}
+.lux-skill-import-head .lux-skill-import-h {
+  margin: 0;
+}
+.lux-skill-import-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+.lux-skill-import-all:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+.lux-skill-import-all:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.lux-skill-import-h {
+  margin: 4px 0 0;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.lux-skill-import-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+.lux-skill-import-btn:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-0);
+}
+.lux-skill-import-btn:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* Success styling only for actually-imported rows — a button disabled because
+   another import is busy must not read as "done". */
+.lux-skill-import-btn[data-done="true"] {
+  opacity: 1;
+  border-color: color-mix(in srgb, var(--success) 35%, transparent);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+
+/* ── web research ── */
+.lux-research-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.lux-research-intro svg {
+  flex-shrink: 0;
+  margin-top: 1px;
+  color: var(--text-2);
+}
+.lux-research-intro p {
+  margin: 0;
+}
+.lux-research-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.lux-research-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-0);
+  font-size: 13px;
+  font-weight: 500;
+}
+.lux-research-hint {
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.lux-research-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.lux-research-save {
+  color: var(--text-3);
+  font-size: 11px;
+}
+.lux-research-save[data-state="saved"] {
+  color: var(--success);
+}
+.lux-research-test-result {
+  margin: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere; /* SearxNG errors embed long query URLs */
+}
+.lux-research-test-result[data-status="ok"] {
+  border-color: color-mix(in srgb, var(--success) 32%, transparent);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  color: var(--success);
+}
+.lux-research-test-result[data-status="error"] {
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.lux-research-note {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+/* SSH host list (Settings → SSH & Remote) — neutral rows inside a hairline card. */
+.lux-ssh-hosts {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin-top: 2px;
+  padding: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+}
+.lux-ssh-hosts .lux-research-hint {
+  padding: 6px 8px;
+  border-radius: var(--radius-xs);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+}
+.lux-ssh-hosts .lux-research-hint:hover {
+  background: var(--hover);
+}
+.lux-ssh-hosts .lux-research-hint strong {
+  color: var(--text-0);
+  font-weight: 600;
+}
+
+/* ── MCP servers (Settings → MCP Servers) ── */
+.lux-mcp {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.lux-mcp-intro {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.lux-mcp-intro svg {
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+.lux-mcp-intro p {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+.lux-mcp-refresh {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.lux-mcp-refresh:hover {
+  background: var(--surface-hover);
+  color: var(--text-0);
+}
+
+/* Single quiet container with hairline dividers (same treatment as the LSP
+   list) — one surface instead of a stack of framed cards. */
+.lux-mcp-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-1);
+}
+.lux-mcp-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 46px;
+  padding: 9px 12px;
+  transition: background 100ms ease;
+}
+.lux-mcp-item + .lux-mcp-item {
+  border-top: 1px solid var(--border-subtle);
+}
+.lux-mcp-item:hover {
+  background: var(--hover-soft);
+}
+.lux-mcp-item[data-editing] {
+  background: var(--accent-softer);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.lux-mcp-item-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+.lux-mcp-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+.lux-mcp-dot[data-state="connected"] {
+  background: var(--success);
+}
+.lux-mcp-dot[data-state="connecting"] {
+  background: var(--accent);
+  animation: lsp-dot-pulse 1.2s ease-in-out infinite;
+}
+.lux-mcp-dot[data-state="error"] {
+  background: var(--danger);
+}
+.lux-mcp-item-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.lux-mcp-item-copy strong {
+  overflow: hidden;
+  color: var(--text-0);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lux-mcp-item-copy code {
+  overflow: hidden;
+  color: var(--text-3);
+  font: 11px/1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lux-mcp-error {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.lux-mcp-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 18px;
+  padding: 0 8px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: var(--surface-1);
+  color: var(--text-2);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.lux-mcp-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.lux-mcp-item-actions button {
+  display: inline-grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+.lux-mcp-item-actions button:hover {
+  background: var(--hover);
+  color: var(--text-0);
+}
+.lux-mcp-item-actions button[data-on] {
+  color: var(--success);
+}
+.lux-mcp-danger:hover {
+  color: var(--danger) !important;
+}
+
+.lux-mcp-add {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.3fr) minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+/* Edit mode: outline the form so it's obvious the fields target an existing server. */
+.lux-mcp-add[data-editing] {
+  padding: 10px;
+  border: 1px solid var(--accent-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-1);
+}
+.lux-mcp-add-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+/* Env editor spans the full form width beneath the main row. */
+.lux-mcp-env-input {
+  grid-column: 1 / -1;
+  height: 32px;
+  min-height: 32px;
+  padding: 7px 10px;
+  resize: vertical;
+  font: 12px/1.5 var(--font-mono);
+  overflow: auto;
+}
+.lux-mcp-editing-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--accent-strong);
+  font-size: 11.5px;
+}
+.lux-mcp-item[data-editing] {
+  border-color: var(--accent-strong);
+}
+.lux-mcp-env-note {
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+.lux-mcp-input {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  outline: 0;
+  background: var(--bg-1);
+  color: var(--text-0);
+  font: 13px/1 var(--font-ui);
+  transition: border-color 100ms ease, background 100ms ease;
+}
+.lux-mcp-input::placeholder {
+  color: var(--text-3);
+}
+.lux-mcp-input:focus {
+  border-color: var(--accent-strong);
+  background: var(--bg-0);
+}
+.lux-mcp-add-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-0);
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 100ms ease, border-color 100ms ease, color 100ms ease;
+}
+.lux-mcp-add-button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-0);
+}
+.lux-mcp-add-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.lux-mcp-note {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+@media (max-width: 640px) {
+  .lux-mcp-add {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

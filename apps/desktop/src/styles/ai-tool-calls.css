@@ -1,0 +1,482 @@
+/* ----------------------------------------------------------------------------
+   AI tool calls — compact, Codex/Claude-style inline activity.
+   Flat monospace rows grouped under a subtle rail. Output collapses by default.
+   ---------------------------------------------------------------------------- */
+
+.ai-tool-calls-group {
+  display: grid;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  margin: 4px 0 2px;
+}
+
+.ai-tool-calls-summary {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  gap: 8px;
+  padding: 4px 5px 4px 3px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  font: 10px/1.3 var(--font-ui);
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 130ms ease, color 130ms ease;
+}
+
+.ai-tool-calls-summary:hover,
+.ai-tool-calls-summary[aria-expanded="true"] {
+  background: var(--hover-soft);
+  color: var(--text-1);
+}
+
+.ai-tool-calls-rail {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  transition: background 180ms ease, box-shadow 180ms ease;
+}
+
+.ai-tool-calls-group[data-active] .ai-tool-calls-rail {
+  background: var(--text-1);
+  box-shadow: 0 0 0 3px var(--hover);
+}
+
+.ai-tool-calls-summary-label {
+  min-width: 0;
+  overflow: hidden;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-tool-calls-badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font: 9px/1 var(--font-ui);
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.ai-tool-calls-badge[data-status="error"] {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.ai-tool-calls-badge[data-status="neutral"] {
+  background: var(--surface-2);
+  color: var(--text-1);
+}
+
+.ai-tool-calls-caret {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--icon-muted);
+  transition: transform 160ms cubic-bezier(0.4, 0, 0.2, 1), color 130ms ease;
+}
+
+.ai-tool-calls-caret[data-expanded="true"] {
+  transform: rotate(90deg);
+  color: var(--text-1);
+}
+
+.ai-tool-calls-list {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* ---- Batched tool calls ---- */
+
+.ai-tool-call-batch {
+  display: grid;
+  min-width: 0;
+  border-radius: 6px;
+}
+
+.ai-tool-call-batch-head {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  font: 10.5px/1 var(--font-ui);
+  text-align: left;
+  transition: background 130ms ease, border-color 130ms ease, color 130ms ease;
+}
+
+.ai-tool-call-batch-head:hover,
+.ai-tool-call-batch[data-open="true"] .ai-tool-call-batch-head {
+  border-color: var(--border-subtle);
+  background: var(--surface-0);
+  color: var(--text-1);
+}
+
+.ai-tool-call-batch[data-active="true"] .ai-tool-call-batch-head {
+  border-color: var(--border-strong);
+  color: var(--text-1);
+}
+
+.ai-tool-call-batch-head span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.ai-tool-call-batch-head strong {
+  display: inline-grid;
+  min-width: 18px;
+  height: 17px;
+  place-items: center;
+  padding: 0 5px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font: 9.5px/1 var(--font-mono);
+}
+
+.ai-tool-call-batch-caret {
+  color: var(--icon-muted);
+  transition: transform 160ms cubic-bezier(0.4, 0, 0.2, 1), color 130ms ease;
+}
+
+.ai-tool-call-batch-caret[data-expanded="true"] {
+  transform: rotate(90deg);
+  color: var(--text-1);
+}
+
+.ai-tool-call-batch-list {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ---- Single tool call ---- */
+
+.ai-tool-call {
+  display: grid;
+  min-width: 0;
+  border-radius: 6px;
+}
+
+.ai-tool-call-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition: background 130ms ease, border-color 130ms ease;
+}
+
+.ai-tool-call-row[data-interactive="true"] {
+  cursor: pointer;
+}
+
+.ai-tool-call-row[data-interactive="true"]:hover {
+  background: var(--surface-0);
+  border-color: var(--border-subtle);
+}
+
+.ai-tool-call[data-open="true"] .ai-tool-call-row {
+  background: var(--surface-0);
+  border-color: var(--border-subtle);
+}
+
+.ai-tool-call-glyph {
+  display: grid;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  color: var(--icon-muted);
+}
+
+.ai-tool-call[data-status="running"] .ai-tool-call-glyph {
+  color: var(--text-1);
+}
+
+.ai-tool-call[data-status="success"] .ai-tool-call-glyph {
+  color: var(--success);
+}
+
+.ai-tool-call[data-status="error"] .ai-tool-call-glyph {
+  color: var(--danger);
+}
+
+.ai-tool-call[data-status="skipped"] .ai-tool-call-glyph {
+  color: var(--gold);
+}
+
+.ai-tool-call[data-status="approval"] .ai-tool-call-glyph {
+  color: var(--gold);
+}
+
+.ai-tool-call-name {
+  flex: 0 0 auto;
+  color: var(--text-0);
+  font: 11.5px/1.4 var(--font-mono);
+  font-weight: 600;
+}
+
+.ai-tool-call-target {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font: 11px/1.4 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-tool-call-flex {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+
+.ai-tool-call-stats {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.ai-tool-stat {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  color: var(--text-1);
+  font: 9.5px/1 var(--font-mono);
+  font-weight: 600;
+}
+
+.ai-tool-stat[data-type="added"],
+.ai-tool-stat[data-type="created"] {
+  background: rgba(91, 201, 138, 0.15);
+  color: var(--success);
+}
+
+.ai-tool-stat[data-type="changed"] {
+  background: rgba(226, 179, 65, 0.15);
+  color: var(--gold);
+}
+
+.ai-tool-stat[data-type="removed"],
+.ai-tool-stat[data-type="deleted"] {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.ai-tool-call-duration {
+  flex: 0 0 auto;
+  color: var(--text-3);
+  font: 10px/1 var(--font-mono);
+}
+
+.ai-tool-call-caret {
+  flex: 0 0 auto;
+  color: var(--icon-muted);
+  transition: transform 160ms cubic-bezier(0.4, 0, 0.2, 1), color 130ms ease;
+}
+
+.ai-tool-call-caret[data-expanded="true"] {
+  transform: rotate(90deg);
+  color: var(--text-1);
+}
+
+/* ---- Expandable output ---- */
+
+.ai-tool-call-body {
+  overflow: hidden;
+}
+
+.ai-tool-call-body pre {
+  max-height: 240px;
+  margin: 3px 0 4px 26px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-0);
+  color: var(--text-1);
+  font: 10.5px/1.55 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ai-tool-call-body[data-kind="error"] pre {
+  border-color: rgba(240, 106, 106, 0.26);
+  background: rgba(240, 106, 106, 0.06);
+  color: #f1acac;
+}
+
+.ai-tool-call-body[data-kind="skipped"] pre {
+  border-color: rgba(226, 179, 65, 0.24);
+  background: rgba(226, 179, 65, 0.05);
+  color: #e2c47e;
+}
+
+/* Live tail of a running Shell command: accent edge + subtle pulse make it read
+   as streaming, not a frozen result. */
+.ai-tool-call-body[data-live] pre {
+  border-color: var(--accent-soft, rgba(126, 168, 216, 0.35));
+  border-left-width: 2px;
+  animation: ai-tool-live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes ai-tool-live-pulse {
+  0%, 100% { border-left-color: var(--accent-soft, rgba(126, 168, 216, 0.35)); }
+  50% { border-left-color: var(--accent, #7ea8d8); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-tool-call-body[data-live] pre {
+    animation: none;
+  }
+}
+
+/* ---- Approval (always expanded — user must act) ---- */
+
+.ai-tool-approval {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 4px 0 4px 26px;
+  padding: 10px 11px;
+  border: 1px solid rgba(226, 179, 65, 0.32);
+  border-radius: 7px;
+  background: rgba(226, 179, 65, 0.05);
+}
+
+.ai-tool-approval[data-risk="delete"] {
+  border-color: rgba(241, 76, 76, 0.34);
+  background: rgba(241, 76, 76, 0.05);
+}
+
+.ai-tool-approval-head > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.ai-tool-approval strong {
+  color: var(--text-0);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.ai-tool-approval-head span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-2);
+  font: 10px/1.3 var(--font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-tool-approval p {
+  margin: 0;
+  color: var(--text-1);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.ai-tool-approval pre {
+  max-height: 200px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-0);
+  color: var(--text-1);
+  font: 10px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ai-tool-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.ai-tool-approval-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 27px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  transition: filter 130ms ease, border-color 130ms ease, background 130ms ease;
+}
+
+.ai-tool-approval-reject {
+  border-color: var(--border-strong);
+  background: var(--surface-1);
+  color: var(--text-1);
+}
+
+.ai-tool-approval-reject:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+  color: var(--text-0);
+}
+
+.ai-tool-approval-approve {
+  border-color: rgba(91, 201, 138, 0.5);
+  background: rgba(91, 201, 138, 0.16);
+  color: var(--success);
+}
+
+.ai-tool-approval-approve[data-risk="delete"],
+.ai-tool-approval-approve[data-risk="execute"] {
+  border-color: rgba(226, 179, 65, 0.5);
+  background: rgba(226, 179, 65, 0.16);
+  color: #ecc873;
+}
+
+.ai-tool-approval-approve:hover {
+  filter: brightness(1.12);
+}

@@ -1,0 +1,17 @@
+[package]
+name = "aspect-agent-browser"
+version = "1.0.0"
+description = "agent-browser CLI bridge — binary resolution, subprocess execution, validation, install"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+base64.workspace = true
+dunce.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+which = "7.0"
+tauri = "2"
+aspect-runtimes = { path = "../aspect-runtimes" }

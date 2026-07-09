@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="/favicon.ico" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AspectIDE</title>
+    <style>
+      /* Boot splash — inline so it paints before any JS/CSS bundle loads.
+         Codex lineage: flat chrome background, quiet monochrome mark, thin
+         neutral ring spinner (mirrors the in-app .ai-chat-loading-mark), no
+         accent color, no glow. Removed by main.tsx once React mounts. */
+      /* #181818 = --chrome (tokens.css): splash → app handoff has no color jump. */
+      html,
+      body {
+        margin: 0;
+        background: #181818;
+      }
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 18px;
+        background: #181818;
+        opacity: 1;
+        transition: opacity 220ms ease;
+      }
+      #boot-splash[data-done] {
+        opacity: 0;
+        pointer-events: none;
+      }
+      /* The real product mark (public/aspect-mark.svg) — plain <img>, no JS needed. */
+      #boot-splash .boot-mark {
+        display: grid;
+        place-items: center;
+        width: 46px;
+        height: 46px;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.32);
+      }
+      #boot-splash .boot-mark img {
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+      /* Thin monochrome ring — identical language to .ai-chat-loading-mark. */
+      #boot-splash .boot-spin {
+        width: 18px;
+        height: 18px;
+        border: 2px solid #2b2b2b;
+        border-top-color: #8d8d8d;
+        border-radius: 999px;
+        animation: boot-spin 0.9s linear infinite;
+      }
+      @keyframes boot-spin {
+        to { transform: rotate(360deg); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash .boot-spin {
+          animation: none;
+          border-top-color: #2b2b2b;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="boot-splash" aria-hidden="true">
+      <span class="boot-mark"><img src="/aspect-mark.svg" alt="" /></span>
+      <span class="boot-spin"></span>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

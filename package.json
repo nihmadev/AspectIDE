@@ -1,0 +1,34 @@
+{
+  "name": "aspect-ide",
+  "version": "1.0.21",
+  "license": "MIT",
+  "private": true,
+  "description": "Rust-first desktop IDE for fast, typed, AI-native developer workflows.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nihmadev/AspectIDE.git"
+  },
+  "bugs": {
+    "url": "https://github.com/nihmadev/AspectIDE.git/issues"
+  },
+  "homepage": "https://github.com/nihmadev/AspectIDE.git#readme",
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "dev": "pnpm --filter @aspect/desktop tauri dev",
+    "dev:windows": "scripts\\dev-windows.cmd",
+    "dev:web": "pnpm --filter @aspect/desktop dev",
+    "build": "pnpm --filter @aspect/desktop build",
+    "typecheck": "pnpm --filter @aspect/desktop typecheck",
+    "tauri:dev": "pnpm --filter @aspect/desktop tauri dev",
+    "tauri:build": "pnpm --filter @aspect/desktop tauri build",
+    "check:rust": "cargo check --workspace",
+    "test:rust": "cargo test --workspace",
+    "benchmark:core": "cargo run -p aspect-bench -- --assert"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["agent-browser", "esbuild"]
+  },
+  "workspaces": [
+    "apps/*"
+  ]
+}

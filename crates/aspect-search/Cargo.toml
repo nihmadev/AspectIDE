@@ -1,0 +1,16 @@
+[package]
+name = "aspect-search"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+globset.workspace = true
+ignore.workspace = true
+aspect-codegraph = { path = "../aspect-codegraph" }
+aspect-core = { path = "../aspect-core" }
+rayon.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

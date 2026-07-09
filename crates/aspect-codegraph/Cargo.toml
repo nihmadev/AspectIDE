@@ -1,0 +1,23 @@
+[package]
+name = "aspect-codegraph"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+aspect-core = { path = "../aspect-core" }
+thiserror.workspace = true
+rayon.workspace = true
+ignore.workspace = true
+serde = { workspace = true }
+# Compact, fast binary codec for the on-disk parse cache. Already present in the
+# dependency tree (transitive), so depending on it directly adds no new crate to
+# the build — only a fast, varint-packed format the cache load/save round-trips.
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-python = "0.25"
+rustc-hash = "2"
+streaming-iterator = "0.1"

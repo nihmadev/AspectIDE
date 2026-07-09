@@ -1,0 +1,350 @@
+name: Release Installers
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Release tag. Must match package version, for example v1.0.0.
+        required: true
+        type: string
+      draft:
+        description: Create the GitHub release as a draft.
+        required: false
+        type: boolean
+        default: true
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  NODE_VERSION: 22
+
+jobs:
+  metadata:
+    name: Release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      draft: ${{ steps.release.outputs.draft }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+      release_name: ${{ steps.release.outputs.release_name }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag_name || github.ref }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Resolve release metadata
+        id: release
+        env:
+          INPUT_DRAFT: ${{ github.event.inputs.draft }}
+          INPUT_TAG_NAME: ${{ github.event.inputs.tag_name }}
+        run: node .github/scripts/resolve-release-metadata.mjs
+
+      - name: Verify source release policy
+        run: node .github/scripts/verify-release-policy.mjs --source
+
+      - name: Test release policy gates
+        run: node .github/scripts/test-release-policy.mjs
+
+  quality:
+    name: Quality gates
+    runs-on: ubuntu-latest
+    needs: metadata
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.tag_name }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux Tauri dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf wget
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cargo fmt
+        run: cargo fmt --all --check
+
+      - name: Cargo check
+        run: cargo check --workspace
+
+      - name: Cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo test
+        run: cargo test --workspace
+
+      - name: Core performance benchmark
+        run: cargo run -p aspect-bench -- --assert --output target/aspect-bench-report.json
+
+      - name: Upload performance benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspect-release-performance-report
+          path: target/aspect-bench-report.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Frontend typecheck
+        run: pnpm typecheck
+
+      - name: Frontend build and AI verifiers
+        run: pnpm build
+
+  build:
+    name: Build ${{ matrix.label }} installer
+    needs:
+      - metadata
+      - quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows
+            os: windows-latest
+            artifact: aspect-ide-windows
+            bundle_args: --bundles nsis
+            target_args: ""
+          - label: Linux
+            os: ubuntu-latest
+            artifact: aspect-ide-linux
+            bundle_args: --bundles appimage,deb,rpm
+            target_args: ""
+          - label: macOS
+            os: macos-latest
+            artifact: aspect-ide-macos
+            bundle_args: --bundles dmg,app
+            target_args: --target universal-apple-darwin
+    runs-on: ${{ matrix.os }}
+    # Surface the optional code-signing secrets as job env so step `if:` guards can
+    # detect their presence. When unset, signing steps skip and unsigned installers
+    # are produced; the (free, required) updater signing still runs.
+    env:
+      WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.tag_name }}
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install universal macOS Rust targets
+        if: runner.os == 'macOS'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential curl file libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev libxdo-dev patchelf rpm wget
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_PFX_BASE64 != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:WINDOWS_CERTIFICATE_PFX_BASE64) { throw 'WINDOWS_CERTIFICATE_PFX_BASE64 is required.' }
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw 'WINDOWS_CERTIFICATE_PASSWORD is required.' }
+          $certPath = Join-Path $env:RUNNER_TEMP 'aspect-windows-signing.pfx'
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX_BASE64))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password | Out-Null
+          Remove-Item -LiteralPath $certPath -Force
+
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12_BASE64 != ''
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_CERTIFICATE_P12_BASE64:?APPLE_CERTIFICATE_P12_BASE64 is required.}"
+          : "${APPLE_CERTIFICATE_PASSWORD:?APPLE_CERTIFICATE_PASSWORD is required.}"
+          : "${APPLE_KEYCHAIN_PASSWORD:?APPLE_KEYCHAIN_PASSWORD is required.}"
+          CERT_PATH="$RUNNER_TEMP/aspect-macos-signing.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/aspect-build.keychain-db"
+          printf '%s' "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > "$CERT_PATH"
+          security create-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security default-keychain -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$APPLE_KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+      - name: Prepare signed release configuration
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_UPDATER_ENDPOINTS: ${{ secrets.TAURI_UPDATER_ENDPOINTS }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: node .github/scripts/prepare-release-config.mjs
+
+      - name: Verify signed release policy
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          TAURI_UPDATER_ENDPOINTS: ${{ secrets.TAURI_UPDATER_ENDPOINTS }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ secrets.TAURI_UPDATER_PUBLIC_KEY }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_CERTIFICATE_PFX_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_PFX_BASE64 }}
+          WINDOWS_CERTIFICATE_THUMBPRINT: ${{ secrets.WINDOWS_CERTIFICATE_THUMBPRINT }}
+        run: node .github/scripts/verify-release-policy.mjs --prepared
+
+      - name: Build native Tauri bundles
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_PROVIDER_SHORT_NAME: ${{ secrets.APPLE_PROVIDER_SHORT_NAME }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: pnpm --filter @aspect/desktop tauri build ${{ matrix.bundle_args }} ${{ matrix.target_args }}
+
+      - name: Collect installer assets
+        run: node .github/scripts/collect-tauri-artifacts.mjs
+
+      - name: Upload installer assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - metadata
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.tag_name }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download installer assets
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-assets
+          pattern: aspect-ide-*
+          merge-multiple: true
+
+      - name: Generate updater manifest (latest.json)
+        env:
+          RELEASE_TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_NOTES: AspectIDE ${{ needs.metadata.outputs.version }}
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          find downloaded-assets -maxdepth 1 -type f -print -exec cp {} release-assets/ \;
+          node .github/scripts/write-updater-manifest.mjs
+
+      - name: Prepare release manifest and checksums
+        shell: bash
+        run: |
+          node .github/scripts/write-release-manifest.mjs
+          cp release-manifest.json release-assets/release-manifest.json
+
+      - name: Upload release manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspect-ide-release-manifest
+          path: |
+            release-assets/SHA256SUMS.txt
+            release-assets/release-manifest.json
+            release-assets/latest.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Write release notes
+        id: notes
+        env:
+          RELEASE_TAG_NAME: ${{ needs.metadata.outputs.tag_name }}
+          RELEASE_VERSION: ${{ needs.metadata.outputs.version }}
+        run: node .github/scripts/write-release-notes.mjs
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: ${{ steps.notes.outputs.notes_path }}
+          draft: ${{ needs.metadata.outputs.draft }}
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          name: ${{ needs.metadata.outputs.release_name }}
+          prerelease: ${{ needs.metadata.outputs.prerelease }}
+          tag_name: ${{ needs.metadata.outputs.tag_name }}
