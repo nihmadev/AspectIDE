@@ -1,6 +1,6 @@
 // Example: How to integrate AiToolsPanel into the main app
 
-import { AiToolsPanel } from "./components/AiToolsPanel";
+import { AspectorToolsPanel } from "./components/Aspector/AspectorToolsPanel";
 
 // Option 1: As a standalone view (like WelcomeScreen)
 // Replace the editor area content with the tools panel

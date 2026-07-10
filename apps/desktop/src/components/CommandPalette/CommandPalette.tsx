@@ -23,22 +23,22 @@ import {
 import * as Dialog from "@radix-ui/react-dialog";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { useEditorCloseGuard } from "./EditorCloseGuard";
-import { documentDisplayPath } from "../lib/editor/documents/documents";
-import { resetEditorFontZoom, toggleEditorMinimap, toggleEditorWordWrap, zoomEditorFontIn, zoomEditorFontOut } from "../lib/editor/preference-commands";
+import { useEditorCloseGuard } from "../Editor/EditorCloseGuard";
+import { documentDisplayPath } from '../../lib/editor/documents/documents';
+import { resetEditorFontZoom, toggleEditorMinimap, toggleEditorWordWrap, zoomEditorFontIn, zoomEditorFontOut } from '../../lib/editor/preference-commands';
 import {
   closedDocumentIdsForAllDocuments,
   closedDocumentIdsForDocumentInGroup,
   closedDocumentIdsForOtherDocuments,
-} from "../lib/editor/close-targets";
-import { formatKeybindingForDisplay } from "../lib/keyboard/keybindings";
-import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
-import { displayPath as formatPath, normalizePath } from "../lib/explorer/file-tree";
-import { useAspectStore, type Activity } from "../lib/store/index";
-import { aspectCommands } from "../lib/tauri/commands";
-import { spawnTerminalSession } from "../lib/terminal/spawn";
-import { pickAndOpenWorkspace, reloadWorkspace } from "../lib/workspace/actions";
-import type { ExtensionCommandExecution, ExtensionCommandRoute, FsEntry, LspWorkspaceSymbol } from "../lib/types/index";
+} from '../../lib/editor/close-targets';
+import { formatKeybindingForDisplay } from '../../lib/keyboard/keybindings';
+import { useTranslation, type TranslateFn } from '../../lib/i18n/useTranslation';
+import { displayPath as formatPath, normalizePath } from '../../lib/explorer/file-tree';
+import { useLuxStore, type Activity } from '../../lib/store/index';
+import { luxCommands } from '../../lib/tauri/commands';
+import { spawnTerminalSession } from '../../lib/terminal/spawn';
+import { pickAndOpenWorkspace, reloadWorkspace } from '../../lib/workspace/actions';
+import type { ExtensionCommandExecution, ExtensionCommandRoute, FsEntry, LspWorkspaceSymbol } from '../../lib/types/index';
 
 const MAX_QUICK_OPEN_FILES = 2_500;
 
@@ -54,37 +54,37 @@ type PaletteCommand = {
 
 export function CommandPalette() {
   const { t } = useTranslation();
-  const open = useAspectStore((state) => state.commandPaletteOpen);
-  const setOpen = useAspectStore((state) => state.setCommandPaletteOpen);
-  const workspace = useAspectStore((state) => state.workspace);
-  const setWorkspace = useAspectStore((state) => state.setWorkspace);
-  const setActiveActivity = useAspectStore((state) => state.setActiveActivity);
-  const setSidebarVisible = useAspectStore((state) => state.setSidebarVisible);
-  const sidebarVisible = useAspectStore((state) => state.sidebarVisible);
-  const aiChatOpen = useAspectStore((state) => state.aiChatOpen);
-  const toggleAiChat = useAspectStore((state) => state.toggleAiChat);
-  const setBottomPanelOpen = useAspectStore((state) => state.setBottomPanelOpen);
-  const bottomPanelOpen = useAspectStore((state) => state.bottomPanelOpen);
-  const editorPreferences = useAspectStore((state) => state.editorPreferences);
-  const setSettingsOpen = useAspectStore((state) => state.setSettingsOpen);
-  const openBottomPanel = useAspectStore((state) => state.openBottomPanel);
-  const setGitStatus = useAspectStore((state) => state.setGitStatus);
-  const languageServers = useAspectStore((state) => state.languageServers);
-  const setLanguageServers = useAspectStore((state) => state.setLanguageServers);
-  const setLanguageServersLoading = useAspectStore((state) => state.setLanguageServersLoading);
-  const keybindingProfile = useAspectStore((state) => state.keybindingProfile);
-  const upsertDocument = useAspectStore((state) => state.upsertDocument);
-  const setPendingEditorReveal = useAspectStore((state) => state.setPendingEditorReveal);
-  const openDocuments = useAspectStore((state) => state.openDocuments);
-  const activeDocumentId = useAspectStore((state) => state.activeDocumentId);
-  const activeEditorGroupId = useAspectStore((state) => state.activeEditorGroupId);
-  const editorGroups = useAspectStore((state) => state.editorGroups);
-  const splitActiveEditor = useAspectStore((state) => state.splitActiveEditor);
-  const closeDocumentInActiveGroup = useAspectStore((state) => state.closeDocumentInActiveGroup);
-  const closeOtherDocuments = useAspectStore((state) => state.closeOtherDocuments);
-  const closeAllDocuments = useAspectStore((state) => state.closeAllDocuments);
-  const selectNextDocument = useAspectStore((state) => state.selectNextDocument);
-  const selectPreviousDocument = useAspectStore((state) => state.selectPreviousDocument);
+  const open = useLuxStore((state) => state.commandPaletteOpen);
+  const setOpen = useLuxStore((state) => state.setCommandPaletteOpen);
+  const workspace = useLuxStore((state) => state.workspace);
+  const setWorkspace = useLuxStore((state) => state.setWorkspace);
+  const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
+  const setSidebarVisible = useLuxStore((state) => state.setSidebarVisible);
+  const sidebarVisible = useLuxStore((state) => state.sidebarVisible);
+  const aiChatOpen = useLuxStore((state) => state.aiChatOpen);
+  const toggleAiChat = useLuxStore((state) => state.toggleAiChat);
+  const setBottomPanelOpen = useLuxStore((state) => state.setBottomPanelOpen);
+  const bottomPanelOpen = useLuxStore((state) => state.bottomPanelOpen);
+  const editorPreferences = useLuxStore((state) => state.editorPreferences);
+  const setSettingsOpen = useLuxStore((state) => state.setSettingsOpen);
+  const openBottomPanel = useLuxStore((state) => state.openBottomPanel);
+  const setGitStatus = useLuxStore((state) => state.setGitStatus);
+  const languageServers = useLuxStore((state) => state.languageServers);
+  const setLanguageServers = useLuxStore((state) => state.setLanguageServers);
+  const setLanguageServersLoading = useLuxStore((state) => state.setLanguageServersLoading);
+  const keybindingProfile = useLuxStore((state) => state.keybindingProfile);
+  const upsertDocument = useLuxStore((state) => state.upsertDocument);
+  const setPendingEditorReveal = useLuxStore((state) => state.setPendingEditorReveal);
+  const openDocuments = useLuxStore((state) => state.openDocuments);
+  const activeDocumentId = useLuxStore((state) => state.activeDocumentId);
+  const activeEditorGroupId = useLuxStore((state) => state.activeEditorGroupId);
+  const editorGroups = useLuxStore((state) => state.editorGroups);
+  const splitActiveEditor = useLuxStore((state) => state.splitActiveEditor);
+  const closeDocumentInActiveGroup = useLuxStore((state) => state.closeDocumentInActiveGroup);
+  const closeOtherDocuments = useLuxStore((state) => state.closeOtherDocuments);
+  const closeAllDocuments = useLuxStore((state) => state.closeAllDocuments);
+  const selectNextDocument = useLuxStore((state) => state.selectNextDocument);
+  const selectPreviousDocument = useLuxStore((state) => state.selectPreviousDocument);
   const [search, setSearch] = useState("");
   const [files, setFiles] = useState<FsEntry[]>([]);
   const [workspaceSymbols, setWorkspaceSymbols] = useState<LspWorkspaceSymbol[]>([]);
@@ -97,7 +97,7 @@ export function CommandPalette() {
   const latestSymbolQuery = useRef("");
 
   const fileIndexMutation = useMutation({
-    mutationFn: () => aspectCommands.fsListFiles(MAX_QUICK_OPEN_FILES),
+    mutationFn: () => luxCommands.fsListFiles(MAX_QUICK_OPEN_FILES),
     onSuccess: (entries) => {
       setFiles(entries);
       setIndexError(null);
@@ -106,7 +106,7 @@ export function CommandPalette() {
   });
 
   const workspaceSymbolsMutation = useMutation({
-    mutationFn: aspectCommands.lspWorkspaceSymbols,
+    mutationFn: luxCommands.lspWorkspaceSymbols,
     onSuccess: (symbols, variables) => {
       if (variables !== latestSymbolQuery.current) return;
       setWorkspaceSymbols(symbols);
@@ -120,7 +120,7 @@ export function CommandPalette() {
   const { mutate: searchSymbols } = workspaceSymbolsMutation;
 
   const extensionCommandsMutation = useMutation({
-    mutationFn: aspectCommands.extensionsCommandRoutes,
+    mutationFn: luxCommands.extensionsCommandRoutes,
     onSuccess: (routes) => {
       setExtensionCommandRoutes(routes);
       setExtensionCommandRoutesLoaded(true);
@@ -133,7 +133,7 @@ export function CommandPalette() {
   });
 
   const executeExtensionCommandMutation = useMutation({
-    mutationFn: aspectCommands.extensionsExecuteCommand,
+    mutationFn: luxCommands.extensionsExecuteCommand,
     onSuccess: (report) => {
       if (report.status === "failed") {
         setExtensionCommandError(formatExtensionCommandExecutionError(report, t));
@@ -147,7 +147,7 @@ export function CommandPalette() {
   });
 
   const openFileMutation = useMutation({
-    mutationFn: aspectCommands.editorOpenFile,
+    mutationFn: luxCommands.editorOpenFile,
     onSuccess: (document) => {
       upsertDocument(document);
       setOpen(false);
@@ -156,7 +156,7 @@ export function CommandPalette() {
   });
 
   const openSymbolMutation = useMutation({
-    mutationFn: async (symbol: LspWorkspaceSymbol) => ({ symbol, document: await aspectCommands.editorOpenFile(symbol.location.path) }),
+    mutationFn: async (symbol: LspWorkspaceSymbol) => ({ symbol, document: await luxCommands.editorOpenFile(symbol.location.path) }),
     onSuccess: ({ document, symbol }) => {
       upsertDocument(document);
       setPendingEditorReveal({
@@ -170,12 +170,12 @@ export function CommandPalette() {
   });
 
   const saveFileMutation = useMutation({
-    mutationFn: aspectCommands.editorSaveFile,
+    mutationFn: luxCommands.editorSaveFile,
     onSuccess: upsertDocument,
   });
 
   const saveAsFileMutation = useMutation({
-    mutationFn: aspectCommands.editorSaveFileAs,
+    mutationFn: luxCommands.editorSaveFileAs,
     onSuccess: upsertDocument,
   });
 
@@ -184,7 +184,7 @@ export function CommandPalette() {
   const saveDocument = useCallback((id: string) => saveFileMutation.mutate(id), [saveFileMutation]);
   const refreshLanguageServers = useCallback(() => {
     setLanguageServersLoading(true);
-    void aspectCommands.lspServers()
+    void luxCommands.lspServers()
       .then(setLanguageServers)
       .catch(() => setLanguageServers([]))
       .finally(() => setLanguageServersLoading(false));
@@ -235,7 +235,7 @@ export function CommandPalette() {
         shortcut: shortcutFor("workbench.action.files.newUntitledFile", keybindingProfile),
         icon: FileCode2,
         run: () => {
-          void aspectCommands.editorNewFile().then(upsertDocument).catch(() => undefined);
+          void luxCommands.editorNewFile().then(upsertDocument).catch(() => undefined);
         },
       },
       ...(workspace
@@ -451,7 +451,7 @@ export function CommandPalette() {
         detail: t("command.detail.refreshGitStatus"),
         icon: GitBranch,
         run: () => {
-          void aspectCommands.gitStatus().then(setGitStatus).catch(() => setGitStatus(null));
+          void luxCommands.gitStatus().then(setGitStatus).catch(() => setGitStatus(null));
           showActivity("git", setActiveActivity, setSidebarVisible);
         },
       },

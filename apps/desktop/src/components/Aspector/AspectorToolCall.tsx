@@ -31,10 +31,10 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { AiToolApprovalDecision, AiToolApprovalState } from "../../lib/aspector/chat/types";
-import { extractReviewPathFromToolInput, requestFileReviewFocus } from "../../lib/aspector/utils/file-review/bridge";
-import { getAiShellLiveOutput, getAiShellLiveOutputVersion, subscribeAiShellLiveOutput } from "../../lib/aspector/utils/shell-live-output";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { AiToolApprovalDecision, AiToolApprovalState } from '../../lib/aspector/chat/types';
+import { extractReviewPathFromToolInput, requestFileReviewFocus } from '../../lib/aspector/utils/file-review/bridge';
+import { getAiShellLiveOutput, getAiShellLiveOutputVersion, subscribeAiShellLiveOutput } from '../../lib/aspector/utils/shell-live-output';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 /** How long a manual expand/collapse of a tool-call group survives before the
  *  panel reverts to auto-follow (open while active, closed when idle). Long enough

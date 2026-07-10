@@ -1,11 +1,11 @@
 import { Bot, Brain, Paperclip, Sparkles } from "lucide-react";
 import { memo } from "react";
 import type { ReactNode, RefObject } from "react";
-import { CompactDropdown } from "../CompactDropdown";
+import { CompactDropdown } from "../CompactDropdown/CompactDropdown";
 import type { AspectorComposerSelectOption } from "./AspectorComposerTypes";
-import { getAiProvider, type AiPreferences } from "../../lib/aspector/utils/preferences";
-import { pickNativeAttachmentFiles } from "../../lib/aspector/chat/composer-attachments";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { getAiProvider, type AiPreferences } from '../../lib/aspector/utils/preferences';
+import { pickNativeAttachmentFiles } from '../../lib/aspector/chat/composer-attachments';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorComposerModelControlsProps = {
   disabled: boolean;

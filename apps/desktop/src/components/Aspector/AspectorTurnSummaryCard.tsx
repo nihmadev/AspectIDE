@@ -1,10 +1,10 @@
 import { Check, ChevronRight, Clock3, Coins, FilePenLine, Repeat2, SearchCheck, Zap } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { AiChatMessage } from "../../lib/aspector/chat/types";
-import { formatCompactTokens } from "../../lib/aspector/chat/context-usage";
-import { buildTurnFileSummary } from "../../lib/aspector/utils/turn-file-summary";
-import { openWorkspaceEditorPath } from "../../lib/editor/open-workspace-editor-path";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { AiChatMessage } from '../../lib/aspector/chat/types';
+import { formatCompactTokens } from '../../lib/aspector/chat/context-usage';
+import { buildTurnFileSummary } from '../../lib/aspector/utils/turn-file-summary';
+import { openWorkspaceEditorPath } from '../../lib/editor/open-workspace-editor-path';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorTurnSummaryCardProps = {
   message: AiChatMessage;

@@ -1,7 +1,7 @@
 import { AtSign, BookOpen, Database, FileCode2, Folder, Search } from "lucide-react";
 import type { CSSProperties, RefObject } from "react";
-import type { AiMentionCandidate } from "../../lib/aspector/chat/mentions";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { AiMentionCandidate } from '../../lib/aspector/chat/mentions';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorChatMentionMenuProps = {
   activeIndex: number;

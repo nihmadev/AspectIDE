@@ -3,7 +3,7 @@ import ReactDOM from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { TooltipProvider } from "@radix-ui/react-tooltip";
 import { App } from "./App";
-import { EditorCloseGuardProvider } from "./components/EditorCloseGuard";
+import { EditorCloseGuardProvider } from "./components/Editor/EditorCloseGuard";
 import { desktopRuntimeRequiredMessage, isBrowserPreviewRuntime, isTauriRuntime } from "./lib/tauri/commands";
 import "./styles/tokens.css";
 import "./styles/app.css";

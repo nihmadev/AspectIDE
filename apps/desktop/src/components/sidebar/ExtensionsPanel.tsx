@@ -1,32 +1,32 @@
 import { Loader2, Package, Play, RefreshCw, Search, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { useTranslation, type TranslateFn } from "../../lib/i18n/useTranslation";
-import { useAspectStore } from "../../lib/store";
-import { aspectCommands } from "../../lib/tauri";
-import type { ExtensionActivationPlan, ExtensionContributionRegistry, ExtensionInfo } from "../../lib/types";
+import { useTranslation, type TranslateFn } from '../../lib/i18n/useTranslation';
+import { useLuxStore } from '../../lib/store';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { ExtensionActivationPlan, ExtensionContributionRegistry, ExtensionInfo } from '../../lib/types';
 import { readErrorMessage, TreeMessage } from "./SidebarShared";
 
 export function ExtensionsPanel() {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
   const [openError, setOpenError] = useState<string | null>(null);
-  const upsertDocument = useAspectStore((state) => state.upsertDocument);
+  const upsertDocument = useLuxStore((state) => state.upsertDocument);
 
   const extensionsMutation = useMutation({
-    mutationFn: aspectCommands.extensionsList,
+    mutationFn: luxCommands.extensionsList,
   });
 
   const activationPlanMutation = useMutation({
-    mutationFn: aspectCommands.extensionsActivationPlan,
+    mutationFn: luxCommands.extensionsActivationPlan,
   });
 
   const contributionRegistryMutation = useMutation({
-    mutationFn: aspectCommands.extensionsContributionRegistry,
+    mutationFn: luxCommands.extensionsContributionRegistry,
   });
 
   const openExtensionManifestMutation = useMutation({
-    mutationFn: (extension: ExtensionInfo) => aspectCommands.editorOpenFile(extension.manifest_path),
+    mutationFn: (extension: ExtensionInfo) => luxCommands.editorOpenFile(extension.manifest_path),
     onSuccess: (document) => {
       setOpenError(null);
       upsertDocument(document);
@@ -186,3 +186,4 @@ function formatExtensionContributes(extension: ExtensionInfo, t: TranslateFn) {
   if (extension.contribution_points.length === 0) return t("sidebar.extensions.noContributionPoints");
   return extension.contribution_points.map((point) => point.id).join(", ");
 }
+

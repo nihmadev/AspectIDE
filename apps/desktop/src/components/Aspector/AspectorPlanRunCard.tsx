@@ -1,8 +1,8 @@
 import { Check, ChevronDown, Circle, Loader2, X } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { getActiveGoalRun, getAiSessionGoalRunsSnapshot, subscribeAiSessionGoalRuns } from "../../lib/aspector/session/goal/session-goal-run";
-import { getAiSessionTodosSnapshot, listAiSessionTodos, subscribeAiSessionTodos, type AiSessionTodo } from "../../lib/aspector/session/todos";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { getActiveGoalRun, getAiSessionGoalRunsSnapshot, subscribeAiSessionGoalRuns } from '../../lib/aspector/session/goal/session-goal-run';
+import { getAiSessionTodosSnapshot, listAiSessionTodos, subscribeAiSessionTodos, type AiSessionTodo } from '../../lib/aspector/session/todos';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 /** A plan the user handed to Agent execution — rendered as a live checklist. */
 export type ActivePlanRun = {

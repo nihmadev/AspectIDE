@@ -2,7 +2,7 @@ import { memo } from "react";
 import type { ChangeEvent, ClipboardEvent, KeyboardEvent, RefObject } from "react";
 import { AspectorComposerInlineMentions } from "./AspectorComposerInlineMentions";
 import { VOICE_MODE_RECORDING, VOICE_MODE_TRANSCRIBING, type AspectorComposerVoiceState } from "./AspectorComposerTypes";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorComposerInputAreaProps = {
   message: string;

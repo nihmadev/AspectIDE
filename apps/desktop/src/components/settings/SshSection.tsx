@@ -1,7 +1,7 @@
 import { Loader2, RefreshCw, Server } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { aspectCommands, type SshOverview } from "../../lib/tauri";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { luxCommands, type SshOverview } from '../../lib/tauri/commands';
 import { NumberSetting, SettingsGrid, ToggleSetting, type SaveState } from "./SettingsControls";
 
 const STRICT_HOST_KEY = "ai.ssh.strictHostKey";
@@ -29,7 +29,7 @@ export function SshSection({ t }: { t: TranslateFn }) {
   const refresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      const result = await aspectCommands.sshList();
+      const result = await luxCommands.sshList();
       setOverview(result);
       setStrict(result.strictHostKey);
       setConnectTimeout(clampTimeout(result.connectTimeoutSecs));
@@ -47,7 +47,7 @@ export function SshSection({ t }: { t: TranslateFn }) {
   const persist = useCallback(async (key: string, value: unknown) => {
     setSaveState("saving");
     try {
-      await aspectCommands.settingsSet("user", key, value);
+      await luxCommands.settingsSet("user", key, value);
       setSaveState("saved");
       window.setTimeout(() => setSaveState("idle"), 1500);
     } catch {
@@ -114,3 +114,4 @@ export function SshSection({ t }: { t: TranslateFn }) {
     </div>
   );
 }
+

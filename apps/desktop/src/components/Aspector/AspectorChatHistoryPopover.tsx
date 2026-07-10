@@ -1,11 +1,11 @@
 import { Archive, ArchiveRestore, Download, History, Pin, PinOff, Pencil, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { exportChatSessionMarkdown } from "../../lib/aspector/chat/export";
-import { aiChatSessionTitle, aiChatStatusLabel } from "../../lib/aspector/chat/presentation";
-import { sameWorkspaceRoot } from "../../lib/explorer/file-tree";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { useLuxStore, type AiChatSession } from "../../lib/store/index";
+import { exportChatSessionMarkdown } from '../../lib/aspector/chat/export';
+import { aiChatSessionTitle, aiChatStatusLabel } from '../../lib/aspector/chat/presentation';
+import { sameWorkspaceRoot } from '../../lib/explorer/file-tree';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useLuxStore, type AiChatSession } from '../../lib/store/index';
 
 type AspectorChatHistoryPopoverProps = {
   workspaceRoot: string | null;

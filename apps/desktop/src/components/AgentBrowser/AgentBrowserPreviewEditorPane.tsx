@@ -1,9 +1,9 @@
 import { AgentBrowserPreview } from "../Aspector/AgentBrowserPreview";
-import { chatSessionIdFromBrowserPreviewPath } from "../../lib/agent-browser/preview-document";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { aspectCommands } from "../../lib/tauri/commands";
-import type { AiPreferences } from "../../lib/aspector/utils/preferences";
-import type { DocumentSnapshot } from "../../lib/types/index";
+import { chatSessionIdFromBrowserPreviewPath } from '../../lib/agent-browser/preview-document';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { AiPreferences } from '../../lib/aspector/utils/preferences';
+import type { DocumentSnapshot } from '../../lib/types/index';
 
 type AgentBrowserPreviewEditorPaneProps = {
   document: DocumentSnapshot;
@@ -24,13 +24,13 @@ export function AgentBrowserPreviewEditorPane({ document, preferences }: AgentBr
         chatSessionId={chatSessionId}
         preferences={preferences}
         onOpenDashboard={() => {
-          void aspectCommands.agentBrowserDashboard({
+          void luxCommands.agentBrowserDashboard({
             action: "start",
             port: preferences.agentBrowserDashboardPort,
             commandPath: preferences.agentBrowserCommand.trim() || null,
           })
             .then((response) => {
-              if (response.url) return aspectCommands.fileOpenExternal(response.url);
+              if (response.url) return luxCommands.fileOpenExternal(response.url);
             });
         }}
       />

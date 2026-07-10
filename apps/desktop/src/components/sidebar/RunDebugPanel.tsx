@@ -2,11 +2,11 @@ import { Bug, ChevronRight, CircleDot, CornerDownRight, Loader2, Play, Plus, Ref
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { useAspectStore } from "../../lib/store";
-import { aspectCommands, subscribeAspectEvents } from "../../lib/tauri";
-import type { DebugAdapterInfo, DebugConfiguration, DebugEvaluateContext, DebugEvaluateResult, DebugExecutionAction, DebugFrameScopes, DebugResolvedBreakpoint, DebugSourceBreakpoint, DebugStackFrame, DebugStackTrace, DebugSessionInfo, DebugVariables, DebugWorkspaceInfo } from "../../lib/types";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useLuxStore } from '../../lib/store';
+import { luxCommands, subscribeLuxEvents } from '../../lib/tauri/commands';
+import type { DebugAdapterInfo, DebugConfiguration, DebugEvaluateContext, DebugEvaluateResult, DebugExecutionAction, DebugFrameScopes, DebugResolvedBreakpoint, DebugSourceBreakpoint, DebugStackFrame, DebugStackTrace, DebugSessionInfo, DebugVariables, DebugWorkspaceInfo } from '../../lib/types';
 import { PanelHeader, readErrorMessage, TreeMessage } from "./SidebarShared";
 
 type DebugWatchExpression = {
@@ -18,10 +18,10 @@ type DebugWatchExpression = {
 
 export function RunDebugPanel() {
   const { t } = useTranslation();
-  const workspace = useAspectStore((state) => state.workspace);
-  const debugSourceBreakpointsByPath = useAspectStore((state) => state.debugSourceBreakpointsByPath);
-  const debugResolvedBreakpointsByPath = useAspectStore((state) => state.debugResolvedBreakpointsByPath);
-  const setDebugResolvedBreakpoints = useAspectStore((state) => state.setDebugResolvedBreakpoints);
+  const workspace = useLuxStore((state) => state.workspace);
+  const debugSourceBreakpointsByPath = useLuxStore((state) => state.debugSourceBreakpointsByPath);
+  const debugResolvedBreakpointsByPath = useLuxStore((state) => state.debugResolvedBreakpointsByPath);
+  const setDebugResolvedBreakpoints = useLuxStore((state) => state.setDebugResolvedBreakpoints);
   const [debugInfo, setDebugInfo] = useState<DebugWorkspaceInfo | null>(null);
   const [debugError, setDebugError] = useState<string | null>(null);
   const [selectedConfigName, setSelectedConfigName] = useState<string | null>(null);
@@ -36,7 +36,7 @@ export function RunDebugPanel() {
   const watchRefreshSignatureRef = useRef<string | null>(null);
 
   const debugMutation = useMutation({
-    mutationFn: aspectCommands.debugWorkspaceInfo,
+    mutationFn: luxCommands.debugWorkspaceInfo,
     onSuccess: (info) => {
       setDebugInfo(info);
       setDebugError(null);
@@ -46,7 +46,7 @@ export function RunDebugPanel() {
   });
 
   const startMutation = useMutation({
-    mutationFn: ({ breakpoints, configuration }: { breakpoints: DebugSourceBreakpoint[]; configuration: DebugConfiguration }) => aspectCommands.debugStart(configuration, breakpoints),
+    mutationFn: ({ breakpoints, configuration }: { breakpoints: DebugSourceBreakpoint[]; configuration: DebugConfiguration }) => luxCommands.debugStart(configuration, breakpoints),
     onSuccess: (session) => {
       setDebugError(null);
       upsertSession(setSessions, session);
@@ -55,7 +55,7 @@ export function RunDebugPanel() {
   });
 
   const stopMutation = useMutation({
-    mutationFn: aspectCommands.debugStop,
+    mutationFn: luxCommands.debugStop,
     onSuccess: (session) => {
       setDebugError(null);
       upsertSession(setSessions, session);
@@ -64,7 +64,7 @@ export function RunDebugPanel() {
   });
 
   const stackTraceMutation = useMutation({
-    mutationFn: aspectCommands.debugStackTrace,
+    mutationFn: luxCommands.debugStackTrace,
     onSuccess: (trace) => {
       setDebugError(null);
       setStackTrace(trace);
@@ -77,7 +77,7 @@ export function RunDebugPanel() {
   });
 
   const executeMutation = useMutation({
-    mutationFn: ({ action, sessionId }: { action: DebugExecutionAction; sessionId: string }) => aspectCommands.debugExecute(sessionId, action),
+    mutationFn: ({ action, sessionId }: { action: DebugExecutionAction; sessionId: string }) => luxCommands.debugExecute(sessionId, action),
     onSuccess: (session) => {
       setDebugError(null);
       setStackTrace(null);
@@ -90,7 +90,7 @@ export function RunDebugPanel() {
   });
 
   const setBreakpointsMutation = useMutation({
-    mutationFn: ({ breakpoints, path, sessionId }: { breakpoints: DebugSourceBreakpoint[]; path: string; sessionId: string }) => aspectCommands.debugSetBreakpoints(sessionId, path, breakpoints),
+    mutationFn: ({ breakpoints, path, sessionId }: { breakpoints: DebugSourceBreakpoint[]; path: string; sessionId: string }) => luxCommands.debugSetBreakpoints(sessionId, path, breakpoints),
     onSuccess: (update) => {
       setDebugError(null);
       setDebugResolvedBreakpoints(update);
@@ -99,7 +99,7 @@ export function RunDebugPanel() {
   });
 
   const scopesMutation = useMutation({
-    mutationFn: ({ frameId, sessionId }: { frameId: number; sessionId: string }) => aspectCommands.debugScopes(sessionId, frameId),
+    mutationFn: ({ frameId, sessionId }: { frameId: number; sessionId: string }) => luxCommands.debugScopes(sessionId, frameId),
     onSuccess: (scopes) => {
       setDebugError(null);
       setFrameScopes(scopes);
@@ -109,7 +109,7 @@ export function RunDebugPanel() {
   });
 
   const variablesMutation = useMutation({
-    mutationFn: ({ sessionId, variablesReference }: { sessionId: string; variablesReference: number }) => aspectCommands.debugVariables(sessionId, variablesReference),
+    mutationFn: ({ sessionId, variablesReference }: { sessionId: string; variablesReference: number }) => luxCommands.debugVariables(sessionId, variablesReference),
     onSuccess: (variables) => {
       setDebugError(null);
       setVariablesByReference((current) => ({ ...current, [variables.variables_reference]: variables }));
@@ -119,7 +119,7 @@ export function RunDebugPanel() {
 
   const evaluateMutation = useMutation({
     mutationFn: ({ context, expression, frameId, sessionId }: { context: DebugEvaluateContext; expression: string; frameId: number | null; sessionId: string; watchId?: string }) =>
-      aspectCommands.debugEvaluate(sessionId, expression, frameId, context),
+      luxCommands.debugEvaluate(sessionId, expression, frameId, context),
     onSuccess: (result, variables) => {
       setDebugError(null);
       if (variables.watchId) {
@@ -153,14 +153,14 @@ export function RunDebugPanel() {
     }
     let cancelled = false;
     debugMutation.mutate();
-    void aspectCommands.debugSessions().then((next) => { if (!cancelled) setSessions(next); }).catch(() => { if (!cancelled) setSessions([]); });
+    void luxCommands.debugSessions().then((next) => { if (!cancelled) setSessions(next); }).catch(() => { if (!cancelled) setSessions([]); });
     return () => { cancelled = true; };
   }, [workspace?.root]);
 
   useEffect(() => {
     let active = true;
     let dispose: (() => void) | undefined;
-    void subscribeAspectEvents((event) => {
+    void subscribeLuxEvents((event) => {
       if (event.type === "debugSessionChanged") upsertSession(setSessions, event.session);
       if (event.type === "debugBreakpointsChanged") setDebugResolvedBreakpoints(event.update);
     }).then((unlisten) => {
@@ -823,3 +823,4 @@ function DebugMeta({ label, tone, value }: { label: string; tone?: "muted" | "wa
     </div>
   );
 }
+

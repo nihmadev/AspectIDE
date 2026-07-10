@@ -1,6 +1,6 @@
 import { Pencil, Undo2 } from "lucide-react";
-import type { AiChatMessage } from "../../lib/aspector/chat/types";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { AiChatMessage } from '../../lib/aspector/chat/types';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorChatMessageActionsProps = {
   canMutate: boolean;

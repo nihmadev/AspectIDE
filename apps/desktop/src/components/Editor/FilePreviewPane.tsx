@@ -1,11 +1,11 @@
 import { Copy, Database, ExternalLink, FileArchive, FileText, ImageIcon, Music, RefreshCw, Table2, Video } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { documentDisplayPath } from "../lib/editor/documents/documents";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { MediaAssetView } from "./preview/MediaAssetView";
-import { useFileAssetUrl } from "../lib/hooks/use-file-asset-url";
-import { aspectCommands } from "../lib/tauri/commands";
-import type { DocumentSnapshot, FileInspection, FilePreview } from "../lib/types/index";
+import { documentDisplayPath } from '../../lib/editor/documents/documents';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { MediaAssetView } from "../Preview/MediaAssetView";
+import { useFileAssetUrl } from '../../lib/hooks/use-file-asset-url';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { DocumentSnapshot, FileInspection, FilePreview } from '../../lib/types/index';
 
 type FilePreviewPaneProps = {
   document: DocumentSnapshot;
@@ -33,7 +33,7 @@ export function FilePreviewPane({ document, variant = "editor" }: FilePreviewPan
     setLoading(true);
     setError(null);
     setInspection(null);
-    void aspectCommands.fileInspect(path, previewOptions)
+    void luxCommands.fileInspect(path, previewOptions)
       .then((result) => {
         if (!cancelled) setInspection(result);
       })
@@ -70,13 +70,13 @@ export function FilePreviewPane({ document, variant = "editor" }: FilePreviewPan
           </div>
         </div>
         <div className="file-preview-actions">
-          <button className="icon-button compact" type="button" title={t("filePreview.action.copyAiContext")} disabled={!inspection} onClick={() => inspection && void aspectCommands.clipboardWriteText(inspection.aiContext).catch(() => undefined)}>
+          <button className="icon-button compact" type="button" title={t("filePreview.action.copyAiContext")} disabled={!inspection} onClick={() => inspection && void luxCommands.clipboardWriteText(inspection.aiContext).catch(() => undefined)}>
             <Copy size={14} />
           </button>
           <button className="icon-button compact" type="button" title={t("filePreview.action.refresh")} onClick={() => setReloadToken((value) => value + 1)} disabled={loading}>
             <RefreshCw size={14} />
           </button>
-          <button className="icon-button compact" type="button" title={t("filePreview.action.openExternal")} onClick={() => void aspectCommands.fileOpenExternal(path).catch(() => undefined)}>
+          <button className="icon-button compact" type="button" title={t("filePreview.action.openExternal")} onClick={() => void luxCommands.fileOpenExternal(path).catch(() => undefined)}>
             <ExternalLink size={14} />
           </button>
         </div>
@@ -267,7 +267,7 @@ function PreviewNote({ note, openPath }: { note: string; openPath?: string }) {
       <FileText size={18} />
       <span>{note}</span>
       {openPath && (
-        <button className="secondary-button compact" type="button" onClick={() => void aspectCommands.fileOpenExternal(openPath).catch(() => undefined)}>
+        <button className="secondary-button compact" type="button" onClick={() => void luxCommands.fileOpenExternal(openPath).catch(() => undefined)}>
           {t("filePreview.action.openExternal")}
         </button>
       )}

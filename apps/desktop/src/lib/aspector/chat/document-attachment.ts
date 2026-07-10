@@ -7,7 +7,7 @@ import {
 } from "./../utils/file-context";
 import { truncateText } from "./../runtime/shared";
 import type { VisionImageFormat } from "./../utils/vision-format";
-import type { DocumentSnapshot } from "./types";
+import type { DocumentSnapshot } from "./../../types/index";
 
 const maxAttachmentChars = 18_000;
 const selectionSurroundingLines = 8;

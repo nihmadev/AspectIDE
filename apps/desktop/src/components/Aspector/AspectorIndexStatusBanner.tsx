@@ -1,8 +1,8 @@
 import { AlertTriangle, Loader2, X } from "lucide-react";
 import { useState } from "react";
-import { isWeakProjectIndex } from "../../lib/aspector/utils/project-index-policy";
-import type { AiIndexState } from "../../lib/store/index";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { isWeakProjectIndex } from '../../lib/aspector/utils/project-index-policy';
+import type { AiIndexState } from '../../lib/store/index';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorIndexStatusBannerProps = {
   index: AiIndexState;

@@ -2,9 +2,9 @@ import { memo } from "react";
 import type { RefObject } from "react";
 import { AspectorChatSlashMenu } from "./AspectorChatSlashMenu";
 import { AspectorChatMentionMenu } from "./AspectorChatMentionMenu";
-import type { AiMentionCandidate } from "../../lib/aspector/chat/mentions";
-import type { SlashCommandMatch } from "../../lib/aspector/chat/slash-commands";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { AiMentionCandidate } from '../../lib/aspector/chat/mentions';
+import type { SlashCommandMatch } from '../../lib/aspector/chat/slash-commands';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorComposerCommandMenusProps = {
   mentionMenuOpen: boolean;

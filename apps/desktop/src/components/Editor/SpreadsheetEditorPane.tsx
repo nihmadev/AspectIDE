@@ -1,7 +1,7 @@
 import { AlertTriangle, Plus, Table2 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { documentDisplayPath } from "../lib/editor/documents/documents";
-import { useTranslation } from "../lib/i18n/useTranslation";
+import { documentDisplayPath } from '../../lib/editor/documents/documents';
+import { useTranslation } from '../../lib/i18n/useTranslation';
 import {
   addSpreadsheetColumn,
   addSpreadsheetRow,
@@ -12,8 +12,8 @@ import {
   sheetColumnCount,
   updateSpreadsheetCell,
   type SpreadsheetEditDocument,
-} from "../lib/editor/documents/spreadsheet-document";
-import type { DocumentSnapshot } from "../lib/types/index";
+} from '../../lib/editor/documents/spreadsheet-document';
+import type { DocumentSnapshot } from '../../lib/types/index';
 
 type SpreadsheetEditorPaneProps = {
   document: DocumentSnapshot;

@@ -1,11 +1,11 @@
 import { ExternalLink, Globe, LayoutDashboard, Loader2, MousePointer2, Radio, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
-import type { AiPreferences } from "../../lib/aspector/utils/preferences";
-import { getAiChatTurnRuntimeSnapshot, subscribeAiChatTurnRuntime } from "../../lib/aspector/chat/turn-runtime";
-import { browserSessionName, ensureBrowserStream, queryBrowserStream } from "../../lib/agent-browser/core";
-import { AgentBrowserStreamClient, mapPreviewCoordinates } from "../../lib/agent-browser/stream";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { luxCommands } from "../../lib/tauri/commands";
+import type { AiPreferences } from '../../lib/aspector/utils/preferences';
+import { getAiChatTurnRuntimeSnapshot, subscribeAiChatTurnRuntime } from '../../lib/aspector/chat/turn-runtime';
+import { browserSessionName, ensureBrowserStream, queryBrowserStream } from '../../lib/agent-browser/core';
+import { AgentBrowserStreamClient, mapPreviewCoordinates } from '../../lib/agent-browser/stream';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { luxCommands } from '../../lib/tauri/commands';
 
 type PreviewView = "live" | "dashboard";
 type BrowserPreviewConnection = "connecting" | "live" | "waiting" | "disconnected" | "error";

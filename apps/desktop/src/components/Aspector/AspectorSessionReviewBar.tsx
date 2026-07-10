@@ -8,10 +8,10 @@ import {
   rejectPendingFileReview,
   subscribePendingFileReviews,
   type PendingFileReview,
-} from "../../lib/aspector/utils/pending-file-review";
-import { requestFileReviewFocus } from "../../lib/aspector/utils/file-review/bridge";
-import { openWorkspaceEditorPath } from "../../lib/editor/open-workspace-editor-path";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+} from '../../lib/aspector/utils/pending-file-review';
+import { requestFileReviewFocus } from '../../lib/aspector/utils/file-review/bridge';
+import { openWorkspaceEditorPath } from '../../lib/editor/open-workspace-editor-path';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorSessionReviewBarProps = {
   sessionId: string | null;

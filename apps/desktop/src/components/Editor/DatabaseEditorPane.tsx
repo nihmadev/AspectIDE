@@ -1,9 +1,9 @@
 import { Database, Play, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { documentDisplayPath } from "../lib/editor/documents/documents";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { aspectCommands } from "../lib/tauri/commands";
-import type { DatabaseTablePreview, DocumentSnapshot } from "../lib/types/index";
+import { documentDisplayPath } from '../../lib/editor/documents/documents';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { DatabaseTablePreview, DocumentSnapshot } from '../../lib/types/index';
 
 const dbOptions = { maxTextBytes: 1_000_000, maxRows: 200, maxColumns: 48, maxArchiveEntries: 0 };
 
@@ -39,7 +39,7 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
     setLoading(true);
     setError(null);
     try {
-      const next = await aspectCommands.databaseListTables(path, dbOptions);
+      const next = await luxCommands.databaseListTables(path, dbOptions);
       setTables(next);
       if (!activeTable && next[0]) setActiveTable(next[0].name);
     } catch (reason) {
@@ -55,7 +55,7 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
     setError(null);
     try {
       const quoted = quoteIdent(tableName);
-      const result = await aspectCommands.databaseExecuteSql(path, {
+      const result = await luxCommands.databaseExecuteSql(path, {
         sql: `SELECT rowid, * FROM ${quoted} LIMIT ${dbOptions.maxRows}`,
       });
       if (isStale?.()) return;
@@ -108,7 +108,7 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await aspectCommands.databaseExecuteSql(path, { sql });
+      const result = await luxCommands.databaseExecuteSql(path, { sql });
       setResultMessage(result.message);
       if (result.columns.length > 0) {
         setTableView({
@@ -147,7 +147,7 @@ export function DatabaseEditorPane({ document }: DatabaseEditorPaneProps) {
     const column = tableView.columns[columnIndex];
     if (!column || rowid === undefined) return;
     try {
-      await aspectCommands.databaseUpdateCell(path, {
+      await luxCommands.databaseUpdateCell(path, {
         table: activeTable,
         rowid,
         column,

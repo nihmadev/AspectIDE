@@ -1,4 +1,4 @@
-import { extractInlineMentionSpans } from "../../lib/aspector/chat/composer-inline-mentions";
+import { extractInlineMentionSpans } from '../../lib/aspector/chat/composer-inline-mentions';
 
 type AspectorComposerInlineMentionsProps = {
   message: string;

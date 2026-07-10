@@ -30,10 +30,10 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
-import { useTranslation, type TranslateFn } from "../../lib/i18n/useTranslation";
-import type { MessageKey } from "../../lib/i18n";
-import { isReadOnlyAgentMode } from "../../lib/aspector/utils/preferences";
-import { useLuxStore } from "../../lib/store/index";
+import { useTranslation, type TranslateFn } from '../../lib/i18n/useTranslation';
+import type { MessageKey } from '../../lib/i18n';
+import { isReadOnlyAgentMode } from '../../lib/aspector/utils/preferences';
+import { useLuxStore } from '../../lib/store/index';
 
 /**
  * "ready"       — registered and invokable in the current runtime configuration.

@@ -1,8 +1,8 @@
 import { Minus, Plus } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { CompactDropdown } from "../CompactDropdown";
-import { withFontFallback } from "../../lib/editorPreferences";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { CompactDropdown } from "../CompactDropdown/CompactDropdown";
+import { withFontFallback } from '../../lib/editor/preferences';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 export type SaveState = "idle" | "saving" | "saved" | "error";
 

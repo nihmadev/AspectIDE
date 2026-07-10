@@ -1,7 +1,7 @@
-import type { AiChatMessage } from "../../lib/aspector/chat/types";
-import type { ContextCompactionState } from "../../lib/aspector/chat/context-compaction";
-import { formatCompactTokens } from "../../lib/aspector/chat/context-usage";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { AiChatMessage } from '../../lib/aspector/chat/types';
+import type { ContextCompactionState } from '../../lib/aspector/chat/context-compaction';
+import { formatCompactTokens } from '../../lib/aspector/chat/context-usage';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorTurnDiagnosticsProps = {
   message: AiChatMessage;

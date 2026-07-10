@@ -1,7 +1,7 @@
 import { ArrowUpCircle, Download, Loader2, RefreshCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import type { UpdaterState } from "../lib/hooks/use-updater";
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import type { UpdaterState } from '../../lib/hooks/use-updater';
 
 type UpdateNoticeProps = {
   state: UpdaterState;

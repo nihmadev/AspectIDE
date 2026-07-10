@@ -2,15 +2,15 @@ import { ChevronDown, ChevronUp, Eraser, Filter, ListFilter, Plus, TerminalSquar
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { displayPath } from "../lib/explorer/file-tree";
-import type { MessageKey } from "../lib/i18n";
-import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
-import { useAspectStore, type BottomPanelTab } from "../lib/store/index";
-import { isTauriRuntime, aspectCommands } from "../lib/tauri/commands";
-import { isTerminalSpawnInFlight, spawnTerminalSession } from "../lib/terminal/spawn";
-import { AI_MIRROR_TERMINAL_LABEL, isAiMirrorTerminal } from "../lib/terminal/types";
-import type { TerminalSessionInfo, WorkspaceDiagnostic } from "../lib/types/index";
-import { XtermTerminal } from "./XtermTerminal";
+import { displayPath } from '../../lib/explorer/file-tree';
+import type { MessageKey } from '../../lib/i18n';
+import { useTranslation, type TranslateFn } from '../../lib/i18n/useTranslation';
+import { useLuxStore, type BottomPanelTab } from '../../lib/store/index';
+import { isTauriRuntime, luxCommands } from '../../lib/tauri/commands';
+import { isTerminalSpawnInFlight, spawnTerminalSession } from '../../lib/terminal/spawn';
+import { AI_MIRROR_TERMINAL_LABEL, isAiMirrorTerminal } from '../../lib/terminal/types';
+import type { TerminalSessionInfo, WorkspaceDiagnostic } from '../../lib/types/index';
+import { XtermTerminal } from "../Terminal/XtermTerminal";
 
 const tabs: Array<{ id: BottomPanelTab; labelKey: MessageKey }> = [
   { id: "problems", labelKey: "panel.tab.problems" },
@@ -32,21 +32,21 @@ type BottomPanelProps = {
 
 export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPanelProps) {
   const { t } = useTranslation();
-  const terminal = useAspectStore((state) => state.terminal);
-  const terminalSessions = useAspectStore((state) => state.terminalSessions);
-  const activeTerminalId = useAspectStore((state) => state.activeTerminalId);
+  const terminal = useLuxStore((state) => state.terminal);
+  const terminalSessions = useLuxStore((state) => state.terminalSessions);
+  const activeTerminalId = useLuxStore((state) => state.activeTerminalId);
   // NOTE: we intentionally do NOT subscribe to terminalOutputBuffers here. Each
   // XtermTerminal selects its own session's buffer slice, so high-volume PTY output on
   // one terminal no longer re-renders the whole bottom panel.
-  const setActiveTerminal = useAspectStore((state) => state.setActiveTerminal);
-  const closeTerminalSession = useAspectStore((state) => state.closeTerminalSession);
-  const clearTerminalOutput = useAspectStore((state) => state.clearTerminalOutput);
-  const activeTab = useAspectStore((state) => state.bottomPanelTab);
-  const setActiveTab = useAspectStore((state) => state.setBottomPanelTab);
-  const setBottomPanelOpen = useAspectStore((state) => state.setBottomPanelOpen);
-  const diagnosticsByPath = useAspectStore((state) => state.diagnosticsByPath);
-  const upsertDocument = useAspectStore((state) => state.upsertDocument);
-  const setPendingEditorReveal = useAspectStore((state) => state.setPendingEditorReveal);
+  const setActiveTerminal = useLuxStore((state) => state.setActiveTerminal);
+  const closeTerminalSession = useLuxStore((state) => state.closeTerminalSession);
+  const clearTerminalOutput = useLuxStore((state) => state.clearTerminalOutput);
+  const activeTab = useLuxStore((state) => state.bottomPanelTab);
+  const setActiveTab = useLuxStore((state) => state.setBottomPanelTab);
+  const setBottomPanelOpen = useLuxStore((state) => state.setBottomPanelOpen);
+  const diagnosticsByPath = useLuxStore((state) => state.diagnosticsByPath);
+  const upsertDocument = useLuxStore((state) => state.upsertDocument);
+  const setPendingEditorReveal = useLuxStore((state) => state.setPendingEditorReveal);
 
   const [problemsFilter, setProblemsFilter] = useState("");
   const [outputFilter, setOutputFilter] = useState("");
@@ -123,14 +123,14 @@ export function BottomPanel({ isMaximized = false, onToggleMaximized }: BottomPa
       return next;
     });
     if (isTauriRuntime()) {
-      void aspectCommands.terminalClose(terminalId).catch(() => undefined).finally(() => closeTerminalSession(terminalId));
+      void luxCommands.terminalClose(terminalId).catch(() => undefined).finally(() => closeTerminalSession(terminalId));
     } else {
       closeTerminalSession(terminalId);
     }
   }, [terminal, closeTerminalSession]);
 
   const openProblemMutation = useMutation({
-    mutationFn: async (problem: WorkspaceDiagnostic) => ({ problem, document: await aspectCommands.editorOpenFile(problem.path) }),
+    mutationFn: async (problem: WorkspaceDiagnostic) => ({ problem, document: await luxCommands.editorOpenFile(problem.path) }),
     onSuccess: ({ document, problem }) => {
       setProblemOpenError(null);
       upsertDocument(document);
@@ -253,7 +253,7 @@ function OutputActions({
     <>
       <select className="panel-select" aria-label={t("panel.output.channel.label")} value={channel} onChange={(event) => setChannel(event.target.value)}>
         <option value="All Channels">{t("panel.output.channel.allChannels")}</option>
-        <option value="Aspect Core">{t("panel.output.channel.aspectCore")}</option>
+        <option value="Aspect Core">Aspect Core</option>
         <option value="Tauri">{t("panel.output.channel.tauri")}</option>
         <option value="Extensions">{t("panel.output.channel.extensions")}</option>
       </select>

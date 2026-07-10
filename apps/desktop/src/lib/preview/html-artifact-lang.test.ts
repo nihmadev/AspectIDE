@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseHtmlArtifactLang } from "../../components/ai-chat/AiChatMessages";
+import { parseHtmlArtifactLang } from "../../components/Aspector/AspectorChatMessages";
 
 describe("parseHtmlArtifactLang", () => {
   it("auto-previews html with an explicit preview/live/run modifier", () => {

@@ -1,6 +1,6 @@
 import { ChevronRight, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { formatCompactTokens } from "../../lib/aiChatContextUsage";
+import { formatCompactTokens } from '../../lib/aspector/chat/context-usage';
 import {
   aggregateUsageByProject,
   clearAiUsageLog,
@@ -8,11 +8,11 @@ import {
   reloadAiUsageLog,
   usageEntryTokensPerSecond,
   type AiUsageLogEntry,
-} from "../../lib/aiUsageLog";
-import { workspaceInstructionsKey } from "../../lib/aiPreferences";
-import type { MessageKey } from "../../lib/i18n";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import type { WorkspaceInfo } from "../../lib/types";
+} from '../../lib/aspector/utils/usage/usage-log';
+import { workspaceInstructionsKey } from '../../lib/aspector/utils/preferences';
+import type { MessageKey } from '../../lib/i18n';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import type { WorkspaceInfo } from '../../lib/types';
 
 /** Time windows for the filter pills, in hours (null = everything). */
 const TIME_FILTERS: Array<{ id: string; labelKey: MessageKey; hours: number | null }> = [

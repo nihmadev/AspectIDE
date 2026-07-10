@@ -15,7 +15,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export function isAspectProvider(provider: Pick<AiProviderConfig, "providerType">): boolean {
-  return provider.providerType === "aspect";
+  return provider.providerType === ("aspect" as string);
 }
 
 async function loadPersistedToken(): Promise<string> {

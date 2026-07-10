@@ -1,7 +1,7 @@
 import { Check, Loader2, Pencil, Plug, PlugZap, Plus, RefreshCw, Server, Trash2, Wrench, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { aspectCommands, MCP_SERVERS_KEY, type McpServerConfig, type McpServerStatus } from "../../lib/tauri";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { luxCommands, MCP_SERVERS_KEY, type McpServerConfig, type McpServerStatus } from '../../lib/tauri/commands';
 
 const EMPTY_DRAFT = { name: "", command: "", args: "", env: "" };
 
@@ -56,8 +56,8 @@ export function McpSection({ t }: { t: TranslateFn }) {
   // settings (the backend's store of record); we only ever *read* it here.
   const reload = useCallback(async () => {
     const [configResult, statusResult] = await Promise.allSettled([
-      aspectCommands.settingsGet("user", MCP_SERVERS_KEY),
-      aspectCommands.mcpStatus(),
+      luxCommands.settingsGet("user", MCP_SERVERS_KEY),
+      luxCommands.mcpStatus(),
     ]);
     if (configResult.status === "fulfilled") {
       const value = configResult.value;
@@ -70,7 +70,7 @@ export function McpSection({ t }: { t: TranslateFn }) {
 
   const refreshStatus = useCallback(async () => {
     try {
-      const live = await aspectCommands.mcpStatus();
+      const live = await luxCommands.mcpStatus();
       setStatuses(Object.fromEntries(live.map((status) => [status.id, status])));
     } catch {
       /* status is best-effort */
@@ -123,7 +123,7 @@ export function McpSection({ t }: { t: TranslateFn }) {
     try {
       // mcpAdd persists then connects atomically; a handshake failure comes back as
       // an error-state status (not a throw), so reload() surfaces it on the row.
-      await aspectCommands.mcpAdd(config);
+      await luxCommands.mcpAdd(config);
       resetDraft();
       await reload();
     } catch (cause) {
@@ -139,7 +139,7 @@ export function McpSection({ t }: { t: TranslateFn }) {
     try {
       // mcpEnable persists the flag AND connects/disconnects in one backend step,
       // so the persisted config can't say "enabled" while the server is dead.
-      await aspectCommands.mcpEnable(config.id, !config.enabled);
+      await luxCommands.mcpEnable(config.id, !config.enabled);
       await reload();
     } catch (cause) {
       setError(errorMessage(cause));
@@ -154,7 +154,7 @@ export function McpSection({ t }: { t: TranslateFn }) {
     setBusy(config.id);
     setError(null);
     try {
-      await aspectCommands.mcpConnect({ ...config, enabled: true });
+      await luxCommands.mcpConnect({ ...config, enabled: true });
       await refreshStatus();
     } catch (cause) {
       setError(errorMessage(cause));
@@ -168,7 +168,7 @@ export function McpSection({ t }: { t: TranslateFn }) {
     setError(null);
     try {
       // mcpRemove disconnects + deletes the persisted config in one backend step.
-      await aspectCommands.mcpRemove(config.id);
+      await luxCommands.mcpRemove(config.id);
       if (editingId === config.id) resetDraft();
       await reload();
     } catch (cause) {
@@ -312,3 +312,4 @@ export function McpSection({ t }: { t: TranslateFn }) {
     </div>
   );
 }
+

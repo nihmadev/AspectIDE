@@ -14,18 +14,18 @@ import {
   type AiProviderConfig,
   type AiProviderPresetId,
   type AiProviderProtocol,
-} from "../../lib/aiPreferences";
-import { formatCompactTokens } from "../../lib/aiChatContextUsage";
+} from '../../lib/aspector/utils/preferences';
+import { formatCompactTokens } from '../../lib/aspector/chat/context-usage';
 import {
   MAX_CONTEXT_AUTO_COMPACT_THRESHOLD,
   MIN_CONTEXT_AUTO_COMPACT_THRESHOLD,
   resolveModelContextTokens,
-} from "../../lib/aiModelContext";
-import { fetchProviderModelConfigs, isFreeModelId, mergeRefreshedModels } from "../../lib/aiProviderModels";
-import { aspectCommands, type AiProviderDiagnosticResponse } from "../../lib/tauri";
-import type { MessageKey } from "../../lib/i18n";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { CompactDropdown } from "../CompactDropdown";
+} from '../../lib/aspector/utils/model-context';
+import { fetchProviderModelConfigs, isFreeModelId, mergeRefreshedModels } from '../../lib/aspector/utils/provider-models';
+import { luxCommands, type AiProviderDiagnosticResponse } from '../../lib/tauri/commands';
+import type { MessageKey } from '../../lib/i18n';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { CompactDropdown } from "../CompactDropdown/CompactDropdown";
 import { NumberSetting, SelectSetting, SettingsGrid, SettingsPanel, TextSetting } from "./SettingsControls";
 
 // Provider preset id в†’ localized description key. Brand names stay verbatim; only the
@@ -339,7 +339,7 @@ function AiProviderEditor({ canRemove, isActive, onActivate, onBack, onRemove, p
       // `max_completion_tokens` and no temperature; standard models keep the
       // tight, cheap probe.
       const isReasoningModel = editingModel.effortLevels.length > 0;
-      const result = await aspectCommands.aiProviderDiagnostic({
+      const result = await luxCommands.aiProviderDiagnostic({
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey || null,
         protocol: provider.protocol,
@@ -683,3 +683,4 @@ function reorderEffortLevels(
   next.splice(insertAt, 0, moved);
   return next;
 }
+

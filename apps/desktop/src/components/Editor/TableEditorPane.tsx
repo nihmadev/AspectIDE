@@ -1,7 +1,7 @@
 import { AlertTriangle, Plus, Table2 } from "lucide-react";
 import { useCallback, useMemo } from "react";
-import { documentDisplayPath } from "../lib/editor/documents/documents";
-import { useTranslation } from "../lib/i18n/useTranslation";
+import { documentDisplayPath } from '../../lib/editor/documents/documents';
+import { useTranslation } from '../../lib/i18n/useTranslation';
 import {
   addTableColumn,
   addTableRow,
@@ -9,8 +9,8 @@ import {
   serializeTableDocument,
   tableColumnCount,
   updateTableCell,
-} from "../lib/editor/documents/table-document";
-import type { DocumentSnapshot } from "../lib/types/index";
+} from '../../lib/editor/documents/table-document';
+import type { DocumentSnapshot } from '../../lib/types/index';
 
 type TableEditorPaneProps = {
   document: DocumentSnapshot;

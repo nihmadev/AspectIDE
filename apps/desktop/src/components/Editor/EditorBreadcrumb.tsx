@@ -1,10 +1,10 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { fileIconForName } from "../lib/explorer/file-icons";
-import { buildFileTreeDirectories, displayPath, normalizePath, sortFsEntries } from "../lib/explorer/file-tree";
-import { useAspectStore } from "../lib/store/index";
-import { aspectCommands } from "../lib/tauri/commands";
-import type { FsEntry } from "../lib/types/index";
+import { fileIconForName } from '../../lib/explorer/file-icons';
+import { buildFileTreeDirectories, displayPath, normalizePath, sortFsEntries } from '../../lib/explorer/file-tree';
+import { useLuxStore } from '../../lib/store/index';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { FsEntry } from '../../lib/types/index';
 
 type CrumbSegment = {
   label: string;
@@ -36,7 +36,7 @@ export function EditorBreadcrumb({
   documentPath: string;
   workspaceRoot: string | null;
 }) {
-  const upsertDocument = useAspectStore((s) => s.upsertDocument);
+  const upsertDocument = useLuxStore((s) => s.upsertDocument);
   const segments = buildSegments(documentPath, workspaceRoot);
   const [openIndex, setOpenIndex] = useState<number | null>(null);
   const [popupAnchor, setPopupAnchor] = useState<DOMRect | null>(null);
@@ -45,7 +45,7 @@ export function EditorBreadcrumb({
   const openFile = useCallback(
     async (path: string) => {
       try {
-        const doc = await aspectCommands.editorOpenFile(path);
+        const doc = await luxCommands.editorOpenFile(path);
         upsertDocument(doc);
       } catch { /* ignore */ }
     },
@@ -137,7 +137,7 @@ function BreadcrumbPopup({
   useEffect(() => {
     setLoading(true);
     setExpandedPaths(new Set());
-    aspectCommands.fsReadTree(dirPath)
+    luxCommands.fsReadTree(dirPath)
       .then((entries) => {
         const dirs = buildFileTreeDirectories(dirPath, entries);
         setDirs(new Map(Object.entries(dirs)));

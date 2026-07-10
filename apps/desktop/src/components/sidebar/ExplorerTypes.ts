@@ -1,4 +1,4 @@
-import type { FsEntry } from "../../lib/types";
+import type { FsEntry } from '../../lib/types';
 
 export type PendingCreate = {
   kind: "file" | "directory";

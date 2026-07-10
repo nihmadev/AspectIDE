@@ -1,8 +1,8 @@
 import { Bug, Files, GitBranch, Package, Search } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { MessageKey } from "../lib/i18n";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { useAspectStore, type Activity } from "../lib/store/index";
+import type { MessageKey } from '../../lib/i18n';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useLuxStore, type Activity } from '../../lib/store/index';
 
 const activities: Array<{ id: Activity; labelKey: MessageKey; icon: LucideIcon }> = [
   { id: "explorer", labelKey: "activity.explorer", icon: Files },
@@ -13,8 +13,8 @@ const activities: Array<{ id: Activity; labelKey: MessageKey; icon: LucideIcon }
 ];
 
 export function ActivityBar() {
-  const activeActivity = useAspectStore((state) => state.activeActivity);
-  const setActiveActivity = useAspectStore((state) => state.setActiveActivity);
+  const activeActivity = useLuxStore((state) => state.activeActivity);
+  const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
   const { t } = useTranslation();
 
   return (

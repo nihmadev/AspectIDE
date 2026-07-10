@@ -1,16 +1,16 @@
 import { Brain, ChevronDown, ChevronRight, Flame, Link2, Loader2, Pin, PinOff, Plus, RefreshCw, Trash2, X } from "lucide-react";
-import { CompactDropdown } from "../CompactDropdown";
+import { CompactDropdown } from "../CompactDropdown/CompactDropdown";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 import {
-  aspectCommands,
+  luxCommands,
   type MemoryRecord,
   type MemoryRelation,
   type MemoryRetentionReport,
   type MemorySortOrder,
   type MemoryStats,
-} from "../../lib/tauri";
-import type { WorkspaceInfo } from "../../lib/types";
+} from '../../lib/tauri/commands';
+import type { WorkspaceInfo } from '../../lib/types';
 
 const COMMON_CATEGORIES = ["core", "semantic", "episodic", "procedural"];
 
@@ -42,11 +42,11 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
       // only the agent's RecallMemory bumps access stats.
       const options = { category, limit: 200, sort, touch: false, includeSuperseded };
       const list = query.trim()
-        ? await aspectCommands.memorySearch(query.trim(), options)
-        : await aspectCommands.memoryList(options);
+        ? await luxCommands.memorySearch(query.trim(), options)
+        : await luxCommands.memoryList(options);
       const [nextStats, nextRetention] = await Promise.all([
-        aspectCommands.memoryStats(),
-        aspectCommands.memoryRetention(),
+        luxCommands.memoryStats(),
+        luxCommands.memoryRetention(),
       ]);
       // Latest-wins: a newer refresh has superseded this one РІР‚вЂќ drop its results.
       if (seq !== seqRef.current) return;
@@ -72,7 +72,7 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
 
   const togglePin = useCallback(async (record: MemoryRecord) => {
     try {
-      await aspectCommands.memoryUpdate(record.id, { pinned: !record.pinned });
+      await luxCommands.memoryUpdate(record.id, { pinned: !record.pinned });
       void refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -82,7 +82,7 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
   const remove = useCallback(async (record: MemoryRecord) => {
     if (!window.confirm(t("settings.memory.confirmDelete"))) return;
     try {
-      await aspectCommands.memoryDelete(record.id);
+      await luxCommands.memoryDelete(record.id);
       void refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -98,7 +98,7 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
       : t("settings.memory.confirmWipe");
     if (!window.confirm(prompt)) return;
     try {
-      await aspectCommands.memoryWipe(null);
+      await luxCommands.memoryWipe(null);
       void refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -109,7 +109,7 @@ export function MemorySection({ workspace, t }: { workspace: WorkspaceInfo | nul
     setPruning(true);
     setPruneResult(null);
     try {
-      const count = await aspectCommands.memoryPrune();
+      const count = await luxCommands.memoryPrune();
       setPruneResult(t("settings.memory.pruneResult", { count }));
       void refresh();
     } catch (cause) {
@@ -267,7 +267,7 @@ function MemoryRow({
     let cancelled = false;
     setLoadingRelations(true);
     setRelationsError(null);
-    aspectCommands.memoryRelations(record.id)
+    luxCommands.memoryRelations(record.id)
       .then((list) => { if (!cancelled) setRelations(list); })
       .catch((cause) => { if (!cancelled) setRelationsError(cause instanceof Error ? cause.message : String(cause)); })
       .finally(() => { if (!cancelled) setLoadingRelations(false); });
@@ -276,7 +276,7 @@ function MemoryRow({
 
   const unrelate = useCallback(async (relationId: string) => {
     try {
-      await aspectCommands.memoryUnrelate(relationId);
+      await luxCommands.memoryUnrelate(relationId);
       setRelations((current) => current?.filter((relation) => relation.id !== relationId) ?? current);
     } catch (cause) {
       setRelationsError(cause instanceof Error ? cause.message : String(cause));
@@ -374,7 +374,7 @@ function MemoryComposer({
     if (!content.trim()) return;
     setSaving(true);
     try {
-      await aspectCommands.memoryCreate({
+      await luxCommands.memoryCreate({
         category: category.trim() || "semantic",
         content: content.trim(),
         importance,
@@ -432,3 +432,4 @@ function MemoryComposer({
     </div>
   );
 }
+

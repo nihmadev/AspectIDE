@@ -2,10 +2,10 @@ import { CornerDownLeft, Gauge, Mic, SendHorizontal, Square } from "lucide-react
 import { memo } from "react";
 import { AspectorContextIndicator } from "./AspectorContextIndicator";
 import { VOICE_MODE_RECORDING, VOICE_MODE_TRANSCRIBING, type AspectorComposerVoiceState } from "./AspectorComposerTypes";
-import type { AiChatContextUsageMeta, AiChatContextUsageSummary } from "../../lib/aspector/chat/context-usage";
-import type { AiChatContextDropSummary } from "../../lib/aspector/chat/context-report";
-import { formatTokenSpeed } from "../../lib/hooks/use-live-token-speed";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { AiChatContextUsageMeta, AiChatContextUsageSummary } from '../../lib/aspector/chat/context-usage';
+import type { AiChatContextDropSummary } from '../../lib/aspector/chat/context-report';
+import { formatTokenSpeed } from '../../lib/hooks/use-live-token-speed';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorComposerSendControlsProps = {
   /** Live tok/s of the running turn, or null to hide the readout. */

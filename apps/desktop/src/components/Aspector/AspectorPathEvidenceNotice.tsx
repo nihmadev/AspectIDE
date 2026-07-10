@@ -1,10 +1,10 @@
 import { AlertTriangle } from "lucide-react";
 import { useMemo } from "react";
-import { listUnverifiedPathsInAssistantMessage, shouldShowPathEvidenceNotice } from "../../lib/aspector/chat/path-evidence";
-import type { AiChatMessage } from "../../lib/aspector/chat/types";
-import { normalizePath } from "../../lib/explorer/file-tree";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { useLuxStore } from "../../lib/store/index";
+import { listUnverifiedPathsInAssistantMessage, shouldShowPathEvidenceNotice } from '../../lib/aspector/chat/path-evidence';
+import type { AiChatMessage } from '../../lib/aspector/chat/types';
+import { normalizePath } from '../../lib/explorer/file-tree';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { useLuxStore } from '../../lib/store/index';
 
 type AspectorPathEvidenceNoticeProps = {
   message: AiChatMessage;

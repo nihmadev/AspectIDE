@@ -1,14 +1,14 @@
 import { AlertTriangle, ArrowDown, ArrowUp, CheckCircle2, ChevronsRight, GitBranch } from "lucide-react";
-import { displayPath } from "../lib/explorer/file-tree";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { useAspectStore } from "../lib/store/index";
+import { displayPath } from '../../lib/explorer/file-tree';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useLuxStore } from '../../lib/store/index';
 
 export function StatusBar() {
-  const workspace = useAspectStore((state) => state.workspace);
-  const diagnosticsByPath = useAspectStore((state) => state.diagnosticsByPath);
-  const gitStatus = useAspectStore((state) => state.gitStatus);
-  const setActiveActivity = useAspectStore((state) => state.setActiveActivity);
-  const toggleBottomPanel = useAspectStore((state) => state.toggleBottomPanel);
+  const workspace = useLuxStore((state) => state.workspace);
+  const diagnosticsByPath = useLuxStore((state) => state.diagnosticsByPath);
+  const gitStatus = useLuxStore((state) => state.gitStatus);
+  const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
+  const toggleBottomPanel = useLuxStore((state) => state.toggleBottomPanel);
   const { t } = useTranslation();
 
   const branchChip = workspace && gitStatus?.branch ? (

@@ -1,14 +1,14 @@
 import { Bug, ChevronDown, Files, GitBranch, Package, Pin, Search } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
-import { ExplorerPanel } from "./sidebar/ExplorerPanel";
-import { ExtensionsPanel } from "./sidebar/ExtensionsPanel";
-import { GitPanel } from "./sidebar/GitPanel";
-import { RunDebugPanel } from "./sidebar/RunDebugPanel";
-import { SearchPanel } from "./sidebar/SearchPanel";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import type { MessageKey } from "../lib/i18n";
-import { useAspectStore, type Activity } from "../lib/store/index";
+import { ExplorerPanel } from "./ExplorerPanel";
+import { ExtensionsPanel } from "./ExtensionsPanel";
+import { GitPanel } from "./GitPanel";
+import { RunDebugPanel } from "./RunDebugPanel";
+import { SearchPanel } from "./SearchPanel";
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import type { MessageKey } from '../../lib/i18n';
+import { useLuxStore, type Activity } from '../../lib/store/index';
 
 const explorerActivities: Array<{ id: Activity; label: MessageKey; shortcut: string; icon: ReactNode }> = [
   { id: "explorer", label: "sidebar.explorer.title", shortcut: "Ctrl+Shift+E", icon: <Files size={18} strokeWidth={1.8} /> },
@@ -21,7 +21,7 @@ const explorerActivities: Array<{ id: Activity; label: MessageKey; shortcut: str
 const pinnedExplorerActivityIds = new Set<Activity>(["explorer", "search"]);
 
 export function Sidebar({ side = "left" }: { side?: "left" | "right" }) {
-  const activeActivity = useAspectStore((state) => state.activeActivity);
+  const activeActivity = useLuxStore((state) => state.activeActivity);
 
   return (
     <aside className="sidebar" data-side={side}>
@@ -39,8 +39,8 @@ export function Sidebar({ side = "left" }: { side?: "left" | "right" }) {
 
 function SidebarViewSwitcher() {
   const { t } = useTranslation();
-  const activeActivity = useAspectStore((state) => state.activeActivity);
-  const setActiveActivity = useAspectStore((state) => state.setActiveActivity);
+  const activeActivity = useLuxStore((state) => state.activeActivity);
+  const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
   const [menuOpen, setMenuOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement | null>(null);
   const pinnedActivities = explorerActivities.filter((activity) => pinnedExplorerActivityIds.has(activity.id));

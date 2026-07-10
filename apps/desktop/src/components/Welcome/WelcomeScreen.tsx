@@ -1,8 +1,8 @@
 import { Clock3, FolderOpen, MessageCircle, X } from "lucide-react";
 import type { MouseEvent } from "react";
-import { displayPath } from "../lib/explorer/file-tree";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import type { RecentWorkspace } from "../lib/types/index";
+import { displayPath } from '../../lib/explorer/file-tree';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import type { RecentWorkspace } from '../../lib/types/index';
 
 type WelcomeScreenProps = {
   loading?: boolean;

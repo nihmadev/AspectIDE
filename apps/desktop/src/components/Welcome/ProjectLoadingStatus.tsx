@@ -1,7 +1,7 @@
 import { AlertCircle, Check, FolderOpen, Loader2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { ProjectLoadSummary } from "../lib/init/project-load-presentation";
-import { useTranslation } from "../lib/i18n/useTranslation";
+import type { ProjectLoadSummary } from '../../lib/init/project-load-presentation';
+import { useTranslation } from '../../lib/i18n/useTranslation';
 import { WorkspaceSkeleton } from "./WorkspaceSkeleton";
 
 type ProjectLoadingStatusProps = {

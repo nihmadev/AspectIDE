@@ -1,6 +1,6 @@
 import { Loader2, MessageCircle, X } from "lucide-react";
-import { useAspectLinkStore } from "../lib/aspect/link-store";
-import { luxCommands } from "../lib/tauri/commands";
+import { useAspectLinkStore } from '../../lib/aspect/link-store';
+import { luxCommands } from '../../lib/tauri/commands';
 
 export function AspectLinkModal() {
   const { open, phase, code, deepLink, error, hide } = useAspectLinkStore();
@@ -29,7 +29,7 @@ export function AspectLinkModal() {
               <button
                 className="aspect-link-cta"
                 type="button"
-                onClick={() => void luxCommands.aspectOpenUrl(deepLink).catch(() => undefined)}
+                onClick={() => void (luxCommands as unknown as Record<string, (url: string) => Promise<void>>).aspectOpenUrl(deepLink).catch(() => undefined)}
               >
                 Open Telegram &amp; verify
               </button>

@@ -1,17 +1,17 @@
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from "react";
-import type { AiMentionCandidate } from "../../lib/aspector/chat/mentions";
+import type { AiMentionCandidate } from '../../lib/aspector/chat/mentions';
 import { AspectorComposerAttachments, type AspectorComposerAttachmentView } from "./AspectorComposerAttachments";
 import { AspectorComposerCommandMenus } from "./AspectorComposerCommandMenus";
 import { AspectorComposerInputArea } from "./AspectorComposerInputArea";
 import { AspectorComposerModelControls } from "./AspectorComposerModelControls";
 import { AspectorComposerSendControls } from "./AspectorComposerSendControls";
-import { formatAspectUsageLabel, useAspectSelectedModelUsage } from "../../lib/aspect/model-sync";
+import { formatAspectUsageLabel, useAspectSelectedModelUsage } from '../../lib/aspect/model-sync';
 import type { AspectorComposerSelectOption, AspectorComposerVoiceState } from "./AspectorComposerTypes";
-import type { SlashCommandMatch } from "../../lib/aspector/chat/slash-commands";
-import type { AiChatContextUsageMeta, AiChatContextUsageSummary } from "../../lib/aspector/chat/context-usage";
-import type { AiChatContextDropSummary } from "../../lib/aspector/chat/context-report";
-import type { AiPreferences } from "../../lib/aspector/utils/preferences";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { SlashCommandMatch } from '../../lib/aspector/chat/slash-commands';
+import type { AiChatContextUsageMeta, AiChatContextUsageSummary } from '../../lib/aspector/chat/context-usage';
+import type { AiChatContextDropSummary } from '../../lib/aspector/chat/context-report';
+import type { AiPreferences } from '../../lib/aspector/utils/preferences';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 // Re-export shared composer types so existing import sites stay valid after the
 // composer was decomposed into focused sections.

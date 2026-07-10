@@ -1,7 +1,7 @@
 import { Bot, Command, Database, ScrollText, Settings, Sparkles, Target, Trash2, Undo2, Wand2 } from "lucide-react";
 import type { CSSProperties, RefObject } from "react";
-import { slashCommandDescription, slashCommandLabel, type SlashCommandMatch } from "../../lib/aspector/chat/slash-commands";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { slashCommandDescription, slashCommandLabel, type SlashCommandMatch } from '../../lib/aspector/chat/slash-commands';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorChatSlashMenuProps = {
   activeIndex: number;

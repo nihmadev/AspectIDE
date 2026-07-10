@@ -2,11 +2,11 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AlertTriangle, FileCode2 } from "lucide-react";
 import { createContext, type ReactNode, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { documentDisplayPath, documentParentLabel, documentTitle } from "../lib/editor/documents/documents";
-import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
-import { useAspectStore } from "../lib/store/index";
-import { isTauriRuntime, aspectCommands } from "../lib/tauri/commands";
-import type { DocumentSnapshot } from "../lib/types/index";
+import { documentDisplayPath, documentParentLabel, documentTitle } from '../../lib/editor/documents/documents';
+import { useTranslation, type TranslateFn } from '../../lib/i18n/useTranslation';
+import { useLuxStore } from '../../lib/store/index';
+import { isTauriRuntime, luxCommands } from '../../lib/tauri/commands';
+import type { DocumentSnapshot } from '../../lib/types/index';
 
 type CloseRequestOptions = {
   title?: string;
@@ -29,7 +29,7 @@ const EditorCloseGuardContext = createContext<EditorCloseGuardApi | null>(null);
 
 export function EditorCloseGuardProvider({ children }: { children: ReactNode }) {
   const { t } = useTranslation();
-  const replaceDocumentSnapshot = useAspectStore((state) => state.replaceDocumentSnapshot);
+  const replaceDocumentSnapshot = useLuxStore((state) => state.replaceDocumentSnapshot);
   const [pendingRequest, setPendingRequest] = useState<PendingCloseRequest | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +40,7 @@ export function EditorCloseGuardProvider({ children }: { children: ReactNode }) 
 
   const requestCloseDocuments = useCallback<EditorCloseGuardApi["requestCloseDocuments"]>((documentIds, action, options) => {
     const uniqueDocumentIds = Array.from(new Set(Array.from(documentIds)));
-    const documentsById = new Map(useAspectStore.getState().openDocuments.map((document) => [document.id, document]));
+    const documentsById = new Map(useLuxStore.getState().openDocuments.map((document) => [document.id, document]));
     const dirtyDocuments = uniqueDocumentIds
       .map((documentId) => documentsById.get(documentId))
       .filter((document): document is DocumentSnapshot => Boolean(document?.is_dirty));
@@ -87,13 +87,13 @@ export function EditorCloseGuardProvider({ children }: { children: ReactNode }) 
     setError(null);
     try {
       for (const document of request.documents) {
-        const current = useAspectStore.getState().openDocuments.find((candidate) => candidate.id === document.id);
+        const current = useLuxStore.getState().openDocuments.find((candidate) => candidate.id === document.id);
         if (!current?.is_dirty) continue;
-        const saved = await aspectCommands.editorSaveFile(document.id);
+        const saved = await luxCommands.editorSaveFile(document.id);
         replaceDocumentSnapshot(saved);
       }
 
-      const latestDocumentsById = new Map(useAspectStore.getState().openDocuments.map((document) => [document.id, document]));
+      const latestDocumentsById = new Map(useLuxStore.getState().openDocuments.map((document) => [document.id, document]));
       const stillDirtyDocuments = request.documentIds
         .map((documentId) => latestDocumentsById.get(documentId))
         .filter((document): document is DocumentSnapshot => Boolean(document?.is_dirty));
@@ -121,7 +121,7 @@ export function EditorCloseGuardProvider({ children }: { children: ReactNode }) 
     let unlisten: (() => void) | undefined;
 
     void getCurrentWindow().onCloseRequested((event) => {
-      const openDocuments = useAspectStore.getState().openDocuments;
+      const openDocuments = useLuxStore.getState().openDocuments;
       if (!openDocuments.some((document) => document.is_dirty)) return;
 
       event.preventDefault();

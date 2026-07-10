@@ -1,6 +1,6 @@
-import { aiChatStatusLabel } from "../../lib/aspector/chat/presentation";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import type { AiChatSessionStatus } from "../../lib/store/index";
+import { aiChatStatusLabel } from '../../lib/aspector/chat/presentation';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import type { AiChatSessionStatus } from '../../lib/store/index';
 
 type AspectorThinkingIndicatorProps = {
   status: AiChatSessionStatus;

@@ -1,10 +1,10 @@
 import { ChevronDown, ChevronUp, ExternalLink, FileText, RefreshCw } from "lucide-react";
 import { useEffect, useState } from "react";
-import { documentDisplayPath } from "../lib/editor/documents/documents";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { useFileAssetUrl } from "../lib/hooks/use-file-asset-url";
-import { aspectCommands } from "../lib/tauri/commands";
-import type { DocumentSnapshot, FileInspection } from "../lib/types/index";
+import { documentDisplayPath } from '../../lib/editor/documents/documents';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useFileAssetUrl } from '../../lib/hooks/use-file-asset-url';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { DocumentSnapshot, FileInspection } from '../../lib/types/index';
 
 type PdfEditorPaneProps = {
   document: DocumentSnapshot;
@@ -30,7 +30,7 @@ export function PdfEditorPane({ document }: PdfEditorPaneProps) {
     if (!path) return;
     let cancelled = false;
     setInspectError(null);
-    void aspectCommands.fileInspect(path, inspectOptions)
+    void luxCommands.fileInspect(path, inspectOptions)
       .then((result) => {
         if (!cancelled) setInspection(result);
       })
@@ -79,7 +79,7 @@ export function PdfEditorPane({ document }: PdfEditorPaneProps) {
           <button className="icon-button compact" type="button" title={t("pdfEditor.action.refresh")} onClick={() => setReloadToken((value) => value + 1)}>
             <RefreshCw size={14} />
           </button>
-          <button className="icon-button compact" type="button" title={t("pdfEditor.action.openExternal")} onClick={() => void aspectCommands.fileOpenExternal(path).catch(() => undefined)}>
+          <button className="icon-button compact" type="button" title={t("pdfEditor.action.openExternal")} onClick={() => void luxCommands.fileOpenExternal(path).catch(() => undefined)}>
             <ExternalLink size={14} />
           </button>
         </div>

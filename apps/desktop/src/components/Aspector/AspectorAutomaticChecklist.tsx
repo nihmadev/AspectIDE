@@ -1,7 +1,7 @@
 import { Check, Circle, Loader2 } from "lucide-react";
 import { useSyncExternalStore } from "react";
-import { getAiSessionTodosSnapshot, listAiSessionTodos, subscribeAiSessionTodos } from "../../lib/aspector/session/todos";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { getAiSessionTodosSnapshot, listAiSessionTodos, subscribeAiSessionTodos } from '../../lib/aspector/session/todos';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorAutomaticChecklistProps = {
   sessionId: string;

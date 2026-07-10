@@ -1,10 +1,10 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
-import { useAspectStore } from "../lib/store/index";
-import { isBrowserPreviewRuntime, isTauriRuntime, aspectCommands } from "../lib/tauri/commands";
-import { isAiMirrorTerminal } from "../lib/terminal/types";
-import type { TerminalSessionInfo } from "../lib/types/index";
+import { useLuxStore } from '../../lib/store/index';
+import { isBrowserPreviewRuntime, isTauriRuntime, luxCommands } from '../../lib/tauri/commands';
+import { isAiMirrorTerminal } from '../../lib/terminal/types';
+import type { TerminalSessionInfo } from '../../lib/types/index';
 import "@xterm/xterm/css/xterm.css";
 
 const webPrompt = "$ ";
@@ -23,7 +23,7 @@ export function XtermTerminal({ clearToken, session }: XtermTerminalProps) {
   // How many chars of bufferText have already been written to the canvas.
   const writtenLenRef = useRef(0);
   const webPromptWrittenRef = useRef(false);
-  const appendTerminalOutput = useAspectStore((state) => state.appendTerminalOutput);
+  const appendTerminalOutput = useLuxStore((state) => state.appendTerminalOutput);
   // Subscribe ONLY to THIS session's buffer slice. Previously BottomPanel subscribed to
   // the whole terminalOutputBuffers map and threaded every session's text down, so a PTY
   // chunk on any terminal re-rendered the entire bottom panel (all tabs, controls, and
@@ -31,7 +31,7 @@ export function XtermTerminal({ clearToken, session }: XtermTerminalProps) {
   // only wakes the one terminal it belongs to. The always-on global terminalOutput
   // listener (App.tsx) keeps this buffer authoritative, so we still render the FULL
   // accumulated output incrementally (delta writes) with no race.
-  const bufferText = useAspectStore((state) =>
+  const bufferText = useLuxStore((state) =>
     session ? (state.terminalOutputBuffers[session.id]?.text ?? "") : "",
   );
 
@@ -114,7 +114,7 @@ export function XtermTerminal({ clearToken, session }: XtermTerminalProps) {
           && !isAiMirrorTerminal(activeSession.id)
           && (terminal.cols !== previousCols || terminal.rows !== previousRows)
         ) {
-          void aspectCommands.terminalResize(activeSession.id, terminal.cols, terminal.rows);
+          void luxCommands.terminalResize(activeSession.id, terminal.cols, terminal.rows);
         }
       });
     };
@@ -131,7 +131,7 @@ export function XtermTerminal({ clearToken, session }: XtermTerminalProps) {
       if (activeSession && isTauriRuntime()) {
         // Write keystrokes to the PTY; the shell echoes them back through the
         // global terminalOutput listener в†’ store buffer в†’ delta write below.
-        void aspectCommands.terminalWrite(activeSession.id, data).catch(() => undefined);
+        void luxCommands.terminalWrite(activeSession.id, data).catch(() => undefined);
         return;
       }
       if (!isBrowserPreviewRuntime()) return;

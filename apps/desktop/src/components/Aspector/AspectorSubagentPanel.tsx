@@ -5,10 +5,10 @@ import {
   listSubagentRunsForSession,
   subscribeSubagentRuns,
   type SubagentRun,
-} from "../../lib/aspector/subagents/runs";
-import { resolveMaxParallelSubagents } from "../../lib/aspector/subagents/policy";
-import { useLuxStore } from "../../lib/store/index";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+} from '../../lib/aspector/subagents/runs';
+import { resolveMaxParallelSubagents } from '../../lib/aspector/subagents/policy';
+import { useLuxStore } from '../../lib/store/index';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorSubagentPanelProps = {
   sessionId: string;

@@ -1,9 +1,9 @@
 import { FileCode2, Loader2, Network, Wrench } from "lucide-react";
 import { useSyncExternalStore } from "react";
-import { getAiTurnActivity, getAiTurnActivitySnapshot, subscribeAiTurnActivity } from "../../lib/aspector/utils/turn-activity";
-import { listSubagentRunsForSession, subscribeSubagentRuns } from "../../lib/aspector/subagents/runs";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import type { AiChatSessionStatus } from "../../lib/store/index";
+import { getAiTurnActivity, getAiTurnActivitySnapshot, subscribeAiTurnActivity } from '../../lib/aspector/utils/turn-activity';
+import { listSubagentRunsForSession, subscribeSubagentRuns } from '../../lib/aspector/subagents/runs';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import type { AiChatSessionStatus } from '../../lib/store/index';
 
 type AspectorAgentNowBarProps = {
   sessionId: string;

@@ -1,6 +1,6 @@
 import { Component, lazy, Suspense } from "react";
 import type { ComponentProps, ReactNode } from "react";
-import { useTranslation } from "../../lib/i18n/useTranslation";
+import { useTranslation } from '../../lib/i18n/useTranslation';
 
 const AspectorChatPanelLazy = lazy(() => import("./AspectorChatPanel").then((module) => ({ default: module.AspectorChatPanel })));
 

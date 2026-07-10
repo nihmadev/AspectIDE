@@ -1,6 +1,6 @@
 import { useEffect } from "react";
-import { useAspectStore } from "../lib/store/index";
-import { useUpdater } from "../lib/hooks/use-updater";
+import { useLuxStore } from '../../lib/store/index';
+import { useUpdater } from '../../lib/hooks/use-updater';
 import { UpdateNotice } from "./UpdateNotice";
 
 /**
@@ -11,7 +11,7 @@ import { UpdateNotice } from "./UpdateNotice";
  */
 export function UpdateNoticeHost() {
   const { state, install, dismiss, check } = useUpdater();
-  const setUpdateAvailable = useAspectStore((store) => store.setUpdateAvailable);
+  const setUpdateAvailable = useLuxStore((store) => store.setUpdateAvailable);
 
   useEffect(() => {
     setUpdateAvailable(state.status === "available");

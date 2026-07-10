@@ -5,7 +5,7 @@ import { luxCommands } from "./../../tauri/commands";
 import { readEditorDocumentAttachment } from "./document-attachment";
 import { truncateText } from "./../runtime/shared";
 import type { VisionImageFormat } from "./../utils/vision-format";
-import type { DocumentSnapshot } from "./types";
+import type { DocumentSnapshot } from "./../../types/index";
 
 export function collectMentionHints(attachments: readonly ComposerAttachment[]): AiChatMentionHints {
   const hints: AiChatMentionHints = {};

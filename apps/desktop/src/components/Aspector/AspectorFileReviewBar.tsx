@@ -12,9 +12,9 @@ import {
   subscribePendingFileReviews,
   getPendingFileReviewsSnapshot,
   type PendingFileReview,
-} from "../../lib/aspector/utils/pending-file-review";
-import { subscribeFileReviewFocus } from "../../lib/aspector/utils/file-review/bridge";
-import { useTranslation } from "../../lib/i18n/useTranslation";
+} from '../../lib/aspector/utils/pending-file-review';
+import { subscribeFileReviewFocus } from '../../lib/aspector/utils/file-review/bridge';
+import { useTranslation } from '../../lib/i18n/useTranslation';
 import { AspectorMonacoDiffReview } from "./AspectorMonacoDiffReview";
 
 type AspectorFileReviewBarProps = {

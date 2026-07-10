@@ -1,5 +1,5 @@
 import { Square } from "lucide-react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorAssistantMessageActionsProps = {
   canMutate: boolean;

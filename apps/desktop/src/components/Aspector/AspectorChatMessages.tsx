@@ -6,17 +6,17 @@ import { lexer, type Token, type Tokens } from "marked";
 import { AspectorChatMessageActions } from "./AspectorChatMessageActions";
 import { AspectorAssistantMessageActions } from "./AspectorAssistantMessageActions";
 import { AspectorToolCallsGroup } from "./AspectorToolCall";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { isCompactionCheckpointMessage, type ContextCompactionState } from "../../lib/aspector/chat/context-compaction";
-import { formatCompactTokens } from "../../lib/aspector/chat/context-usage";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { isCompactionCheckpointMessage, type ContextCompactionState } from '../../lib/aspector/chat/context-compaction';
+import { formatCompactTokens } from '../../lib/aspector/chat/context-usage';
 import { AspectorPathEvidenceNotice } from "./AspectorPathEvidenceNotice";
 import { AspectorTurnSummaryCard } from "./AspectorTurnSummaryCard";
 import { isPendingAssistantShell } from "./AspectorThinkingIndicator";
-import type { AiChatSessionStatus } from "../../lib/store/index";
-import * as chatDisplayText from "../../lib/aspector/chat/display-text";
-import { useElapsedSeconds, formatThinkingElapsed } from "../../lib/hooks/use-elapsed-seconds";
+import type { AiChatSessionStatus } from '../../lib/store/index';
+import * as chatDisplayText from '../../lib/aspector/chat/display-text';
+import { useElapsedSeconds, formatThinkingElapsed } from '../../lib/hooks/use-elapsed-seconds';
 import { HtmlArtifact } from "./HtmlArtifact";
-import { isReviewRequestMessage, type AiChatMessage, type AiChatMessageAttachment, type AiChatResponseTiming, type AiInlineNotice, type AiMessageSegment, type AiToolApprovalDecision } from "../../lib/aspector/chat/types";
+import { isReviewRequestMessage, type AiChatMessage, type AiChatMessageAttachment, type AiChatResponseTiming, type AiInlineNotice, type AiMessageSegment, type AiToolApprovalDecision } from '../../lib/aspector/chat/types';
 
 const coerceChatMessageText =
   chatDisplayText.coerceChatMessageText

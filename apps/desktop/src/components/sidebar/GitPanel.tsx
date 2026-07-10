@@ -1,12 +1,12 @@
 import { Check, ChevronDown, GitBranch, Loader2, Minus, Plus, Trash2, Undo2, ArrowDown, ArrowUp, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { displayPath, joinPath } from "../../lib/fileTree";
-import { categorizeGitFile, gitDecoBadge, type GitDecoStatus } from "../../lib/gitDecorations";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { useAspectStore } from "../../lib/store";
-import { aspectCommands } from "../../lib/tauri";
-import type { GitFileStatus, GitStatus } from "../../lib/types";
+import { displayPath, joinPath } from '../../lib/explorer/file-tree';
+import { categorizeGitFile, gitDecoBadge, type GitDecoStatus } from '../../lib/explorer/git-decorations';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useLuxStore } from '../../lib/store';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { GitFileStatus, GitStatus } from '../../lib/types';
 import { GitDiffModal } from "./GitDiffModal";
 import { readErrorMessage, TreeMessage } from "./SidebarShared";
 
@@ -32,9 +32,9 @@ type GitRow =
 
 export function GitPanel() {
   const { t } = useTranslation();
-  const gitStatus = useAspectStore((state) => state.gitStatus);
-  const setGitStatus = useAspectStore((state) => state.setGitStatus);
-  const workspace = useAspectStore((state) => state.workspace);
+  const gitStatus = useLuxStore((state) => state.gitStatus);
+  const setGitStatus = useLuxStore((state) => state.setGitStatus);
+  const workspace = useLuxStore((state) => state.workspace);
 
   const [commitMessage, setCommitMessage] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -67,7 +67,7 @@ export function GitPanel() {
     // Skip if the file-set hasn't changed since the last successful fetch.
     if (lastFetchedSignatureRef.current === fileSetSignature) return;
     let cancelled = false;
-    aspectCommands.gitDiff()
+    luxCommands.gitDiff()
       .then((diff) => {
         if (cancelled) return;
         lastFetchedSignatureRef.current = fileSetSignature;
@@ -106,19 +106,19 @@ export function GitPanel() {
     }
   }, [setGitStatus, t]);
 
-  const refresh = useCallback(() => void runOp("refresh", () => aspectCommands.gitStatus()), [runOp]);
-  const stage = useCallback((paths: string[]) => void runOp("stage", () => aspectCommands.gitStage(paths)), [runOp]);
-  const unstage = useCallback((paths: string[]) => void runOp("unstage", () => aspectCommands.gitUnstage(paths)), [runOp]);
+  const refresh = useCallback(() => void runOp("refresh", () => luxCommands.gitStatus()), [runOp]);
+  const stage = useCallback((paths: string[]) => void runOp("stage", () => luxCommands.gitStage(paths)), [runOp]);
+  const unstage = useCallback((paths: string[]) => void runOp("unstage", () => luxCommands.gitUnstage(paths)), [runOp]);
   const discard = useCallback((paths: string[], label: string) => {
     if (!window.confirm(t("sidebar.git.discardConfirm", { target: label }))) return;
-    void runOp("discard", () => aspectCommands.gitDiscard(paths));
+    void runOp("discard", () => luxCommands.gitDiscard(paths));
   }, [runOp, t]);
 
   const commit = useCallback(() => {
     const message = commitMessage.trim();
     if (!message) return;
     void runOp("commit", async () => {
-      const status = await aspectCommands.gitCommit(message);
+      const status = await luxCommands.gitCommit(message);
       setCommitMessage("");
       return status;
     });
@@ -128,8 +128,8 @@ export function GitPanel() {
     const message = commitMessage.trim();
     if (!message) return;
     void runOp("commit", async () => {
-      await aspectCommands.gitStage([]);
-      const status = await aspectCommands.gitCommit(message);
+      await luxCommands.gitStage([]);
+      const status = await luxCommands.gitCommit(message);
       setCommitMessage("");
       return status;
     });
@@ -138,21 +138,21 @@ export function GitPanel() {
   const toggleBranchMenu = useCallback(() => {
     setBranchMenuOpen((open) => {
       const next = !open;
-      if (next) void aspectCommands.gitBranches().then(setBranches).catch(() => setBranches([]));
+      if (next) void luxCommands.gitBranches().then(setBranches).catch(() => setBranches([]));
       return next;
     });
   }, []);
 
   const switchBranch = useCallback((name: string) => {
     setBranchMenuOpen(false);
-    void runOp("branch", () => aspectCommands.gitCheckoutBranch(name));
+    void runOp("branch", () => luxCommands.gitCheckoutBranch(name));
   }, [runOp]);
 
   const createBranch = useCallback(() => {
     setBranchMenuOpen(false);
     const name = window.prompt(t("sidebar.git.newBranchPrompt"))?.trim();
     if (!name) return;
-    void runOp("branch", () => aspectCommands.gitCreateBranch(name));
+    void runOp("branch", () => luxCommands.gitCreateBranch(name));
   }, [runOp, t]);
 
   const openDiff = useCallback((file: GitFileStatus) => {
@@ -243,10 +243,10 @@ export function GitPanel() {
           )}
         </div>
         <div className="git-sync">
-          <button className="git-sync-button" type="button" disabled={busy !== null} title={t("sidebar.git.pull")} onClick={() => void runOp("pull", () => aspectCommands.gitPull())}>
+          <button className="git-sync-button" type="button" disabled={busy !== null} title={t("sidebar.git.pull")} onClick={() => void runOp("pull", () => luxCommands.gitPull())}>
             <ArrowDown size={13} />{behind > 0 && <span>{behind}</span>}
           </button>
-          <button className="git-sync-button" type="button" disabled={busy !== null} title={t("sidebar.git.push")} onClick={() => void runOp("push", () => aspectCommands.gitPush())}>
+          <button className="git-sync-button" type="button" disabled={busy !== null} title={t("sidebar.git.push")} onClick={() => void runOp("push", () => luxCommands.gitPush())}>
             <ArrowUp size={13} />{ahead > 0 && <span>{ahead}</span>}
           </button>
           <button className="git-sync-button" type="button" disabled={busy !== null} title={t("sidebar.git.refresh")} onClick={refresh}>
@@ -486,3 +486,4 @@ function dirName(path: string): string {
   const slash = cleaned.lastIndexOf("/");
   return slash === -1 ? "" : cleaned.slice(0, slash);
 }
+

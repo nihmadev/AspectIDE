@@ -13,11 +13,11 @@ import { AspectorPlanRunCard, type ActivePlanRun } from "./AspectorPlanRunCard";
 import { AspectorSessionReviewBar } from "./AspectorSessionReviewBar";
 import { AspectorSubagentPanel } from "./AspectorSubagentPanel";
 import { AspectorAutomaticChecklist } from "./AspectorAutomaticChecklist";
-import { buildContextDropSummary } from "../../lib/aspector/chat/context-report";
-import { aiChatErrorFromMessage, classifyAiChatError, type AiChatErrorPresentation } from "../../lib/aspector/chat/errors";
-import { clearAiRetryNotice, getAiRetryNotice, setAiRetryNotice } from "../../lib/aspector/utils/retry-notice";
-import { automaticRetryReason, getAutomaticRetryAttempts, isTransientRetryKind, nextAutomaticRetry, resetAutomaticRetry } from "../../lib/aspector/automatic/retry";
-import { isAutomaticSocialOnlyMessage } from "../../lib/aspector/automatic/social-message";
+import { buildContextDropSummary } from '../../lib/aspector/chat/context-report';
+import { aiChatErrorFromMessage, classifyAiChatError, type AiChatErrorPresentation } from '../../lib/aspector/chat/errors';
+import { clearAiRetryNotice, getAiRetryNotice, setAiRetryNotice } from '../../lib/aspector/utils/retry-notice';
+import { automaticRetryReason, getAutomaticRetryAttempts, isTransientRetryKind, nextAutomaticRetry, resetAutomaticRetry } from '../../lib/aspector/automatic/retry';
+import { isAutomaticSocialOnlyMessage } from '../../lib/aspector/automatic/social-message';
 
 import { AspectorChatSlashMenu } from "./AspectorChatSlashMenu";
 import { AspectorChatMentionMenu } from "./AspectorChatMentionMenu";
@@ -27,9 +27,9 @@ import {
   pruneStaleToolOutputs,
   reconcileCompactedMessages,
   shouldAutoCompactContext,
-} from "../../lib/aspector/chat/context-compaction";
-import { loadProjectSlashCommands, type ProjectSlashCommand } from "../../lib/aspector/chat/project-commands";
-import { scheduleChatSessionTitleRefresh } from "../../lib/aspector/chat/session-title";
+} from '../../lib/aspector/chat/context-compaction';
+import { loadProjectSlashCommands, type ProjectSlashCommand } from '../../lib/aspector/chat/project-commands';
+import { scheduleChatSessionTitleRefresh } from '../../lib/aspector/chat/session-title';
 import {
   composerTextAfterSlashPick,
   filterSlashCommands,
@@ -37,18 +37,18 @@ import {
   isExactSlashCommand,
   parseGoalSlashCommand,
   parseSlashQuery,
-} from "../../lib/aspector/chat/slash-commands";
-import { openAgentBrowserPreviewTab } from "../../lib/agent-browser/preview-document";
-import { buildAiChatContextUsageSummary, formatCompactTokens } from "../../lib/aspector/chat/context-usage";
-import { aiChatSessionTitle, aiChatStatusLabel } from "../../lib/aspector/chat/presentation";
-import { useTranslation, type TranslateFn } from "../../lib/i18n/useTranslation";
-import { sanitizeSessionGoal } from "../../lib/aspector/session/orchestration/sanitize";
-import { getAiSessionGoal, setAiSessionGoal } from "../../lib/aspector/session/goal/session-goal";
+} from '../../lib/aspector/chat/slash-commands';
+import { openAgentBrowserPreviewTab } from '../../lib/agent-browser/preview-document';
+import { buildAiChatContextUsageSummary, formatCompactTokens } from '../../lib/aspector/chat/context-usage';
+import { aiChatSessionTitle, aiChatStatusLabel } from '../../lib/aspector/chat/presentation';
+import { useTranslation, type TranslateFn } from '../../lib/i18n/useTranslation';
+import { sanitizeSessionGoal } from '../../lib/aspector/session/orchestration/sanitize';
+import { getAiSessionGoal, setAiSessionGoal } from '../../lib/aspector/session/goal/session-goal';
 import {
   createInternalGoalOrchestrationMessage,
   filterVisibleChatMessages,
-} from "../../lib/aspector/chat/goal-orchestration";
-import { evaluateGoalRunContinuationAfterTurn } from "../../lib/aspector/session/goal/evaluator";
+} from '../../lib/aspector/chat/goal-orchestration';
+import { evaluateGoalRunContinuationAfterTurn } from '../../lib/aspector/session/goal/evaluator';
 import {
   buildGoalContinuationDirective,
   buildGoalKickoffDirective,
@@ -66,8 +66,8 @@ import {
   startGoalRun,
   stopGoalRun,
   syncGoalRunFromAssistantMessage,
-} from "../../lib/aspector/session/goal/session-goal-run";
-import { replaceAiSessionTodos } from "../../lib/aspector/session/todos";
+} from '../../lib/aspector/session/goal/session-goal-run';
+import { replaceAiSessionTodos } from '../../lib/aspector/session/todos';
 import {
   AI_AGENT_MODE_ORDER,
   AI_PREFERENCES_KEY,
@@ -80,35 +80,35 @@ import {
   mergeAiPreferences,
   resolveEffectiveAutoCompactThreshold,
   type AiPreferences,
-} from "../../lib/aspector/utils/preferences";
-import { aspectAvailability, aspectWeeklyBadge, useAspectModelSync, useAspectUsagePoller } from "../../lib/aspect/model-sync";
-import { useAspectUsageStore } from "../../lib/aspect/usage-store";
-import { isAspectProvider, relinkAspect } from "../../lib/aspect/enroll";
-import { resolveVisionImageFormat } from "../../lib/aspector/utils/vision-format";
-import { loadChatCheckpointStore, saveChatCheckpointStore } from "../../lib/aspector/chat/checkpoint-store";
-import { buildCheckpointSendInput } from "../../lib/aspector/chat/checkpoint-input";
+} from '../../lib/aspector/utils/preferences';
+import { aspectAvailability, aspectWeeklyBadge, useAspectModelSync, useAspectUsagePoller } from '../../lib/aspect/model-sync';
+import { useAspectUsageStore } from '../../lib/aspect/usage-store';
+import { isAspectProvider, relinkAspect } from '../../lib/aspect/enroll';
+import { resolveVisionImageFormat } from '../../lib/aspector/utils/vision-format';
+import { loadChatCheckpointStore, saveChatCheckpointStore } from '../../lib/aspector/chat/checkpoint-store';
+import { buildCheckpointSendInput } from '../../lib/aspector/chat/checkpoint-input';
 import {
   createTurnCheckpointBeforeSend,
   hasUserTurnCheckpoint,
   repairMessageTurnCheckpointIds,
-} from "../../lib/aspector/chat/turn-checkpoints";
-import { restoreChatBeforeUserMessage, undoLastAgentTurn } from "../../lib/aspector/chat/turn-restore";
+} from '../../lib/aspector/chat/turn-checkpoints';
+import { restoreChatBeforeUserMessage, undoLastAgentTurn } from '../../lib/aspector/chat/turn-restore';
 import {
   buildMessageDisplayAttachments,
   collectClipboardFiles,
   readClipboardImageFile,
   revokeComposerAttachmentPreviews,
-} from "../../lib/aspector/chat/composer-attachments";
-import { buildMentionRuntimeAttachments, collectMentionHints } from "../../lib/aspector/chat/mention-attachments";
-import { applyMentionSelection, mentionMenuVisible, parseMentionQuery, searchMentionCandidates, type AiMentionCandidate } from "../../lib/aspector/chat/mentions";
-import { buildPlanHandoffUserMessage, extractPlanHandoffPayload } from "../../lib/aspector/chat/plan-handoff";
-import { clearPendingPlan, getPendingPlanForSession, getPendingPlansSnapshot, subscribePendingPlans } from "../../lib/aspector/utils/pending-plan";
-import { getPendingQuestionForSession, getPendingQuestionsSnapshot, settlePendingQuestion, subscribePendingQuestions } from "../../lib/aspector/utils/pending-question";
-import { buildQueuedMessagePayload, dequeueFirstForSession, enqueueChatMessage, getQueuedMessagesForSession, removeQueuedMessage, setQueuedMessageInjectedTurn, updateQueuedMessage, useAllQueuedMessages, type QueuedMessage } from "../../lib/aspector/chat/queue";
+} from '../../lib/aspector/chat/composer-attachments';
+import { buildMentionRuntimeAttachments, collectMentionHints } from '../../lib/aspector/chat/mention-attachments';
+import { applyMentionSelection, mentionMenuVisible, parseMentionQuery, searchMentionCandidates, type AiMentionCandidate } from '../../lib/aspector/chat/mentions';
+import { buildPlanHandoffUserMessage, extractPlanHandoffPayload } from '../../lib/aspector/chat/plan-handoff';
+import { clearPendingPlan, getPendingPlanForSession, getPendingPlansSnapshot, subscribePendingPlans } from '../../lib/aspector/utils/pending-plan';
+import { getPendingQuestionForSession, getPendingQuestionsSnapshot, settlePendingQuestion, subscribePendingQuestions } from '../../lib/aspector/utils/pending-question';
+import { buildQueuedMessagePayload, dequeueFirstForSession, enqueueChatMessage, getQueuedMessagesForSession, removeQueuedMessage, setQueuedMessageInjectedTurn, updateQueuedMessage, useAllQueuedMessages, type QueuedMessage } from '../../lib/aspector/chat/queue';
 import { AspectorChatQueuedMessages } from "./AspectorChatQueuedMessages";
-import { readEditorDocumentAttachment, readSelectionAttachment } from "../../lib/aspector/chat/document-attachment";
-import { readChatAttachment, sendAiChatMessage } from "../../lib/aspector/chat/runtime";
-import { runNativeChatTurn } from "../../lib/aspector/subagents/native-turn";
+import { readEditorDocumentAttachment, readSelectionAttachment } from '../../lib/aspector/chat/document-attachment';
+import { readChatAttachment, sendAiChatMessage } from '../../lib/aspector/chat/runtime';
+import { runNativeChatTurn } from '../../lib/aspector/subagents/native-turn';
 import {
   findLastUserMessageIndex,
   isAbortError,
@@ -119,8 +119,8 @@ import {
   statusToSessionStatus,
   stripTrailingErrorBubble,
   trimCancelledAssistantShell,
-} from "../../lib/aspector/chat/panel-turn-helpers";
-import { dragEventHasEditorTab, readEditorTabDrop } from "../../lib/editor/chat-bridge";
+} from '../../lib/aspector/chat/panel-turn-helpers';
+import { dragEventHasEditorTab, readEditorTabDrop } from '../../lib/editor/chat-bridge';
 import {
   abortAiChatTurn,
   finishAiChatTurn,
@@ -133,24 +133,24 @@ import {
   startAiChatTurn,
   subscribeAiChatTurnRuntime,
   TURN_SUPERSEDED,
-} from "../../lib/aspector/chat/turn-runtime";
-import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision } from "../../lib/aspector/chat/types";
-import { normalizeVisibleReasoning } from "../../lib/aspector/chat/reasoning";
-import { DEFAULT_UI_FONT_STACK, withFontFallback } from "../../lib/editor/preferences";
-import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from "../../lib/store/index";
-import { isTauriRuntime, luxCommands } from "../../lib/tauri/commands";
-import { getActiveTurnId } from "../../lib/aspector/chat/active-turns";
-import { useVoiceInput } from "../../lib/hooks/use-voice-input";
-import { useLiveTokenSpeed } from "../../lib/hooks/use-live-token-speed";
-import { useAiChatScroll } from "../../lib/hooks/use-ai-chat-scroll";
-import { useAiChatComposerAttachments } from "../../lib/hooks/use-ai-chat-composer-attachments";
-import { useComposerSessionDraft } from "../../lib/hooks/use-composer-session-draft";
+} from '../../lib/aspector/chat/turn-runtime';
+import type { AiChatAttachmentInput, AiChatMessage, AiToolApprovalDecision } from '../../lib/aspector/chat/types';
+import { normalizeVisibleReasoning } from '../../lib/aspector/chat/reasoning';
+import { DEFAULT_UI_FONT_STACK, withFontFallback } from '../../lib/editor/preferences';
+import { isAiChatSessionBusyStatus, selectActiveAiChatSession, useLuxStore, type AiChatSessionStatus } from '../../lib/store/index';
+import { isTauriRuntime, luxCommands } from '../../lib/tauri/commands';
+import { getActiveTurnId } from '../../lib/aspector/chat/active-turns';
+import { useVoiceInput } from '../../lib/hooks/use-voice-input';
+import { useLiveTokenSpeed } from '../../lib/hooks/use-live-token-speed';
+import { useAiChatScroll } from '../../lib/hooks/use-ai-chat-scroll';
+import { useAiChatComposerAttachments } from '../../lib/hooks/use-ai-chat-composer-attachments';
+import { useComposerSessionDraft } from '../../lib/hooks/use-composer-session-draft';
 import {
   setComposerAttachments,
   setComposerDraft,
-} from "../../lib/aspector/chat/composer-session";
-import { findAnyPendingToolApproval } from "../../lib/aspector/chat/pending-approval";
-import { openWorkspaceEditorPath } from "../../lib/editor/open-workspace-editor-path";
+} from '../../lib/aspector/chat/composer-session';
+import { findAnyPendingToolApproval } from '../../lib/aspector/chat/pending-approval';
+import { openWorkspaceEditorPath } from '../../lib/editor/open-workspace-editor-path';
 import { AspectorChatGlobalApprovalBanner } from "./AspectorChatGlobalApprovalBanner";
 import { AspectorAgentNowPlaque } from "./AspectorAgentNowPlaque";
 import { AspectorChatClosedNotice } from "./AspectorChatClosedNotice";

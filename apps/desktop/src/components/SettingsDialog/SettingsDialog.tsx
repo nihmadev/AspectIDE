@@ -2,13 +2,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { ArrowUpCircle, Award, Brain, Braces, Cable, ChartColumn, Cloud, Compass, Download, FileCode, FileText, HelpCircle, Key, Loader2, Play, RefreshCw, ScrollText, Search, Settings2, Share2, Trash2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { FontSelectSetting, NumberSetting, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "./settings/SettingsControls";
-import { SkillsSection } from "./settings/SkillsSection";
-import { MemorySection } from "./settings/MemorySection";
-import { SshSection } from "./settings/SshSection";
-import { McpSection } from "./settings/McpSection";
-import { AiProvidersSection } from "./settings/AiProvidersSection";
-import { AgentBrowserSection } from "./settings/AgentBrowserSection";
+import { FontSelectSetting, NumberSetting, SegmentedSetting, SelectSetting, SettingsGrid, SettingsPanel, TextareaSetting, TextSetting, ToggleSetting, ToolRoundLimitSetting, type SaveState } from "../Settings/SettingsControls";
+import { SkillsSection } from "../Settings/SkillsSection";
+import { MemorySection } from "../Settings/MemorySection";
+import { SshSection } from "../Settings/SshSection";
+import { McpSection } from "../Settings/McpSection";
+import { AiProvidersSection } from "../Settings/AiProvidersSection";
+import { AgentBrowserSection } from "../Settings/AgentBrowserSection";
 import {
   AI_PREFERENCES_KEY,
   aiToolRoundLimitMax,
@@ -30,12 +30,12 @@ import {
   type AiToolApprovalMode,
   type AiVisionImageFormatPreference,
   type AiScanConcurrency,
-} from "../lib/aiPreferences";
-import { AI_VISION_IMAGE_FORMATS } from "../lib/aiVisionFormat";
-import { AiUsageSection } from "./settings/AiUsageSection";
+} from '../../lib/aspector/utils/preferences';
+import { AI_VISION_IMAGE_FORMATS } from '../../lib/aspector/utils/vision-format';
+import { AiUsageSection } from "../Settings/AiUsageSection";
 
 const AI_SCAN_CONCURRENCY_OPTIONS: readonly AiScanConcurrency[] = ["auto", "all", "half"];
-import { formatCompactTokens } from "../lib/aiChatContextUsage";
+import { formatCompactTokens } from '../../lib/aspector/chat/context-usage';
 import {
   clearLspInstallError,
   ensureLspInstallSubscription,
@@ -44,7 +44,7 @@ import {
   setLspUninstallIntent,
   subscribeLspInstallProgress,
   type LspInstallProgress,
-} from "../lib/lspInstallStore";
+} from '../../lib/editor/lsp-install-store';
 import {
   clearRuntimeProvisionError,
   ensureRuntimeProvisionSubscription,
@@ -52,7 +52,7 @@ import {
   onRuntimeProvisionFinished,
   subscribeRuntimeProvisionProgress,
   type RuntimeProvisionProgress,
-} from "../lib/runtimeProvisionStore";
+} from '../../lib/init/runtime-provision-store';
 import {
   applyCodeGraphStatus,
   clearCodeGraphError,
@@ -60,7 +60,7 @@ import {
   getCodeGraphStateSnapshot,
   onCodeGraphBuildFinished,
   subscribeCodeGraphState,
-} from "../lib/codeGraphStore";
+} from '../../lib/visualization/code-graph-store';
 import {
   defaultEditorPreferences,
   EDITOR_PREFERENCES_KEY,
@@ -69,18 +69,18 @@ import {
   type EditorPreferences,
   type RenderWhitespaceSetting,
   type WordWrapSetting,
-} from "../lib/editorPreferences";
-import { displayPath } from "../lib/fileTree";
-import { getFolderIconSvg } from "../lib/fileIconMap";
-import { extensionForLanguage, fileIconForName } from "../lib/fileIcons";
-import { displayNameForLanguage } from "../lib/languageLabels";
-import { loadDictionary, LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from "../lib/i18n";
-import { useTranslation, type TranslateFn } from "../lib/i18n/useTranslation";
-import { isRulesContextPath } from "../lib/aiRuntimeFileContext";
-import { useLuxStore } from "../lib/store";
-import { isTauriRuntime, luxCommands, type LspCatalogEntry, type RuntimeCatalogEntry } from "../lib/tauri";
-import { useUpdater } from "../lib/useUpdater";
-import type { FsEntry, WorkspaceInfo } from "../lib/types";
+} from '../../lib/editor/preferences';
+import { displayPath } from '../../lib/explorer/file-tree';
+import { getFolderIconSvg } from '../../lib/explorer/file-icon-map';
+import { extensionForLanguage, fileIconForName } from '../../lib/explorer/file-icons';
+import { displayNameForLanguage } from '../../lib/editor/language-labels';
+import { loadDictionary, LOCALES, UI_LOCALE_KEY, type Locale, type MessageKey } from '../../lib/i18n';
+import { useTranslation, type TranslateFn } from '../../lib/i18n/useTranslation';
+import { isRulesContextPath } from '../../lib/aspector/runtime/file-context';
+import { useLuxStore } from '../../lib/store';
+import { isTauriRuntime, luxCommands, type LspCatalogEntry, type RuntimeCatalogEntry } from '../../lib/tauri/commands';
+import { useUpdater } from '../../lib/hooks/use-updater';
+import type { FsEntry, WorkspaceInfo } from '../../lib/types';
 
 const scope = "user" as const;
 
@@ -1393,3 +1393,4 @@ function resetSection(sectionId: SettingsSectionId, resetEditor: (preferences: E
     }));
   }
 }
+

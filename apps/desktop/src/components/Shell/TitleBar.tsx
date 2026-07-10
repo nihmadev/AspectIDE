@@ -2,13 +2,13 @@ import { ArrowUpCircle, Minus, PanelLeft, PanelTop, Settings, Sparkles, Square, 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { useEffect, useRef, useState } from "react";
-import { useEditorCloseGuard } from "./EditorCloseGuard";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { closedDocumentIdsForAllDocuments } from "../lib/editor/close-targets";
-import { resetEditorFontZoom, toggleEditorMinimap, toggleEditorWordWrap, zoomEditorFontIn, zoomEditorFontOut } from "../lib/editor/preference-commands";
-import { useAspectStore } from "../lib/store/index";
-import { isTauriRuntime, aspectCommands } from "../lib/tauri/commands";
-import { pickAndOpenWorkspace, reloadWorkspace } from "../lib/workspace/actions";
+import { useEditorCloseGuard } from "../Editor/EditorCloseGuard";
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { closedDocumentIdsForAllDocuments } from '../../lib/editor/close-targets';
+import { resetEditorFontZoom, toggleEditorMinimap, toggleEditorWordWrap, zoomEditorFontIn, zoomEditorFontOut } from '../../lib/editor/preference-commands';
+import { useLuxStore } from '../../lib/store/index';
+import { isTauriRuntime, luxCommands } from '../../lib/tauri/commands';
+import { pickAndOpenWorkspace, reloadWorkspace } from '../../lib/workspace/actions';
 
 type TitleMenuItem = {
   label: string;
@@ -39,27 +39,27 @@ function isTitleBarInteractiveTarget(target: EventTarget | null) {
 }
 
 export function TitleBar() {
-  const workspaceMode = useAspectStore((state) => state.workspaceMode);
-  const setWorkspaceMode = useAspectStore((state) => state.setWorkspaceMode);
-  const workspace = useAspectStore((state) => state.workspace);
-  const activeDocumentId = useAspectStore((state) => state.activeDocumentId);
-  const openDocuments = useAspectStore((state) => state.openDocuments);
-  const sidebarVisible = useAspectStore((state) => state.sidebarVisible);
-  const toggleSidebar = useAspectStore((state) => state.toggleSidebar);
-  const aiChatOpen = useAspectStore((state) => state.aiChatOpen);
-  const toggleAiChat = useAspectStore((state) => state.toggleAiChat);
-  const bottomPanelOpen = useAspectStore((state) => state.bottomPanelOpen);
-  const setBottomPanelOpen = useAspectStore((state) => state.setBottomPanelOpen);
-  const editorPreferences = useAspectStore((state) => state.editorPreferences);
-  const setWorkspace = useAspectStore((state) => state.setWorkspace);
-  const upsertDocument = useAspectStore((state) => state.upsertDocument);
-  const openBottomPanel = useAspectStore((state) => state.openBottomPanel);
-  const setActiveActivity = useAspectStore((state) => state.setActiveActivity);
-  const setSidebarVisible = useAspectStore((state) => state.setSidebarVisible);
-  const setCommandPaletteOpen = useAspectStore((state) => state.setCommandPaletteOpen);
-  const setSettingsOpen = useAspectStore((state) => state.setSettingsOpen);
-  const updateAvailable = useAspectStore((state) => state.updateAvailable);
-  const openSettingsSection = useAspectStore((state) => state.openSettingsSection);
+  const workspaceMode = useLuxStore((state) => state.workspaceMode);
+  const setWorkspaceMode = useLuxStore((state) => state.setWorkspaceMode);
+  const workspace = useLuxStore((state) => state.workspace);
+  const activeDocumentId = useLuxStore((state) => state.activeDocumentId);
+  const openDocuments = useLuxStore((state) => state.openDocuments);
+  const sidebarVisible = useLuxStore((state) => state.sidebarVisible);
+  const toggleSidebar = useLuxStore((state) => state.toggleSidebar);
+  const aiChatOpen = useLuxStore((state) => state.aiChatOpen);
+  const toggleAiChat = useLuxStore((state) => state.toggleAiChat);
+  const bottomPanelOpen = useLuxStore((state) => state.bottomPanelOpen);
+  const setBottomPanelOpen = useLuxStore((state) => state.setBottomPanelOpen);
+  const editorPreferences = useLuxStore((state) => state.editorPreferences);
+  const setWorkspace = useLuxStore((state) => state.setWorkspace);
+  const upsertDocument = useLuxStore((state) => state.upsertDocument);
+  const openBottomPanel = useLuxStore((state) => state.openBottomPanel);
+  const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
+  const setSidebarVisible = useLuxStore((state) => state.setSidebarVisible);
+  const setCommandPaletteOpen = useLuxStore((state) => state.setCommandPaletteOpen);
+  const setSettingsOpen = useLuxStore((state) => state.setSettingsOpen);
+  const updateAvailable = useLuxStore((state) => state.updateAvailable);
+  const openSettingsSection = useLuxStore((state) => state.openSettingsSection);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
   const menuRef = useRef<HTMLElement | null>(null);
   const hoverSwitchedMenuRef = useRef<string | null>(null);
@@ -99,22 +99,22 @@ export function TitleBar() {
 
   const closeWorkspace = () => {
     requestCloseDocuments(closedDocumentIdsForAllDocuments(openDocuments), () => {
-      void aspectCommands.workspaceClose().then(() => setWorkspace(null)).catch(() => undefined);
+      void luxCommands.workspaceClose().then(() => setWorkspace(null)).catch(() => undefined);
     }, { title: t("titlebar.dialog.saveBeforeClosingFolder") });
   };
 
   const saveActiveEditor = () => {
     if (!activeDocumentId) return;
-    void aspectCommands.editorSaveFile(activeDocumentId).then(upsertDocument).catch(() => undefined);
+    void luxCommands.editorSaveFile(activeDocumentId).then(upsertDocument).catch(() => undefined);
   };
 
   const saveActiveEditorAs = () => {
     if (!activeDocumentId) return;
-    void aspectCommands.editorSaveFileAs(activeDocumentId).then(upsertDocument).catch(() => undefined);
+    void luxCommands.editorSaveFileAs(activeDocumentId).then(upsertDocument).catch(() => undefined);
   };
 
   const newUntitledFile = () => {
-    void aspectCommands.editorNewFile().then(upsertDocument).catch(() => undefined);
+    void luxCommands.editorNewFile().then(upsertDocument).catch(() => undefined);
   };
 
   const showActivity = (activity: Parameters<typeof setActiveActivity>[0]) => {

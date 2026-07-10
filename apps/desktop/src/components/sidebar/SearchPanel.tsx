@@ -2,12 +2,12 @@ import { CaseSensitive, Loader2, Regex, RefreshCw, Replace, ReplaceAll, Search, 
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { fileIconForName } from "../../lib/fileIcons";
-import { displayPath } from "../../lib/fileTree";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { useAspectStore } from "../../lib/store";
-import { aspectCommands } from "../../lib/tauri";
-import type { LspWorkspaceEdit, SearchHit, SearchOptions } from "../../lib/types";
+import { fileIconForName } from '../../lib/explorer/file-icons';
+import { displayPath } from '../../lib/explorer/file-tree';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useLuxStore } from '../../lib/store';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { LspWorkspaceEdit, SearchHit, SearchOptions } from '../../lib/types';
 import { PanelHeader, readErrorMessage, relativePath, TreeMessage } from "./SidebarShared";
 
 type SearchResultGroup = {
@@ -29,12 +29,12 @@ export function SearchPanel() {
   const lastScheduledSearchKey = useRef("");
   const [openError, setOpenError] = useState<string | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const searchResponse = useAspectStore((state) => state.searchResponse);
-  const setSearchResponse = useAspectStore((state) => state.setSearchResponse);
-  const upsertDocument = useAspectStore((state) => state.upsertDocument);
-  const updateOpenDocuments = useAspectStore((state) => state.updateOpenDocuments);
-  const setPendingEditorReveal = useAspectStore((state) => state.setPendingEditorReveal);
-  const workspace = useAspectStore((state) => state.workspace);
+  const searchResponse = useLuxStore((state) => state.searchResponse);
+  const setSearchResponse = useLuxStore((state) => state.setSearchResponse);
+  const upsertDocument = useLuxStore((state) => state.upsertDocument);
+  const updateOpenDocuments = useLuxStore((state) => state.updateOpenDocuments);
+  const setPendingEditorReveal = useLuxStore((state) => state.setPendingEditorReveal);
+  const workspace = useLuxStore((state) => state.workspace);
 
   const searchOptions = useMemo<SearchOptions>(() => ({
     case_sensitive: caseSensitive,
@@ -47,7 +47,7 @@ export function SearchPanel() {
   }), [caseSensitive, excludePattern, includeHidden, includePattern, useRegex, wholeWord]);
 
   const searchMutation = useMutation({
-    mutationFn: ({ options, value }: { value: string; options: SearchOptions; key: string }) => aspectCommands.searchQuery(value, options),
+    mutationFn: ({ options, value }: { value: string; options: SearchOptions; key: string }) => luxCommands.searchQuery(value, options),
     onSuccess: (response, variables) => {
       if (variables.key !== lastScheduledSearchKey.current) return;
       setOpenError(null);
@@ -61,7 +61,7 @@ export function SearchPanel() {
   });
 
   const openSearchHitMutation = useMutation({
-    mutationFn: async (hit: SearchHit) => ({ hit, document: await aspectCommands.editorOpenFile(hit.path) }),
+    mutationFn: async (hit: SearchHit) => ({ hit, document: await luxCommands.editorOpenFile(hit.path) }),
     onSuccess: ({ document, hit }) => {
       setOpenError(null);
       upsertDocument(document);
@@ -71,7 +71,7 @@ export function SearchPanel() {
   });
 
   const replaceMutation = useMutation({
-    mutationFn: async (hits: SearchHit[]) => aspectCommands.editorApplyWorkspaceEdit(buildSearchReplaceEdit(hits, query, replaceValue, { caseSensitive, useRegex })),
+    mutationFn: async (hits: SearchHit[]) => luxCommands.editorApplyWorkspaceEdit(buildSearchReplaceEdit(hits, query, replaceValue, { caseSensitive, useRegex })),
     onSuccess: (result) => {
       setOpenError(null);
       updateOpenDocuments(result.edited_documents);
@@ -275,3 +275,4 @@ function highlightPreview(hit: SearchHit): ReactNode {
     </>
   );
 }
+

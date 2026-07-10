@@ -2,12 +2,12 @@ import { Archive, Edit3, FolderOpen, Globe, History, MessageSquare, MessageSquar
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { AspectorLazyChatPanel } from "../Aspector/AspectorLazyChatPanel";
-import { openAgentBrowserPreviewTab } from "../../lib/agent-browser/preview-document";
-import { aiChatSessionTitle, aiChatStatusLabel } from "../../lib/aspector/chat/presentation";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { useAspectStore, type AiChatSession } from "../../lib/store/index";
-import { aspectCommands } from "../../lib/tauri/commands";
-import type { MessageKey } from "../../lib/i18n";
+import { openAgentBrowserPreviewTab } from '../../lib/agent-browser/preview-document';
+import { aiChatSessionTitle, aiChatStatusLabel } from '../../lib/aspector/chat/presentation';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useLuxStore, type AiChatSession } from '../../lib/store/index';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { MessageKey } from '../../lib/i18n';
 
 type AgentProjectLoadSummary = {
   active: boolean;
@@ -22,16 +22,16 @@ type AgentWorkspaceProps = {
 
 export function AgentWorkspace({ onOpenProject, projectLoad }: AgentWorkspaceProps) {
   const { t } = useTranslation();
-  const activeSessionId = useAspectStore((state) => state.activeAiChatSessionId);
-  const chatSessions = useAspectStore((state) => state.aiChatSessions);
-  const closeChatSession = useAspectStore((state) => state.closeAiChatSession);
-  const deleteChatSession = useAspectStore((state) => state.deleteAiChatSession);
-  const ensureChatSession = useAspectStore((state) => state.ensureAiChatSession);
-  const renameChatSession = useAspectStore((state) => state.renameAiChatSession);
-  const restoreChatSession = useAspectStore((state) => state.restoreAiChatSession);
-  const setActiveChatSession = useAspectStore((state) => state.setActiveAiChatSession);
-  const workspace = useAspectStore((state) => state.workspace);
-  const agentBrowserEnabled = useAspectStore((state) => state.aiPreferences.agentBrowserEnabled);
+  const activeSessionId = useLuxStore((state) => state.activeAiChatSessionId);
+  const chatSessions = useLuxStore((state) => state.aiChatSessions);
+  const closeChatSession = useLuxStore((state) => state.closeAiChatSession);
+  const deleteChatSession = useLuxStore((state) => state.deleteAiChatSession);
+  const ensureChatSession = useLuxStore((state) => state.ensureAiChatSession);
+  const renameChatSession = useLuxStore((state) => state.renameAiChatSession);
+  const restoreChatSession = useLuxStore((state) => state.restoreAiChatSession);
+  const setActiveChatSession = useLuxStore((state) => state.setActiveAiChatSession);
+  const workspace = useLuxStore((state) => state.workspace);
+  const agentBrowserEnabled = useLuxStore((state) => state.aiPreferences.agentBrowserEnabled);
   const sortedChatSessions = [...chatSessions].sort(compareAgentChatSessions);
   const openChatSessions = sortedChatSessions.filter((session) => !session.closedAt);
   const archivedChatSessions = sortedChatSessions.filter((session) => session.closedAt);
@@ -205,8 +205,8 @@ function AgentChatRow({ active, onClose, onCreateChat, onDelete, onRename, onRes
     ],
     [
       { label: t("agent.chat.contextMenu.rename"), onClick: () => setRenaming(true), shortcut: "F2" },
-      { label: t("agent.chat.contextMenu.copyTitle"), onClick: () => void aspectCommands.clipboardWriteText(title) },
-      { label: t("agent.chat.contextMenu.copyTranscript"), onClick: () => void aspectCommands.clipboardWriteText(formatChatTranscript(session, title)) },
+      { label: t("agent.chat.contextMenu.copyTitle"), onClick: () => void luxCommands.clipboardWriteText(title) },
+      { label: t("agent.chat.contextMenu.copyTranscript"), onClick: () => void luxCommands.clipboardWriteText(formatChatTranscript(session, title)) },
     ],
     [
       closed

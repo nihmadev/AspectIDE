@@ -1,5 +1,5 @@
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { useFileAssetUrl } from "../../lib/useFileAssetUrl";
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useFileAssetUrl } from '../../lib/hooks/use-file-asset-url';
 
 type ResolvedAsset = {
   error: string | null;

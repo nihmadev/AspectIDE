@@ -5,8 +5,8 @@ import {
   updateQueuedMessage,
   useQueuedMessages,
   type QueuedMessage,
-} from "../../lib/aspector/chat/queue";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+} from '../../lib/aspector/chat/queue';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorChatQueuedMessagesProps = {
   sessionId: string | null;

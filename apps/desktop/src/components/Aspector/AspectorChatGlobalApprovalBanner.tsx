@@ -1,7 +1,7 @@
 import { Shield } from "lucide-react";
-import type { PendingToolApprovalRef } from "../../lib/aspector/chat/pending-approval";
-import type { AiToolApprovalDecision } from "../../lib/aspector/chat/types";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { PendingToolApprovalRef } from '../../lib/aspector/chat/pending-approval';
+import type { AiToolApprovalDecision } from '../../lib/aspector/chat/types';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type AspectorChatGlobalApprovalBannerProps = {
   pending: PendingToolApprovalRef;

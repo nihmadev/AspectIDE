@@ -1,7 +1,7 @@
 import { Check, CornerDownLeft, MessageCircleQuestion, X } from "lucide-react";
 import { useMemo, useState } from "react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import type { PendingQuestion } from "../../lib/aspector/utils/pending-question";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import type { PendingQuestion } from '../../lib/aspector/utils/pending-question';
 import { HtmlArtifact } from "./HtmlArtifact";
 
 type AspectorQuestionCardProps = {

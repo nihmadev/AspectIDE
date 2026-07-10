@@ -1,6 +1,6 @@
 import type { CSSProperties, ReactNode } from "react";
-import { displayPath } from "../../lib/fileTree";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { displayPath } from '../../lib/explorer/file-tree';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 export type PanelAction = {
   label: string;

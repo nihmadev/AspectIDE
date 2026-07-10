@@ -4,15 +4,15 @@ import type { CSSProperties, DragEvent, KeyboardEvent as ReactKeyboardEvent, Mou
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEditorCloseGuard } from "../EditorCloseGuard";
-import { fileIconForName } from "../../lib/fileIcons";
-import { getFolderIconSvg } from "../../lib/fileIconMap";
-import { displayPath, joinPath, normalizePath, parentPath } from "../../lib/fileTree";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { useAspectStore } from "../../lib/store";
-import { aspectCommands } from "../../lib/tauri";
-import { externalFilesFromDrop, importExternalFiles, isExternalFileDrag } from "../../lib/explorerImport";
-import type { FsEntry } from "../../lib/types";
+import { useEditorCloseGuard } from "../Editor/EditorCloseGuard";
+import { fileIconForName } from '../../lib/explorer/file-icons';
+import { getFolderIconSvg } from '../../lib/explorer/file-icon-map';
+import { displayPath, joinPath, normalizePath, parentPath } from '../../lib/explorer/file-tree';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useLuxStore } from '../../lib/store';
+import { luxCommands } from '../../lib/tauri/commands';
+import { externalFilesFromDrop, importExternalFiles, isExternalFileDrag } from '../../lib/explorer/import';
+import type { FsEntry } from '../../lib/types';
 import {
   buildDirectories,
   buildGitDecorations,
@@ -45,32 +45,32 @@ const EXPLORER_OVERSCAN = 12;
 
 export function ExplorerPanel() {
   const { t } = useTranslation();
-  const workspace = useAspectStore((state) => state.workspace);
-  const workspaceFolders = useAspectStore((state) => state.workspaceFolders);
-  const setWorkspace = useAspectStore((state) => state.setWorkspace);
-  const addWorkspaceFolder = useAspectStore((state) => state.addWorkspaceFolder);
-  const removeWorkspaceFolder = useAspectStore((state) => state.removeWorkspaceFolder);
-  const fileEntries = useAspectStore((state) => state.fileEntries);
-  const gitStatus = useAspectStore((state) => state.gitStatus);
-  const fileTreeDirectories = useAspectStore((state) => state.fileTreeDirectories);
-  const fileTreeLoading = useAspectStore((state) => state.fileTreeLoading);
-  const fileTreeError = useAspectStore((state) => state.fileTreeError);
-  const setFileEntries = useAspectStore((state) => state.setFileEntries);
-  const setFileTreeDirectories = useAspectStore((state) => state.setFileTreeDirectories);
-  const setFileTreeLoading = useAspectStore((state) => state.setFileTreeLoading);
-  const setFileTreeError = useAspectStore((state) => state.setFileTreeError);
-  const activeDocument = useAspectStore((state) => state.openDocuments.find((document) => document.id === state.activeDocumentId) ?? null);
-  const openDocuments = useAspectStore((state) => state.openDocuments);
-  const closeDocument = useAspectStore((state) => state.closeDocument);
-  const upsertDocument = useAspectStore((state) => state.upsertDocument);
-  const openBottomPanel = useAspectStore((state) => state.openBottomPanel);
-  const setCommandPaletteOpen = useAspectStore((state) => state.setCommandPaletteOpen);
-  const setSettingsOpen = useAspectStore((state) => state.setSettingsOpen);
-  const upsertTerminalSession = useAspectStore((state) => state.upsertTerminalSession);
-  const explorerExpandedPaths = useAspectStore((state) => state.explorerExpandedPaths);
-  const setExplorerExpandedPaths = useAspectStore((state) => state.setExplorerExpandedPaths);
-  const ensureExplorerExpandedPath = useAspectStore((state) => state.ensureExplorerExpandedPath);
-  const toggleExplorerExpandedPath = useAspectStore((state) => state.toggleExplorerExpandedPath);
+  const workspace = useLuxStore((state) => state.workspace);
+  const workspaceFolders = useLuxStore((state) => state.workspaceFolders);
+  const setWorkspace = useLuxStore((state) => state.setWorkspace);
+  const addWorkspaceFolder = useLuxStore((state) => state.addWorkspaceFolder);
+  const removeWorkspaceFolder = useLuxStore((state) => state.removeWorkspaceFolder);
+  const fileEntries = useLuxStore((state) => state.fileEntries);
+  const gitStatus = useLuxStore((state) => state.gitStatus);
+  const fileTreeDirectories = useLuxStore((state) => state.fileTreeDirectories);
+  const fileTreeLoading = useLuxStore((state) => state.fileTreeLoading);
+  const fileTreeError = useLuxStore((state) => state.fileTreeError);
+  const setFileEntries = useLuxStore((state) => state.setFileEntries);
+  const setFileTreeDirectories = useLuxStore((state) => state.setFileTreeDirectories);
+  const setFileTreeLoading = useLuxStore((state) => state.setFileTreeLoading);
+  const setFileTreeError = useLuxStore((state) => state.setFileTreeError);
+  const activeDocument = useLuxStore((state) => state.openDocuments.find((document) => document.id === state.activeDocumentId) ?? null);
+  const openDocuments = useLuxStore((state) => state.openDocuments);
+  const closeDocument = useLuxStore((state) => state.closeDocument);
+  const upsertDocument = useLuxStore((state) => state.upsertDocument);
+  const openBottomPanel = useLuxStore((state) => state.openBottomPanel);
+  const setCommandPaletteOpen = useLuxStore((state) => state.setCommandPaletteOpen);
+  const setSettingsOpen = useLuxStore((state) => state.setSettingsOpen);
+  const upsertTerminalSession = useLuxStore((state) => state.upsertTerminalSession);
+  const explorerExpandedPaths = useLuxStore((state) => state.explorerExpandedPaths);
+  const setExplorerExpandedPaths = useLuxStore((state) => state.setExplorerExpandedPaths);
+  const ensureExplorerExpandedPath = useLuxStore((state) => state.ensureExplorerExpandedPath);
+  const toggleExplorerExpandedPath = useLuxStore((state) => state.toggleExplorerExpandedPath);
 
   const [pendingCreate, setPendingCreate] = useState<PendingCreate | null>(null);
   const [pendingRename, setPendingRename] = useState<PendingRename | null>(null);
@@ -105,7 +105,7 @@ export function ExplorerPanel() {
   );
 
   const openFileMutation = useMutation({
-    mutationFn: aspectCommands.editorOpenFile,
+    mutationFn: luxCommands.editorOpenFile,
     onSuccess: upsertDocument,
     onError: (error) => setOperationError(readErrorMessage(error, t)),
   });
@@ -116,7 +116,7 @@ export function ExplorerPanel() {
   // content is discarded Р Р†Р вЂљРІР‚Сњ the renamed file on disk already holds the last
   // saved state, which is the correct ground-truth after a FS rename.
   const retargetMovedDocuments = useCallback(async (sourcePath: string, destinationPath: string) => {
-    const { openDocuments: docs } = useAspectStore.getState();
+    const { openDocuments: docs } = useLuxStore.getState();
     const affected = docs.filter((doc) => doc.path && pathIsInsideEntry(sourcePath, doc.path));
     if (affected.length === 0) return;
     const sourceNorm = normalizePath(sourcePath);
@@ -130,7 +130,7 @@ export function ExplorerPanel() {
       // Close stale tab before opening the retargeted one
       closeDocument(doc.id);
       try {
-        upsertDocument(await aspectCommands.editorOpenFile(newPath));
+        upsertDocument(await luxCommands.editorOpenFile(newPath));
       } catch {
         // New path unreachable (e.g. directory that contains this file was
         // not fully moved yet) Р Р†Р вЂљРІР‚Сњ leave tab closed instead of keeping stale path.
@@ -146,7 +146,7 @@ export function ExplorerPanel() {
     setFileTreeError(null);
     setOperationError(null);
     try {
-      const pairs = await Promise.all(workspaceRoots.map(async (folder) => [folder, await aspectCommands.fsReadTree(folder.root)] as const));
+      const pairs = await Promise.all(workspaceRoots.map(async (folder) => [folder, await luxCommands.fsReadTree(folder.root)] as const));
       const directories = pairs.reduce<Record<string, FsEntry[]>>((merged, [folder, entries]) => ({
         ...merged,
         ...buildDirectories(folder.root, entries),
@@ -167,10 +167,10 @@ export function ExplorerPanel() {
     setFileTreeError(null);
     setOperationError(null);
     try {
-      const entries = await aspectCommands.fsReadTree(folder.root);
+      const entries = await luxCommands.fsReadTree(folder.root);
       const directories = buildDirectories(folder.root, entries);
       if (refreshSeq.current !== seq) return;
-      setFileTreeDirectories({ ...useAspectStore.getState().fileTreeDirectories, ...directories });
+      setFileTreeDirectories({ ...useLuxStore.getState().fileTreeDirectories, ...directories });
       if (workspace?.root === folder.root) setFileEntries(directories[normalizePath(folder.root)] ?? []);
       ensureExplorerExpandedPath(folder.root);
     } catch (error) {
@@ -221,8 +221,8 @@ export function ExplorerPanel() {
       const targetPath = joinPath(parent, trimmed);
       try {
         setOperationError(null);
-        if (kind === "file") await aspectCommands.fsCreateFile(targetPath);
-        else await aspectCommands.fsCreateDir(targetPath);
+        if (kind === "file") await luxCommands.fsCreateFile(targetPath);
+        else await luxCommands.fsCreateDir(targetPath);
         await refreshTree();
         ensureExplorerExpandedPath(parent);
         if (kind === "file") openFileMutation.mutate(targetPath);
@@ -246,7 +246,7 @@ export function ExplorerPanel() {
       try {
         setOperationError(null);
         const destination = joinPath(parentPath(entry.path), trimmed);
-        await aspectCommands.fsRename(entry.path, destination);
+        await luxCommands.fsRename(entry.path, destination);
         // Retarget any open editors that were pointing at the old path so
         // subsequent saves and AI tool calls reach the correct location.
         await retargetMovedDocuments(entry.path, destination);
@@ -267,8 +267,8 @@ export function ExplorerPanel() {
         setDeleteInFlight(true);
         setPendingDelete(null);
         setOperationError(null);
-        await aspectCommands.fsDelete(entry.path);
-        for (const document of useAspectStore.getState().openDocuments) {
+        await luxCommands.fsDelete(entry.path);
+        for (const document of useLuxStore.getState().openDocuments) {
           if (document.path && pathIsInsideEntry(entry.path, document.path)) closeDocument(document.id);
         }
         await refreshTree();
@@ -322,12 +322,12 @@ export function ExplorerPanel() {
       try {
         setOperationError(null);
         if (clipboardEntry.operation === "cut") {
-          await aspectCommands.fsRename(clipboardEntry.entry.path, destination);
+          await luxCommands.fsRename(clipboardEntry.entry.path, destination);
           // Retarget open editors that referred to the cut source path.
           await retargetMovedDocuments(clipboardEntry.entry.path, destination);
           setClipboardEntry(null);
         } else {
-          await aspectCommands.fsCopy(clipboardEntry.entry.path, destination);
+          await luxCommands.fsCopy(clipboardEntry.entry.path, destination);
         }
         await refreshTree();
         ensureExplorerExpandedPath(targetDirectory);
@@ -353,7 +353,7 @@ export function ExplorerPanel() {
       try {
         setOperationError(null);
         const destination = joinPath(targetDirectory, entry.name);
-        await aspectCommands.fsRename(entry.path, destination);
+        await luxCommands.fsRename(entry.path, destination);
         // Retarget open editors that referred to the dragged entry's old path.
         await retargetMovedDocuments(entry.path, destination);
         await refreshTree();
@@ -371,7 +371,7 @@ export function ExplorerPanel() {
 
   const copyAbsolutePath = useCallback(async (entry: FsEntry) => {
     try {
-      await aspectCommands.clipboardWriteText(entry.path);
+      await luxCommands.clipboardWriteText(entry.path);
     } catch (error) {
       setOperationError(readErrorMessage(error, t));
     }
@@ -383,7 +383,7 @@ export function ExplorerPanel() {
       .sort((a, b) => normalizePath(b.root).length - normalizePath(a.root).length)[0] ?? workspace;
     if (!owningRoot) return;
     try {
-      await aspectCommands.clipboardWriteText(relativePath(owningRoot.root, entry.path));
+      await luxCommands.clipboardWriteText(relativePath(owningRoot.root, entry.path));
     } catch (error) {
       setOperationError(readErrorMessage(error, t));
     }
@@ -394,7 +394,7 @@ export function ExplorerPanel() {
       try {
         const cwd = entry.kind === "directory" ? entry.path : parentPath(entry.path);
         openBottomPanel("terminal");
-        const createdTerminal = await aspectCommands.terminalCreate(undefined, cwd);
+        const createdTerminal = await luxCommands.terminalCreate(undefined, cwd);
         upsertTerminalSession(createdTerminal, true);
       } catch (error) {
         setOperationError(readErrorMessage(error, t));
@@ -405,7 +405,7 @@ export function ExplorerPanel() {
 
   const addFolderToWorkspace = useCallback(async () => {
     try {
-      const picked = await aspectCommands.workspacePickFolder();
+      const picked = await luxCommands.workspacePickFolder();
       if (!picked) return;
       addWorkspaceFolder(picked);
       await loadWorkspaceRoot(picked);
@@ -424,14 +424,14 @@ export function ExplorerPanel() {
       const remainingFolders = workspaceRoots.filter((folder) => normalizePath(folder.root) !== normalizePath(root));
       removeWorkspaceFolder(root);
       if (remainingFolders.length === 0) {
-        void aspectCommands.workspaceClose().then(() => setWorkspace(null)).catch(() => setWorkspace(null));
+        void luxCommands.workspaceClose().then(() => setWorkspace(null)).catch(() => setWorkspace(null));
         return;
       }
       if (workspace && normalizePath(workspace.root) === normalizePath(root)) {
         setWorkspace(remainingFolders[0]);
       }
       const normalizedRoot = normalizePath(root);
-      setFileTreeDirectories(Object.fromEntries(Object.entries(useAspectStore.getState().fileTreeDirectories).filter(([key]) => key !== normalizedRoot && !key.startsWith(`${normalizedRoot}/`))));
+      setFileTreeDirectories(Object.fromEntries(Object.entries(useLuxStore.getState().fileTreeDirectories).filter(([key]) => key !== normalizedRoot && !key.startsWith(`${normalizedRoot}/`))));
     }, { title: t("sidebar.explorer.removeWorkspaceFolder.saveChangesTitle") });
   }, [openDocuments, removeWorkspaceFolder, requestCloseDocuments, setFileTreeDirectories, setWorkspace, t, workspace, workspaceRoots]);
 
@@ -615,7 +615,7 @@ export function ExplorerPanel() {
         [
           { label: t("sidebar.explorer.contextMenu.newFile"), onClick: () => { ensureExplorerExpandedPath(targetDirectory); setPendingCreate({ kind: "file", parentPath: targetDirectory }); } },
           { label: t("sidebar.explorer.contextMenu.newFolder"), onClick: () => { ensureExplorerExpandedPath(targetDirectory); setPendingCreate({ kind: "directory", parentPath: targetDirectory }); } },
-          { label: t("sidebar.explorer.contextMenu.revealInFileExplorer"), shortcut: "Shift+Alt+R", onClick: () => void aspectCommands.fsRevealInFileExplorer(targetDirectory).catch((error) => setOperationError(readErrorMessage(error, t))) },
+          { label: t("sidebar.explorer.contextMenu.revealInFileExplorer"), shortcut: "Shift+Alt+R", onClick: () => void luxCommands.fsRevealInFileExplorer(targetDirectory).catch((error) => setOperationError(readErrorMessage(error, t))) },
           { label: t("sidebar.explorer.contextMenu.openInIntegratedTerminal"), onClick: () => void openEntryTerminal(entry) },
         ],
         [
@@ -624,7 +624,7 @@ export function ExplorerPanel() {
           { label: t("sidebar.explorer.contextMenu.removeFolderFromWorkspace"), onClick: () => removeFolderFromWorkspace(targetDirectory) },
         ],
         [
-          { label: t("sidebar.explorer.contextMenu.findInFolder"), shortcut: "Shift+Alt+F", onClick: () => { useAspectStore.getState().setActiveActivity("search"); setCommandPaletteOpen(true); } },
+          { label: t("sidebar.explorer.contextMenu.findInFolder"), shortcut: "Shift+Alt+F", onClick: () => { useLuxStore.getState().setActiveActivity("search"); setCommandPaletteOpen(true); } },
         ],
         [
           { label: t("common.paste"), shortcut: "Ctrl+V", disabled: !clipboardEntry, onClick: () => void pasteInto(targetDirectory) },
@@ -640,11 +640,11 @@ export function ExplorerPanel() {
       [
         { label: t("sidebar.explorer.contextMenu.newFile"), onClick: () => { ensureExplorerExpandedPath(targetDirectory); setPendingCreate({ kind: "file", parentPath: targetDirectory }); } },
         { label: t("sidebar.explorer.contextMenu.newFolder"), onClick: () => { ensureExplorerExpandedPath(targetDirectory); setPendingCreate({ kind: "directory", parentPath: targetDirectory }); } },
-        { label: t("sidebar.explorer.contextMenu.revealInFileExplorer"), shortcut: "Shift+Alt+R", onClick: () => void aspectCommands.fsRevealInFileExplorer(entry.path).catch((error) => setOperationError(readErrorMessage(error, t))) },
+        { label: t("sidebar.explorer.contextMenu.revealInFileExplorer"), shortcut: "Shift+Alt+R", onClick: () => void luxCommands.fsRevealInFileExplorer(entry.path).catch((error) => setOperationError(readErrorMessage(error, t))) },
         { label: t("sidebar.explorer.contextMenu.openInIntegratedTerminal"), onClick: () => void openEntryTerminal(entry) },
       ],
       [
-        { label: t("sidebar.explorer.contextMenu.findInFolder"), shortcut: "Shift+Alt+F", onClick: () => { useAspectStore.getState().setActiveActivity("search"); setCommandPaletteOpen(true); } },
+        { label: t("sidebar.explorer.contextMenu.findInFolder"), shortcut: "Shift+Alt+F", onClick: () => { useLuxStore.getState().setActiveActivity("search"); setCommandPaletteOpen(true); } },
       ],
       [
         { label: t("common.cut"), shortcut: "Ctrl+X", onClick: () => setClipboardEntry({ entry, operation: "cut" }) },
@@ -1158,3 +1158,4 @@ function DeleteEntryDialog({
     </Dialog.Root>
   );
 }
+

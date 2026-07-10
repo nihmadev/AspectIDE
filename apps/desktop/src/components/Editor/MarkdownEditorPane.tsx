@@ -3,10 +3,10 @@ import { Eye, EyeOff } from "lucide-react";
 import { lazy, Suspense, useMemo, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import type { editor } from "monaco-editor";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { sanitizeMarkdownHtml } from "../lib/preview/sanitize-html";
-import { useDebouncedValue } from "../lib/hooks/use-debounced-value";
-import type { DocumentSnapshot } from "../lib/types/index";
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { sanitizeMarkdownHtml } from '../../lib/preview/sanitize-html';
+import { useDebouncedValue } from '../../lib/hooks/use-debounced-value';
+import type { DocumentSnapshot } from '../../lib/types/index';
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
 

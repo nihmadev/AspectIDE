@@ -1,11 +1,11 @@
 import { ExternalLink, Music, RefreshCw, Video } from "lucide-react";
 import { useState } from "react";
-import { MediaAssetView } from "./preview/MediaAssetView";
-import { documentDisplayPath } from "../lib/editor/documents/documents";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { useFileAssetUrl } from "../lib/hooks/use-file-asset-url";
-import { aspectCommands } from "../lib/tauri/commands";
-import type { DocumentSnapshot } from "../lib/types/index";
+import { MediaAssetView } from "../Preview/MediaAssetView";
+import { documentDisplayPath } from '../../lib/editor/documents/documents';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useFileAssetUrl } from '../../lib/hooks/use-file-asset-url';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { DocumentSnapshot } from '../../lib/types/index';
 
 type MediaEditorPaneProps = {
   document: DocumentSnapshot;
@@ -41,7 +41,7 @@ export function MediaEditorPane({ document }: MediaEditorPaneProps) {
           <button className="icon-button compact" type="button" title={t("mediaEditor.action.refresh")} onClick={() => setReloadToken((value) => value + 1)}>
             <RefreshCw size={14} />
           </button>
-          <button className="icon-button compact" type="button" title={t("mediaEditor.action.openExternal")} onClick={() => void aspectCommands.fileOpenExternal(path).catch(() => undefined)}>
+          <button className="icon-button compact" type="button" title={t("mediaEditor.action.openExternal")} onClick={() => void luxCommands.fileOpenExternal(path).catch(() => undefined)}>
             <ExternalLink size={14} />
           </button>
         </div>

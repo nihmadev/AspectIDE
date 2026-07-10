@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { AiToolCallsGroup, type AiMessage } from "./components/AiToolCall";
+import { AspectorToolCallsGroup, type AspectorMessage } from "./components/Aspector/AspectorToolCall";
 import type { TranslateFn } from "./lib/i18n/useTranslation";
 import "./styles/tokens.css";
 import "./styles/ai-tool-calls.css";
@@ -16,7 +16,7 @@ const demoTranslate: TranslateFn = (key, params) => {
 };
 
 // Demo messages with tool calls
-const demoMessages: AiMessage[] = [
+const demoMessages: AspectorMessage[] = [
   {
     id: "1",
     role: "user",
@@ -226,7 +226,7 @@ function DemoApp() {
               {message.content}
             </div>
             {message.toolCalls && (
-              <AiToolCallsGroup t={demoTranslate} toolCalls={message.toolCalls} />
+              <AspectorToolCallsGroup t={demoTranslate} toolCalls={message.toolCalls} />
             )}
           </div>
         ))}

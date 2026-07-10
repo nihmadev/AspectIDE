@@ -6,9 +6,9 @@ import {
   type AiChatContextUsageMeta,
   type AiChatContextUsageRow,
   type AiChatContextUsageSummary,
-} from "../../lib/aspector/chat/context-usage";
-import type { AiChatContextDropSummary } from "../../lib/aspector/chat/context-report";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+} from '../../lib/aspector/chat/context-usage';
+import type { AiChatContextDropSummary } from '../../lib/aspector/chat/context-report';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 const ringSize = 22;
 const ringStroke = 2.5;

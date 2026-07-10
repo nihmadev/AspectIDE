@@ -9,9 +9,9 @@ import {
   removeSubagentRun,
   subscribeSubagentRuns,
   type SubagentRun,
-} from "../../lib/aspector/subagents/runs";
-import { formatCompactTokens } from "../../lib/aspector/chat/context-usage";
-import { getAiSessionGoal, getAiSessionGoalsSnapshot, subscribeAiSessionGoals } from "../../lib/aspector/session/goal/session-goal";
+} from '../../lib/aspector/subagents/runs';
+import { formatCompactTokens } from '../../lib/aspector/chat/context-usage';
+import { getAiSessionGoal, getAiSessionGoalsSnapshot, subscribeAiSessionGoals } from '../../lib/aspector/session/goal/session-goal';
 import {
   formatGoalRunDuration,
   formatGoalRunElapsedMs,
@@ -20,13 +20,13 @@ import {
   getAiSessionGoalRunsSnapshot,
   getGoalRunEvaluatorReason,
   subscribeAiSessionGoalRuns,
-} from "../../lib/aspector/session/goal/session-goal-run";
-import { getAiSessionTodosSnapshot, listAiSessionTodos, subscribeAiSessionTodos, type AiSessionTodoStatus } from "../../lib/aspector/session/todos";
-import { openWorkspaceEditorPath } from "../../lib/editor/open-workspace-editor-path";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { isFullExecutionAgentMode, type AiPreferences } from "../../lib/aspector/utils/preferences";
-import { resolveMaxParallelSubagents } from "../../lib/aspector/subagents/policy";
-import type { AiChatSessionStatus } from "../../lib/store/index";
+} from '../../lib/aspector/session/goal/session-goal-run';
+import { getAiSessionTodosSnapshot, listAiSessionTodos, subscribeAiSessionTodos, type AiSessionTodoStatus } from '../../lib/aspector/session/todos';
+import { openWorkspaceEditorPath } from '../../lib/editor/open-workspace-editor-path';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { isFullExecutionAgentMode, type AiPreferences } from '../../lib/aspector/utils/preferences';
+import { resolveMaxParallelSubagents } from '../../lib/aspector/subagents/policy';
+import type { AiChatSessionStatus } from '../../lib/store/index';
 import { AspectorAgentNowBar } from "./AspectorAgentNowBar";
 
 const ISLAND_FLOAT_POS_KEY = "aspect.agentIsland.floatPos";

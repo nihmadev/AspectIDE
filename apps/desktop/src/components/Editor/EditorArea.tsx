@@ -13,13 +13,13 @@ import { DatabaseEditorPane } from "./DatabaseEditorPane";
 import { DiagramEditorPane } from "./DiagramEditorPane";
 import { SpreadsheetEditorPane } from "./SpreadsheetEditorPane";
 import { TableEditorPane } from "./TableEditorPane";
-import { gitStatusForPath, useGitDecorations } from "../lib/explorer/git-decorations";
-import { fileIconForName } from "../lib/explorer/file-icons";
-import { resolveEditorPaneKind } from "../lib/editor/documents/view-routing";
-import { AgentBrowserPreviewEditorPane } from "./AgentBrowserPreviewEditorPane";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { resetEditorFontZoom, updateEditorFontSize, zoomEditorFontIn, zoomEditorFontOut } from "../lib/editor/preference-commands";
-import { DEFAULT_EDITOR_FONT_STACK, withFontFallback } from "../lib/editor/preferences";
+import { gitStatusForPath, useGitDecorations } from '../../lib/explorer/git-decorations';
+import { fileIconForName } from '../../lib/explorer/file-icons';
+import { resolveEditorPaneKind } from '../../lib/editor/documents/view-routing';
+import { AgentBrowserPreviewEditorPane } from "../AgentBrowser/AgentBrowserPreviewEditorPane";
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { resetEditorFontZoom, updateEditorFontSize, zoomEditorFontIn, zoomEditorFontOut } from '../../lib/editor/preference-commands';
+import { DEFAULT_EDITOR_FONT_STACK, withFontFallback } from '../../lib/editor/preferences';
 import {
   closedDocumentIdsForAllDocuments,
   closedDocumentIdsForDocumentInGroup,
@@ -27,29 +27,29 @@ import {
   closedDocumentIdsForEditorGroup,
   closedDocumentIdsForOtherDocuments,
   closedDocumentIdsForOtherDocumentsInGroup,
-} from "../lib/editor/close-targets";
+} from '../../lib/editor/close-targets';
 import {
   documentDisplayPath,
   documentRelativePath,
   documentTitle,
   isEditableTextDocument,
-} from "../lib/editor/documents/documents";
-import { setEditorTabDragData } from "../lib/editor/chat-bridge";
-import { normalizePath, parentPath } from "../lib/explorer/file-tree";
-import { AiFileReviewBar } from "./ai-chat/AiFileReviewBar";
+} from '../../lib/editor/documents/documents';
+import { setEditorTabDragData } from '../../lib/editor/chat-bridge';
+import { normalizePath, parentPath } from '../../lib/explorer/file-tree';
+import { AspectorFileReviewBar } from "../Aspector/AspectorFileReviewBar";
 import { EditorBreadcrumb } from "./EditorBreadcrumb";
 import {
   getPendingFileReviewsSnapshot,
   listPendingFileReviewsForPath,
   subscribePendingFileReviews,
-} from "../lib/aspector/utils/pending-file-review";
+} from '../../lib/aspector/utils/pending-file-review';
 import {
   applyAiEditDecorations,
   createEmptyAiEditDecorationState,
   type AiEditDecorationState,
-} from "../lib/editor/monaco/ai-edit-decorations";
-import { setEditorSelectionSnapshot } from "../lib/editor/selection-bridge";
-import { applyDebugBreakpointDecorations, registerDebugBreakpointGutter } from "../lib/editor/monaco/debug-adapters";
+} from '../../lib/editor/monaco/ai-edit-decorations';
+import { setEditorSelectionSnapshot } from '../../lib/editor/selection-bridge';
+import { applyDebugBreakpointDecorations, registerDebugBreakpointGutter } from '../../lib/editor/monaco/debug-adapters';
 import {
   applyDiagnosticsMarkers,
   disposeLspProviders,
@@ -59,15 +59,15 @@ import {
   type MonacoDisposable,
   type MonacoEditorInstance,
   type MonacoInstance,
-} from "../lib/editor/monaco/lsp-adapters";
-import { useAspectStore, type Activity, type EditorGroup } from "../lib/store/index";
-import { aspectCommands } from "../lib/tauri/commands";
+} from '../../lib/editor/monaco/lsp-adapters';
+import { useLuxStore, type Activity, type EditorGroup } from '../../lib/store/index';
+import { luxCommands } from '../../lib/tauri/commands';
 import type {
   DebugResolvedBreakpoint,
   DebugSourceBreakpoint,
   DocumentSnapshot,
   WorkspaceDiagnostic,
-} from "../lib/types/index";
+} from '../../lib/types/index';
 
 const MonacoEditor = lazy(() => import("@monaco-editor/react"));
 const noDiagnostics: WorkspaceDiagnostic[] = [];
@@ -82,36 +82,36 @@ type EditorTabMenuAction = {
 };
 
 export function EditorArea() {
-  const openDocuments = useAspectStore((state) => state.openDocuments);
-  const editorGroups = useAspectStore((state) => state.editorGroups);
-  const activeEditorGroupId = useAspectStore((state) => state.activeEditorGroupId);
-  const setActiveEditorGroup = useAspectStore((state) => state.setActiveEditorGroup);
-  const setActiveDocumentInGroup = useAspectStore((state) => state.setActiveDocumentInGroup);
-  const splitActiveEditor = useAspectStore((state) => state.splitActiveEditor);
-  const splitDocumentInGroup = useAspectStore((state) => state.splitDocumentInGroup);
-  const closeEditorGroup = useAspectStore((state) => state.closeEditorGroup);
-  const closeDocumentInGroup = useAspectStore((state) => state.closeDocumentInGroup);
-  const closeOtherDocumentsInGroup = useAspectStore((state) => state.closeOtherDocumentsInGroup);
-  const closeDocumentsToRightInGroup = useAspectStore((state) => state.closeDocumentsToRightInGroup);
-  const closeSavedDocumentsInGroup = useAspectStore((state) => state.closeSavedDocumentsInGroup);
-  const closeOtherDocuments = useAspectStore((state) => state.closeOtherDocuments);
-  const closeAllDocuments = useAspectStore((state) => state.closeAllDocuments);
-  const ensureExplorerExpandedPath = useAspectStore((state) => state.ensureExplorerExpandedPath);
-  const upsertDocument = useAspectStore((state) => state.upsertDocument);
-  const applyDocumentEdits = useAspectStore((state) => state.applyDocumentEdits);
-  const workspace = useAspectStore((state) => state.workspace);
-  const setActiveActivity = useAspectStore((state) => state.setActiveActivity);
-  const setSidebarVisible = useAspectStore((state) => state.setSidebarVisible);
-  const editorPreferences = useAspectStore((state) => state.editorPreferences);
-  const aiPreferences = useAspectStore((state) => state.aiPreferences);
-  const diagnosticsByPath = useAspectStore((state) => state.diagnosticsByPath);
-  const debugSourceBreakpointsByPath = useAspectStore((state) => state.debugSourceBreakpointsByPath);
-  const debugResolvedBreakpointsByPath = useAspectStore((state) => state.debugResolvedBreakpointsByPath);
-  const toggleDebugSourceBreakpoint = useAspectStore((state) => state.toggleDebugSourceBreakpoint);
-  const pendingEditorReveal = useAspectStore((state) => state.pendingEditorReveal);
-  const setPendingEditorReveal = useAspectStore((state) => state.setPendingEditorReveal);
-  const consumePendingEditorReveal = useAspectStore((state) => state.consumePendingEditorReveal);
-  const updateOpenDocuments = useAspectStore((state) => state.updateOpenDocuments);
+  const openDocuments = useLuxStore((state) => state.openDocuments);
+  const editorGroups = useLuxStore((state) => state.editorGroups);
+  const activeEditorGroupId = useLuxStore((state) => state.activeEditorGroupId);
+  const setActiveEditorGroup = useLuxStore((state) => state.setActiveEditorGroup);
+  const setActiveDocumentInGroup = useLuxStore((state) => state.setActiveDocumentInGroup);
+  const splitActiveEditor = useLuxStore((state) => state.splitActiveEditor);
+  const splitDocumentInGroup = useLuxStore((state) => state.splitDocumentInGroup);
+  const closeEditorGroup = useLuxStore((state) => state.closeEditorGroup);
+  const closeDocumentInGroup = useLuxStore((state) => state.closeDocumentInGroup);
+  const closeOtherDocumentsInGroup = useLuxStore((state) => state.closeOtherDocumentsInGroup);
+  const closeDocumentsToRightInGroup = useLuxStore((state) => state.closeDocumentsToRightInGroup);
+  const closeSavedDocumentsInGroup = useLuxStore((state) => state.closeSavedDocumentsInGroup);
+  const closeOtherDocuments = useLuxStore((state) => state.closeOtherDocuments);
+  const closeAllDocuments = useLuxStore((state) => state.closeAllDocuments);
+  const ensureExplorerExpandedPath = useLuxStore((state) => state.ensureExplorerExpandedPath);
+  const upsertDocument = useLuxStore((state) => state.upsertDocument);
+  const applyDocumentEdits = useLuxStore((state) => state.applyDocumentEdits);
+  const workspace = useLuxStore((state) => state.workspace);
+  const setActiveActivity = useLuxStore((state) => state.setActiveActivity);
+  const setSidebarVisible = useLuxStore((state) => state.setSidebarVisible);
+  const editorPreferences = useLuxStore((state) => state.editorPreferences);
+  const aiPreferences = useLuxStore((state) => state.aiPreferences);
+  const diagnosticsByPath = useLuxStore((state) => state.diagnosticsByPath);
+  const debugSourceBreakpointsByPath = useLuxStore((state) => state.debugSourceBreakpointsByPath);
+  const debugResolvedBreakpointsByPath = useLuxStore((state) => state.debugResolvedBreakpointsByPath);
+  const toggleDebugSourceBreakpoint = useLuxStore((state) => state.toggleDebugSourceBreakpoint);
+  const pendingEditorReveal = useLuxStore((state) => state.pendingEditorReveal);
+  const setPendingEditorReveal = useLuxStore((state) => state.setPendingEditorReveal);
+  const consumePendingEditorReveal = useLuxStore((state) => state.consumePendingEditorReveal);
+  const updateOpenDocuments = useLuxStore((state) => state.updateOpenDocuments);
   const { requestCloseDocuments } = useEditorCloseGuard();
   const { t } = useTranslation();
 
@@ -119,7 +119,7 @@ export function EditorArea() {
     let lastZoomAt = 0;
     const zoomFromWheel = (event: WheelEvent) => {
       if (!(event.ctrlKey || event.metaKey)) return;
-      if (!useAspectStore.getState().editorPreferences.mouseWheelZoom) return;
+      if (!useLuxStore.getState().editorPreferences.mouseWheelZoom) return;
       if (!(event.target instanceof Element) || !event.target.closest(".editor-area")) return;
 
       event.preventDefault();
@@ -142,12 +142,12 @@ export function EditorArea() {
     .filter((group) => group.documentIds.length > 0);
 
   const saveMutation = useMutation({
-    mutationFn: aspectCommands.editorSaveFile,
+    mutationFn: luxCommands.editorSaveFile,
     onSuccess: upsertDocument,
   });
 
   const saveAsMutation = useMutation({
-    mutationFn: aspectCommands.editorSaveFileAs,
+    mutationFn: luxCommands.editorSaveFileAs,
     onSuccess: upsertDocument,
   });
 
@@ -163,7 +163,7 @@ export function EditorArea() {
 
   const applySpreadsheetChanges = (id: string, text: string) => {
     enqueueEditorOperation(id, async () => {
-      const document = await aspectCommands.editorUpdateText(id, text);
+      const document = await luxCommands.editorUpdateText(id, text);
       upsertDocument(document);
     });
   };
@@ -173,7 +173,7 @@ export function EditorArea() {
 
     if (event.isFlush || event.isEolChange) {
       enqueueEditorOperation(id, async () => {
-        const document = await aspectCommands.editorUpdateText(id, value);
+        const document = await luxCommands.editorUpdateText(id, value);
         upsertDocument(document);
       });
       return;
@@ -183,10 +183,10 @@ export function EditorArea() {
     if (edits.length === 0) return;
     enqueueEditorOperation(id, async () => {
       try {
-        const result = await aspectCommands.editorApplyEdits(id, edits);
+        const result = await luxCommands.editorApplyEdits(id, edits);
         applyDocumentEdits(id, edits, result);
       } catch {
-        const document = await aspectCommands.editorUpdateText(id, value);
+        const document = await luxCommands.editorUpdateText(id, value);
         upsertDocument(document);
       }
     });
@@ -341,13 +341,13 @@ function EditorGroupPane({
   closeSavedDocumentsInGroup: (groupId: string) => void;
   documents: DocumentSnapshot[];
   diagnosticsByPath: Record<string, WorkspaceDiagnostic[]>;
-  debugResolvedBreakpointsByPath: ReturnType<typeof useAspectStore.getState>["debugResolvedBreakpointsByPath"];
-  debugSourceBreakpointsByPath: ReturnType<typeof useAspectStore.getState>["debugSourceBreakpointsByPath"];
-  editorPreferences: typeof useAspectStore.getState extends () => infer T ? T extends { editorPreferences: infer P } ? P : never : never;
-  aiPreferences: typeof useAspectStore.getState extends () => infer T ? T extends { aiPreferences: infer P } ? P : never : never;
-  pendingEditorReveal: ReturnType<typeof useAspectStore.getState>["pendingEditorReveal"];
-  setPendingEditorReveal: ReturnType<typeof useAspectStore.getState>["setPendingEditorReveal"];
-  consumePendingEditorReveal: ReturnType<typeof useAspectStore.getState>["consumePendingEditorReveal"];
+  debugResolvedBreakpointsByPath: ReturnType<typeof useLuxStore.getState>["debugResolvedBreakpointsByPath"];
+  debugSourceBreakpointsByPath: ReturnType<typeof useLuxStore.getState>["debugSourceBreakpointsByPath"];
+  editorPreferences: typeof useLuxStore.getState extends () => infer T ? T extends { editorPreferences: infer P } ? P : never : never;
+  aiPreferences: typeof useLuxStore.getState extends () => infer T ? T extends { aiPreferences: infer P } ? P : never : never;
+  pendingEditorReveal: ReturnType<typeof useLuxStore.getState>["pendingEditorReveal"];
+  setPendingEditorReveal: ReturnType<typeof useLuxStore.getState>["setPendingEditorReveal"];
+  consumePendingEditorReveal: ReturnType<typeof useLuxStore.getState>["consumePendingEditorReveal"];
   ensureExplorerExpandedPath: (path: string) => void;
   group: EditorGroup;
   groupCount: number;
@@ -364,12 +364,12 @@ function EditorGroupPane({
   toggleDebugSourceBreakpoint: (path: string, line: number) => void;
   applyEditorChanges: (id: string, event: editor.IModelContentChangedEvent, value: string | undefined) => void;
   applySpreadsheetChanges: (id: string, text: string) => void;
-  updateOpenDocuments: ReturnType<typeof useAspectStore.getState>["updateOpenDocuments"];
-  upsertDocument: ReturnType<typeof useAspectStore.getState>["upsertDocument"];
+  updateOpenDocuments: ReturnType<typeof useLuxStore.getState>["updateOpenDocuments"];
+  upsertDocument: ReturnType<typeof useLuxStore.getState>["upsertDocument"];
   workspaceRoot: string | null;
 }) {
   const { t } = useTranslation();
-  const activeAiChatSessionId = useAspectStore((state) => state.activeAiChatSessionId);
+  const activeAiChatSessionId = useLuxStore((state) => state.activeAiChatSessionId);
   const isActiveGroup = activeEditorGroupId === group.id;
   const editorRef = useRef<MonacoEditorInstance | null>(null);
   const monacoRef = useRef<MonacoInstance | null>(null);
@@ -577,7 +577,7 @@ function EditorGroupPane({
             />
           ) : editorPaneKind === "monaco" ? (
             <>
-              <AiFileReviewBar documentPath={activeDocument.path} sessionId={activeAiChatSessionId} />
+              <AspectorFileReviewBar documentPath={activeDocument.path} sessionId={activeAiChatSessionId} />
               <Suspense fallback={<div className="editor-loading">{t("editor.status.loading")}</div>}>
               <MonacoEditor
                 height="100%"
@@ -716,9 +716,9 @@ function EditorTab({
 
   const closeTab = () => closeDocumentInGroup(groupId, document.id);
   const copyPath = () => {
-    if (document.path) void aspectCommands.clipboardWriteText(document.path).catch(() => undefined);
+    if (document.path) void luxCommands.clipboardWriteText(document.path).catch(() => undefined);
   };
-  const copyRelativePath = () => void aspectCommands.clipboardWriteText(documentRelativePath(document, workspaceRoot)).catch(() => undefined);
+  const copyRelativePath = () => void luxCommands.clipboardWriteText(documentRelativePath(document, workspaceRoot)).catch(() => undefined);
 
   const fileBackedGroups: EditorTabMenuAction[][] = document.path
     ? [
@@ -727,7 +727,7 @@ function EditorTab({
           { label: t("editor.tabMenu.copyRelativePath"), shortcut: "Ctrl+M Ctrl+Shift+C", onClick: copyRelativePath },
         ],
         [
-          { label: t("editor.tabMenu.revealInFileExplorer"), shortcut: "Shift+Alt+R", onClick: () => document.path && void aspectCommands.fsRevealInFileExplorer(document.path).catch(() => undefined) },
+          { label: t("editor.tabMenu.revealInFileExplorer"), shortcut: "Shift+Alt+R", onClick: () => document.path && void luxCommands.fsRevealInFileExplorer(document.path).catch(() => undefined) },
           { label: t("editor.tabMenu.revealInExplorerView"), onClick: revealInExplorer },
         ],
       ]

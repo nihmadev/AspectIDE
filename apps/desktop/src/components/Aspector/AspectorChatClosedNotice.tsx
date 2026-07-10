@@ -1,5 +1,5 @@
 import { MessageSquarePlus } from "lucide-react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 /** Notice shown when the active chat session has been closed, offering to restore it. */
 export function AspectorChatClosedNotice({ onRestore, t }: { onRestore: () => void; t: TranslateFn }) {

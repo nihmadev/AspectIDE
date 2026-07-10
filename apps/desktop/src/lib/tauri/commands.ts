@@ -53,7 +53,7 @@ import type {
   LspTextEdit,
   LspWorkspaceSymbol,
   LspWorkspaceEdit,
-  LuxEvent,
+  AspectEvent,
   RecentWorkspace,
   SearchOptions,
   SearchResponse,
@@ -1277,8 +1277,8 @@ function defaultKeybindingProfile(): KeybindingProfile {
   };
 }
 
-export async function subscribeLuxEvents(handler: (event: LuxEvent) => void) {
-  return safeListen<LuxEvent>("lux://event", handler, { label: "lux://event" });
+export async function subscribeLuxEvents(handler: (event: AspectEvent) => void) {
+  return safeListen<AspectEvent>("lux://event", handler, { label: "lux://event" });
 }
 
 export async function subscribeAiChatStream(handler: (event: AiChatStreamEvent) => void) {

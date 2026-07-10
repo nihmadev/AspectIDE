@@ -1,7 +1,7 @@
 import { ChevronRight, RotateCcw } from "lucide-react";
-import type { AiChatErrorPresentation } from "../../lib/aspector/chat/errors";
-import type { AiChatErrorHistoryEntry } from "../../lib/store/index";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { AiChatErrorPresentation } from '../../lib/aspector/chat/errors';
+import type { AiChatErrorHistoryEntry } from '../../lib/store/index';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 function formatErrorTime(timestamp: number) {
   return new Date(timestamp).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });

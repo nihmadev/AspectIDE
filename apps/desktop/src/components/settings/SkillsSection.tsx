@@ -1,9 +1,9 @@
 import { Check, DownloadCloud, Loader2, Pencil, Plus, Trash2, Wand2 } from "lucide-react";
-import { CompactDropdown } from "../CompactDropdown";
+import { CompactDropdown } from "../CompactDropdown/CompactDropdown";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { aspectCommands, type ImportableSkill, type Skill, type SkillDraft, type SkillScope } from "../../lib/tauri";
-import type { WorkspaceInfo } from "../../lib/types";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { luxCommands, type ImportableSkill, type Skill, type SkillDraft, type SkillScope } from '../../lib/tauri/commands';
+import type { WorkspaceInfo } from '../../lib/types';
 
 type ScopeFilter = "all" | SkillScope;
 
@@ -29,7 +29,7 @@ export function SkillsSection({ workspace, t }: { workspace: WorkspaceInfo | nul
     setLoading(true);
     setError(null);
     try {
-      setSkills(await aspectCommands.skillsList());
+      setSkills(await luxCommands.skillsList());
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -49,7 +49,7 @@ export function SkillsSection({ workspace, t }: { workspace: WorkspaceInfo | nul
   const toggleEnabled = useCallback(async (skill: Skill) => {
     try {
       // In-place flag flip РІР‚вЂќ preserves the file's other content (vs a full re-render).
-      await aspectCommands.skillsSetEnabled(skill.scope, skill.slug, !skill.enabled);
+      await luxCommands.skillsSetEnabled(skill.scope, skill.slug, !skill.enabled);
       void refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -59,7 +59,7 @@ export function SkillsSection({ workspace, t }: { workspace: WorkspaceInfo | nul
   const remove = useCallback(async (skill: Skill) => {
     if (!window.confirm(t("settings.skills.confirmDelete", { name: skill.name }))) return;
     try {
-      await aspectCommands.skillsDelete(skill.scope, skill.slug);
+      await luxCommands.skillsDelete(skill.scope, skill.slug);
       void refresh();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -189,7 +189,7 @@ function SkillEditor({
         enabled,
         body,
       };
-      await aspectCommands.skillsSave(scope, slug, draft);
+      await luxCommands.skillsSave(scope, slug, draft);
       onSaved();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -299,7 +299,7 @@ function SkillImporter({
 
   useEffect(() => {
     let active = true;
-    void aspectCommands
+    void luxCommands
       .skillsDiscoverImportable()
       .then((found) => { if (active) setCandidates(found); })
       .catch((cause) => { if (active) setError(cause instanceof Error ? cause.message : String(cause)); })
@@ -314,7 +314,7 @@ function SkillImporter({
     setBusy(key);
     setError(null);
     try {
-      await aspectCommands.skillsImport(TARGET_SCOPE, slug, content);
+      await luxCommands.skillsImport(TARGET_SCOPE, slug, content);
       setImported((prev) => new Set(prev).add(key));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -339,7 +339,7 @@ function SkillImporter({
       const key = candidateKey(candidate);
       if (imported.has(key)) continue;
       try {
-        await aspectCommands.skillsImport(TARGET_SCOPE, candidate.slug, candidate.content);
+        await luxCommands.skillsImport(TARGET_SCOPE, candidate.slug, candidate.content);
         setImported((prev) => new Set(prev).add(key));
         imports += 1;
       } catch (cause) {
@@ -439,3 +439,4 @@ function SkillImporter({
     </div>
   );
 }
+

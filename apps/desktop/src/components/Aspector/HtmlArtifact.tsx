@@ -1,6 +1,6 @@
 import { Code2, Copy, Eye } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 type ArtifactView = "preview" | "code";
 

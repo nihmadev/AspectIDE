@@ -1,8 +1,8 @@
 import { ChevronRight, Loader2 } from "lucide-react";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { getAiRetryNotice, getAiRetryNoticeRevision, subscribeAiRetryNotice } from "../../lib/aspector/utils/retry-notice";
-import type { AiChatErrorHistoryEntry } from "../../lib/store/index";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import { getAiRetryNotice, getAiRetryNoticeRevision, subscribeAiRetryNotice } from '../../lib/aspector/utils/retry-notice';
+import type { AiChatErrorHistoryEntry } from '../../lib/store/index';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 function formatRetryErrorTime(timestamp: number) {
   return new Date(timestamp).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });

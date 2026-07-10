@@ -1,10 +1,10 @@
 import { ExternalLink, ImageIcon, Minus, Plus, RefreshCw, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { documentDisplayPath } from "../lib/editor/documents/documents";
-import { useTranslation } from "../lib/i18n/useTranslation";
-import { useFileAssetUrl } from "../lib/hooks/use-file-asset-url";
-import { aspectCommands } from "../lib/tauri/commands";
-import type { DocumentSnapshot } from "../lib/types/index";
+import { documentDisplayPath } from '../../lib/editor/documents/documents';
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { useFileAssetUrl } from '../../lib/hooks/use-file-asset-url';
+import { luxCommands } from '../../lib/tauri/commands';
+import type { DocumentSnapshot } from '../../lib/types/index';
 
 type ImageEditorPaneProps = {
   document: DocumentSnapshot;
@@ -76,7 +76,7 @@ export function ImageEditorPane({ document }: ImageEditorPaneProps) {
           <button className="icon-button compact" type="button" title={t("imageEditor.action.refresh")} onClick={() => setReloadToken((value) => value + 1)}>
             <RefreshCw size={14} />
           </button>
-          <button className="icon-button compact" type="button" title={t("imageEditor.action.openExternal")} onClick={() => void aspectCommands.fileOpenExternal(path).catch(() => undefined)}>
+          <button className="icon-button compact" type="button" title={t("imageEditor.action.openExternal")} onClick={() => void luxCommands.fileOpenExternal(path).catch(() => undefined)}>
             <ExternalLink size={14} />
           </button>
         </div>

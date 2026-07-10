@@ -1,8 +1,8 @@
 import { ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { defaultAiPreferences, type AiPreferences } from "../../lib/aiPreferences";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import { aspectCommands, type AgentBrowserStatusResponse } from "../../lib/tauri";
+import { defaultAiPreferences, type AiPreferences } from '../../lib/aspector/utils/preferences';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import { luxCommands, type AgentBrowserStatusResponse } from '../../lib/tauri/commands';
 import { NumberSetting, SettingsGrid, SettingsPanel, TextSetting, ToggleSetting } from "./SettingsControls";
 
 /** Advanced fields, in display order вЂ” also drives the disclosure's count badge
@@ -39,13 +39,13 @@ export function AgentBrowserSection({ onChange, preferences, t }: { onChange: (p
   const refreshStatus = useCallback(async (options: { full?: boolean } = {}) => {
     setChecking(true);
     try {
-      const response = await aspectCommands.agentBrowserStatus({
+      const response = await luxCommands.agentBrowserStatus({
         commandPath: preferences.agentBrowserCommand.trim() || undefined,
         skipAutoUpdate: true,
         lightweight: options.full ? false : true,
       });
       if (response.updatePerformed) {
-        void import("../../lib/agentBrowserSkillsCache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
+        void import("../../lib/agent-browser/skills-cache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
       }
       setStatus(response);
     } catch (error) {
@@ -118,7 +118,7 @@ export function AgentBrowserSection({ onChange, preferences, t }: { onChange: (p
             onClick={() => {
               setInstalling(true);
               setInstallResult(null);
-              void aspectCommands.agentBrowserInstall({
+              void luxCommands.agentBrowserInstall({
                 commandPath: preferences.agentBrowserCommand.trim() || null,
                 withDeps: false,
               }).then((response) => {
@@ -129,7 +129,7 @@ export function AgentBrowserSection({ onChange, preferences, t }: { onChange: (p
                   ? { ok: true, text: t("settings.agentBrowser.install.success", { path: response.commandPath ?? "agent-browser" }) }
                   : { ok: false, text: t("settings.agentBrowser.install.failed", { detail: response.detail }) });
                 if (response.success) {
-                  void import("../../lib/agentBrowserSkillsCache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
+                  void import("../../lib/agent-browser/skills-cache").then(({ invalidateAgentBrowserSkillsCache }) => invalidateAgentBrowserSkillsCache());
                 }
               }).catch((error: unknown) => {
                 setInstallResult({

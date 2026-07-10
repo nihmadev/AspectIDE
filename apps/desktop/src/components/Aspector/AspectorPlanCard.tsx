@@ -14,9 +14,9 @@ import {
   Sparkles,
 } from "lucide-react";
 import { useState } from "react";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
-import type { PendingPlan } from "../../lib/aspector/utils/pending-plan";
-import { openWorkspaceEditorPath } from "../../lib/editor/open-workspace-editor-path";
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
+import type { PendingPlan } from '../../lib/aspector/utils/pending-plan';
+import { openWorkspaceEditorPath } from '../../lib/editor/open-workspace-editor-path';
 
 type AspectorPlanCardProps = {
   plan: PendingPlan;

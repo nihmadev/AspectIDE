@@ -1,7 +1,7 @@
 import { AtSign, Braces, FileCode2, FileText, ImagePlus, X, ZoomIn } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
-import type { ComposerAttachment } from "../../lib/aspector/chat/composer-attachments";
-import type { TranslateFn } from "../../lib/i18n/useTranslation";
+import type { ComposerAttachment } from '../../lib/aspector/chat/composer-attachments';
+import type { TranslateFn } from '../../lib/i18n/useTranslation';
 
 export type AspectorComposerAttachmentView = {
   id: string;

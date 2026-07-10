@@ -1,15 +1,15 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import type { PanelImperativeHandle } from "react-resizable-panels";
-import { AgentWorkspace } from "./components/AgentWorkspace";
-import { useEditorCloseGuard } from "./components/EditorCloseGuard";
-import { LazyAiChatPanel } from "./components/LazyAiChatPanel";
-import { ProjectLoadingStatus } from "./components/ProjectLoadingStatus";
-import { StatusBar } from "./components/StatusBar";
-import { TitleBar } from "./components/TitleBar";
-import { UpdateNoticeHost } from "./components/UpdateNoticeHost";
-import { LuxideLinkModal } from "./components/LuxideLinkModal";
-import { WelcomeScreen } from "./components/WelcomeScreen";
+import { AgentWorkspace } from "./components/AgentWorkspace/AgentWorkspace";
+import { useEditorCloseGuard } from "./components/Editor/EditorCloseGuard";
+import { AspectorLazyChatPanel } from "./components/Aspector/AspectorLazyChatPanel";
+import { ProjectLoadingStatus } from "./components/Welcome/ProjectLoadingStatus";
+import { StatusBar } from "./components/Shell/StatusBar";
+import { TitleBar } from "./components/Shell/TitleBar";
+import { UpdateNoticeHost } from "./components/Updates/UpdateNoticeHost";
+import { AspectLinkModal } from "./components/AspectLink/AspectLinkModal";
+import { WelcomeScreen } from "./components/Welcome/WelcomeScreen";
 import { saveChatCheckpointStore } from "./lib/aspector/chat/checkpoint-store";
 import { loadAiChatHistory, resetAiChatPersistDigest, saveAiChatHistory } from "./lib/aspector/chat/history";
 import { ensureBundledAgentBrowserLatest } from "./lib/agent-browser/auto-update";
@@ -30,11 +30,11 @@ import { luxCommands, subscribeLuxEvents } from "./lib/tauri/commands";
 import { AI_MIRROR_TERMINAL_ID, AI_MIRROR_TERMINAL_LABEL } from "./lib/terminal/types";
 import type { RecentWorkspace, WorkspaceInfo } from "./lib/types/index";
 
-const BottomPanel = lazy(() => import("./components/BottomPanel").then((module) => ({ default: module.BottomPanel })));
-const CommandPalette = lazy(() => import("./components/CommandPalette").then((module) => ({ default: module.CommandPalette })));
-const EditorArea = lazy(() => import("./components/EditorArea").then((module) => ({ default: module.EditorArea })));
-const SettingsDialog = lazy(() => import("./components/SettingsDialog").then((module) => ({ default: module.SettingsDialog })));
-const Sidebar = lazy(() => import("./components/Sidebar").then((module) => ({ default: module.Sidebar })));
+const BottomPanel = lazy(() => import("./components/Shell/BottomPanel").then((module) => ({ default: module.BottomPanel })));
+const CommandPalette = lazy(() => import("./components/CommandPalette/CommandPalette").then((module) => ({ default: module.CommandPalette })));
+const EditorArea = lazy(() => import("./components/Editor/EditorArea").then((module) => ({ default: module.EditorArea })));
+const SettingsDialog = lazy(() => import("./components/SettingsDialog/SettingsDialog").then((module) => ({ default: module.SettingsDialog })));
+const Sidebar = lazy(() => import("./components/Sidebar/Sidebar").then((module) => ({ default: module.Sidebar })));
 
 export function App() {
   const setWorkspace = useLuxStore((state) => state.setWorkspace);
@@ -687,7 +687,7 @@ export function App() {
                 <>
                   <Separator className="resize-handle editor-group-separator" />
                   <Panel defaultSize="32%" minSize="300px" maxSize="48%">
-                    <LazyAiChatPanel presentation="panel" />
+                    <AspectorLazyChatPanel presentation="panel" />
                   </Panel>
                 </>
               )}
@@ -700,7 +700,7 @@ export function App() {
         <DeferredCommandPalette open={commandPaletteOpen} />
         <DeferredSettingsDialog open={settingsOpen} />
         <UpdateNoticeHost />
-        <LuxideLinkModal />
+        <AspectLinkModal />
       </div>
     );
   }
@@ -717,7 +717,7 @@ export function App() {
         <DeferredCommandPalette open={commandPaletteOpen} />
         <DeferredSettingsDialog open={settingsOpen} />
         <UpdateNoticeHost />
-        <LuxideLinkModal />
+        <AspectLinkModal />
       </div>
     );
   }
@@ -747,7 +747,7 @@ export function App() {
             <>
               <Separator className="resize-handle editor-group-separator" />
               <Panel defaultSize="32%" minSize="300px" maxSize="48%">
-                <LazyAiChatPanel presentation="panel" />
+                <AspectorLazyChatPanel presentation="panel" />
               </Panel>
             </>
           )}

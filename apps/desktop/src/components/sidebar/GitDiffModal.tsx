@@ -2,8 +2,8 @@ import { lazy, Suspense, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import type { editor } from "monaco-editor";
-import { useTranslation } from "../../lib/i18n/useTranslation";
-import { aspectCommands, type GitFileDiff } from "../../lib/tauri";
+import { useTranslation } from '../../lib/i18n/useTranslation';
+import { luxCommands, type GitFileDiff } from '../../lib/tauri/commands';
 import { readErrorMessage } from "./SidebarShared";
 
 const DiffEditor = lazy(() => import("@monaco-editor/react").then((module) => ({ default: module.DiffEditor })));
@@ -35,7 +35,7 @@ export function GitDiffModal({ path, displayName, onClose }: GitDiffModalProps) 
     let cancelled = false;
     setDiff(null);
     setError(null);
-    aspectCommands.gitFileDiff(path)
+    luxCommands.gitFileDiff(path)
       .then((result) => { if (!cancelled) setDiff(result); })
       .catch((cause) => { if (!cancelled) setError(readErrorMessage(cause, t)); });
     return () => { cancelled = true; };
@@ -92,3 +92,4 @@ function languageForPath(path: string): string {
   const extension = path.split(".").pop()?.toLowerCase() ?? "";
   return LANGUAGE_BY_EXTENSION[extension] ?? "plaintext";
 }
+
