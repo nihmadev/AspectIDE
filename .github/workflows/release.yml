@@ -110,7 +110,7 @@ jobs:
 
       - name: Upload performance benchmark report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aspect-release-performance-report
           path: target/aspect-bench-report.json
@@ -272,7 +272,7 @@ jobs:
         run: node .github/scripts/collect-tauri-artifacts.mjs
 
       - name: Upload installer assets
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: release-assets/*
@@ -321,7 +321,7 @@ jobs:
           cp release-manifest.json release-assets/release-manifest.json
 
       - name: Upload release manifest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aspect-ide-release-manifest
           path: |
